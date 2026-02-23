@@ -1,19 +1,22 @@
-pub mod auth;
 pub mod graphql;
 pub mod health;
 pub mod stream;
 pub mod upload;
 
 use salvo::prelude::*;
+use std::sync::Arc;
 
 pub use health::*;
 pub use stream::*;
 
+use beam_auth::utils::service::AuthService;
 use beam_stream::graphql::AppSchema;
 use beam_stream::state::AppState;
 
 /// Create the main API router with all routes
 pub fn create_router(state: AppState, schema: AppSchema) -> Router {
+    let auth_service: Arc<dyn AuthService> = Arc::clone(&state.services.auth);
+
     // Note: No authorization is done at the top-level here because only `graphql` is secured with auth the other endpoints are either public or require query params (i.e., presigned URLs)
     Router::new().hoop(affix_state::inject(state)).push(
         Router::with_path("v1")

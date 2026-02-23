@@ -1,6 +1,7 @@
-use beam_stream::state::AppState;
+use crate::utils::service::AuthService;
 use salvo::prelude::*;
 use serde::Deserialize;
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -22,7 +23,7 @@ pub struct RefreshRequest {
 
 #[handler]
 pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<AppState>().unwrap();
+    let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
     let body: RegisterRequest = match req.parse_json().await {
         Ok(b) => b,
         Err(_) => {
@@ -36,9 +37,7 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let device_hash = "unknown_device";
     let ip = "0.0.0.0";
 
-    match state
-        .services
-        .auth
+    match auth
         .register(&body.username, &body.email, &body.password, device_hash, ip)
         .await
     {
@@ -65,7 +64,7 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
 
 #[handler]
 pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<AppState>().unwrap();
+    let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
     let body: LoginRequest = match req.parse_json().await {
         Ok(b) => b,
         Err(_) => {
@@ -79,9 +78,7 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let device_hash = "unknown_device";
     let ip = "0.0.0.0";
 
-    match state
-        .services
-        .auth
+    match auth
         .login(&body.username_or_email, &body.password, device_hash, ip)
         .await
     {
@@ -108,7 +105,7 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn refresh(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<AppState>().unwrap();
+    let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
 
     let session_id = if let Some(c) = req.cookie("session_id") {
         c.value().to_string()
@@ -120,7 +117,7 @@ pub async fn refresh(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         return;
     };
 
-    match state.services.auth.refresh(&session_id).await {
+    match auth.refresh(&session_id).await {
         Ok(auth_response) => {
             let cookie = salvo::http::cookie::Cookie::build((
                 "session_id",
@@ -145,7 +142,7 @@ pub async fn refresh(req: &mut Request, depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn logout(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<AppState>().unwrap();
+    let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
 
     let session_id = if let Some(c) = req.cookie("session_id") {
         c.value().to_string()
@@ -160,7 +157,7 @@ pub async fn logout(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     // Remove cookie
     res.remove_cookie("session_id");
 
-    match state.services.auth.logout(&session_id).await {
+    match auth.logout(&session_id).await {
         Ok(_) => {
             res.status_code(StatusCode::OK);
         }

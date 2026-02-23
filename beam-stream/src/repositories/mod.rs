@@ -3,7 +3,6 @@ pub mod library;
 pub mod movie;
 pub mod show;
 pub mod stream;
-pub mod user;
 
 // Re-export all repository traits
 pub use file::{FileRepository, SqlFileRepository};
@@ -11,4 +10,3 @@ pub use library::{LibraryRepository, SqlLibraryRepository};
 pub use movie::{MovieRepository, SqlMovieRepository};
 pub use show::{ShowRepository, SqlShowRepository};
 pub use stream::{MediaStreamRepository, SqlMediaStreamRepository};
-pub use user::{SqlUserRepository, UserRepository};
