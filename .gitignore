@@ -16,3 +16,4 @@ target
 **/mutants.out*/
 
 .env
+.todos/
