@@ -11,11 +11,10 @@ import { routeTree } from "./routeTree.gen";
 import "./styles.css";
 
 import { ApolloClient, HttpLink, InMemoryCache } from "@apollo/client";
-import { ApolloProvider } from "@apollo/client/react";
-import reportWebVitals from "./reportWebVitals.ts";
-
 import { setContext } from "@apollo/client/link/context";
+import { ApolloProvider } from "@apollo/client/react";
 import { AuthProvider, useAuth } from "./hooks/auth";
+import reportWebVitals from "./reportWebVitals.ts";
 
 const httpLink = new HttpLink({ uri: `${env.C_STREAM_SERVER_URL}/v1/graphql` });
 
@@ -51,7 +50,8 @@ const router = createRouter({
 	context: {
 		...TanStackQueryProviderContext,
 		apolloClient: client,
-		auth: undefined!, // Initial value, will be overwritten by RouterProvider
+		// biome-ignore lint/style/noNonNullAssertion: intentional placeholder overwritten by RouterProvider
+		auth: undefined!,
 	},
 	defaultPreload: "intent",
 	scrollRestoration: true,

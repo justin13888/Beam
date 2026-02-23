@@ -1,34 +1,34 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
 import { gql } from "@apollo/client";
-import { useQuery, useMutation } from "@apollo/client/react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { useState, useMemo } from "react";
-import type {
-	QueryRoot,
-	MutationRoot,
-	LibraryMutationScanLibraryArgs,
-	LibraryFile,
-} from "../gql";
-import { FileIndexStatus, FileContentType } from "../gql";
+import { useMutation, useQuery } from "@apollo/client/react";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import {
+	AlertTriangle,
 	ArrowLeft,
-	FileVideo,
-	FileQuestion,
-	Film,
-	Tv,
-	RefreshCw,
-	Scan,
-	Clock,
-	HardDrive,
-	Search,
+	CheckCircle2,
 	ChevronDown,
 	ChevronUp,
-	AlertTriangle,
-	CheckCircle2,
 	CircleDot,
+	Clock,
+	FileQuestion,
+	FileVideo,
+	Film,
 	Filter,
+	HardDrive,
+	RefreshCw,
+	Scan,
+	Search,
+	Tv,
 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import type {
+	LibraryFile,
+	LibraryMutationScanLibraryArgs,
+	MutationRoot,
+	QueryRoot,
+} from "../gql";
+import { FileContentType, FileIndexStatus } from "../gql";
 
 const GET_LIBRARY_WITH_FILES = gql`
   query GetLibraryWithFiles($id: ID!, $libraryId: ID!) {
@@ -78,8 +78,6 @@ function formatFileSize(bytes: number): string {
 	const i = Math.floor(Math.log(bytes) / Math.log(k));
 	return `${Number.parseFloat((bytes / k ** i).toFixed(1))} ${sizes[i]}`;
 }
-
-
 
 function formatTimeAgo(dateStr: unknown): string {
 	if (!dateStr) return "Never";
@@ -391,7 +389,7 @@ function LibraryDetailPage() {
 						</div>
 					</div>
 				</div>
-				
+
 				{/* Stats Cards */}
 				<div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
 					<div className="rounded-xl bg-gray-800/40 backdrop-blur-sm border border-gray-700/50 p-4">
