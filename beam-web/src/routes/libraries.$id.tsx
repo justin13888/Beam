@@ -303,7 +303,7 @@ function LibraryDetailPage() {
 
 	if (loading) {
 		return (
-			<div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
+			<div className="min-h-screen bg-linear-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
 				<div className="flex items-center gap-3 text-gray-400">
 					<RefreshCw className="animate-spin" size={20} />
 					<span className="text-lg">Loading library...</span>
@@ -314,7 +314,7 @@ function LibraryDetailPage() {
 
 	if (error) {
 		return (
-			<div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
+			<div className="min-h-screen bg-linear-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
 				<div className="text-center space-y-4">
 					<p className="text-red-400 text-lg">Error: {error.message}</p>
 					<Link to="/libraries">
@@ -332,7 +332,7 @@ function LibraryDetailPage() {
 
 	if (!library) {
 		return (
-			<div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
+			<div className="min-h-screen bg-linear-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
 				<div className="text-center space-y-4">
 					<p className="text-gray-400 text-lg">Library not found</p>
 					<Link to="/libraries">
@@ -349,7 +349,7 @@ function LibraryDetailPage() {
 	}
 
 	return (
-		<div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950">
+		<div className="min-h-screen bg-linear-to-br from-gray-950 via-gray-900 to-gray-950">
 			<div className="max-w-7xl mx-auto px-6 py-8">
 				{/* Breadcrumb & Header */}
 				<div className="mb-6">
@@ -391,7 +391,7 @@ function LibraryDetailPage() {
 						</div>
 					</div>
 				</div>
-
+				
 				{/* Stats Cards */}
 				<div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
 					<div className="rounded-xl bg-gray-800/40 backdrop-blur-sm border border-gray-700/50 p-4">
