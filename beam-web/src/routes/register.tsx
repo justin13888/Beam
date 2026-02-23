@@ -34,7 +34,7 @@ function RegisterPage() {
     }
 
     try {
-      const response = await fetch(`${env.C_STREAM_SERVER_URL}/auth/register`, {
+      const response = await fetch(`${env.C_STREAM_SERVER_URL}/v1/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",

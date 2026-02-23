@@ -166,7 +166,7 @@ function RouteComponent() {
 		return <div>No data...</div>;
 	}
 
-	const streamLink = `${env.C_STREAM_SERVER_URL}/stream/mp4/${id}`;
+	const streamLink = `${env.C_STREAM_SERVER_URL}/v1/stream/mp4/${id}`;
 	// TODO: Detect appropriate stream type later (MP4, HLS, DASH) depending on client capabilities in the future.
 	return (
 		<div className="container mx-auto p-4">

@@ -53,7 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = () => {
     // Call API to revoke session (cookie)
-    fetch(`${env.C_STREAM_SERVER_URL}/auth/logout`, {
+    fetch(`${env.C_STREAM_SERVER_URL}/v1/auth/logout`, {
         method: "POST",
         // usage of 'include' ensures cookies are sent
         credentials: "include", 
