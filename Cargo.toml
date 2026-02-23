@@ -3,6 +3,8 @@ members = ["beam-auth", "beam-stream", "beam-migration", "beam-entity"]
 resolver = "3"
 
 [workspace.dependencies]
+# http 1.3.x has a corrupted publish that fails to compile; pin to >=1.4
+http = ">=1.4, <2"
 argon2 = { version = "0.5.3", features = ["std"] }
 async-trait = "0.1"
 bb8-redis = "0.26.0"
