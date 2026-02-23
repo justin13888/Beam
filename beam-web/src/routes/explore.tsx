@@ -1,8 +1,13 @@
-import { MediaSortField, SortOrder, type SearchMediaQuery, type SearchMediaQueryVariables } from "@/gql";
 import type { ApolloClient } from "@apollo/client";
 import { gql, type TypedDocumentNode } from "@apollo/client";
 import { queryOptions } from "@tanstack/react-query";
 import { createFileRoute, ErrorComponent } from "@tanstack/react-router";
+import {
+	MediaSortField,
+	type SearchMediaQuery,
+	type SearchMediaQueryVariables,
+	SortOrder,
+} from "@/gql";
 
 const SEARCH_MEDIA: TypedDocumentNode<
 	SearchMediaQuery,

@@ -1,29 +1,29 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
 import { gql } from "@apollo/client";
-import { useQuery, useMutation } from "@apollo/client/react";
+import { useMutation, useQuery } from "@apollo/client/react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import {
+	ChevronRight,
+	Clock,
+	FileVideo,
+	FolderOpen,
+	Library as LibraryIcon,
+	Plus,
+	RefreshCw,
+	Scan,
+	Trash2,
+} from "lucide-react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useState } from "react";
 import type {
-	QueryRoot,
-	MutationRoot,
-	LibraryMutationCreateLibraryArgs,
-	LibraryMutationScanLibraryArgs,
-	LibraryMutationDeleteLibraryArgs,
 	Library,
+	LibraryMutationCreateLibraryArgs,
+	LibraryMutationDeleteLibraryArgs,
+	LibraryMutationScanLibraryArgs,
+	MutationRoot,
+	QueryRoot,
 } from "../gql";
-import {
-	FolderOpen,
-	Plus,
-	Scan,
-	Trash2,
-	RefreshCw,
-	Clock,
-	FileVideo,
-	ChevronRight,
-	Library as LibraryIcon,
-} from "lucide-react";
 
 const GET_LIBRARIES = gql`
   query GetLibraries {
@@ -94,9 +94,6 @@ function formatTimeAgo(dateStr: unknown): string {
 	return date.toLocaleDateString();
 }
 
-
-
-
 function ScanStatusBadge({ library }: { library: Library }) {
 	const isScanning =
 		library.lastScanStartedAt &&
@@ -130,18 +127,25 @@ function ScanStatusBadge({ library }: { library: Library }) {
 }
 
 function LibrariesPage() {
-	const { data, loading, error, refetch } =
-		useQuery<QueryRoot>(GET_LIBRARIES);
+	const { data, loading, error, refetch } = useQuery<QueryRoot>(GET_LIBRARIES);
 	const [createLibrary, { loading: creating }] = useMutation<
 		MutationRoot,
 		LibraryMutationCreateLibraryArgs
 	>(CREATE_LIBRARY);
-	const [scanLibrary] = useMutation<MutationRoot, LibraryMutationScanLibraryArgs>(SCAN_LIBRARY);
-	const [deleteLibrary] = useMutation<MutationRoot, LibraryMutationDeleteLibraryArgs>(DELETE_LIBRARY);
+	const [scanLibrary] = useMutation<
+		MutationRoot,
+		LibraryMutationScanLibraryArgs
+	>(SCAN_LIBRARY);
+	const [deleteLibrary] = useMutation<
+		MutationRoot,
+		LibraryMutationDeleteLibraryArgs
+	>(DELETE_LIBRARY);
 
 	const [name, setName] = useState("");
 	const [rootPath, setRootPath] = useState("");
 	const [showCreateForm, setShowCreateForm] = useState(false);
+	const libNameId = useId();
+	const libRootPathId = useId();
 	const [scanningIds, setScanningIds] = useState<Set<string>>(new Set());
 
 	const handleCreate = async (e: React.FormEvent) => {
@@ -174,7 +178,11 @@ function LibrariesPage() {
 	};
 
 	const handleDelete = async (libraryId: string, libraryName: string) => {
-		if (!confirm(`Are you sure you want to delete "${libraryName}"? This will remove all indexed files.`)) {
+		if (
+			!confirm(
+				`Are you sure you want to delete "${libraryName}"? This will remove all indexed files.`,
+			)
+		) {
 			return;
 		}
 		try {
@@ -201,7 +209,11 @@ function LibrariesPage() {
 			<div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 flex items-center justify-center">
 				<div className="text-center space-y-4">
 					<p className="text-red-400 text-lg">Error: {error.message}</p>
-					<Button onClick={() => refetch()} variant="outline" className="border-gray-600 text-gray-300 hover:bg-gray-800">
+					<Button
+						onClick={() => refetch()}
+						variant="outline"
+						className="border-gray-600 text-gray-300 hover:bg-gray-800"
+					>
 						Retry
 					</Button>
 				</div>
@@ -250,13 +262,16 @@ function LibrariesPage() {
 						<h2 className="text-xl font-semibold text-white mb-4">
 							Create New Library
 						</h2>
-						<form onSubmit={handleCreate} className="flex flex-col sm:flex-row gap-4 items-end">
+						<form
+							onSubmit={handleCreate}
+							className="flex flex-col sm:flex-row gap-4 items-end"
+						>
 							<div className="flex-1 space-y-2">
-								<Label htmlFor="lib-name" className="text-gray-300">
+								<Label htmlFor={libNameId} className="text-gray-300">
 									Name
 								</Label>
 								<Input
-									id="lib-name"
+									id={libNameId}
 									value={name}
 									onChange={(e) => setName(e.target.value)}
 									placeholder="e.g. Movies"
@@ -265,11 +280,11 @@ function LibrariesPage() {
 								/>
 							</div>
 							<div className="flex-1 space-y-2">
-								<Label htmlFor="lib-root-path" className="text-gray-300">
+								<Label htmlFor={libRootPathId} className="text-gray-300">
 									Root Path
 								</Label>
 								<Input
-									id="lib-root-path"
+									id={libRootPathId}
 									value={rootPath}
 									onChange={(e) => setRootPath(e.target.value)}
 									placeholder="/media/movies"
