@@ -1,7 +1,6 @@
-use crate::config::ServerConfig;
-use crate::models::domain::{CreateUser, User};
-use crate::repositories::user::UserRepository;
-use crate::services::session_store::{SessionData, SessionStore};
+use crate::utils::models::{CreateUser, User};
+use crate::utils::repository::UserRepository;
+use crate::utils::session_store::{SessionData, SessionStore};
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
@@ -12,7 +11,6 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::error;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -69,7 +67,7 @@ pub struct AuthenticatedUser {
 }
 
 #[async_trait]
-pub trait AuthService: Send + Sync + std::fmt::Debug {
+pub trait AuthService: Send + Sync + std::fmt::Debug + 'static {
     /// Register a new user with the given details.
     async fn register(
         &self,
@@ -115,19 +113,19 @@ pub trait AuthService: Send + Sync + std::fmt::Debug {
 pub struct LocalAuthService {
     user_repo: Arc<dyn UserRepository>,
     session_store: Arc<dyn SessionStore>,
-    config: ServerConfig,
+    jwt_secret: String,
 }
 
 impl LocalAuthService {
     pub fn new(
         user_repo: Arc<dyn UserRepository>,
         session_store: Arc<dyn SessionStore>,
-        config: ServerConfig,
+        jwt_secret: String,
     ) -> Self {
         Self {
             user_repo,
             session_store,
-            config,
+            jwt_secret,
         }
     }
 
@@ -165,7 +163,7 @@ impl LocalAuthService {
         let token = encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret(self.config.jwt_secret.as_bytes()),
+            &EncodingKey::from_secret(self.jwt_secret.as_bytes()),
         )?;
 
         Ok(token)
@@ -236,7 +234,7 @@ impl AuthService for LocalAuthService {
             username: username.to_string(),
             email: email.to_string(),
             password_hash,
-            is_admin: false, // Default to false
+            is_admin: false,
         };
 
         let user = self
@@ -305,7 +303,7 @@ impl AuthService for LocalAuthService {
             .get(session_id)
             .await
             .map_err(|e| AuthError::Session(e.to_string()))?
-            .ok_or(AuthError::InvalidCredentials)?; // Session invalid/expired
+            .ok_or(AuthError::InvalidCredentials)?;
 
         // Touch session
         let ttl_secs = 7 * 24 * 60 * 60;
@@ -341,7 +339,7 @@ impl AuthService for LocalAuthService {
         let validation = Validation::default();
         let token_data = decode::<Claims>(
             token,
-            &DecodingKey::from_secret(self.config.jwt_secret.as_bytes()),
+            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
             &validation,
         )?;
 
@@ -399,7 +397,7 @@ impl AuthService for LocalAuthService {
         let token = encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret(self.config.jwt_secret.as_bytes()),
+            &EncodingKey::from_secret(self.jwt_secret.as_bytes()),
         )?;
 
         Ok(token)
@@ -409,7 +407,7 @@ impl AuthService for LocalAuthService {
         let validation = Validation::default();
         let token_data = decode::<StreamClaims>(
             token,
-            &DecodingKey::from_secret(self.config.jwt_secret.as_bytes()),
+            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
             &validation,
         )?;
 

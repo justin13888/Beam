@@ -473,6 +473,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "beam-auth"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "base64",
+ "bb8-redis",
+ "beam-entity",
+ "chrono",
+ "jsonwebtoken",
+ "rand 0.10.0",
+ "redis",
+ "salvo",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "beam-entity"
 version = "0.1.0"
 dependencies = [
@@ -494,11 +516,9 @@ dependencies = [
 name = "beam-stream"
 version = "0.1.0"
 dependencies = [
- "argon2",
  "async-graphql",
  "async-trait",
- "base64",
- "bb8-redis",
+ "beam-auth",
  "beam-entity",
  "beam-migration",
  "bytes",
@@ -512,7 +532,6 @@ dependencies = [
  "futures",
  "hex",
  "http",
- "jsonwebtoken",
  "m3u8-rs",
  "mockall",
  "num",
@@ -520,7 +539,6 @@ dependencies = [
  "parking_lot",
  "rand 0.10.0",
  "rayon",
- "redis",
  "regex",
  "rust_decimal",
  "salvo",

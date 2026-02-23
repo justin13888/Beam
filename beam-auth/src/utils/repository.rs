@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sea_orm::*;
 use uuid::Uuid;
 
-use crate::models::domain::{CreateUser, User};
+use crate::utils::models::{CreateUser, User};
 
 /// Repository for managing user data.
 #[async_trait]
