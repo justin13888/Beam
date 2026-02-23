@@ -9,5 +9,7 @@ count.txt
 .tanstack
 .wrangler
 
-# GraphQL Codegen
-src/gql.ts
+# Coverage output
+coverage/
+
+# GraphQL Codegen (src/gql.ts is tracked as a stub; update via `bun run codegen:full`)
