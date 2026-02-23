@@ -1,15 +1,15 @@
 [package]
-name = "migration"
+name = "beam-migration"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [lib]
-name = "migration"
+name = "beam_migration"
 path = "src/lib.rs"
 
 [[bin]]
-name = "migration"
+name = "beam-migration"
 path = "src/main.rs"
 
 [dependencies]

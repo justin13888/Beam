@@ -473,6 +473,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "beam-entity"
+version = "0.1.0"
+dependencies = [
+ "sea-orm",
+ "serde",
+]
+
+[[package]]
+name = "beam-migration"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "sea-orm-migration",
+ "tokio",
+]
+
+[[package]]
 name = "beam-stream"
 version = "0.1.0"
 dependencies = [
@@ -481,6 +499,8 @@ dependencies = [
  "async-trait",
  "base64",
  "bb8-redis",
+ "beam-entity",
+ "beam-migration",
  "bytes",
  "chrono",
  "color-eyre",
@@ -494,7 +514,6 @@ dependencies = [
  "http",
  "jsonwebtoken",
  "m3u8-rs",
- "migration",
  "mockall",
  "num",
  "num_cpus",
@@ -2401,16 +2420,6 @@ name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
-
-[[package]]
-name = "migration"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "async-trait",
- "sea-orm-migration",
- "tokio",
-]
 
 [[package]]
 name = "mime"

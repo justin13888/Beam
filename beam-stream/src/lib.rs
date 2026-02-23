@@ -1,5 +1,5 @@
 pub mod config;
-pub mod entities;
+pub use beam_entity as entities;
 pub mod graphql;
 pub mod logging;
 pub mod models;
