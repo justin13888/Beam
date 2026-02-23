@@ -10,6 +10,8 @@
 		"build": "vite build && tsc",
 		"serve": "vite preview",
 		"test": "vitest run",
+		"test:coverage": "vitest run --coverage",
+		"typecheck": "tsc --noEmit",
 		"format": "biome format",
 		"lint": "biome lint",
 		"check": "biome check"
@@ -57,10 +59,11 @@
 		"@types/react-dom": "^19.2.0",
 		"@vitejs/plugin-react": "^5.0.4",
 		"baseline-browser-mapping": "^2.9.19",
+		"@vitest/coverage-v8": "^4.0.18",
 		"jsdom": "^27.0.0",
 		"typescript": "^5.7.2",
 		"vite": "^7.1.7",
-		"vitest": "^4.0.2",
+		"vitest": "^4.0.18",
 		"web-vitals": "^5.1.0"
 	}
 }
