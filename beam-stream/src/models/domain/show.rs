@@ -39,8 +39,8 @@ pub struct CreateEpisode {
     pub runtime: Option<Duration>,
 }
 
-impl From<crate::entities::show::Model> for Show {
-    fn from(model: crate::entities::show::Model) -> Self {
+impl From<beam_entity::show::Model> for Show {
+    fn from(model: beam_entity::show::Model) -> Self {
         Self {
             id: model.id,
             title: model.title,
@@ -50,8 +50,8 @@ impl From<crate::entities::show::Model> for Show {
     }
 }
 
-impl From<crate::entities::season::Model> for Season {
-    fn from(model: crate::entities::season::Model) -> Self {
+impl From<beam_entity::season::Model> for Season {
+    fn from(model: beam_entity::season::Model) -> Self {
         Self {
             id: model.id,
             show_id: model.show_id,
@@ -60,8 +60,8 @@ impl From<crate::entities::season::Model> for Season {
     }
 }
 
-impl From<crate::entities::episode::Model> for Episode {
-    fn from(model: crate::entities::episode::Model) -> Self {
+impl From<beam_entity::episode::Model> for Episode {
+    fn from(model: beam_entity::episode::Model) -> Self {
         Self {
             id: model.id,
             season_id: model.season_id,

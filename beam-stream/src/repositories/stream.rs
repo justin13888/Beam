@@ -90,7 +90,7 @@ impl SqlMediaStreamRepository {
 #[async_trait]
 impl MediaStreamRepository for SqlMediaStreamRepository {
     async fn insert_streams(&self, streams: Vec<CreateMediaStream>) -> Result<u32, DbErr> {
-        use crate::entities::media_stream;
+        use beam_entity::media_stream;
         use crate::models::domain::{StreamMetadata, StreamType};
         use sea_orm::{ActiveModelTrait, Set};
 
@@ -199,7 +199,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
     }
 
     async fn find_by_file_id(&self, file_id: Uuid) -> Result<Vec<MediaStream>, DbErr> {
-        use crate::entities::media_stream;
+        use beam_entity::media_stream;
         use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
 
         let models = media_stream::Entity::find()

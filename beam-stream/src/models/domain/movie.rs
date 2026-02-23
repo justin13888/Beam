@@ -39,8 +39,8 @@ pub struct CreateMovieEntry {
     pub is_primary: bool,
 }
 
-impl From<crate::entities::movie::Model> for Movie {
-    fn from(model: crate::entities::movie::Model) -> Self {
+impl From<beam_entity::movie::Model> for Movie {
+    fn from(model: beam_entity::movie::Model) -> Self {
         Self {
             id: model.id,
             title: model.title,
@@ -53,8 +53,8 @@ impl From<crate::entities::movie::Model> for Movie {
     }
 }
 
-impl From<crate::entities::movie_entry::Model> for MovieEntry {
-    fn from(model: crate::entities::movie_entry::Model) -> Self {
+impl From<beam_entity::movie_entry::Model> for MovieEntry {
+    fn from(model: beam_entity::movie_entry::Model) -> Self {
         Self {
             id: model.id,
             library_id: model.library_id,

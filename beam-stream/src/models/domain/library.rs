@@ -24,8 +24,8 @@ pub struct CreateLibrary {
     pub description: Option<String>,
 }
 
-impl From<crate::entities::library::Model> for Library {
-    fn from(model: crate::entities::library::Model) -> Self {
+impl From<beam_entity::library::Model> for Library {
+    fn from(model: beam_entity::library::Model) -> Self {
         Self {
             id: model.id,
             name: model.name,
