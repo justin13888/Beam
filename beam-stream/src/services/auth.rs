@@ -53,6 +53,7 @@ pub struct AuthUserResponse {
     pub id: String,
     pub username: String,
     pub email: String,
+    pub is_admin: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,8 +253,9 @@ impl AuthService for LocalAuthService {
             session_id,
             user: AuthUserResponse {
                 id: user.id.to_string(),
-                username: user.username,
-                email: user.email,
+                username: user.username.clone(),
+                email: user.email.clone(),
+                is_admin: user.is_admin,
             },
         })
     }
@@ -295,6 +297,7 @@ impl AuthService for LocalAuthService {
                 id: user.id.to_string(),
                 username: user.username,
                 email: user.email,
+                is_admin: user.is_admin,
             },
         })
     }
@@ -333,6 +336,7 @@ impl AuthService for LocalAuthService {
                 id: session.user_id,
                 username: user.username,
                 email: user.email,
+                is_admin: user.is_admin,
             },
         })
     }

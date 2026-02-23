@@ -1,7 +1,7 @@
 import { Link, useNavigate } from '@tanstack/react-router'
 
 import { useState } from 'react'
-import { ClipboardType, Home, Menu, Network, X, LogIn, LogOut, User, Library } from 'lucide-react'
+import { ClipboardType, Home, Menu, Network, Shield, X, LogIn, LogOut, User, Library } from 'lucide-react'
 import { useAuth } from '../hooks/auth'
 import { Button } from './ui/button'
 
@@ -106,6 +106,21 @@ export default function Header() {
             <Library size={20} />
             <span className="font-medium">Libraries</span>
           </Link>
+
+          {isAuthenticated && user?.is_admin && (
+            <Link
+              to="/admin"
+              onClick={() => setIsOpen(false)}
+              className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+              activeProps={{
+                className:
+                  'flex items-center gap-3 p-3 rounded-lg bg-cyan-600 hover:bg-cyan-700 transition-colors mb-2',
+              }}
+            >
+              <Shield size={20} />
+              <span className="font-medium">Admin</span>
+            </Link>
+          )}
 
           <Link
             to="/demo/form/simple"

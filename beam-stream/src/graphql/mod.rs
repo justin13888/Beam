@@ -6,6 +6,7 @@ use schema::*;
 
 use crate::{
     graphql::schema::{
+        admin::AdminQuery,
         library::{LibraryMutation, LibraryQuery},
         media::{MediaMutation, MediaQuery},
     },
@@ -15,7 +16,7 @@ use crate::{
 pub mod guard;
 pub mod schema;
 
-pub use guard::AuthGuard;
+pub use guard::{AdminGuard, AuthGuard};
 
 pub type AppSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
@@ -24,6 +25,7 @@ pub fn create_schema(state: AppState) -> AppSchema {
         QueryRoot {
             library: LibraryQuery,
             media: MediaQuery,
+            admin: AdminQuery,
         },
         MutationRoot {
             library: LibraryMutation,

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::{
     config::ServerConfig,
+    repositories::UserRepository,
     services::{
+        admin_log::{AdminLogService, LocalAdminLogService},
         auth::{AuthService, LocalAuthService},
         hash::{HashConfig, HashService, LocalHashService},
         library::{LibraryService, LocalLibraryService},
@@ -70,6 +72,8 @@ pub struct AppServices {
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
     pub transcode: Arc<dyn TranscodeService>,
+    pub admin_log: Arc<dyn AdminLogService>,
+    pub user_repo: Arc<dyn UserRepository>,
 }
 
 impl AppServices {
@@ -87,7 +91,9 @@ impl AppServices {
         let stream_repo = Arc::new(crate::repositories::SqlMediaStreamRepository::new(
             db.clone(),
         ));
-        let user_repo = Arc::new(crate::repositories::SqlUserRepository::new(db.clone()));
+        let user_repo: Arc<dyn UserRepository> =
+            Arc::new(crate::repositories::SqlUserRepository::new(db.clone()));
+        let admin_log_repo = Arc::new(crate::repositories::SqlAdminLogRepository::new(db.clone()));
 
         let hash_service = Arc::new(LocalHashService::new(hash_config));
         let media_info_service =
@@ -105,10 +111,13 @@ impl AppServices {
         );
 
         let auth_service = Arc::new(LocalAuthService::new(
-            user_repo,
+            user_repo.clone(),
             session_store.clone(),
             config.clone(),
         ));
+
+        let admin_log_service: Arc<dyn AdminLogService> =
+            Arc::new(LocalAdminLogService::new(admin_log_repo));
 
         Self {
             auth: auth_service,
@@ -123,9 +132,12 @@ impl AppServices {
                 config.video_dir.clone(),
                 hash_service.clone(),
                 media_info_service,
+                admin_log_service.clone(),
             )),
             metadata: Arc::new(StubMetadataService::new(metadata_config)),
             transcode: transcode_service,
+            admin_log: admin_log_service,
+            user_repo,
         }
     }
 }
