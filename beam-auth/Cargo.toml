@@ -4,9 +4,15 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 publish = false
+default-run = "beam-auth"
+
+[[bin]]
+name = "beam-auth"
+path = "src/main.rs"
+required-features = ["server"]
 
 [features]
-default = []
+default = ["server"]
 utils = [
     "dep:argon2",
     "dep:async-trait",
@@ -30,6 +36,16 @@ server = [
 ]
 
 [dependencies]
+# Non-optional: always compiled (needed by config.rs, logging.rs, and main.rs)
+color-eyre = "0.6.5"
+confique = { workspace = true }
+dotenvy = "0.15.7"
+eyre = "0.6.12"
+http = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
+
+# Optional: feature-gated
 argon2 = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { version = "0.22.1", optional = true }

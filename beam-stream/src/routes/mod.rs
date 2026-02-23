@@ -15,7 +15,7 @@ use beam_stream::state::AppState;
 
 /// Create the main API router with all routes
 pub fn create_router(state: AppState, schema: AppSchema) -> Router {
-    let auth_service: Arc<dyn AuthService> = Arc::clone(&state.services.auth);
+    let _auth_service: Arc<dyn AuthService> = Arc::clone(&state.services.auth);
 
     // Note: No authorization is done at the top-level here because only `graphql` is secured with auth the other endpoints are either public or require query params (i.e., presigned URLs)
     Router::new().hoop(affix_state::inject(state)).push(
@@ -23,7 +23,6 @@ pub fn create_router(state: AppState, schema: AppSchema) -> Router {
             .push(Router::with_path("health").get(health_check))
             .push(Router::with_path("stream/<id>/token").post(get_stream_token))
             .push(Router::with_path("stream/mp4/<id>").get(stream_mp4))
-            .push(Router::with_path("auth").push(auth::auth_routes()))
             .push(
                 Router::with_path("graphql")
                     .hoop(affix_state::inject(schema))
