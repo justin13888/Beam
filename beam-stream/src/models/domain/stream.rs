@@ -71,9 +71,9 @@ pub struct CreateMediaStream {
     pub metadata: StreamMetadata,
 }
 
-impl From<crate::entities::media_stream::Model> for MediaStream {
-    fn from(model: crate::entities::media_stream::Model) -> Self {
-        use crate::entities::media_stream::StreamType as DbStreamType;
+impl From<beam_entity::media_stream::Model> for MediaStream {
+    fn from(model: beam_entity::media_stream::Model) -> Self {
+        use beam_entity::media_stream::StreamType as DbStreamType;
 
         let stream_type = match model.stream_type {
             DbStreamType::Video => StreamType::Video,

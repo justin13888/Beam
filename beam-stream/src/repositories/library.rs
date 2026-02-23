@@ -118,7 +118,7 @@ impl SqlLibraryRepository {
 #[async_trait]
 impl LibraryRepository for SqlLibraryRepository {
     async fn find_all(&self) -> Result<Vec<Library>, DbErr> {
-        use crate::entities::library;
+        use beam_entity::library;
         use sea_orm::EntityTrait;
 
         let models = library::Entity::find().all(&self.db).await?;
@@ -126,7 +126,7 @@ impl LibraryRepository for SqlLibraryRepository {
     }
 
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Library>, DbErr> {
-        use crate::entities::library;
+        use beam_entity::library;
         use sea_orm::EntityTrait;
 
         let model = library::Entity::find_by_id(id).one(&self.db).await?;
@@ -134,7 +134,7 @@ impl LibraryRepository for SqlLibraryRepository {
     }
 
     async fn create(&self, create: CreateLibrary) -> Result<Library, DbErr> {
-        use crate::entities::library;
+        use beam_entity::library;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 
@@ -156,7 +156,7 @@ impl LibraryRepository for SqlLibraryRepository {
     }
 
     async fn count_files(&self, library_id: Uuid) -> Result<u64, DbErr> {
-        use crate::entities::files;
+        use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
         // TODO: Check if this is slow (N+1)?
@@ -173,7 +173,7 @@ impl LibraryRepository for SqlLibraryRepository {
         finished_at: Option<DateTime<Utc>>,
         file_count: Option<i32>,
     ) -> Result<(), DbErr> {
-        use crate::entities::library;
+        use beam_entity::library;
         use sea_orm::{ActiveModelTrait, Set};
 
         let mut library: library::ActiveModel = library::ActiveModel {
@@ -196,7 +196,7 @@ impl LibraryRepository for SqlLibraryRepository {
     }
 
     async fn delete(&self, id: Uuid) -> Result<(), DbErr> {
-        use crate::entities::library;
+        use beam_entity::library;
         use sea_orm::EntityTrait;
 
         library::Entity::delete_by_id(id).exec(&self.db).await?;

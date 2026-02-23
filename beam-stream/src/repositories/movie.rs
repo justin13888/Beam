@@ -94,7 +94,7 @@ impl SqlMovieRepository {
 #[async_trait]
 impl MovieRepository for SqlMovieRepository {
     async fn find_by_title(&self, title: &str) -> Result<Option<Movie>, DbErr> {
-        use crate::entities::movie;
+        use beam_entity::movie;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         let model = movie::Entity::find()
@@ -106,7 +106,7 @@ impl MovieRepository for SqlMovieRepository {
     }
 
     async fn create(&self, create: CreateMovie) -> Result<Movie, DbErr> {
-        use crate::entities::movie;
+        use beam_entity::movie;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 
@@ -125,7 +125,7 @@ impl MovieRepository for SqlMovieRepository {
     }
 
     async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
-        use crate::entities::movie_entry;
+        use beam_entity::movie_entry;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 
@@ -148,7 +148,7 @@ impl MovieRepository for SqlMovieRepository {
         library_id: Uuid,
         movie_id: Uuid,
     ) -> Result<(), DbErr> {
-        use crate::entities::library_movie;
+        use beam_entity::library_movie;
         use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
         // Check if association already exists

@@ -72,7 +72,7 @@ impl SqlFileRepository {
 #[async_trait]
 impl FileRepository for SqlFileRepository {
     async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr> {
-        use crate::entities::files;
+        use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         let model = files::Entity::find()
@@ -84,7 +84,7 @@ impl FileRepository for SqlFileRepository {
     }
 
     async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
-        use crate::entities::files;
+        use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         let models = files::Entity::find()
@@ -96,7 +96,7 @@ impl FileRepository for SqlFileRepository {
     }
 
     async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr> {
-        use crate::entities::files;
+        use beam_entity::files;
         use crate::models::domain::MediaFileContent;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
@@ -132,7 +132,7 @@ impl FileRepository for SqlFileRepository {
         Ok(MediaFile::from(result))
     }
     async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr> {
-        use crate::entities::files;
+        use beam_entity::files;
         use crate::models::domain::MediaFileContent;
         use sea_orm::{ActiveModelTrait, Set};
 
@@ -182,7 +182,7 @@ impl FileRepository for SqlFileRepository {
     }
 
     async fn delete(&self, id: Uuid) -> Result<(), DbErr> {
-        use crate::entities::files;
+        use beam_entity::files;
         use sea_orm::EntityTrait;
 
         files::Entity::delete_by_id(id).exec(&self.db).await?;
@@ -190,7 +190,7 @@ impl FileRepository for SqlFileRepository {
     }
 
     async fn delete_by_ids(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {
-        use crate::entities::files;
+        use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         if ids.is_empty() {

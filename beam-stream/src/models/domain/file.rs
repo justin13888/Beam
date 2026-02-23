@@ -91,8 +91,8 @@ pub struct UpdateMediaFile {
     pub status: Option<FileStatus>,
 }
 
-impl From<crate::entities::files::Model> for MediaFile {
-    fn from(model: crate::entities::files::Model) -> Self {
+impl From<beam_entity::files::Model> for MediaFile {
+    fn from(model: beam_entity::files::Model) -> Self {
         // Determine content type from polymorphic foreign keys
         let content = model
             .movie_entry_id

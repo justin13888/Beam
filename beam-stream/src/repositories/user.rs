@@ -34,7 +34,7 @@ impl SqlUserRepository {
 #[async_trait]
 impl UserRepository for SqlUserRepository {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, DbErr> {
-        use crate::entities::user;
+        use beam_entity::user;
         use sea_orm::EntityTrait;
 
         let model = user::Entity::find_by_id(id).one(&self.db).await?;
@@ -42,7 +42,7 @@ impl UserRepository for SqlUserRepository {
     }
 
     async fn find_by_username(&self, username: &str) -> Result<Option<User>, DbErr> {
-        use crate::entities::user;
+        use beam_entity::user;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         let model = user::Entity::find()
@@ -53,7 +53,7 @@ impl UserRepository for SqlUserRepository {
     }
 
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, DbErr> {
-        use crate::entities::user;
+        use beam_entity::user;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         let model = user::Entity::find()
@@ -64,7 +64,7 @@ impl UserRepository for SqlUserRepository {
     }
 
     async fn create(&self, create: CreateUser) -> Result<User, DbErr> {
-        use crate::entities::user;
+        use beam_entity::user;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 

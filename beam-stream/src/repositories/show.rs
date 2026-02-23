@@ -111,7 +111,7 @@ impl SqlShowRepository {
 #[async_trait]
 impl ShowRepository for SqlShowRepository {
     async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr> {
-        use crate::entities::show;
+        use beam_entity::show;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         let model = show::Entity::find()
@@ -123,7 +123,7 @@ impl ShowRepository for SqlShowRepository {
     }
 
     async fn create(&self, title: String) -> Result<Show, DbErr> {
-        use crate::entities::show;
+        use beam_entity::show;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 
@@ -145,7 +145,7 @@ impl ShowRepository for SqlShowRepository {
         library_id: Uuid,
         show_id: Uuid,
     ) -> Result<(), DbErr> {
-        use crate::entities::library_show;
+        use beam_entity::library_show;
         use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
         // Check if association already exists
@@ -172,7 +172,7 @@ impl ShowRepository for SqlShowRepository {
         show_id: Uuid,
         season_number: u32,
     ) -> Result<Season, DbErr> {
-        use crate::entities::season;
+        use beam_entity::season;
         use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
         // Try to find existing season
@@ -199,7 +199,7 @@ impl ShowRepository for SqlShowRepository {
     }
 
     async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
-        use crate::entities::episode;
+        use beam_entity::episode;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 

@@ -33,6 +33,13 @@ A high-performance streaming service built with Rust and Axum.
     cargo watch -x run
     ```
 
+### Generate GraphQL Schema
+
+```bash
+# With dependencies like database started up...
+cargo run --bin export_schema
+```
+
 ### Build container image
 
 ```bash
