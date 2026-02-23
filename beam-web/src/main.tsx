@@ -17,7 +17,7 @@ import reportWebVitals from "./reportWebVitals.ts";
 import { setContext } from "@apollo/client/link/context";
 import { AuthProvider, useAuth } from "./hooks/auth";
 
-const httpLink = new HttpLink({ uri: `${env.C_STREAM_SERVER_URL}/graphql` });
+const httpLink = new HttpLink({ uri: `${env.C_STREAM_SERVER_URL}/v1/graphql` });
 
 const authLink = setContext((_, { headers }) => {
 	const token = localStorage.getItem("token");

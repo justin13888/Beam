@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
         config.bind_address
     );
     info!(
-        "GraphiQL interface available at http://{}/graphql",
+        "GraphiQL interface available at http://{}/v1/graphql",
         config.bind_address
     );
 
