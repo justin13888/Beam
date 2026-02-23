@@ -10,9 +10,9 @@
 		"build": "vite build && tsc",
 		"serve": "vite preview",
 		"test": "vitest run",
-		"format": "biome format",
-		"lint": "biome lint",
-		"check": "biome check"
+		"format": "biome format .",
+		"lint": "biome lint .",
+		"check": "biome check ."
 	},
 	"dependencies": {
 		"@apollo/client": "^4.0.7",
@@ -46,7 +46,6 @@
 		"zod": "^4.1.11"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.2.4",
 		"@graphql-codegen/cli": "^6.0.1",
 		"@graphql-codegen/typescript": "^5.0.2",
 		"@graphql-codegen/typescript-operations": "^5.0.2",
