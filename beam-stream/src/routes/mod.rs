@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod graphql;
+pub mod graphql_ws;
 pub mod health;
 pub mod stream;
 pub mod upload;
@@ -25,9 +26,14 @@ pub fn create_router(state: AppState, schema: AppSchema) -> Router {
                 .push(Router::with_path("auth").push(auth::auth_routes()))
                 .push(
                     Router::with_path("graphql")
-                        .hoop(affix_state::inject(schema))
+                        .hoop(affix_state::inject(schema.clone()))
                         .get(graphql::graphiql)
                         .post(graphql::graphql_handler),
+                )
+                .push(
+                    Router::with_path("graphql/ws")
+                        .hoop(affix_state::inject(schema))
+                        .get(graphql_ws::graphql_ws_handler),
                 ),
         )
 }

@@ -9,6 +9,7 @@ use crate::{
         hash::{HashConfig, HashService, LocalHashService},
         library::{LibraryService, LocalLibraryService},
         metadata::{MetadataConfig, MetadataService, StubMetadataService},
+        notification::{LocalNotificationService, NotificationService},
         session_store::{RedisSessionStore, SessionStore},
         transcode::{LocalTranscodeService, TranscodeService},
     },
@@ -70,6 +71,7 @@ pub struct AppServices {
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
     pub transcode: Arc<dyn TranscodeService>,
+    pub notification: Arc<dyn NotificationService>,
 }
 
 impl AppServices {
@@ -89,6 +91,7 @@ impl AppServices {
         ));
         let user_repo = Arc::new(crate::repositories::SqlUserRepository::new(db.clone()));
 
+        let notification_service = Arc::new(LocalNotificationService::new());
         let hash_service = Arc::new(LocalHashService::new(hash_config));
         let media_info_service =
             Arc::new(crate::services::media_info::LocalMediaInfoService::default());
@@ -123,9 +126,11 @@ impl AppServices {
                 config.video_dir.clone(),
                 hash_service.clone(),
                 media_info_service,
+                notification_service.clone(),
             )),
             metadata: Arc::new(StubMetadataService::new(metadata_config)),
             transcode: transcode_service,
+            notification: notification_service,
         }
     }
 }

@@ -3,6 +3,7 @@ pub mod hash;
 pub mod library;
 pub mod media_info;
 pub mod metadata;
+pub mod notification;
 pub mod session_store;
 pub mod transcode;
 

@@ -21,6 +21,7 @@ async-graphql = { version = "7.0.17", features = [
     "uuid",
     "url",
 ] }
+async-stream = "0.3"
 async-trait = { workspace = true }
 base64 = "0.22.1"
 bb8-redis = { workspace = true }
@@ -32,6 +33,7 @@ dotenvy = "0.15.7"
 eyre = "0.6.12"
 ffmpeg-next = { workspace = true }
 fs2 = "0.4.3"
+futures-util = "0.3"
 hex = { version = "0.4.3", features = ["serde"] }
 http = "1"
 jsonwebtoken = { workspace = true }

@@ -12,6 +12,7 @@ use crate::models::domain::file::{FileStatus, MediaFileContent, UpdateMediaFile}
 use crate::models::{Library, LibraryFile};
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
+use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use crate::utils::metadata::{StreamMetadata, VideoFileMetadata};
 
 use std::collections::HashMap;
@@ -61,6 +62,7 @@ pub struct LocalLibraryService {
     video_dir: PathBuf,
     hash_service: Arc<dyn HashService>,
     media_info_service: Arc<dyn MediaInfoService>,
+    notification_service: Arc<dyn NotificationService>,
 }
 
 impl LocalLibraryService {
@@ -74,6 +76,7 @@ impl LocalLibraryService {
         video_dir: PathBuf,
         hash_service: Arc<dyn HashService>,
         media_info_service: Arc<dyn MediaInfoService>,
+        notification_service: Arc<dyn NotificationService>,
     ) -> Self {
         LocalLibraryService {
             library_repo,
@@ -84,6 +87,7 @@ impl LocalLibraryService {
             video_dir,
             hash_service,
             media_info_service,
+            notification_service,
         }
     }
 
@@ -498,6 +502,13 @@ impl LibraryService for LocalLibraryService {
             last_scan_file_count,
         } = self.library_repo.create(create).await?;
 
+        self.notification_service.publish(AdminEvent::info(
+            EventCategory::System,
+            format!("Library '{}' created", name),
+            Some(id.to_string()),
+            Some(name.clone()),
+        ));
+
         Ok(Library {
             id: id.to_string(),
             name,
@@ -526,12 +537,29 @@ impl LibraryService for LocalLibraryService {
             library.name, library.root_path
         );
 
+        self.notification_service.publish(AdminEvent::info(
+            EventCategory::LibraryScan,
+            format!("Library scan started for '{}'", library.name),
+            Some(lib_uuid.to_string()),
+            Some(library.name.clone()),
+        ));
+
         // Update scan start time
         self.library_repo
             .update_scan_progress(lib_uuid, Some(start_time), None, None)
             .await?;
 
         if !library.root_path.exists() {
+            self.notification_service.publish(AdminEvent::error(
+                EventCategory::LibraryScan,
+                format!(
+                    "Library '{}' path not found: {}",
+                    library.name,
+                    library.root_path.display()
+                ),
+                Some(lib_uuid.to_string()),
+                Some(library.name.clone()),
+            ));
             return Err(LibraryError::PathNotFound(
                 library.root_path.to_string_lossy().to_string(),
             ));
@@ -595,7 +623,19 @@ impl LibraryService for LocalLibraryService {
                 match self.process_new_file(&path, lib_uuid).await {
                     Ok(true) => added_count += 1,
                     Ok(false) => {}
-                    Err(e) => error!("Failed to process file {}: {}", path.display(), e),
+                    Err(e) => {
+                        error!("Failed to process file {}: {}", path.display(), e);
+                        self.notification_service.publish(AdminEvent::warning(
+                            EventCategory::LibraryScan,
+                            format!(
+                                "Failed to process file '{}': {}",
+                                path.display(),
+                                e
+                            ),
+                            Some(lib_uuid.to_string()),
+                            Some(library.name.clone()),
+                        ));
+                    }
                 }
             }
         }
@@ -622,6 +662,19 @@ impl LibraryService for LocalLibraryService {
             total_files
         );
 
+        self.notification_service.publish(AdminEvent::info(
+            EventCategory::LibraryScan,
+            format!(
+                "Library scan complete for '{}': added {}, removed {}, total {}",
+                library.name,
+                added_count,
+                existing_map.len(),
+                total_files
+            ),
+            Some(lib_uuid.to_string()),
+            Some(library.name.clone()),
+        ));
+
         Ok(added_count)
     }
 
@@ -629,13 +682,22 @@ impl LibraryService for LocalLibraryService {
         let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
 
         // Verify library exists
-        self.library_repo
+        let library = self
+            .library_repo
             .find_by_id(lib_uuid)
             .await?
             .ok_or(LibraryError::LibraryNotFound)?;
 
         // Delete the library itself
         self.library_repo.delete(lib_uuid).await?;
+
+        self.notification_service.publish(AdminEvent::info(
+            EventCategory::System,
+            format!("Library '{}' deleted", library.name),
+            Some(lib_uuid.to_string()),
+            Some(library.name),
+        ));
+
         Ok(true)
     }
 }

@@ -4,12 +4,14 @@ use beam_stream::state::{AppContext, AppState, UserContext};
 use salvo::prelude::*;
 
 const GRAPHQL_PATH: &str = "graphql";
+const GRAPHQL_WS_PATH: &str = "graphql/ws";
 
 #[handler]
 pub async fn graphiql(res: &mut Response) {
     res.render(Text::Html(
         GraphiQLSource::build()
-            .endpoint(&format!("/{}", GRAPHQL_PATH))
+            .endpoint(&format!("/v1/{}", GRAPHQL_PATH))
+            .subscription_endpoint(&format!("/v1/{}", GRAPHQL_WS_PATH))
             .finish(),
     ));
 }
