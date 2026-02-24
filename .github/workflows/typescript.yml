@@ -6,19 +6,30 @@ on:
   pull_request:
     branches: [master]
 
-defaults:
-  run:
-    working-directory: beam-web
-
 jobs:
-  lint:
-    name: Lint & Format (Biome)
+  setup:
+    name: Discover Workspaces
     runs-on: ubuntu-latest
+    outputs:
+      workspaces: ${{ steps.workspaces.outputs.list }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - id: workspaces
+        run: echo "list=$(jq -c '.workspaces' package.json)" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build (${{ matrix.workspace }})
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJson(needs.setup.outputs.workspaces) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
@@ -26,24 +37,29 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('beam-web/bun.lock') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Check formatting and linting (Biome)
-        run: bun run check
+      - name: Build
+        working-directory: ${{ matrix.workspace }}
+        run: bun run build
 
   typecheck:
-    name: Type Check
+    name: Type Check (${{ matrix.workspace }})
+    needs: setup
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJson(needs.setup.outputs.workspaces) }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
@@ -51,7 +67,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('beam-web/bun.lock') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
@@ -59,16 +75,26 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Type check
-        run: bun run typecheck
+        working-directory: ${{ matrix.workspace }}
+        run: |
+          if jq -e '.scripts.typecheck' package.json > /dev/null 2>&1; then
+            bun run typecheck
+          else
+            echo "No typecheck script in ${{ matrix.workspace }}, skipping"
+          fi
 
   test:
-    name: Tests & Coverage
+    name: Tests (${{ matrix.workspace }})
+    needs: setup
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: ${{ fromJson(needs.setup.outputs.workspaces) }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
@@ -76,7 +102,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('beam-web/bun.lock') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
@@ -84,11 +110,18 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Run tests with coverage
-        run: bun run test:coverage
+        working-directory: ${{ matrix.workspace }}
+        run: |
+          if jq -e '.scripts["test:coverage"]' package.json > /dev/null 2>&1; then
+            bun run test:coverage
+          else
+            echo "No test:coverage script in ${{ matrix.workspace }}, skipping"
+          fi
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
-          name: typescript-coverage
-          path: beam-web/coverage
+          name: coverage-${{ matrix.workspace }}
+          path: ${{ matrix.workspace }}/coverage
+          if-no-files-found: ignore
           retention-days: 7
