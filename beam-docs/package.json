@@ -15,7 +15,8 @@
     "check": "biome check .",
     "lint:fix": "biome lint --write .",
     "format:fix": "biome format --write .",
-    "check:fix": "biome check --write ."
+    "check:fix": "biome check --write .",
+    "typecheck": "astro check"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.10",
@@ -24,6 +25,7 @@
     "sharp": "^0.34.2"
   },
   "devDependencies": {
+    "@astrojs/check": "^0.9.6",
     "wrangler": "^4.45.0"
   }
 }

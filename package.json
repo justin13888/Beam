@@ -4,6 +4,9 @@
 	"version": "0.0.1",
 	"workspaces": ["beam-docs", "beam-web"],
 	"scripts": {
+		"build": "bun run --filter '*' build",
+		"typecheck": "bun run --filter '*' typecheck",
+		"test:coverage": "bun run --filter '*' test:coverage",
 		"lint": "biome lint .",
 		"format": "biome format .",
 		"check": "biome check .",
