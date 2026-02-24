@@ -2,16 +2,19 @@ use sea_orm::DatabaseConnection;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use beam_auth::utils::{
+    repository::{SqlUserRepository, UserRepository},
+    service::{AuthService, LocalAuthService},
+    session_store::{RedisSessionStore, SessionStore},
+};
+
 use crate::{
     config::ServerConfig,
-    repositories::UserRepository,
     services::{
         admin_log::{AdminLogService, LocalAdminLogService},
-        auth::{AuthService, LocalAuthService},
         hash::{HashConfig, HashService, LocalHashService},
         library::{LibraryService, LocalLibraryService},
         metadata::{MetadataConfig, MetadataService, StubMetadataService},
-        session_store::{RedisSessionStore, SessionStore},
         transcode::{LocalTranscodeService, TranscodeService},
     },
 };
@@ -92,7 +95,7 @@ impl AppServices {
             db.clone(),
         ));
         let user_repo: Arc<dyn UserRepository> =
-            Arc::new(crate::repositories::SqlUserRepository::new(db.clone()));
+            Arc::new(SqlUserRepository::new(db.clone()));
         let admin_log_repo = Arc::new(crate::repositories::SqlAdminLogRepository::new(db.clone()));
 
         let hash_service = Arc::new(LocalHashService::new(hash_config));
@@ -113,7 +116,7 @@ impl AppServices {
         let auth_service = Arc::new(LocalAuthService::new(
             user_repo.clone(),
             session_store.clone(),
-            config.clone(),
+            config.jwt_secret.clone(),
         ));
 
         let admin_log_service: Arc<dyn AdminLogService> =

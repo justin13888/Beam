@@ -9,7 +9,10 @@
     "preview": "wrangler pages dev ./dist",
     "astro": "astro",
     "deploy": "astro build && wrangler pages deploy",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "format": "biome format .",
+    "lint": "biome lint .",
+    "check": "biome check ."
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.10",

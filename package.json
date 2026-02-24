@@ -1,0 +1,14 @@
+{
+	"name": "beam",
+	"private": true,
+	"version": "0.0.1",
+	"workspaces": ["beam-docs", "beam-web"],
+	"scripts": {
+		"lint": "biome lint .",
+		"format": "biome format .",
+		"check": "biome check ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.2.4"
+	}
+}

@@ -1,11 +1,10 @@
-use crate::config::ConfigError;
 use async_trait::async_trait;
 use bb8_redis::RedisConnectionManager;
 use bb8_redis::bb8::{Pool, PooledConnection};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, error};
+use tracing::debug;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SessionData {
@@ -24,8 +23,6 @@ pub enum SessionError {
     Pool(#[from] bb8_redis::bb8::RunError<redis::RedisError>),
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error("Config error: {0}")]
-    Config(#[from] ConfigError),
 }
 
 type Result<T> = std::result::Result<T, SessionError>;
@@ -156,7 +153,6 @@ impl SessionStore for RedisSessionStore {
         let key = Self::session_key(session_id);
         let mut conn = self.get_conn().await?;
 
-        // Update TTL
         let _: bool = conn.expire(&key, ttl_secs as i64).await?;
         Ok(())
     }
@@ -164,11 +160,6 @@ impl SessionStore for RedisSessionStore {
     async fn delete(&self, session_id: &str) -> Result<()> {
         let key = Self::session_key(session_id);
         let mut conn = self.get_conn().await?;
-
-        // We also need to remove it from the user's set... but we might not know the user_id without fetching first.
-        // For efficiency, we can just delete the session key.
-        // The user set will eventually contain stale IDs, which is acceptable or can be cleaned up lazily.
-        // Or if we want to be strict, we fetch first.
 
         let value: Option<String> = conn.get(&key).await?;
         if let Some(v) = value {
@@ -224,8 +215,6 @@ impl SessionStore for RedisSessionStore {
         let mut sessions = Vec::new();
 
         for id in session_ids {
-            // Need to fetch each session. This could be optimized with MGET if we stored keys differently or just looped
-            // Since this is an admin/user-facing infrequent op, getting them one by one or via pipe is fine.
             let key = Self::session_key(&id);
             let value: Option<String> = conn.get(&key).await?;
 

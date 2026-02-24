@@ -1,0 +1,48 @@
+[package]
+name = "beam-auth"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[features]
+default = []
+utils = [
+    "dep:argon2",
+    "dep:async-trait",
+    "dep:base64",
+    "dep:bb8-redis",
+    "dep:beam-entity",
+    "dep:chrono",
+    "dep:jsonwebtoken",
+    "dep:rand",
+    "dep:redis",
+    "dep:sea-orm",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:tracing",
+    "dep:uuid",
+]
+server = [
+    "utils",
+    "dep:salvo",
+]
+
+[dependencies]
+argon2 = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+base64 = { version = "0.22.1", optional = true }
+bb8-redis = { workspace = true, optional = true }
+beam-entity = { path = "../beam-entity", optional = true }
+chrono = { workspace = true, features = ["serde"], optional = true }
+jsonwebtoken = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+redis = { workspace = true, optional = true }
+salvo = { workspace = true, optional = true }
+sea-orm = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tracing = { workspace = true, features = ["log"], optional = true }
+uuid = { workspace = true, optional = true }

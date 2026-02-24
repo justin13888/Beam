@@ -1,16 +1,16 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
 import { gql } from "@apollo/client";
 import { useQuery } from "@apollo/client/react";
-import type { QueryRoot } from "../gql";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import {
-	Library,
+	ChevronRight,
 	FileVideo,
+	Library,
+	RefreshCw,
 	Scan,
 	Search,
-	ChevronRight,
-	RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import type { QueryRoot } from "../gql";
 
 const GET_LIBRARIES = gql`
   query GetLibraries {
@@ -49,8 +49,8 @@ function DashboardPage() {
 						</span>
 					</h1>
 					<p className="text-lg text-gray-400 max-w-xl mx-auto">
-						Your personal media server. Organize, index, and stream your
-						media collections.
+						Your personal media server. Organize, index, and stream your media
+						collections.
 					</p>
 				</div>
 
