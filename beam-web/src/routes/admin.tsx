@@ -1,8 +1,6 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
 import { gql } from "@apollo/client";
 import { useQuery } from "@apollo/client/react";
-import { useState } from "react";
-import { useAuth } from "../hooks/auth";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import {
 	AlertCircle,
 	AlertTriangle,
@@ -10,7 +8,9 @@ import {
 	RefreshCw,
 	Shield,
 } from "lucide-react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "../hooks/auth";
 
 const GET_ADMIN_LOGS = gql`
   query GetAdminLogs($limit: Int, $offset: Int) {
@@ -137,7 +137,9 @@ function AdminPage() {
 					<div className="flex items-center gap-3">
 						<span className="text-sm text-gray-500">
 							Logged in as{" "}
-							<span className="text-gray-300 font-medium">{user?.username}</span>
+							<span className="text-gray-300 font-medium">
+								{user?.username}
+							</span>
 						</span>
 						<Button
 							variant="outline"
@@ -236,7 +238,7 @@ function AdminPage() {
 														{(() => {
 															try {
 																return JSON.stringify(
-																	JSON.parse(log.details!),
+																	JSON.parse(log.details),
 																	null,
 																	2,
 																);
