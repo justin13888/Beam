@@ -7,7 +7,7 @@ publish = false
 default-run = "beam-stream"
 
 [dependencies]
-beam-auth = { path = "../beam-auth", features = ["utils", "server"] }
+beam-auth = { path = "../beam-auth", features = ["utils"] }
 beam-entity = { path = "../beam-entity" }
 http = { workspace = true }
 async-graphql = { version = "7.0.17", features = [
