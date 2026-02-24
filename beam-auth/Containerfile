@@ -1,0 +1,60 @@
+# ----------------------------------------------------
+# Stage 1: Setup chef image
+# ----------------------------------------------------
+FROM docker.io/rust:1.91-slim-trixie AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+
+# ----------------------------------------------------
+# Stage 2: Create dependency recipe
+# ----------------------------------------------------
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ----------------------------------------------------
+# Stage 3: Build Rust application
+# ----------------------------------------------------
+FROM chef AS builder
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libssl-dev \
+    pkg-config \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cook dependencies first (cached layer)
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Build the application
+COPY . .
+RUN cargo build --release --package beam-auth
+
+# ----------------------------------------------------
+# Stage 4: Runtime image
+# ----------------------------------------------------
+FROM docker.io/debian:trixie-slim
+
+# Install minimal runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the binary from builder
+COPY --from=builder /app/target/release/beam-auth /usr/local/bin/beam-auth
+
+# Create non-root user
+RUN useradd -m -u 1000 -s /bin/bash appuser
+USER appuser
+
+# Expose port
+EXPOSE 8001/tcp
+
+# Run the binary
+CMD ["beam-auth"]

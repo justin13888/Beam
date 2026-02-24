@@ -482,6 +482,11 @@ dependencies = [
  "bb8-redis",
  "beam-entity",
  "chrono",
+ "color-eyre",
+ "confique",
+ "dotenvy",
+ "eyre",
+ "http",
  "jsonwebtoken",
  "rand 0.10.0",
  "redis",
@@ -490,7 +495,9 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
