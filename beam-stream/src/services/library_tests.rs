@@ -21,22 +21,20 @@ mod tests {
     #[tokio::test]
     async fn test_process_file_movie_success() {
         // Setup Mocks
-        let mut mock_library_repo = MockLibraryRepository::new();
+        let mock_library_repo = MockLibraryRepository::new();
         let mut mock_file_repo = MockFileRepository::new();
         let mut mock_movie_repo = MockMovieRepository::new();
-        let mut mock_show_repo = MockShowRepository::new();
+        let mock_show_repo = MockShowRepository::new();
         let mut mock_stream_repo = MockMediaStreamRepository::new();
         let mut mock_hash_service = MockHashService::new();
         let mut mock_media_info_service = MockMediaInfoService::new();
 
         // Config
-        let temp_dir = TempDir::new().unwrap().keep();
-        // Config
-        let temp_dir = TempDir::new().unwrap().into_path();
-        let video_dir = temp_dir.clone();
+        let temp_dir = TempDir::new().unwrap();
+        let video_dir = temp_dir.path().to_path_buf();
 
         // File Path
-        let path = temp_dir.join("movies/Avatar.mp4");
+        let path = video_dir.join("movies/Avatar.mp4");
         let lib_id = Uuid::new_v4();
 
         // Mocks Expectations
@@ -162,9 +160,9 @@ mod tests {
     #[tokio::test]
     async fn test_process_file_episode_success() {
         // Setup Mocks
-        let mut mock_library_repo = MockLibraryRepository::new();
+        let mock_library_repo = MockLibraryRepository::new();
         let mut mock_file_repo = MockFileRepository::new();
-        let mut mock_movie_repo = MockMovieRepository::new();
+        let mock_movie_repo = MockMovieRepository::new();
         let mut mock_show_repo = MockShowRepository::new();
         let mut mock_stream_repo = MockMediaStreamRepository::new();
         let mut mock_hash_service = MockHashService::new();

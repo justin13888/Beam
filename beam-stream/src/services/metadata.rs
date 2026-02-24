@@ -34,17 +34,17 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct StubMetadataService {
     /// Directory where cached metadata is stored
-    cache_dir: std::path::PathBuf,
+    _cache_dir: std::path::PathBuf,
     /// Map of stub media IDs -> titles (demo purposes)
     /// In a real implementation, this would query a database or external API
-    media_stubs: Vec<(String, String)>,
+    _media_stubs: Vec<(String, String)>,
 }
 
 impl StubMetadataService {
     pub fn new(config: MetadataConfig) -> Self {
         Self {
-            cache_dir: config.cache_dir,
-            media_stubs: vec![],
+            _cache_dir: config.cache_dir,
+            _media_stubs: vec![],
         }
     }
 }
@@ -224,7 +224,7 @@ impl MetadataService for StubMetadataService {
 
     /// Refresh metadata for by media filter
     async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
-        todo!()
+        Ok(())
     }
 }
 
