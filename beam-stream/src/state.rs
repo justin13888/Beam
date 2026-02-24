@@ -2,15 +2,19 @@ use sea_orm::DatabaseConnection;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use beam_auth::utils::{
+    repository::SqlUserRepository,
+    service::{AuthService, LocalAuthService},
+    session_store::{RedisSessionStore, SessionStore},
+};
+
 use crate::{
     config::ServerConfig,
     services::{
-        auth::{AuthService, LocalAuthService},
         hash::{HashConfig, HashService, LocalHashService},
         library::{LibraryService, LocalLibraryService},
         metadata::{MetadataConfig, MetadataService, StubMetadataService},
         notification::{LocalNotificationService, NotificationService},
-        session_store::{RedisSessionStore, SessionStore},
         transcode::{LocalTranscodeService, TranscodeService},
     },
 };
@@ -89,7 +93,7 @@ impl AppServices {
         let stream_repo = Arc::new(crate::repositories::SqlMediaStreamRepository::new(
             db.clone(),
         ));
-        let user_repo = Arc::new(crate::repositories::SqlUserRepository::new(db.clone()));
+        let user_repo = Arc::new(SqlUserRepository::new(db.clone()));
 
         let notification_service = Arc::new(LocalNotificationService::new());
         let hash_service = Arc::new(LocalHashService::new(hash_config));
@@ -110,7 +114,7 @@ impl AppServices {
         let auth_service = Arc::new(LocalAuthService::new(
             user_repo,
             session_store.clone(),
-            config.clone(),
+            config.jwt_secret.clone(),
         ));
 
         Self {

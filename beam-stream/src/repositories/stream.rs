@@ -90,8 +90,8 @@ impl SqlMediaStreamRepository {
 #[async_trait]
 impl MediaStreamRepository for SqlMediaStreamRepository {
     async fn insert_streams(&self, streams: Vec<CreateMediaStream>) -> Result<u32, DbErr> {
-        use beam_entity::media_stream;
         use crate::models::domain::{StreamMetadata, StreamType};
+        use beam_entity::media_stream;
         use sea_orm::{ActiveModelTrait, Set};
 
         let mut inserted_count = 0;

@@ -7,8 +7,9 @@ publish = false
 default-run = "beam-stream"
 
 [dependencies]
-argon2 = { workspace = true }
+beam-auth = { path = "../beam-auth", features = ["utils", "server"] }
 beam-entity = { path = "../beam-entity" }
+http = { workspace = true }
 async-graphql = { version = "7.0.17", features = [
     "apollo_persisted_queries",
     "chrono",
@@ -23,8 +24,6 @@ async-graphql = { version = "7.0.17", features = [
 ] }
 async-stream = "0.3"
 async-trait = { workspace = true }
-base64 = "0.22.1"
-bb8-redis = { workspace = true }
 bytes = "1"
 chrono = { workspace = true, features = ["serde"] }
 color-eyre = "0.6.5"
@@ -35,15 +34,12 @@ ffmpeg-next = { workspace = true }
 fs2 = "0.4.3"
 futures-util = "0.3"
 hex = { version = "0.4.3", features = ["serde"] }
-http = "1"
-jsonwebtoken = { workspace = true }
 m3u8-rs = "6.0.0"
 num = { version = "0.4.3", features = ["serde"] }
 num_cpus = "1.17.0"
 parking_lot = "0.12.5"
 rand = { workspace = true }
 rayon = "1.11.0"
-redis = { workspace = true }
 regex = { workspace = true }
 rust_decimal = "1.39.0"
 salvo = { workspace = true }

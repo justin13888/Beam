@@ -473,6 +473,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "beam-auth"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "base64",
+ "bb8-redis",
+ "beam-entity",
+ "chrono",
+ "jsonwebtoken",
+ "rand 0.10.0",
+ "redis",
+ "salvo",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "beam-entity"
 version = "0.1.0"
 dependencies = [
@@ -494,12 +516,10 @@ dependencies = [
 name = "beam-stream"
 version = "0.1.0"
 dependencies = [
- "argon2",
  "async-graphql",
  "async-stream",
  "async-trait",
- "base64",
- "bb8-redis",
+ "beam-auth",
  "beam-entity",
  "beam-migration",
  "bytes",
@@ -514,7 +534,6 @@ dependencies = [
  "futures-util",
  "hex",
  "http",
- "jsonwebtoken",
  "m3u8-rs",
  "mockall",
  "num",
@@ -522,7 +541,6 @@ dependencies = [
  "parking_lot",
  "rand 0.10.0",
  "rayon",
- "redis",
  "regex",
  "rust_decimal",
  "salvo",
@@ -1882,12 +1900,11 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.2.0"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f16ca2af56261c99fba8bac40a10251ce8188205a4c448fbb745a2e4daa76fea"
+checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
 dependencies = [
  "bytes",
- "fnv",
  "itoa",
 ]
 

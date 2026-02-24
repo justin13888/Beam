@@ -96,8 +96,8 @@ impl FileRepository for SqlFileRepository {
     }
 
     async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr> {
-        use beam_entity::files;
         use crate::models::domain::MediaFileContent;
+        use beam_entity::files;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 
@@ -132,8 +132,8 @@ impl FileRepository for SqlFileRepository {
         Ok(MediaFile::from(result))
     }
     async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr> {
-        use beam_entity::files;
         use crate::models::domain::MediaFileContent;
+        use beam_entity::files;
         use sea_orm::{ActiveModelTrait, Set};
 
         let mut active_model: files::ActiveModel = files::ActiveModel {
