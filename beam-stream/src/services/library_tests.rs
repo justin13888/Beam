@@ -7,6 +7,7 @@ mod tests {
     use crate::repositories::movie::MockMovieRepository;
     use crate::repositories::show::MockShowRepository;
     use crate::repositories::stream::MockMediaStreamRepository;
+    use crate::services::admin_log::NoOpAdminLogService;
     use crate::services::hash::MockHashService;
     use crate::services::library::LocalLibraryService;
     use crate::services::media_info::MockMediaInfoService;
@@ -150,6 +151,7 @@ mod tests {
             Arc::new(mock_hash_service),
             Arc::new(mock_media_info_service),
             Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
         );
 
         let result = service.process_new_file(&path, lib_id).await;
@@ -297,6 +299,7 @@ mod tests {
             Arc::new(mock_hash_service),
             Arc::new(mock_media_info_service),
             Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
         );
 
         let result = service.process_new_file(&path, lib_id).await;

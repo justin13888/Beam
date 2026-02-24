@@ -2,6 +2,7 @@
 //!
 //! These entities map to the database tables created by migrations.
 
+pub mod admin_log;
 pub mod episode;
 pub mod files;
 pub mod genre;
@@ -31,5 +32,6 @@ pub use movie_genre::Entity as MovieGenre;
 pub use season::Entity as Season;
 pub use show::Entity as Show;
 pub use show_genre::Entity as ShowGenre;
+pub use admin_log::Entity as AdminLog;
 pub use stream_cache::Entity as StreamCache;
 pub use user::Entity as User;
