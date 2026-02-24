@@ -6,7 +6,10 @@
 	"scripts": {
 		"lint": "biome lint .",
 		"format": "biome format .",
-		"check": "biome check ."
+		"check": "biome check .",
+		"lint:fix": "biome lint --write .",
+		"format:fix": "biome format --write .",
+		"check:fix": "biome check --write ."
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.2.4"

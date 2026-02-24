@@ -12,7 +12,10 @@
     "cf-typegen": "wrangler types",
     "format": "biome format .",
     "lint": "biome lint .",
-    "check": "biome check ."
+    "check": "biome check .",
+    "lint:fix": "biome lint --write .",
+    "format:fix": "biome format --write .",
+    "check:fix": "biome check --write ."
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.10",

@@ -8,6 +8,8 @@
         "start": "NODE_ENV=production bun src/index.ts",
         "lint": "bunx @biomejs/biome check .",
         "lint:fix": "bunx @biomejs/biome check --apply .",
+        "format:fix": "bunx @biomejs/biome format --write .",
+        "check:fix": "bunx @biomejs/biome check --write .",
         "db:push": "drizzle-kit push:pg",
         "db:studio": "drizzle-kit studio",
         "gen:jwt": "bun run scripts/gen-jwt.ts"
