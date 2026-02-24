@@ -5,7 +5,7 @@ use std::sync::Arc;
 use beam_auth::utils::{
     repository::{SqlUserRepository, UserRepository},
     service::{AuthService, LocalAuthService},
-    session_store::{RedisSessionStore, SessionStore},
+    session_store::RedisSessionStore,
 };
 
 use crate::{
@@ -70,7 +70,6 @@ impl AppContext {
 #[derive(Debug)]
 pub struct AppServices {
     pub auth: Arc<dyn AuthService>,
-    pub session_store: Arc<dyn SessionStore>,
     pub hash: Arc<dyn HashService>,
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
@@ -114,8 +113,8 @@ impl AppServices {
         );
 
         let auth_service = Arc::new(LocalAuthService::new(
-            user_repo.clone(),
-            session_store.clone(),
+            user_repo,
+            session_store,
             config.jwt_secret.clone(),
         ));
 
@@ -124,7 +123,6 @@ impl AppServices {
 
         Self {
             auth: auth_service,
-            session_store,
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
                 library_repo,
