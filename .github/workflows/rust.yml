@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [master]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -20,29 +24,34 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-  clippy:
-    name: Lint
+  build-ffmpeg:
+    name: Build FFmpeg
     runs-on: ubuntu-latest
     container: docker.io/rust:1.91-slim-trixie
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends \
-            build-essential pkg-config yasm nasm wget ca-certificates \
-            clang libclang-dev \
-            libx264-dev libx265-dev libvpx-dev \
-            libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
-            libfribidi-dev libogg-dev libssl-dev \
-            && rm -rf /var/lib/apt/lists/*
-
       - name: Cache FFmpeg 8.0 build
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
           path: /opt/ffmpeg
           key: ffmpeg-8.0-debian-trixie-v1
+
+      - name: Cache apt packages (FFmpeg build)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-trixie-ffmpeg-build-v1
+
+      - name: Install FFmpeg build dependencies
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config yasm nasm wget ca-certificates \
+            libx264-dev libx265-dev libvpx-dev \
+            libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
+            libfribidi-dev libogg-dev libssl-dev \
+            && rm -rf /var/lib/apt/lists/*
 
       - name: Build FFmpeg 8.0 from source
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -77,6 +86,37 @@ jobs:
             --extra-libs=-lm
           make -j$(nproc)
           make install
+
+  clippy:
+    name: Lint
+    needs: [build-ffmpeg]
+    runs-on: ubuntu-latest
+    container: docker.io/rust:1.91-slim-trixie
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache apt packages (Rust build)
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-trixie-rust-build-v1
+
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            clang libclang-dev \
+            libx264-dev libx265-dev libvpx-dev \
+            libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
+            libfribidi-dev libogg-dev libssl-dev \
+            && rm -rf /var/lib/apt/lists/*
+
+      - name: Restore FFmpeg cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/ffmpeg
+          key: ffmpeg-8.0-debian-trixie-v1
+          fail-on-cache-miss: true
 
       - name: Set up FFmpeg environment
         run: |
@@ -92,61 +132,34 @@ jobs:
 
   test:
     name: Tests & Coverage
+    needs: [build-ffmpeg]
     runs-on: ubuntu-latest
     container: docker.io/rust:1.91-slim-trixie
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache apt packages (Rust build)
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-trixie-rust-build-v1
+
       - name: Install build dependencies
         run: |
           apt-get update && apt-get install -y --no-install-recommends \
-            build-essential pkg-config yasm nasm wget ca-certificates \
+            build-essential pkg-config \
             clang libclang-dev \
             libx264-dev libx265-dev libvpx-dev \
             libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
             libfribidi-dev libogg-dev libssl-dev \
             && rm -rf /var/lib/apt/lists/*
 
-      - name: Cache FFmpeg 8.0 build
-        id: cache-ffmpeg
-        uses: actions/cache@v4
+      - name: Restore FFmpeg cache
+        uses: actions/cache/restore@v4
         with:
           path: /opt/ffmpeg
           key: ffmpeg-8.0-debian-trixie-v1
-
-      - name: Build FFmpeg 8.0 from source
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg
-          wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz
-          tar xf ffmpeg-8.0.tar.xz
-          cd ffmpeg-8.0
-          ./configure \
-            --prefix=/opt/ffmpeg \
-            --disable-debug \
-            --disable-doc \
-            --disable-ffplay \
-            --enable-shared \
-            --disable-static \
-            --enable-gpl \
-            --enable-version3 \
-            --enable-fontconfig \
-            --enable-libass \
-            --enable-libfontconfig \
-            --enable-libfreetype \
-            --enable-libfribidi \
-            --enable-libopus \
-            --enable-libvpx \
-            --enable-libx264 \
-            --enable-libx265 \
-            --enable-openssl \
-            --enable-small \
-            --extra-cflags="-I/opt/ffmpeg/include" \
-            --extra-ldflags="-L/opt/ffmpeg/lib" \
-            --extra-libs=-lpthread \
-            --extra-libs=-lm
-          make -j$(nproc)
-          make install
+          fail-on-cache-miss: true
 
       - name: Set up FFmpeg environment
         run: |
