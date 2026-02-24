@@ -3,8 +3,34 @@ name: TypeScript CI
 on:
   push:
     branches: [master]
+    paths:
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "**/*.js"
+      - "**/*.mjs"
+      - "**/*.cjs"
+      - "**/*.astro"
+      - "**/tsconfig*.json"
+      - "package.json"
+      - "**/package.json"
+      - "bun.lock"
   pull_request:
     branches: [master]
+    paths:
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "**/*.js"
+      - "**/*.mjs"
+      - "**/*.cjs"
+      - "**/*.astro"
+      - "**/tsconfig*.json"
+      - "package.json"
+      - "**/package.json"
+      - "bun.lock"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
