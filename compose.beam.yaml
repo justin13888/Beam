@@ -23,6 +23,15 @@ services:
       timeout: 3s
       start_period: 10s
       retries: 3
+    networks:
+      - default
+      - beam_proxy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.auth.rule: "Host(`auth.beam.localhost`)"
+      traefik.http.routers.auth.entrypoints: websecure
+      traefik.http.routers.auth.tls: "true"
+      traefik.http.services.auth.loadbalancer.server.port: "8001"
 
   stream:
     build:
@@ -68,6 +77,17 @@ services:
       retries: 3
       # To disable healthcheck, use:
       # disable: true
+    networks:
+      - default
+      - beam_proxy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.stream.rule: "Host(`stream.beam.localhost`)"
+      traefik.http.routers.stream.entrypoints: websecure
+      traefik.http.routers.stream.tls: "true"
+      traefik.http.services.stream.loadbalancer.server.port: "8000"
+      # Disable response buffering for low-latency media streaming
+      traefik.http.services.stream.loadbalancer.responseForwarding.flushInterval: "-1"
 
   web:
     build:
@@ -86,8 +106,21 @@ services:
     depends_on:
       stream:
         condition: service_healthy
+    networks:
+      - default
+      - beam_proxy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.web.rule: "Host(`beam.localhost`)"
+      traefik.http.routers.web.entrypoints: websecure
+      traefik.http.routers.web.tls: "true"
+      traefik.http.services.web.loadbalancer.server.port: "80"
 
 # Named volumes for video and cache (used when HOST_*_DIR is not set)
 volumes:
   stream_videos:
   stream_cache:
+
+networks:
+  beam_proxy:
+    name: beam_proxy

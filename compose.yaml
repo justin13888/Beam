@@ -1,4 +1,3 @@
 include:
   - compose.dependencies.yaml
   - compose.beam.yaml
-# TODO: Add other dependencies (e.g. envoy reverse proxy, database and env vars)
