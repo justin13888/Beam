@@ -1,8 +1,0 @@
-[package]
-name = "beam-tasks"
-version = "0.1.0"
-edition = "2021"
-description = "Background task and scheduling microservice for Beam"
-repository = "https://github.com/justin13888/beam/tree/master/beam-stream"
-
-# TODO: Install dependencies for GRPC microservice
