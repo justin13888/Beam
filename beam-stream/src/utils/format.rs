@@ -228,7 +228,7 @@ impl Disposition {
 impl From<ffmpeg::format::stream::Disposition> for Disposition {
     fn from(disposition: ffmpeg::format::stream::Disposition) -> Self {
         Disposition {
-            flags: disposition.bits() as i32,
+            flags: disposition.bits(),
         }
     }
 }

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sea_orm::*;
 use uuid::Uuid;
 
-use crate::models::domain::{AdminLog, AdminLogCategory, AdminLogLevel, CreateAdminLog};
+use crate::models::domain::{AdminLog, CreateAdminLog};
 
 #[async_trait]
 pub trait AdminLogRepository: Send + Sync + std::fmt::Debug {
