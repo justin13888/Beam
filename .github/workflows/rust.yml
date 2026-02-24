@@ -36,22 +36,16 @@ jobs:
           path: /opt/ffmpeg
           key: ffmpeg-8.0-debian-trixie-v1
 
-      - name: Cache apt packages (FFmpeg build)
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-trixie-ffmpeg-build-v1
-
       - name: Install FFmpeg build dependencies
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends \
-            build-essential pkg-config yasm nasm wget ca-certificates \
-            libx264-dev libx265-dev libvpx-dev \
-            libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
-            libfribidi-dev libogg-dev libssl-dev \
-            && rm -rf /var/lib/apt/lists/*
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: >-
+            build-essential pkg-config yasm nasm wget ca-certificates
+            libx264-dev libx265-dev libvpx-dev
+            libopus-dev libass-dev libfreetype-dev libfontconfig-dev
+            libfribidi-dev libogg-dev libssl-dev
+          version: 1.0
 
       - name: Build FFmpeg 8.0 from source
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -95,21 +89,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache apt packages (Rust build)
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-trixie-rust-build-v1
-
       - name: Install build dependencies
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            clang libclang-dev \
-            libx264-dev libx265-dev libvpx-dev \
-            libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
-            libfribidi-dev libogg-dev libssl-dev \
-            && rm -rf /var/lib/apt/lists/*
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: >-
+            build-essential pkg-config
+            clang libclang-dev
+            libx264-dev libx265-dev libvpx-dev
+            libopus-dev libass-dev libfreetype-dev libfontconfig-dev
+            libfribidi-dev libogg-dev libssl-dev
+          version: 1.0
 
       - name: Restore FFmpeg cache
         uses: actions/cache/restore@v4
@@ -138,21 +127,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache apt packages (Rust build)
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-trixie-rust-build-v1
-
       - name: Install build dependencies
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            clang libclang-dev \
-            libx264-dev libx265-dev libvpx-dev \
-            libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
-            libfribidi-dev libogg-dev libssl-dev \
-            && rm -rf /var/lib/apt/lists/*
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: >-
+            build-essential pkg-config
+            clang libclang-dev
+            libx264-dev libx265-dev libvpx-dev
+            libopus-dev libass-dev libfreetype-dev libfontconfig-dev
+            libfribidi-dev libogg-dev libssl-dev
+          version: 1.0
 
       - name: Restore FFmpeg cache
         uses: actions/cache/restore@v4
