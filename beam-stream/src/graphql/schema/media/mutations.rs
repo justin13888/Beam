@@ -1,6 +1,7 @@
 use async_graphql::*;
 
 use crate::graphql::AuthGuard;
+#[derive(Default)]
 pub struct MediaMutation;
 
 #[Object]

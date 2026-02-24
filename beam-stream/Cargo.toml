@@ -22,6 +22,7 @@ async-graphql = { version = "7.0.17", features = [
     "uuid",
     "url",
 ] }
+async-stream = "0.3"
 async-trait = { workspace = true }
 bytes = "1"
 chrono = { workspace = true, features = ["serde"] }
@@ -31,6 +32,7 @@ dotenvy = "0.15.7"
 eyre = "0.6.12"
 ffmpeg-next = { workspace = true }
 fs2 = "0.4.3"
+futures-util = "0.3"
 hex = { version = "0.4.3", features = ["serde"] }
 m3u8-rs = "6.0.0"
 num = { version = "0.4.3", features = ["serde"] }

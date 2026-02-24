@@ -4,6 +4,7 @@ use crate::graphql::AuthGuard;
 use crate::models::{Library, LibraryFile};
 use crate::state::{AppContext, AppState};
 
+#[derive(Default)]
 pub struct LibraryQuery;
 
 #[Object]

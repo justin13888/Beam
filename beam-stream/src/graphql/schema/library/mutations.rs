@@ -5,6 +5,7 @@ use crate::models::Library;
 use crate::services::metadata::MediaFilter;
 use crate::state::AppState;
 
+#[derive(Default)]
 pub struct LibraryMutation;
 
 #[Object]

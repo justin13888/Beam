@@ -3,6 +3,7 @@ pub mod hash;
 pub mod library;
 pub mod media_info;
 pub mod metadata;
+pub mod notification;
 pub mod transcode;
 
 // Re-export types for convenience

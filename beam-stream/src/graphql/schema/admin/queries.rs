@@ -1,7 +1,9 @@
 use async_graphql::*;
 
 use crate::graphql::guard::AdminGuard;
+use crate::graphql::AuthGuard;
 use crate::models::domain::admin_log::{AdminLog, AdminLogCategory, AdminLogLevel};
+use crate::services::notification::AdminEvent;
 use crate::state::AppState;
 
 #[derive(SimpleObject)]
@@ -52,10 +54,25 @@ impl From<AdminLog> for AdminLogEntry {
     }
 }
 
+#[derive(Default)]
 pub struct AdminQuery;
 
 #[Object]
 impl AdminQuery {
+    /// Fetch recent admin events from the in-memory event log.
+    /// Returns the most recent `limit` events (default 100, max 1000).
+    #[graphql(guard = "AuthGuard")]
+    async fn admin_events(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(default = 100)] limit: u32,
+    ) -> Result<Vec<AdminEvent>> {
+        let state = ctx.data::<AppState>()?;
+        let limit = (limit as usize).min(1000);
+        let events = state.services.notification.recent_events(limit);
+        Ok(events)
+    }
+
     /// Fetch paginated admin log entries (most recent first). Admin only.
     #[graphql(guard = "AdminGuard")]
     async fn logs(

@@ -15,6 +15,7 @@ use crate::{
         hash::{HashConfig, HashService, LocalHashService},
         library::{LibraryService, LocalLibraryService},
         metadata::{MetadataConfig, MetadataService, StubMetadataService},
+        notification::{LocalNotificationService, NotificationService},
         transcode::{LocalTranscodeService, TranscodeService},
     },
 };
@@ -74,6 +75,7 @@ pub struct AppServices {
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
     pub transcode: Arc<dyn TranscodeService>,
+    pub notification: Arc<dyn NotificationService>,
     pub admin_log: Arc<dyn AdminLogService>,
     pub user_repo: Arc<dyn UserRepository>,
 }
@@ -97,6 +99,7 @@ impl AppServices {
             Arc::new(SqlUserRepository::new(db.clone()));
         let admin_log_repo = Arc::new(crate::repositories::SqlAdminLogRepository::new(db.clone()));
 
+        let notification_service = Arc::new(LocalNotificationService::new());
         let hash_service = Arc::new(LocalHashService::new(hash_config));
         let media_info_service =
             Arc::new(crate::services::media_info::LocalMediaInfoService::default());
@@ -113,7 +116,7 @@ impl AppServices {
         );
 
         let auth_service = Arc::new(LocalAuthService::new(
-            user_repo,
+            user_repo.clone(),
             session_store,
             config.jwt_secret.clone(),
         ));
@@ -133,10 +136,12 @@ impl AppServices {
                 config.video_dir.clone(),
                 hash_service.clone(),
                 media_info_service,
+                notification_service.clone(),
                 admin_log_service.clone(),
             )),
             metadata: Arc::new(StubMetadataService::new(metadata_config)),
             transcode: transcode_service,
+            notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
         }

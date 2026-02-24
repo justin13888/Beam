@@ -2,6 +2,7 @@ use async_graphql::*;
 
 use crate::models::MediaMetadata;
 
+#[derive(Default)]
 pub struct MediaQuery;
 
 // Re-export types from services for GraphQL

@@ -524,6 +524,7 @@ name = "beam-stream"
 version = "0.1.0"
 dependencies = [
  "async-graphql",
+ "async-stream",
  "async-trait",
  "beam-auth",
  "beam-entity",
@@ -537,6 +538,7 @@ dependencies = [
  "ffmpeg-next",
  "fs2",
  "futures",
+ "futures-util",
  "hex",
  "http",
  "m3u8-rs",
