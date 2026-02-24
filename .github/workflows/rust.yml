@@ -27,14 +27,13 @@ jobs:
   build-ffmpeg:
     name: Build FFmpeg
     runs-on: ubuntu-latest
-    container: docker.io/rust:1.91-slim-trixie
     steps:
       - name: Cache FFmpeg 8.0 build
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
           path: /opt/ffmpeg
-          key: ffmpeg-8.0-debian-trixie-v1
+          key: ffmpeg-8.0-ubuntu-latest-v1
 
       - name: Install FFmpeg build dependencies
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -85,9 +84,12 @@ jobs:
     name: Lint
     needs: [build-ffmpeg]
     runs-on: ubuntu-latest
-    container: docker.io/rust:1.91-slim-trixie
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.91
+        with:
+          components: clippy
 
       - name: Install build dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
@@ -104,7 +106,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /opt/ffmpeg
-          key: ffmpeg-8.0-debian-trixie-v1
+          key: ffmpeg-8.0-ubuntu-latest-v1
           fail-on-cache-miss: true
 
       - name: Set up FFmpeg environment
@@ -123,9 +125,10 @@ jobs:
     name: Tests & Coverage
     needs: [build-ffmpeg]
     runs-on: ubuntu-latest
-    container: docker.io/rust:1.91-slim-trixie
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.91
 
       - name: Install build dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
@@ -142,7 +145,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /opt/ffmpeg
-          key: ffmpeg-8.0-debian-trixie-v1
+          key: ffmpeg-8.0-ubuntu-latest-v1
           fail-on-cache-miss: true
 
       - name: Set up FFmpeg environment
