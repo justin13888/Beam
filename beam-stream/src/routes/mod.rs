@@ -20,9 +20,7 @@ pub fn create_router(state: AppState, schema: AppSchema) -> Router {
             .push(Router::with_path("health").get(health_check))
             .push(Router::with_path("stream/<id>/token").post(get_stream_token))
             .push(Router::with_path("stream/mp4/<id>").get(stream_mp4))
-            .push(
-                Router::with_path("auth").push(beam_auth::server::auth_routes()),
-            )
+            .push(Router::with_path("auth").push(beam_auth::server::auth_routes()))
             .push(
                 Router::with_path("graphql")
                     .hoop(affix_state::inject(schema.clone()))

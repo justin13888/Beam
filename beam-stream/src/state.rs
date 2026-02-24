@@ -95,8 +95,7 @@ impl AppServices {
         let stream_repo = Arc::new(crate::repositories::SqlMediaStreamRepository::new(
             db.clone(),
         ));
-        let user_repo: Arc<dyn UserRepository> =
-            Arc::new(SqlUserRepository::new(db.clone()));
+        let user_repo: Arc<dyn UserRepository> = Arc::new(SqlUserRepository::new(db.clone()));
         let admin_log_repo = Arc::new(crate::repositories::SqlAdminLogRepository::new(db.clone()));
 
         let notification_service = Arc::new(LocalNotificationService::new());

@@ -8,10 +8,8 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
-        db.execute_unprepared(
-            "CREATE TYPE admin_log_level AS ENUM ('info', 'warning', 'error')",
-        )
-        .await?;
+        db.execute_unprepared("CREATE TYPE admin_log_level AS ENUM ('info', 'warning', 'error')")
+            .await?;
 
         db.execute_unprepared(
             "CREATE TYPE admin_log_category AS ENUM ('library_scan', 'system', 'auth')",
@@ -35,10 +33,8 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        db.execute_unprepared(
-            "CREATE INDEX idx_admin_logs_level ON admin_logs (level)",
-        )
-        .await?;
+        db.execute_unprepared("CREATE INDEX idx_admin_logs_level ON admin_logs (level)")
+            .await?;
 
         Ok(())
     }
@@ -46,9 +42,12 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
-        db.execute_unprepared("DROP TABLE IF EXISTS admin_logs").await?;
-        db.execute_unprepared("DROP TYPE IF EXISTS admin_log_category").await?;
-        db.execute_unprepared("DROP TYPE IF EXISTS admin_log_level").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS admin_logs")
+            .await?;
+        db.execute_unprepared("DROP TYPE IF EXISTS admin_log_category")
+            .await?;
+        db.execute_unprepared("DROP TYPE IF EXISTS admin_log_level")
+            .await?;
 
         Ok(())
     }

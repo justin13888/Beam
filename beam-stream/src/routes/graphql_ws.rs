@@ -26,14 +26,12 @@ pub async fn graphql_ws_handler(req: &mut Request, depot: &mut Depot, res: &mut 
         .unwrap_or(WebSocketProtocols::SubscriptionsTransportWS);
 
     // Extract auth token from query string or Authorization header
-    let token = req
-        .query::<String>("token")
-        .or_else(|| {
-            req.headers()
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string))
-        });
+    let token = req.query::<String>("token").or_else(|| {
+        req.headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string))
+    });
 
     if let Err(e) = WebSocketUpgrade::new()
         .upgrade(req, res, move |ws| {
@@ -77,8 +75,7 @@ pub async fn graphql_ws_handler(req: &mut Request, depot: &mut Depot, res: &mut 
 
                 // Drive the GraphQL WebSocket protocol as a Stream<Item = WsMessage>
                 let mut gql_ws = Box::pin(
-                    GqlWebSocket::new(schema, input_stream, protocol)
-                        .connection_data(conn_data),
+                    GqlWebSocket::new(schema, input_stream, protocol).connection_data(conn_data),
                 );
 
                 while let Some(ws_msg) = gql_ws.next().await {

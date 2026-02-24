@@ -657,11 +657,7 @@ impl LibraryService for LocalLibraryService {
                         error!("Failed to process file {}: {}", path.display(), e);
                         self.notification_service.publish(AdminEvent::warning(
                             EventCategory::LibraryScan,
-                            format!(
-                                "Failed to process file '{}': {}",
-                                path.display(),
-                                e
-                            ),
+                            format!("Failed to process file '{}': {}", path.display(), e),
                             Some(lib_uuid.to_string()),
                             Some(library.name.clone()),
                         ));

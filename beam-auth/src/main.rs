@@ -78,13 +78,11 @@ async fn main() -> Result<()> {
         .into_handler();
 
     // Build API router
-    let router = Router::new()
-        .hoop(affix_state::inject(auth_service))
-        .push(
-            Router::with_path("v1")
-                .push(Router::with_path("health").get(health_check))
-                .push(Router::with_path("auth").push(auth_routes())),
-        );
+    let router = Router::new().hoop(affix_state::inject(auth_service)).push(
+        Router::with_path("v1")
+            .push(Router::with_path("health").get(health_check))
+            .push(Router::with_path("auth").push(auth_routes())),
+    );
 
     let service = Service::new(router).hoop(cors);
 
