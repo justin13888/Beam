@@ -38,24 +38,6 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  check:
-    name: Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache FFmpeg development libraries
-        uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev clang
-          version: 1.0
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check compilation
-        run: cargo check --workspace --all-targets
-
   test:
     name: Tests & Coverage
     runs-on: ubuntu-latest
