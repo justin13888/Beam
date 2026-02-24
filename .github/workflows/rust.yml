@@ -23,14 +23,66 @@ jobs:
   clippy:
     name: Lint
     runs-on: ubuntu-latest
+    container: docker.io/rust:1.91-slim-trixie
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache FFmpeg development libraries
-        uses: awalsh128/cache-apt-pkgs-action@latest
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config yasm nasm wget ca-certificates \
+            clang libclang-dev \
+            libx264-dev libx265-dev libvpx-dev \
+            libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
+            libfribidi-dev libogg-dev libssl-dev \
+            && rm -rf /var/lib/apt/lists/*
+
+      - name: Cache FFmpeg 8.0 build
+        id: cache-ffmpeg
+        uses: actions/cache@v4
         with:
-          packages: libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev clang
-          version: 1.0
+          path: /opt/ffmpeg
+          key: ffmpeg-8.0-debian-trixie-v1
+
+      - name: Build FFmpeg 8.0 from source
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg
+          wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz
+          tar xf ffmpeg-8.0.tar.xz
+          cd ffmpeg-8.0
+          ./configure \
+            --prefix=/opt/ffmpeg \
+            --disable-debug \
+            --disable-doc \
+            --disable-ffplay \
+            --enable-shared \
+            --disable-static \
+            --enable-gpl \
+            --enable-version3 \
+            --enable-fontconfig \
+            --enable-libass \
+            --enable-libfontconfig \
+            --enable-libfreetype \
+            --enable-libfribidi \
+            --enable-libopus \
+            --enable-libvpx \
+            --enable-libx264 \
+            --enable-libx265 \
+            --enable-openssl \
+            --enable-small \
+            --extra-cflags="-I/opt/ffmpeg/include" \
+            --extra-ldflags="-L/opt/ffmpeg/lib" \
+            --extra-libs=-lpthread \
+            --extra-libs=-lm
+          make -j$(nproc)
+          make install
+
+      - name: Set up FFmpeg environment
+        run: |
+          echo "PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/opt/ffmpeg/lib:/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+          echo "/opt/ffmpeg/bin" >> $GITHUB_PATH
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -41,14 +93,66 @@ jobs:
   test:
     name: Tests & Coverage
     runs-on: ubuntu-latest
+    container: docker.io/rust:1.91-slim-trixie
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache FFmpeg development libraries
-        uses: awalsh128/cache-apt-pkgs-action@latest
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config yasm nasm wget ca-certificates \
+            clang libclang-dev \
+            libx264-dev libx265-dev libvpx-dev \
+            libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
+            libfribidi-dev libogg-dev libssl-dev \
+            && rm -rf /var/lib/apt/lists/*
+
+      - name: Cache FFmpeg 8.0 build
+        id: cache-ffmpeg
+        uses: actions/cache@v4
         with:
-          packages: libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev clang
-          version: 1.0
+          path: /opt/ffmpeg
+          key: ffmpeg-8.0-debian-trixie-v1
+
+      - name: Build FFmpeg 8.0 from source
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg
+          wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz
+          tar xf ffmpeg-8.0.tar.xz
+          cd ffmpeg-8.0
+          ./configure \
+            --prefix=/opt/ffmpeg \
+            --disable-debug \
+            --disable-doc \
+            --disable-ffplay \
+            --enable-shared \
+            --disable-static \
+            --enable-gpl \
+            --enable-version3 \
+            --enable-fontconfig \
+            --enable-libass \
+            --enable-libfontconfig \
+            --enable-libfreetype \
+            --enable-libfribidi \
+            --enable-libopus \
+            --enable-libvpx \
+            --enable-libx264 \
+            --enable-libx265 \
+            --enable-openssl \
+            --enable-small \
+            --extra-cflags="-I/opt/ffmpeg/include" \
+            --extra-ldflags="-L/opt/ffmpeg/lib" \
+            --extra-libs=-lpthread \
+            --extra-libs=-lm
+          make -j$(nproc)
+          make install
+
+      - name: Set up FFmpeg environment
+        run: |
+          echo "PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/opt/ffmpeg/lib:/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+          echo "/opt/ffmpeg/bin" >> $GITHUB_PATH
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
