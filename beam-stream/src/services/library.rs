@@ -2,14 +2,17 @@ use std::sync::Arc;
 
 use regex::Regex;
 use sea_orm::DbErr;
+use serde_json;
 use thiserror::Error;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::models::domain::Library as DomainLibrary;
+use crate::models::domain::admin_log::{AdminLogCategory, AdminLogLevel};
 use crate::models::domain::file::{FileStatus, MediaFileContent, UpdateMediaFile};
 use crate::models::{Library, LibraryFile};
+use crate::services::admin_log::AdminLogService;
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::utils::metadata::{StreamMetadata, VideoFileMetadata};
@@ -61,6 +64,7 @@ pub struct LocalLibraryService {
     video_dir: PathBuf,
     hash_service: Arc<dyn HashService>,
     media_info_service: Arc<dyn MediaInfoService>,
+    admin_log: Arc<dyn AdminLogService>,
 }
 
 impl LocalLibraryService {
@@ -74,6 +78,7 @@ impl LocalLibraryService {
         video_dir: PathBuf,
         hash_service: Arc<dyn HashService>,
         media_info_service: Arc<dyn MediaInfoService>,
+        admin_log: Arc<dyn AdminLogService>,
     ) -> Self {
         LocalLibraryService {
             library_repo,
@@ -84,6 +89,7 @@ impl LocalLibraryService {
             video_dir,
             hash_service,
             media_info_service,
+            admin_log,
         }
     }
 
@@ -526,12 +532,37 @@ impl LibraryService for LocalLibraryService {
             library.name, library.root_path
         );
 
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Info,
+                AdminLogCategory::LibraryScan,
+                format!("Library scan started: \"{}\"", library.name),
+                Some(serde_json::json!({ "library_id": library_id, "path": library.root_path })),
+            )
+            .await;
+
         // Update scan start time
         self.library_repo
             .update_scan_progress(lib_uuid, Some(start_time), None, None)
             .await?;
 
         if !library.root_path.exists() {
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Error,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "Library scan failed: path not found for \"{}\"",
+                        library.name
+                    ),
+                    Some(serde_json::json!({
+                        "library_id": library_id,
+                        "path": library.root_path
+                    })),
+                )
+                .await;
             return Err(LibraryError::PathNotFound(
                 library.root_path.to_string_lossy().to_string(),
             ));
@@ -595,12 +626,28 @@ impl LibraryService for LocalLibraryService {
                 match self.process_new_file(&path, lib_uuid).await {
                     Ok(true) => added_count += 1,
                     Ok(false) => {}
-                    Err(e) => error!("Failed to process file {}: {}", path.display(), e),
+                    Err(e) => {
+                        error!("Failed to process file {}: {}", path.display(), e);
+                        let _ = self
+                            .admin_log
+                            .log(
+                                AdminLogLevel::Warning,
+                                AdminLogCategory::LibraryScan,
+                                format!("Failed to process file: {}", path.display()),
+                                Some(serde_json::json!({
+                                    "library_id": library_id,
+                                    "path": path.display().to_string(),
+                                    "error": e.to_string()
+                                })),
+                            )
+                            .await;
+                    }
                 }
             }
         }
 
         // Phase 4: Remove files that are in DB but not on FS (remaining in map)
+        let removed_count = existing_map.len();
         let to_remove: Vec<Uuid> = existing_map.values().map(|f| f.id).collect();
         if !to_remove.is_empty() {
             info!("Removing {} missing files from library", to_remove.len());
@@ -617,10 +664,26 @@ impl LibraryService for LocalLibraryService {
 
         info!(
             "Scan complete. Added: {}, Removed: {}, Total: {}",
-            added_count,
-            existing_map.len(),
-            total_files
+            added_count, removed_count, total_files
         );
+
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Info,
+                AdminLogCategory::LibraryScan,
+                format!(
+                    "Library scan completed: \"{}\" — {} added, {} removed, {} total",
+                    library.name, added_count, removed_count, total_files
+                ),
+                Some(serde_json::json!({
+                    "library_id": library_id,
+                    "added": added_count,
+                    "removed": removed_count,
+                    "total": total_files,
+                })),
+            )
+            .await;
 
         Ok(added_count)
     }
