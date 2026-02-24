@@ -1,4 +1,29 @@
 services:
+  auth:
+    build:
+      context: .
+      dockerfile: beam-auth/Containerfile
+    environment:
+      BIND_ADDRESS: ${AUTH_BIND_ADDRESS:-0.0.0.0:8001}
+      SERVER_URL: ${AUTH_SERVER_URL:-http://localhost:8001}
+      DATABASE_URL: ${DATABASE_URL:-postgres://beam:password@postgres:5432/beam}
+      RUST_LOG: ${RUST_LOG:-beam_auth=info}
+      REDIS_URL: ${REDIS_URL:-redis://valkey:6379}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is not set or is empty}
+    ports:
+      - "${AUTH_HOST_PORT:-8001}:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/v1/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
   stream:
     build:
       context: .
