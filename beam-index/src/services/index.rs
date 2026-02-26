@@ -613,7 +613,18 @@ mod tests {
                 Ok(crate::models::domain::Movie {
                     id: movie_id,
                     title: "Avatar".to_string(),
+                    title_localized: None,
+                    description: None,
+                    year: None,
+                    release_date: None,
                     runtime: None,
+                    poster_url: None,
+                    backdrop_url: None,
+                    tmdb_id: None,
+                    imdb_id: None,
+                    tvdb_id: None,
+                    rating_tmdb: None,
+                    rating_imdb: None,
                     created_at: chrono::Utc::now(),
                     updated_at: chrono::Utc::now(),
                 })
@@ -730,6 +741,14 @@ mod tests {
             Ok(crate::models::domain::Show {
                 id: show_id,
                 title: "Season 1".to_string(),
+                title_localized: None,
+                description: None,
+                year: None,
+                poster_url: None,
+                backdrop_url: None,
+                tmdb_id: None,
+                imdb_id: None,
+                tvdb_id: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -748,6 +767,9 @@ mod tests {
                     id: season_id,
                     show_id,
                     season_number: 1,
+                    poster_url: None,
+                    first_aired: None,
+                    last_aired: None,
                 })
             });
 
@@ -761,7 +783,10 @@ mod tests {
                     season_id,
                     episode_number: 1,
                     title: "The Show - S01E01".to_string(),
+                    description: None,
+                    air_date: None,
                     runtime: None,
+                    thumbnail_url: None,
                     created_at: chrono::Utc::now(),
                 })
             });

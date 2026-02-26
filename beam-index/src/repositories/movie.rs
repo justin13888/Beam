@@ -8,9 +8,12 @@ use crate::models::domain::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait MovieRepository: Send + Sync + std::fmt::Debug {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Movie>, DbErr>;
     async fn find_by_title(&self, title: &str) -> Result<Option<Movie>, DbErr>;
+    async fn find_all(&self) -> Result<Vec<Movie>, DbErr>;
     async fn create(&self, create: CreateMovie) -> Result<Movie, DbErr>;
     async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr>;
+    async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr>;
     async fn ensure_library_association(
         &self,
         library_id: Uuid,
@@ -32,6 +35,14 @@ impl SqlMovieRepository {
 
 #[async_trait]
 impl MovieRepository for SqlMovieRepository {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Movie>, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::EntityTrait;
+
+        let model = movie::Entity::find_by_id(id).one(&self.db).await?;
+        Ok(model.map(Movie::from))
+    }
+
     async fn find_by_title(&self, title: &str) -> Result<Option<Movie>, DbErr> {
         use beam_entity::movie;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -42,6 +53,14 @@ impl MovieRepository for SqlMovieRepository {
             .await?;
 
         Ok(model.map(Movie::from))
+    }
+
+    async fn find_all(&self) -> Result<Vec<Movie>, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::EntityTrait;
+
+        let models = movie::Entity::find().all(&self.db).await?;
+        Ok(models.into_iter().map(Movie::from).collect())
     }
 
     async fn create(&self, create: CreateMovie) -> Result<Movie, DbErr> {
@@ -80,6 +99,18 @@ impl MovieRepository for SqlMovieRepository {
 
         let result = new_entry.insert(&self.db).await?;
         Ok(MovieEntry::from(result))
+    }
+
+    async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr> {
+        use beam_entity::movie_entry;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let models = movie_entry::Entity::find()
+            .filter(movie_entry::Column::MovieId.eq(movie_id))
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(MovieEntry::from).collect())
     }
 
     async fn ensure_library_association(
