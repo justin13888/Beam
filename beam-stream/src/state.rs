@@ -16,7 +16,7 @@ use crate::{
         admin_log::{AdminLogService, LocalAdminLogService},
         hash::{HashConfig, HashService, LocalHashService},
         library::{LibraryService, LocalLibraryService},
-        metadata::{MetadataConfig, MetadataService, StubMetadataService},
+        metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
         transcode::{LocalTranscodeService, TranscodeService},
     },
@@ -85,13 +85,18 @@ pub struct AppServices {
 impl AppServices {
     pub async fn new(config: &ServerConfig, db: DatabaseConnection) -> eyre::Result<Self> {
         let hash_config = HashConfig::default();
-        let metadata_config = MetadataConfig {
-            cache_dir: config.cache_dir.clone(),
-        };
 
         // Create repository implementations
         let library_repo = Arc::new(crate::repositories::SqlLibraryRepository::new(db.clone()));
-        let file_repo = Arc::new(crate::repositories::SqlFileRepository::new(db.clone()));
+        let file_repo: Arc<dyn crate::repositories::FileRepository> =
+            Arc::new(crate::repositories::SqlFileRepository::new(db.clone()));
+        let movie_repo: Arc<dyn crate::repositories::MovieRepository> =
+            Arc::new(crate::repositories::SqlMovieRepository::new(db.clone()));
+        let show_repo: Arc<dyn crate::repositories::ShowRepository> =
+            Arc::new(crate::repositories::SqlShowRepository::new(db.clone()));
+        let stream_repo: Arc<dyn crate::repositories::MediaStreamRepository> = Arc::new(
+            crate::repositories::SqlMediaStreamRepository::new(db.clone()),
+        );
         let user_repo: Arc<dyn UserRepository> = Arc::new(SqlUserRepository::new(db.clone()));
         let admin_log_repo = Arc::new(crate::repositories::SqlAdminLogRepository::new(db.clone()));
 
@@ -131,12 +136,17 @@ impl AppServices {
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
                 library_repo,
-                file_repo,
+                file_repo.clone(),
                 config.video_dir.clone(),
                 notification_service.clone(),
                 index_service,
             )),
-            metadata: Arc::new(StubMetadataService::new(metadata_config)),
+            metadata: Arc::new(DbMetadataService::new(
+                movie_repo,
+                show_repo,
+                file_repo,
+                stream_repo,
+            )),
             transcode: transcode_service,
             notification: notification_service,
             admin_log: admin_log_service,

@@ -11,6 +11,8 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr>;
     async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr>;
     async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
+    async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
+    async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr>;
     async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr>;
     async fn delete(&self, id: Uuid) -> Result<(), DbErr>;
@@ -57,6 +59,30 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::LibraryId.eq(library_id))
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
+    async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let models = files::Entity::find()
+            .filter(files::Column::MovieEntryId.eq(movie_entry_id))
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
+    async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let models = files::Entity::find()
+            .filter(files::Column::EpisodeId.eq(episode_id))
             .all(&self.db)
             .await?;
 

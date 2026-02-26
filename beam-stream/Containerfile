@@ -68,6 +68,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
     clang libclang-dev pkg-config \
+    protobuf-compiler \
     libx264-dev libx265-dev libvpx-dev \
     libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
     libfribidi-dev libogg-dev libssl-dev \
@@ -83,6 +84,7 @@ ENV PATH=/opt/ffmpeg/bin:$PATH
 
 # Copy the dependency recipe
 COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json --bin beam-stream
 
 # Build application
 COPY . .

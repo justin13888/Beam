@@ -8,7 +8,9 @@ use crate::models::domain::{CreateEpisode, Episode, Season, Show};
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait ShowRepository: Send + Sync + std::fmt::Debug {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Show>, DbErr>;
     async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr>;
+    async fn find_all(&self) -> Result<Vec<Show>, DbErr>;
     async fn create(&self, title: String) -> Result<Show, DbErr>;
     async fn ensure_library_association(
         &self,
@@ -20,6 +22,8 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
         show_id: Uuid,
         season_number: u32,
     ) -> Result<Season, DbErr>;
+    async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr>;
+    async fn find_episodes_by_season_id(&self, season_id: Uuid) -> Result<Vec<Episode>, DbErr>;
     async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
 }
 
@@ -37,6 +41,14 @@ impl SqlShowRepository {
 
 #[async_trait]
 impl ShowRepository for SqlShowRepository {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Show>, DbErr> {
+        use beam_entity::show;
+        use sea_orm::EntityTrait;
+
+        let model = show::Entity::find_by_id(id).one(&self.db).await?;
+        Ok(model.map(Show::from))
+    }
+
     async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr> {
         use beam_entity::show;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -47,6 +59,14 @@ impl ShowRepository for SqlShowRepository {
             .await?;
 
         Ok(model.map(Show::from))
+    }
+
+    async fn find_all(&self) -> Result<Vec<Show>, DbErr> {
+        use beam_entity::show;
+        use sea_orm::EntityTrait;
+
+        let models = show::Entity::find().all(&self.db).await?;
+        Ok(models.into_iter().map(Show::from).collect())
     }
 
     async fn create(&self, title: String) -> Result<Show, DbErr> {
@@ -123,6 +143,32 @@ impl ShowRepository for SqlShowRepository {
 
         let result = new_season.insert(&self.db).await?;
         Ok(Season::from(result))
+    }
+
+    async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr> {
+        use beam_entity::season;
+        use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
+
+        let models = season::Entity::find()
+            .filter(season::Column::ShowId.eq(show_id))
+            .order_by(season::Column::SeasonNumber, Order::Asc)
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(Season::from).collect())
+    }
+
+    async fn find_episodes_by_season_id(&self, season_id: Uuid) -> Result<Vec<Episode>, DbErr> {
+        use beam_entity::episode;
+        use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder};
+
+        let models = episode::Entity::find()
+            .filter(episode::Column::SeasonId.eq(season_id))
+            .order_by(episode::Column::EpisodeNumber, Order::Asc)
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(Episode::from).collect())
     }
 
     async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {

@@ -16,16 +16,53 @@ mod tests {
     };
 
     use crate::graphql::create_schema;
+    use crate::models::MediaMetadata;
     use crate::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
     use crate::services::hash::HashService;
     use crate::services::library::{LibraryError, LibraryService};
-    use crate::services::metadata::{MetadataConfig, StubMetadataService};
+    use crate::services::metadata::{
+        MediaConnection, MediaFilter, MediaSearchFilters, MediaSortField, MetadataError,
+        MetadataService, PageInfo, SortOrder,
+    };
     use crate::services::notification::InMemoryNotificationService;
     use crate::services::transcode::TranscodeService;
     use crate::state::{AppContext, AppServices, AppState, UserContext};
 
     // ─── Stub implementations for services not exercised during auth tests ───
+
+    #[derive(Debug)]
+    struct StubMetadataService;
+
+    #[async_trait::async_trait]
+    impl MetadataService for StubMetadataService {
+        async fn get_media_metadata(&self, _media_id: &str) -> Option<MediaMetadata> {
+            None
+        }
+        async fn search_media(
+            &self,
+            _first: Option<u32>,
+            _after: Option<String>,
+            _last: Option<u32>,
+            _before: Option<String>,
+            _sort_by: MediaSortField,
+            _sort_order: SortOrder,
+            _filters: MediaSearchFilters,
+        ) -> MediaConnection {
+            MediaConnection {
+                edges: vec![],
+                page_info: PageInfo {
+                    has_next_page: false,
+                    has_previous_page: false,
+                    start_cursor: None,
+                    end_cursor: None,
+                },
+            }
+        }
+        async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
+            Ok(())
+        }
+    }
 
     #[derive(Debug)]
     struct StubHashService;
@@ -126,9 +163,7 @@ mod tests {
             auth: auth.clone(),
             hash: Arc::new(StubHashService),
             library: Arc::new(StubLibraryService),
-            metadata: Arc::new(StubMetadataService::new(MetadataConfig {
-                cache_dir: PathBuf::from("/tmp"),
-            })),
+            metadata: Arc::new(StubMetadataService),
             transcode: Arc::new(StubTranscodeService),
             notification,
             admin_log,

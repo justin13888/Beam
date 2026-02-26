@@ -14,17 +14,15 @@ import { useAuth } from "../hooks/auth";
 
 const GET_ADMIN_LOGS = gql`
   query GetAdminLogs($limit: Int, $offset: Int) {
-    admin {
-      logs(limit: $limit, offset: $offset) {
-        id
-        level
-        category
-        message
-        details
-        createdAt
-      }
-      logCount
+    logs(limit: $limit, offset: $offset) {
+      id
+      level
+      category
+      message
+      details
+      createdAt
     }
+    logCount
   }
 `;
 
@@ -38,10 +36,8 @@ interface AdminLogEntry {
 }
 
 interface AdminQueryResult {
-	admin: {
-		logs: AdminLogEntry[];
-		logCount: number;
-	};
+	logs: AdminLogEntry[];
+	logCount: number;
 }
 
 const PAGE_SIZE = 50;
@@ -117,8 +113,8 @@ function AdminPage() {
 		},
 	);
 
-	const logs = data?.admin?.logs ?? [];
-	const totalCount = data?.admin?.logCount ?? 0;
+	const logs = data?.logs ?? [];
+	const totalCount = data?.logCount ?? 0;
 	const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
 	return (
