@@ -231,3 +231,65 @@ impl SessionStore for RedisSessionStore {
         Ok(sessions)
     }
 }
+
+/// In-memory session store for use in tests and offline scenarios.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    #[derive(Debug, Default)]
+    pub struct InMemorySessionStore {
+        sessions: Mutex<HashMap<String, SessionData>>,
+    }
+
+    #[async_trait]
+    impl SessionStore for InMemorySessionStore {
+        async fn create(&self, data: &SessionData, _ttl_secs: u64) -> Result<String> {
+            let session_id = Uuid::new_v4().to_string();
+            self.sessions
+                .lock()
+                .unwrap()
+                .insert(session_id.clone(), data.clone());
+            Ok(session_id)
+        }
+
+        async fn get(&self, session_id: &str) -> Result<Option<SessionData>> {
+            Ok(self.sessions.lock().unwrap().get(session_id).cloned())
+        }
+
+        async fn touch(&self, _session_id: &str, _ttl_secs: u64) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete(&self, session_id: &str) -> Result<()> {
+            self.sessions.lock().unwrap().remove(session_id);
+            Ok(())
+        }
+
+        async fn delete_all_for_user(&self, user_id: &str) -> Result<u64> {
+            let mut sessions = self.sessions.lock().unwrap();
+            let to_remove: Vec<String> = sessions
+                .iter()
+                .filter(|(_, v)| v.user_id == user_id)
+                .map(|(k, _)| k.clone())
+                .collect();
+            let count = to_remove.len() as u64;
+            for id in to_remove {
+                sessions.remove(&id);
+            }
+            Ok(count)
+        }
+
+        async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
+            let sessions = self.sessions.lock().unwrap();
+            Ok(sessions
+                .iter()
+                .filter(|(_, v)| v.user_id == user_id)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+        }
+    }
+}

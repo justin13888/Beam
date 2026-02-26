@@ -7,6 +7,9 @@ use crate::state::AppState;
 pub mod guard;
 pub mod schema;
 
+#[cfg(test)]
+mod auth_tests;
+
 pub use guard::{AdminGuard, AuthGuard};
 
 pub type AppSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
