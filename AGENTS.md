@@ -28,3 +28,14 @@ Unit tests must verify essential services end-to-end without spinning up externa
 ## MANDATORY: Use td for Task Management
 You must run td usage --new-session at conversation start (or after /clear) to see current work.
 Use td usage -q for subsequent reads.
+
+## CI Commands to ensure pass before pushing completed to work (e.g. before PR)
+
+```
+# Rust
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+# Typescript
+bun run check
+```
+```
