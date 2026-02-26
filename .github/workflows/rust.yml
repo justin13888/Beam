@@ -163,16 +163,13 @@ jobs:
         with:
           shared-key: test
 
-      - name: Run tests
-        run: cargo test --workspace
-
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate coverage report
         run: |
           cargo llvm-cov --workspace --lcov --output-path lcov.info
-          cargo llvm-cov report --workspace --summary-only
+          cargo llvm-cov report --summary-only
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
