@@ -36,6 +36,7 @@ Use td usage -q for subsequent reads.
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 # Typescript
+bun install
 bun run check
 ```
 ```
