@@ -94,10 +94,21 @@ pub async fn stream_mp4(req: &mut Request, depot: &mut Depot, res: &mut Response
 
     debug!("Streaming media with ID: {}", id);
 
-    // TODO: Map ID to actual video file path
-    // For now, hardcode to test.mkv
-    let source_video_path = PathBuf::from("videos/test.mkv");
-    let cache_mp4_path = PathBuf::from("cache/test.mp4");
+    // Look up the file by ID to get its actual path
+    let file = match state.services.library.get_file_by_id(id.clone()).await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            return;
+        }
+        Err(_) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            return;
+        }
+    };
+
+    let source_video_path = PathBuf::from(&file.path);
+    let cache_mp4_path = state.config.cache_dir.join(format!("{}.mp4", id));
 
     if !source_video_path.exists() {
         error!("Source video file not found: {:?}", source_video_path);

@@ -76,6 +76,12 @@ mod tests {
         async fn delete_library(&self, _library_id: String) -> Result<bool, LibraryError> {
             unimplemented!("not called in auth tests")
         }
+        async fn get_file_by_id(
+            &self,
+            _file_id: String,
+        ) -> Result<Option<crate::models::LibraryFile>, LibraryError> {
+            unimplemented!("not called in auth tests")
+        }
     }
 
     #[derive(Debug)]

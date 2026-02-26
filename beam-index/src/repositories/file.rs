@@ -8,6 +8,7 @@ use uuid::Uuid;
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait FileRepository: Send + Sync + std::fmt::Debug {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr>;
     async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr>;
     async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr>;
@@ -30,6 +31,14 @@ impl SqlFileRepository {
 
 #[async_trait]
 impl FileRepository for SqlFileRepository {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::EntityTrait;
+
+        let model = files::Entity::find_by_id(id).one(&self.db).await?;
+        Ok(model.map(MediaFile::from))
+    }
+
     async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr> {
         use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
