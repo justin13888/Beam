@@ -9,12 +9,6 @@ pub struct HealthStatus {
     pub version: String,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub message: String,
-}
-
 /// Health check endpoint
 #[endpoint(
     tags("health"),

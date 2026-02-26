@@ -154,7 +154,7 @@ impl LocalIndexService {
         }
 
         let count = self.stream_repo.insert_streams(streams_to_insert).await?;
-        Ok(count as u32)
+        Ok(count)
     }
 
     /// Classify media content (Movie vs Episode) based on regex
