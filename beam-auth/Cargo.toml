@@ -34,6 +34,7 @@ server = [
     "utils",
     "dep:salvo",
 ]
+test-utils = ["utils"]
 
 [dependencies]
 # Non-optional: always compiled (needed by config.rs, logging.rs, and main.rs)

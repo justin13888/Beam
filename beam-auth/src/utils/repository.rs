@@ -90,3 +90,52 @@ impl UserRepository for SqlUserRepository {
         Ok(User::from(result))
     }
 }
+
+/// In-memory user repository for use in tests and offline scenarios.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory {
+    use super::*;
+    use chrono::Utc;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    pub struct InMemoryUserRepository {
+        users: Mutex<HashMap<Uuid, User>>,
+    }
+
+    #[async_trait]
+    impl UserRepository for InMemoryUserRepository {
+        async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, DbErr> {
+            Ok(self.users.lock().unwrap().get(&id).cloned())
+        }
+
+        async fn find_by_username(&self, username: &str) -> Result<Option<User>, DbErr> {
+            let users = self.users.lock().unwrap();
+            Ok(users.values().find(|u| u.username == username).cloned())
+        }
+
+        async fn find_by_email(&self, email: &str) -> Result<Option<User>, DbErr> {
+            let users = self.users.lock().unwrap();
+            Ok(users.values().find(|u| u.email == email).cloned())
+        }
+
+        async fn create(&self, user: CreateUser) -> Result<User, DbErr> {
+            let now = Utc::now();
+            let new_user = User {
+                id: Uuid::new_v4(),
+                username: user.username,
+                email: user.email,
+                password_hash: user.password_hash,
+                is_admin: user.is_admin,
+                created_at: now,
+                updated_at: now,
+            };
+            self.users
+                .lock()
+                .unwrap()
+                .insert(new_user.id, new_user.clone());
+            Ok(new_user)
+        }
+    }
+}

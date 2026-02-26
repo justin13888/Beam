@@ -60,6 +60,7 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
 futures = "0.3.31"
+beam-auth = { path = "../beam-auth", features = ["test-utils"] }
 beam-migration = { path = "../beam-migration" }
 beam-index = { path = "../beam-index", features = ["test-utils"] }
 mockall = "0.14.0"
