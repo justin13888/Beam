@@ -1,0 +1,50 @@
+[package]
+name = "beam-index"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+default-run = "beam-index"
+
+[dependencies]
+beam-entity = { path = "../beam-entity" }
+async-graphql = { version = "7.0.17", features = ["chrono", "uuid"] }
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+color-eyre = "0.6.5"
+confique = { workspace = true }
+dotenvy = "0.15.7"
+eyre = "0.6.12"
+ffmpeg-next = { workspace = true }
+num = { version = "0.4.3", features = ["serde"] }
+num_cpus = "1.17.0"
+parking_lot = "0.12.5"
+prost = { workspace = true }
+rayon = "1.11.0"
+regex = { workspace = true }
+sea-orm = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
+uuid = { workspace = true }
+walkdir = { workspace = true }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+[dev-dependencies]
+futures = "0.3.31"
+mockall = "0.14.0"
+tempfile = "3.23.0"
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
+[features]
+test-utils = ["dep:mockall"]
+
+[dependencies.mockall]
+version = "0.14.0"
+optional = true

@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::services::hash::MockHashService;
-    use crate::services::media_info::MockMediaInfoService;
+    use beam_index::services::hash::MockHashService;
+    use beam_index::services::media_info::MockMediaInfoService;
     use crate::services::transcode::{LocalTranscodeService, TranscodeService};
     use crate::utils::color::{
         ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
