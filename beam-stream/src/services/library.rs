@@ -25,6 +25,9 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     async fn get_library_files(&self, library_id: String)
     -> Result<Vec<LibraryFile>, LibraryError>;
 
+    /// Get a single file by its ID
+    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LibraryFile>, LibraryError>;
+
     /// Create a new library
     async fn create_library(
         &self,
@@ -134,6 +137,12 @@ impl LibraryService for LocalLibraryService {
 
         let files = self.file_repo.find_all_by_library(lib_uuid).await?;
         Ok(files.into_iter().map(LibraryFile::from).collect())
+    }
+
+    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LibraryFile>, LibraryError> {
+        let file_uuid = Uuid::parse_str(&file_id).map_err(|_| LibraryError::InvalidId)?;
+        let file = self.file_repo.find_by_id(file_uuid).await?;
+        Ok(file.map(LibraryFile::from))
     }
 
     async fn create_library(
