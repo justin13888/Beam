@@ -92,8 +92,7 @@ impl LibraryService for LocalLibraryService {
                 description,
                 size: size as u32,
                 last_scan_started_at: last_scan_started_at.map(|d| d.with_timezone(&chrono::Utc)),
-                last_scan_finished_at: last_scan_finished_at
-                    .map(|d| d.with_timezone(&chrono::Utc)),
+                last_scan_finished_at: last_scan_finished_at.map(|d| d.with_timezone(&chrono::Utc)),
                 last_scan_file_count,
             });
         }

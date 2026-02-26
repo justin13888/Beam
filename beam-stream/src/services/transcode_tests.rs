@@ -1,7 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use beam_index::services::hash::MockHashService;
-    use beam_index::services::media_info::MockMediaInfoService;
     use crate::services::transcode::{LocalTranscodeService, TranscodeService};
     use crate::utils::color::{
         ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
@@ -10,6 +8,8 @@ mod tests {
     use crate::utils::metadata::{
         Rational, StreamMetadata, VideoFileMetadata, VideoMetadata, VideoStreamMetadata,
     };
+    use beam_index::services::hash::MockHashService;
+    use beam_index::services::media_info::MockMediaInfoService;
     use std::collections::HashMap;
     // use std::path::PathBuf;
     use std::process::Command;

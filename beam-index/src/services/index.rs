@@ -270,9 +270,8 @@ impl LocalIndexService {
 
         if !is_known_video {
             // Index as Unknown file
-            let metadata = std::fs::metadata(path).map_err(|e| {
-                IndexError::PathNotFound(format!("Failed to read metadata: {}", e))
-            })?;
+            let metadata = std::fs::metadata(path)
+                .map_err(|e| IndexError::PathNotFound(format!("Failed to read metadata: {}", e)))?;
 
             let create_file = CreateMediaFile {
                 library_id: lib_uuid,
@@ -727,17 +726,14 @@ mod tests {
             .expect_find_by_title()
             .times(1)
             .returning(|_| Ok(None));
-        mock_show_repo
-            .expect_create()
-            .times(1)
-            .returning(move |_| {
-                Ok(crate::models::domain::Show {
-                    id: show_id,
-                    title: "Season 1".to_string(),
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                })
-            });
+        mock_show_repo.expect_create().times(1).returning(move |_| {
+            Ok(crate::models::domain::Show {
+                id: show_id,
+                title: "Season 1".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+        });
         mock_show_repo
             .expect_ensure_library_association()
             .times(1)

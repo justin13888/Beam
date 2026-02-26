@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use tonic::transport::Channel;
 
-use beam_index::proto::index_service_client::IndexServiceClient;
 use beam_index::proto::ScanLibraryRequest;
+use beam_index::proto::index_service_client::IndexServiceClient;
 use beam_index::services::index::{IndexError, IndexService};
 
 #[derive(Debug, Clone)]
