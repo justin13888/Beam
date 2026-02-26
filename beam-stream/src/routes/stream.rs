@@ -1,15 +1,10 @@
 use beam_stream::state::AppState;
 use salvo::oapi::ToSchema;
 use salvo::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tracing::{debug, error, trace};
-
-#[derive(Debug, Deserialize, ToParameters)]
-pub struct StreamParams {
-    pub token: String,
-}
 
 #[derive(Serialize, ToSchema)]
 pub struct StreamTokenResponse {

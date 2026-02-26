@@ -44,6 +44,9 @@ pub struct ServerConfig {
 
     #[config(env = "REDIS_URL", default = "redis://localhost:6379")]
     pub redis_url: String,
+
+    #[config(env = "BEAM_INDEX_URL", default = "http://localhost:50051")]
+    pub beam_index_url: String,
 }
 
 impl ServerConfig {

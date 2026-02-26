@@ -47,7 +47,9 @@ async fn main() -> Result<()> {
     info!("Connected to database");
 
     // Initialize App Services and State
-    let services = beam_stream::state::AppServices::new(&config, db).await;
+    let services = beam_stream::state::AppServices::new(&config, db)
+        .await
+        .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
     let state = beam_stream::state::AppState::new(config.clone(), services);
 
     let schema = create_schema(state.clone());

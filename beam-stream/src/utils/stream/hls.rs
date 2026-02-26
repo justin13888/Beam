@@ -70,7 +70,10 @@ impl HlsStreamGenerator {
                         bandwidth: stream.max_rate as u64,
                         average_bandwidth: Some(stream.bit_rate as u64),
                         codecs: Some(stream.codec.to_string()),
-                        resolution: Some(stream.resolution.into()),
+                        resolution: Some(m3u8_rs::Resolution {
+                            width: stream.resolution.width as u64,
+                            height: stream.resolution.height as u64,
+                        }),
                         frame_rate: Some(stream.frame_rate.to_f64().unwrap_or_else(|| {
                             panic!(
                                 "Frame rate ({:?}) should be a valid rational number.",
