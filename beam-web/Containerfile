@@ -1,4 +1,92 @@
 # ----------------------------------------------------
+# Stage 1: Build FFmpeg 8.0 from source
+# ----------------------------------------------------
+FROM docker.io/debian:trixie-slim AS ffmpeg-builder
+
+# Install all build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential pkg-config yasm nasm wget ca-certificates \
+    libx264-dev libx265-dev libvpx-dev \
+    libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
+    libfribidi-dev libogg-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/ffmpeg
+
+RUN wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz && \
+    tar xf ffmpeg-8.0.tar.xz && \
+    cd ffmpeg-8.0 && \
+    ./configure \
+    --prefix=/opt/ffmpeg \
+    --disable-debug \
+    --disable-doc \
+    --disable-ffplay \
+    --enable-shared \
+    --disable-static \
+    --enable-gpl \
+    --enable-version3 \
+    --enable-fontconfig \
+    --enable-libass \
+    --enable-libfontconfig \
+    --enable-libfreetype \
+    --enable-libfribidi \
+    --enable-libopus \
+    --enable-libvpx \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-openssl \
+    --enable-small \
+    --extra-cflags="-I/opt/ffmpeg/include" \
+    --extra-ldflags="-L/opt/ffmpeg/lib" \
+    --extra-libs=-lpthread \
+    --extra-libs=-lm && \
+    make -j$(nproc) && \
+    make install
+
+# ----------------------------------------------------
+# Chef: Setup chef image
+# ----------------------------------------------------
+FROM docker.io/rust:1.91-slim-trixie AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+
+# ----------------------------------------------------
+# Planner: Create dependency recipe
+# ----------------------------------------------------
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ----------------------------------------------------
+# Schema: Generate GraphQL schema from Rust types
+# ----------------------------------------------------
+FROM chef AS schema-builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    clang libclang-dev pkg-config \
+    protobuf-compiler \
+    libx264-dev libx265-dev libvpx-dev \
+    libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
+    libfribidi-dev libogg-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
+
+ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
+ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib:/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu
+ENV PATH=/opt/ffmpeg/bin:$PATH
+
+# Cook dependencies for the schema export binary
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --recipe-path recipe.json --bin export_schema
+
+COPY . .
+RUN cargo build --bin export_schema
+RUN cd beam-stream && ../target/debug/export_schema
+
+# ----------------------------------------------------
 # Build: Build the application using Bun
 # ----------------------------------------------------
 FROM docker.io/oven/bun:1.3-debian AS builder
@@ -9,17 +97,17 @@ ARG C_STREAM_SERVER_URL=http://localhost:8000
 
 WORKDIR /app
 
-# Copy package files and lockfile for beam-web
-COPY beam-web/package.json beam-web/bun.lock ./beam-web/
+# Copy workspace root package files and all workspace member package.json files for dependency install
+COPY package.json bun.lock ./
+COPY beam-web/package.json ./beam-web/
+COPY beam-docs/package.json ./beam-docs/
 
-# Install dependencies
-WORKDIR /app/beam-web
+# Install dependencies from workspace root
 RUN bun install --frozen-lockfile
 
-# Copy beam-web source and the pre-generated schema from beam-stream
-WORKDIR /app
+# Copy beam-web source and the generated schema from schema-builder
 COPY beam-web ./beam-web
-COPY beam-stream/schema.graphql ./beam-stream/schema.graphql
+COPY --from=schema-builder /app/beam-stream/schema.graphql ./beam-stream/schema.graphql
 
 # Generate TypeScript types from the schema
 WORKDIR /app/beam-web
@@ -50,14 +138,14 @@ COPY <<EOF /etc/caddy/Caddyfile
     encode gzip zstd
     file_server
     try_files {path} /index.html
-    
+
     header {
         # Security headers
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
     }
-    
+
     # Cache static assets
     @static {
         path *.js *.css *.woff *.woff2 *.ttf *.eot *.ico *.png *.jpg *.jpeg *.gif *.svg *.webp

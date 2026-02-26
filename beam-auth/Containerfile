@@ -27,7 +27,7 @@ RUN apt-get update && \
 
 # Cook dependencies first (cached layer)
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json --bin beam-auth
 
 # Build the application
 COPY . .

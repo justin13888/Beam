@@ -24,7 +24,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type {
 	LibraryFile,
-	LibraryMutationScanLibraryArgs,
 	MutationRoot,
 	QueryRoot,
 } from "../gql";
@@ -32,38 +31,34 @@ import { FileContentType, FileIndexStatus } from "../gql";
 
 const GET_LIBRARY_WITH_FILES = gql`
   query GetLibraryWithFiles($id: ID!, $libraryId: ID!) {
-    library {
-      libraryById(id: $id) {
-        id
-        name
-        description
-        size
-        lastScanStartedAt
-        lastScanFinishedAt
-        lastScanFileCount
-      }
-      libraryFiles(libraryId: $libraryId) {
-        id
-        libraryId
-        path
-        sizeBytes
-        mimeType
-        durationSecs
-        containerFormat
-        status
-        contentType
-        scannedAt
-        updatedAt
-      }
+    libraryById(id: $id) {
+      id
+      name
+      description
+      size
+      lastScanStartedAt
+      lastScanFinishedAt
+      lastScanFileCount
+    }
+    libraryFiles(libraryId: $libraryId) {
+      id
+      libraryId
+      path
+      sizeBytes
+      mimeType
+      durationSecs
+      containerFormat
+      status
+      contentType
+      scannedAt
+      updatedAt
     }
   }
 `;
 
 const SCAN_LIBRARY = gql`
   mutation ScanLibrary($id: ID!) {
-    library {
-      scanLibrary(id: $id)
-    }
+    scanLibrary(id: $id)
   }
 `;
 
@@ -199,10 +194,9 @@ function LibraryDetailPage() {
 		GET_LIBRARY_WITH_FILES,
 		{ variables: { id, libraryId: id } },
 	);
-	const [scanLibrary] = useMutation<
-		MutationRoot,
-		LibraryMutationScanLibraryArgs
-	>(SCAN_LIBRARY);
+	const [scanLibrary] = useMutation<MutationRoot, { id: string }>(
+		SCAN_LIBRARY,
+	);
 
 	const [scanning, setScanning] = useState(false);
 	const [searchQuery, setSearchQuery] = useState("");
@@ -233,8 +227,8 @@ function LibraryDetailPage() {
 		}
 	};
 
-	const files = data?.library?.libraryFiles ?? [];
-	const library = data?.library?.libraryById;
+	const files = data?.libraryFiles ?? [];
+	const library = data?.libraryById;
 
 	// Filter and sort files
 	const filteredFiles = useMemo(() => {

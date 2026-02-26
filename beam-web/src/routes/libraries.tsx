@@ -16,60 +16,45 @@ import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type {
-	Library,
-	LibraryMutationCreateLibraryArgs,
-	LibraryMutationDeleteLibraryArgs,
-	LibraryMutationScanLibraryArgs,
-	MutationRoot,
-	QueryRoot,
-} from "../gql";
+import type { Library, MutationRoot, QueryRoot } from "../gql";
 
 const GET_LIBRARIES = gql`
   query GetLibraries {
-    library {
-      libraries {
-        id
-        name
-        description
-        size
-        lastScanStartedAt
-        lastScanFinishedAt
-        lastScanFileCount
-      }
+    libraries {
+      id
+      name
+      description
+      size
+      lastScanStartedAt
+      lastScanFinishedAt
+      lastScanFileCount
     }
   }
 `;
 
 const CREATE_LIBRARY = gql`
   mutation CreateLibrary($name: String!, $rootPath: String!) {
-    library {
-      createLibrary(name: $name, rootPath: $rootPath) {
-        id
-        name
-        description
-        size
-        lastScanStartedAt
-        lastScanFinishedAt
-        lastScanFileCount
-      }
+    createLibrary(name: $name, rootPath: $rootPath) {
+      id
+      name
+      description
+      size
+      lastScanStartedAt
+      lastScanFinishedAt
+      lastScanFileCount
     }
   }
 `;
 
 const SCAN_LIBRARY = gql`
   mutation ScanLibrary($id: ID!) {
-    library {
-      scanLibrary(id: $id)
-    }
+    scanLibrary(id: $id)
   }
 `;
 
 const DELETE_LIBRARY = gql`
   mutation DeleteLibrary($id: ID!) {
-    library {
-      deleteLibrary(id: $id)
-    }
+    deleteLibrary(id: $id)
   }
 `;
 
@@ -130,16 +115,14 @@ function LibrariesPage() {
 	const { data, loading, error, refetch } = useQuery<QueryRoot>(GET_LIBRARIES);
 	const [createLibrary, { loading: creating }] = useMutation<
 		MutationRoot,
-		LibraryMutationCreateLibraryArgs
+		{ name: string; rootPath: string }
 	>(CREATE_LIBRARY);
-	const [scanLibrary] = useMutation<
-		MutationRoot,
-		LibraryMutationScanLibraryArgs
-	>(SCAN_LIBRARY);
-	const [deleteLibrary] = useMutation<
-		MutationRoot,
-		LibraryMutationDeleteLibraryArgs
-	>(DELETE_LIBRARY);
+	const [scanLibrary] = useMutation<MutationRoot, { id: string }>(
+		SCAN_LIBRARY,
+	);
+	const [deleteLibrary] = useMutation<MutationRoot, { id: string }>(
+		DELETE_LIBRARY,
+	);
 
 	const [name, setName] = useState("");
 	const [rootPath, setRootPath] = useState("");
@@ -221,7 +204,7 @@ function LibrariesPage() {
 		);
 	}
 
-	const libraries = data?.library?.libraries ?? [];
+	const libraries = data?.libraries ?? [];
 
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950">
