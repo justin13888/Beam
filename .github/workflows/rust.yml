@@ -97,6 +97,7 @@ jobs:
           packages: >-
             build-essential pkg-config
             clang libclang-dev
+            protobuf-compiler
             libx264-dev libx265-dev libvpx-dev
             libopus-dev libass-dev libfreetype-dev libfontconfig-dev
             libfribidi-dev libogg-dev libssl-dev
@@ -136,6 +137,7 @@ jobs:
           packages: >-
             build-essential pkg-config
             clang libclang-dev
+            protobuf-compiler
             libx264-dev libx265-dev libvpx-dev
             libopus-dev libass-dev libfreetype-dev libfontconfig-dev
             libfribidi-dev libogg-dev libssl-dev
