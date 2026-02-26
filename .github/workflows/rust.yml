@@ -117,6 +117,8 @@ jobs:
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -156,6 +158,8 @@ jobs:
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
 
       - name: Run tests
         run: cargo test --workspace
