@@ -22,11 +22,7 @@ import {
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type {
-	LibraryFile,
-	MutationRoot,
-	QueryRoot,
-} from "../gql";
+import type { LibraryFile, MutationRoot, QueryRoot } from "../gql";
 import { FileContentType, FileIndexStatus } from "../gql";
 
 const GET_LIBRARY_WITH_FILES = gql`
@@ -194,9 +190,7 @@ function LibraryDetailPage() {
 		GET_LIBRARY_WITH_FILES,
 		{ variables: { id, libraryId: id } },
 	);
-	const [scanLibrary] = useMutation<MutationRoot, { id: string }>(
-		SCAN_LIBRARY,
-	);
+	const [scanLibrary] = useMutation<MutationRoot, { id: string }>(SCAN_LIBRARY);
 
 	const [scanning, setScanning] = useState(false);
 	const [searchQuery, setSearchQuery] = useState("");

@@ -117,9 +117,7 @@ function LibrariesPage() {
 		MutationRoot,
 		{ name: string; rootPath: string }
 	>(CREATE_LIBRARY);
-	const [scanLibrary] = useMutation<MutationRoot, { id: string }>(
-		SCAN_LIBRARY,
-	);
+	const [scanLibrary] = useMutation<MutationRoot, { id: string }>(SCAN_LIBRARY);
 	const [deleteLibrary] = useMutation<MutationRoot, { id: string }>(
 		DELETE_LIBRARY,
 	);
