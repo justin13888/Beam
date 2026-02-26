@@ -7,10 +7,12 @@ use beam_auth::utils::{
     service::{AuthService, LocalAuthService},
     session_store::RedisSessionStore,
 };
+use beam_index::services::index::IndexService;
 
 use crate::{
     config::ServerConfig,
     services::{
+        GrpcIndexService,
         admin_log::{AdminLogService, LocalAdminLogService},
         hash::{HashConfig, HashService, LocalHashService},
         library::{LibraryService, LocalLibraryService},
@@ -81,7 +83,7 @@ pub struct AppServices {
 }
 
 impl AppServices {
-    pub async fn new(config: &ServerConfig, db: DatabaseConnection) -> Self {
+    pub async fn new(config: &ServerConfig, db: DatabaseConnection) -> eyre::Result<Self> {
         let hash_config = HashConfig::default();
         let metadata_config = MetadataConfig {
             cache_dir: config.cache_dir.clone(),
@@ -90,11 +92,6 @@ impl AppServices {
         // Create repository implementations
         let library_repo = Arc::new(crate::repositories::SqlLibraryRepository::new(db.clone()));
         let file_repo = Arc::new(crate::repositories::SqlFileRepository::new(db.clone()));
-        let movie_repo = Arc::new(crate::repositories::SqlMovieRepository::new(db.clone()));
-        let show_repo = Arc::new(crate::repositories::SqlShowRepository::new(db.clone()));
-        let stream_repo = Arc::new(crate::repositories::SqlMediaStreamRepository::new(
-            db.clone(),
-        ));
         let user_repo: Arc<dyn UserRepository> = Arc::new(SqlUserRepository::new(db.clone()));
         let admin_log_repo = Arc::new(crate::repositories::SqlAdminLogRepository::new(db.clone()));
 
@@ -123,26 +120,27 @@ impl AppServices {
         let admin_log_service: Arc<dyn AdminLogService> =
             Arc::new(LocalAdminLogService::new(admin_log_repo));
 
-        Self {
+        let index_service: Arc<dyn IndexService> = Arc::new(
+            GrpcIndexService::connect(config.beam_index_url.clone())
+                .await
+                .map_err(|e| eyre::eyre!("Failed to connect to beam-index: {}", e))?,
+        );
+
+        Ok(Self {
             auth: auth_service,
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
                 library_repo,
                 file_repo,
-                movie_repo,
-                show_repo,
-                stream_repo,
                 config.video_dir.clone(),
-                hash_service.clone(),
-                media_info_service,
                 notification_service.clone(),
-                admin_log_service.clone(),
+                index_service,
             )),
             metadata: Arc::new(StubMetadataService::new(metadata_config)),
             transcode: transcode_service,
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
-        }
+        })
     }
 }

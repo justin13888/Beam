@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
     let db = sea_orm::Database::connect(&config.database_url).await?;
 
     // Create Services
-    let services = AppServices::new(&config, db).await;
+    let services = AppServices::new(&config, db).await?;
     let state = AppState::new(config.clone(), services);
 
     // Create the GraphQL schema

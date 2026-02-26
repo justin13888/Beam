@@ -1,0 +1,14 @@
+syntax = "proto3";
+package beam_index;
+
+service IndexService {
+  rpc ScanLibrary(ScanLibraryRequest) returns (ScanLibraryResponse);
+}
+
+message ScanLibraryRequest {
+  string library_id = 1;
+}
+
+message ScanLibraryResponse {
+  uint32 files_added = 1;
+}
