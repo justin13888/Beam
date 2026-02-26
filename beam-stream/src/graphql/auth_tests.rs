@@ -10,7 +10,7 @@ mod tests {
 
     use async_graphql::Request;
     use beam_auth::utils::{
-        repository::{UserRepository, in_memory::InMemoryUserRepository},
+        repository::in_memory::InMemoryUserRepository,
         service::{AuthService, LocalAuthService},
         session_store::in_memory::InMemorySessionStore,
     };
@@ -138,6 +138,7 @@ mod tests {
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
             jwt_secret: TEST_JWT_SECRET.to_string(),
             redis_url: "redis://localhost".to_string(),
+            beam_index_url: "http://localhost:50051".to_string(),
         };
 
         let state = AppState::new(config, services);
@@ -167,8 +168,11 @@ mod tests {
             "expected auth error but got none"
         );
         assert!(
-            response.errors.iter().any(|e| e.message.contains("Unauthorized")
-                || e.message.to_lowercase().contains("unauthorized")),
+            response
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Unauthorized")
+                    || e.message.to_lowercase().contains("unauthorized")),
             "expected Unauthorized error, got: {:?}",
             response.errors
         );
