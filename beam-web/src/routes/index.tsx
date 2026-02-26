@@ -14,16 +14,14 @@ import type { QueryRoot } from "../gql";
 
 const GET_LIBRARIES = gql`
   query GetLibraries {
-    library {
-      libraries {
-        id
-        name
-        description
-        size
-        lastScanStartedAt
-        lastScanFinishedAt
-        lastScanFileCount
-      }
+    libraries {
+      id
+      name
+      description
+      size
+      lastScanStartedAt
+      lastScanFinishedAt
+      lastScanFileCount
     }
   }
 `;
@@ -34,7 +32,7 @@ export const Route = createFileRoute("/")({
 
 function DashboardPage() {
 	const { data, loading } = useQuery<QueryRoot>(GET_LIBRARIES);
-	const libraries = data?.library?.libraries ?? [];
+	const libraries = data?.libraries ?? [];
 	const totalFiles = libraries.reduce((sum, lib) => sum + lib.size, 0);
 
 	return (

@@ -21,6 +21,11 @@ const config: CodegenConfig = {
 				},
 				// Use `unknown` instead of `any` for unconfigured scalars
 				defaultScalarType: "unknown",
+				// Map known scalars to concrete TypeScript types
+				scalars: {
+					DateTime: "string",
+					Decimal: "string",
+				},
 				// Apollo Client always includes `__typename` fields
 				nonOptionalTypename: true,
 				// Apollo Client doesn't add the `__typename` field to root types so

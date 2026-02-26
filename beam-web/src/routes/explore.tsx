@@ -28,22 +28,21 @@ const SEARCH_MEDIA: TypedDocumentNode<
 		$query: String
 		$minRating: Int
 	) {
-		media {
-			search(
-				first: $first
-				after: $after
-				last: $last
-				before: $before
-				sortBy: $sortBy
-				sortOrder: $sortOrder
-				mediaType: $mediaType
-				genre: $genre
-				year: $year
-				yearFrom: $yearFrom
-				yearTo: $yearTo
-				query: $query
-				minRating: $minRating
-			) {
+		search(
+			first: $first
+			after: $after
+			last: $last
+			before: $before
+			sortBy: $sortBy
+			sortOrder: $sortOrder
+			mediaType: $mediaType
+			genre: $genre
+			year: $year
+			yearFrom: $yearFrom
+			yearTo: $yearTo
+			query: $query
+			minRating: $minRating
+		) {
 				edges {
 					cursor
 					node {
@@ -85,7 +84,6 @@ const SEARCH_MEDIA: TypedDocumentNode<
 					startCursor
 					endCursor
 				}
-			}
 		}
 	}
 `;

@@ -13,14 +13,13 @@ const GET_METADATA_BY_ID: TypedDocumentNode<
 	GetMediaMetadataByIdQueryVariables
 > = gql`
   	query GetMediaMetadataById($mediaId: ID!) {
-		media {
-			metadata(id: $mediaId) {
+		metadata(id: $mediaId) {
 			__typename
 			... on ShowMetadata {
 				title {
-				original
-				localized
-				alternatives
+					original
+					localized
+					alternatives
 				}
 				description
 				year
@@ -107,8 +106,8 @@ const GET_METADATA_BY_ID: TypedDocumentNode<
 						maxRate
 						bitRate
 						resolution {
-						width
-						height
+							width
+							height
 						}
 						frameRate
 					}
@@ -129,7 +128,6 @@ const GET_METADATA_BY_ID: TypedDocumentNode<
 						isForced
 					}
 				}
-			}
 			}
 		}
 	}
@@ -171,9 +169,9 @@ function RouteComponent() {
 	return (
 		<div className="container mx-auto p-4">
 			<h1 className="text-2xl font-bold mb-4">
-				{data.media.metadata?.title.original}
+				{data.metadata?.title.original}
 			</h1>
-			<p className="mb-4">{data.media.metadata?.description}</p>
+			<p className="mb-4">{data.metadata?.description}</p>
 			{/* Watch Link */}
 			<a
 				href={streamLink}
