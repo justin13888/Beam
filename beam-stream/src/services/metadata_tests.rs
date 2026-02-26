@@ -251,6 +251,10 @@ mod tests {
                 .cloned())
         }
 
+        async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr> {
+            Ok(self.files.lock().unwrap().get(&id).cloned())
+        }
+
         async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
             Ok(self
                 .files
