@@ -39,4 +39,3 @@ cargo clippy --workspace --all-targets -- -D warnings
 bun install
 bun run check
 ```
-```
