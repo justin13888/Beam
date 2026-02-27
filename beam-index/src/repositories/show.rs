@@ -283,25 +283,29 @@ pub mod in_memory {
         }
 
         async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr> {
-            Ok(self
+            let mut seasons: Vec<Season> = self
                 .seasons
                 .lock()
                 .unwrap()
                 .values()
                 .filter(|s| s.show_id == show_id)
                 .cloned()
-                .collect())
+                .collect();
+            seasons.sort_by_key(|s| s.season_number);
+            Ok(seasons)
         }
 
         async fn find_episodes_by_season_id(&self, season_id: Uuid) -> Result<Vec<Episode>, DbErr> {
-            Ok(self
+            let mut episodes: Vec<Episode> = self
                 .episodes
                 .lock()
                 .unwrap()
                 .values()
                 .filter(|e| e.season_id == season_id)
                 .cloned()
-                .collect())
+                .collect();
+            episodes.sort_by_key(|e| e.episode_number);
+            Ok(episodes)
         }
 
         async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {

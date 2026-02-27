@@ -185,13 +185,15 @@ pub mod in_memory {
         }
 
         async fn find_by_file_id(&self, file_id: Uuid) -> Result<Vec<MediaStream>, DbErr> {
-            Ok(self
+            let mut streams = self
                 .streams
                 .lock()
                 .unwrap()
                 .get(&file_id)
                 .cloned()
-                .unwrap_or_default())
+                .unwrap_or_default();
+            streams.sort_by_key(|s| s.index);
+            Ok(streams)
         }
     }
 }
