@@ -38,25 +38,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Cache Bun dependencies
-        id: bun-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.bun/install/cache
-            **/node_modules
-          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
-
-      - name: Install dependencies
-        if: steps.bun-cache.outputs.cache-hit != 'true'
-        run: bun install --frozen-lockfile
-
+      - uses: ./.github/actions/setup-bun
       - name: Biome check
         run: bun run check

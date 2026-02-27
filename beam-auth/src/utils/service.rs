@@ -45,6 +45,7 @@ pub struct StreamClaims {
     pub exp: usize,
 }
 
+#[cfg_attr(feature = "server", derive(salvo::oapi::ToSchema))]
 #[derive(Debug, Serialize)]
 pub struct AuthUserResponse {
     /// User ID of authenticated user
@@ -54,6 +55,7 @@ pub struct AuthUserResponse {
     pub is_admin: bool,
 }
 
+#[cfg_attr(feature = "server", derive(salvo::oapi::ToSchema))]
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub token: String,

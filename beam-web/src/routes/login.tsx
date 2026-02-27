@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
-import { env } from "@/env";
+import { apiClient } from "@/lib/apiClient";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -24,28 +24,23 @@ function LoginPage() {
 		setIsLoading(true);
 
 		const formData = new FormData(event.currentTarget);
-		const username = formData.get("username") as string;
+		const username_or_email = formData.get("username") as string;
 		const password = formData.get("password") as string;
 
 		try {
-			const response = await fetch(`${env.C_STREAM_SERVER_URL}/v1/auth/login`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
+			const {
+				data,
+				error: apiError,
+				response,
+			} = await apiClient.POST("/v1/auth/login", {
+				body: { username_or_email, password },
 				credentials: "include",
-				body: JSON.stringify({
-					username_or_email: username,
-					password,
-					device_hash: "web-client", // TODO: generate actual hash
-					ip: "127.0.0.1", // Server will likely ignore this or overwrite
-				}),
 			});
 
-			if (!response.ok) {
-				const errorData = await response.text();
-				throw new Error(errorData || "Login failed");
+			if (!response.ok || !data) {
+				throw new Error(apiError ? String(apiError) : "Login failed");
 			}
 
-			const data = await response.json();
 			login(data);
 			navigate({ to: "/" });
 		} catch (err) {

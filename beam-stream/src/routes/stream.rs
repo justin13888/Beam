@@ -1,4 +1,4 @@
-use beam_stream::state::AppState;
+use crate::state::AppState;
 use salvo::oapi::ToSchema;
 use salvo::prelude::*;
 use serde::Serialize;

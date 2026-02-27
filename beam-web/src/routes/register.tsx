@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
-import { env } from "@/env";
+import { apiClient } from "@/lib/apiClient";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -38,28 +38,19 @@ function RegisterPage() {
 		}
 
 		try {
-			const response = await fetch(
-				`${env.C_STREAM_SERVER_URL}/v1/auth/register`,
-				{
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					credentials: "include",
-					body: JSON.stringify({
-						username,
-						email,
-						password,
-						device_hash: "web-client",
-						ip: "127.0.0.1",
-					}),
-				},
-			);
+			const {
+				data,
+				error: apiError,
+				response,
+			} = await apiClient.POST("/v1/auth/register", {
+				body: { username, email, password },
+				credentials: "include",
+			});
 
-			if (!response.ok) {
-				const errorData = await response.text();
-				throw new Error(errorData || "Registration failed");
+			if (!response.ok || !data) {
+				throw new Error(apiError ? String(apiError) : "Registration failed");
 			}
 
-			const data = await response.json();
 			login(data);
 			navigate({ to: "/" });
 		} catch (err) {

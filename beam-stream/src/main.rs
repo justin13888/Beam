@@ -8,9 +8,7 @@ use tracing::info;
 
 use beam_stream::config::ServerConfig;
 use beam_stream::graphql::create_schema;
-use routes::create_router;
-
-mod routes;
+use beam_stream::routes::create_router;
 
 #[tokio::main]
 async fn main() -> Result<()> {

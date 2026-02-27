@@ -12,4 +12,9 @@ count.txt
 # Coverage output
 coverage/
 
-# GraphQL Codegen (src/gql.ts is tracked as a stub; update via `bun run codegen:full`)
+# Generated type artifacts — regenerate locally with:
+#   GraphQL:  cd beam-web && bun run codegen
+#   OpenAPI:  cd beam-web && bun run codegen:openapi:full
+openapi.json
+src/api.gen.ts
+src/gql.ts

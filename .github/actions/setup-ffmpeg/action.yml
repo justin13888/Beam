@@ -1,0 +1,67 @@
+name: Setup FFmpeg
+description: >
+  Builds FFmpeg 8.0 from source if not cached, restores from cache if available,
+  and configures PKG_CONFIG_PATH / LD_LIBRARY_PATH / PATH for the job.
+
+runs:
+  using: composite
+  steps:
+    - name: Cache FFmpeg 8.0 build
+      id: cache-ffmpeg
+      uses: actions/cache@v4
+      with:
+        path: /opt/ffmpeg
+        key: ffmpeg-8.0-ubuntu-latest-v1
+
+    - name: Install FFmpeg build dependencies
+      if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+      uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: >-
+          build-essential pkg-config yasm nasm wget ca-certificates
+          libx264-dev libx265-dev libvpx-dev
+          libopus-dev libass-dev libfreetype-dev libfontconfig-dev
+          libfribidi-dev libogg-dev libssl-dev
+        version: 1.0
+
+    - name: Build FFmpeg 8.0 from source
+      if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg
+        wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz
+        tar xf ffmpeg-8.0.tar.xz
+        cd ffmpeg-8.0
+        ./configure \
+          --prefix=/opt/ffmpeg \
+          --disable-debug \
+          --disable-doc \
+          --disable-ffplay \
+          --enable-shared \
+          --disable-static \
+          --enable-gpl \
+          --enable-version3 \
+          --enable-fontconfig \
+          --enable-libass \
+          --enable-libfontconfig \
+          --enable-libfreetype \
+          --enable-libfribidi \
+          --enable-libopus \
+          --enable-libvpx \
+          --enable-libx264 \
+          --enable-libx265 \
+          --enable-openssl \
+          --enable-small \
+          --extra-cflags="-I/opt/ffmpeg/include" \
+          --extra-ldflags="-L/opt/ffmpeg/lib" \
+          --extra-libs=-lpthread \
+          --extra-libs=-lm
+        make -j$(nproc)
+        make install
+
+    - name: Configure FFmpeg environment
+      shell: bash
+      run: |
+        echo "PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/opt/ffmpeg/lib:/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+        echo "/opt/ffmpeg/bin" >> $GITHUB_PATH

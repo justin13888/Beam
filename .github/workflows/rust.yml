@@ -3,8 +3,18 @@ name: Rust CI
 on:
   push:
     branches: [master]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
   pull_request:
     branches: [master]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,7 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Check formatting
         run: cargo fmt --check
 
@@ -28,57 +37,8 @@ jobs:
     name: Build FFmpeg
     runs-on: ubuntu-latest
     steps:
-      - name: Cache FFmpeg 8.0 build
-        id: cache-ffmpeg
-        uses: actions/cache@v4
-        with:
-          path: /opt/ffmpeg
-          key: ffmpeg-8.0-ubuntu-latest-v1
-
-      - name: Install FFmpeg build dependencies
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: >-
-            build-essential pkg-config yasm nasm wget ca-certificates
-            libx264-dev libx265-dev libvpx-dev
-            libopus-dev libass-dev libfreetype-dev libfontconfig-dev
-            libfribidi-dev libogg-dev libssl-dev
-          version: 1.0
-
-      - name: Build FFmpeg 8.0 from source
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg
-          wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz
-          tar xf ffmpeg-8.0.tar.xz
-          cd ffmpeg-8.0
-          ./configure \
-            --prefix=/opt/ffmpeg \
-            --disable-debug \
-            --disable-doc \
-            --disable-ffplay \
-            --enable-shared \
-            --disable-static \
-            --enable-gpl \
-            --enable-version3 \
-            --enable-fontconfig \
-            --enable-libass \
-            --enable-libfontconfig \
-            --enable-libfreetype \
-            --enable-libfribidi \
-            --enable-libopus \
-            --enable-libvpx \
-            --enable-libx264 \
-            --enable-libx265 \
-            --enable-openssl \
-            --enable-small \
-            --extra-cflags="-I/opt/ffmpeg/include" \
-            --extra-ldflags="-L/opt/ffmpeg/lib" \
-            --extra-libs=-lpthread \
-            --extra-libs=-lm
-          make -j$(nproc)
-          make install
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-ffmpeg
 
   clippy:
     name: Lint
@@ -91,30 +51,8 @@ jobs:
         with:
           components: clippy
 
-      - name: Install build dependencies
-        uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: >-
-            build-essential pkg-config
-            clang libclang-dev
-            protobuf-compiler
-            libx264-dev libx265-dev libvpx-dev
-            libopus-dev libass-dev libfreetype-dev libfontconfig-dev
-            libfribidi-dev libogg-dev libssl-dev
-          version: 1.0
-
-      - name: Restore FFmpeg cache
-        uses: actions/cache/restore@v4
-        with:
-          path: /opt/ffmpeg
-          key: ffmpeg-8.0-ubuntu-latest-v1
-          fail-on-cache-miss: true
-
-      - name: Set up FFmpeg environment
-        run: |
-          echo "PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/opt/ffmpeg/lib:/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-          echo "/opt/ffmpeg/bin" >> $GITHUB_PATH
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -133,30 +71,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.91
 
-      - name: Install build dependencies
-        uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: >-
-            build-essential pkg-config
-            clang libclang-dev
-            protobuf-compiler
-            libx264-dev libx265-dev libvpx-dev
-            libopus-dev libass-dev libfreetype-dev libfontconfig-dev
-            libfribidi-dev libogg-dev libssl-dev
-          version: 1.0
-
-      - name: Restore FFmpeg cache
-        uses: actions/cache/restore@v4
-        with:
-          path: /opt/ffmpeg
-          key: ffmpeg-8.0-ubuntu-latest-v1
-          fail-on-cache-miss: true
-
-      - name: Set up FFmpeg environment
-        run: |
-          echo "PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/opt/ffmpeg/lib:/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-          echo "/opt/ffmpeg/bin" >> $GITHUB_PATH
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2

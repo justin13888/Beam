@@ -1,12 +1,12 @@
-//! Export GraphQL schema to a file for code generation
+//! Export the GraphQL schema as SDL to stdout.
+//!
+//! Run via: `cargo run --bin export_schema -p beam-stream > schema.graphql`
 
 use async_graphql::Schema;
 use beam_stream::graphql::schema::{MutationRoot, QueryRoot, SubscriptionRoot};
-use eyre::Result;
-use std::fs;
 
-fn main() -> Result<()> {
-    // Build schema from type definitions only - no runtime services needed
+fn main() {
+    // Build schema from type definitions only — no runtime services needed
     let schema = Schema::build(
         QueryRoot::default(),
         MutationRoot::default(),
@@ -14,12 +14,5 @@ fn main() -> Result<()> {
     )
     .finish();
 
-    let sdl = schema.sdl();
-
-    let output_path = "schema.graphql";
-    fs::write(output_path, &sdl)?;
-
-    println!("GraphQL schema exported to: {output_path}");
-
-    Ok(())
+    print!("{}", schema.sdl());
 }
