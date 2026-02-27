@@ -2,7 +2,6 @@ pub mod graphql;
 pub mod graphql_ws;
 pub mod health;
 pub mod stream;
-pub mod upload;
 
 use salvo::prelude::*;
 

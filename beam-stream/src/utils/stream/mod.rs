@@ -119,7 +119,6 @@ impl StreamBuilder {
                             "Extracted video metadata for file {:?}: {:#?}",
                             &file_path, &file_metadata
                         );
-                        // let best_video_stream_idx = file_metadata.best_video_stream; // TODO: Find use for this value
                         let best_audio_stream_idx = file_metadata.best_audio_stream;
                         let best_subtitle_stream_idx = file_metadata.best_subtitle_stream;
 

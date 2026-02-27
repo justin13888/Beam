@@ -159,7 +159,6 @@ impl LibraryRepository for SqlLibraryRepository {
         use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
-        // TODO: Check if this is slow (N+1)?
         files::Entity::find()
             .filter(files::Column::LibraryId.eq(library_id))
             .count(&self.db)
