@@ -5,10 +5,61 @@ use tokio::sync::Mutex;
 use tracing::{info, trace};
 
 use crate::services::hash::HashService;
+use crate::services::media_info::MediaInfoService;
 use crate::utils::{
     file::FileType,
     stream::{StreamBuilder, mp4::MP4StreamGenerator},
 };
+
+/// Abstracts the MP4 generation step so it can be replaced in tests.
+#[async_trait::async_trait]
+pub trait Mp4Generator: Send + Sync + std::fmt::Debug {
+    async fn generate_mp4(
+        &self,
+        source_path: &Path,
+        output_path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// Production implementation: uses ffmpeg_next via StreamBuilder + MP4StreamGenerator.
+#[derive(Debug, Clone)]
+pub struct LocalMp4Generator {
+    hash_service: Arc<dyn HashService>,
+    media_info_service: Arc<dyn MediaInfoService>,
+}
+
+impl LocalMp4Generator {
+    pub fn new(
+        hash_service: Arc<dyn HashService>,
+        media_info_service: Arc<dyn MediaInfoService>,
+    ) -> Self {
+        Self {
+            hash_service,
+            media_info_service,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Mp4Generator for LocalMp4Generator {
+    async fn generate_mp4(
+        &self,
+        source_path: &Path,
+        output_path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ffmpeg_next::init()?;
+
+        let mut stream_builder =
+            StreamBuilder::new(self.hash_service.clone(), self.media_info_service.clone());
+        stream_builder.add_file(FileType::Video, source_path);
+        let stream_configuration = stream_builder.build().await?;
+
+        let mp4_generator = MP4StreamGenerator::from(stream_configuration);
+        mp4_generator.generate_mp4(output_path).await?;
+
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 pub trait TranscodeService: Send + Sync + std::fmt::Debug {
@@ -20,24 +71,17 @@ pub trait TranscodeService: Send + Sync + std::fmt::Debug {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
-use crate::services::media_info::MediaInfoService;
-
 #[derive(Debug, Clone)]
 pub struct LocalTranscodeService {
-    hash_service: Arc<dyn HashService>,
-    media_info_service: Arc<dyn MediaInfoService>,
+    mp4_generator: Arc<dyn Mp4Generator>,
     // Distributed locks would be better, but local map works for single instance
     locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl LocalTranscodeService {
-    pub fn new(
-        hash_service: Arc<dyn HashService>,
-        media_info_service: Arc<dyn MediaInfoService>,
-    ) -> Self {
+    pub fn new(mp4_generator: Arc<dyn Mp4Generator>) -> Self {
         Self {
-            hash_service,
-            media_info_service,
+            mp4_generator,
             locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -74,20 +118,9 @@ impl TranscodeService for LocalTranscodeService {
 
         trace!("Starting MP4 generation in background task...");
 
-        // Initialize FFmpeg (safe to call multiple times)
-        ffmpeg_next::init()?;
-
-        // Build stream configuration
-        let mut stream_builder =
-            StreamBuilder::new(self.hash_service.clone(), self.media_info_service.clone());
-        stream_builder.add_file(FileType::Video, source_path);
-        let stream_configuration = stream_builder.build().await?;
-
-        // Create MP4 generator
-        let mp4_generator = MP4StreamGenerator::from(stream_configuration);
-
-        // Generate MP4 (this internally spawns a blocking task)
-        mp4_generator.generate_mp4(output_path).await?;
+        self.mp4_generator
+            .generate_mp4(source_path, output_path)
+            .await?;
 
         info!("MP4 generation completed successfully");
         Ok(())

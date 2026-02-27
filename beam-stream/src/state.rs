@@ -18,7 +18,7 @@ use crate::{
         library::{LibraryService, LocalLibraryService, OsPathValidator},
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
-        transcode::{LocalTranscodeService, TranscodeService},
+        transcode::{LocalMp4Generator, LocalTranscodeService, TranscodeService},
     },
 };
 
@@ -104,10 +104,11 @@ impl AppServices {
         let hash_service = Arc::new(LocalHashService::new(hash_config));
         let media_info_service =
             Arc::new(crate::services::media_info::LocalMediaInfoService::default());
-        let transcode_service = Arc::new(LocalTranscodeService::new(
+        let mp4_generator = Arc::new(LocalMp4Generator::new(
             hash_service.clone(),
             media_info_service.clone(),
         ));
+        let transcode_service = Arc::new(LocalTranscodeService::new(mp4_generator));
 
         // Initialize Redis session store
         let session_store = Arc::new(
