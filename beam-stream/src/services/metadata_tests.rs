@@ -4,388 +4,21 @@
 /// external infrastructure. All repositories are stateful in-memory fakes.
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use async_trait::async_trait;
-    use sea_orm::DbErr;
     use uuid::Uuid;
 
     use crate::models::domain::movie::Movie;
-    use crate::models::domain::{
-        CreateEpisode, CreateMediaFile, CreateMovie, CreateMovieEntry, Episode, MediaFile,
-        MediaFileContent, MediaStream, MovieEntry, Season, Show, UpdateMediaFile,
-    };
-    use crate::repositories::{
-        FileRepository, MediaStreamRepository, MovieRepository, ShowRepository,
-    };
+    use crate::models::domain::{Episode, MediaFile, MediaFileContent, MovieEntry, Season, Show};
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
+    use crate::repositories::movie::in_memory::InMemoryMovieRepository;
+    use crate::repositories::show::in_memory::InMemoryShowRepository;
+    use crate::repositories::stream::in_memory::InMemoryMediaStreamRepository;
     use crate::services::metadata::{
         DbMetadataService, MediaFilter, MediaSearchFilters, MediaSortField, MetadataService,
         SortOrder,
     };
-
-    // ---------------------------------------------------------------------------
-    // In-memory fakes
-    // ---------------------------------------------------------------------------
-
-    #[derive(Debug, Default)]
-    struct InMemoryMovieRepository {
-        movies: Mutex<HashMap<Uuid, Movie>>,
-        entries: Mutex<HashMap<Uuid, MovieEntry>>,
-    }
-
-    #[async_trait]
-    impl MovieRepository for InMemoryMovieRepository {
-        async fn find_by_id(&self, id: Uuid) -> Result<Option<Movie>, DbErr> {
-            Ok(self.movies.lock().unwrap().get(&id).cloned())
-        }
-
-        async fn find_by_title(&self, title: &str) -> Result<Option<Movie>, DbErr> {
-            Ok(self
-                .movies
-                .lock()
-                .unwrap()
-                .values()
-                .find(|m| m.title == title)
-                .cloned())
-        }
-
-        async fn find_all(&self) -> Result<Vec<Movie>, DbErr> {
-            Ok(self.movies.lock().unwrap().values().cloned().collect())
-        }
-
-        async fn create(&self, create: CreateMovie) -> Result<Movie, DbErr> {
-            let movie = Movie {
-                id: Uuid::new_v4(),
-                title: create.title,
-                title_localized: None,
-                description: None,
-                year: None,
-                release_date: None,
-                runtime: create.runtime,
-                poster_url: None,
-                backdrop_url: None,
-                tmdb_id: None,
-                imdb_id: None,
-                tvdb_id: None,
-                rating_tmdb: None,
-                rating_imdb: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-            self.movies.lock().unwrap().insert(movie.id, movie.clone());
-            Ok(movie)
-        }
-
-        async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
-            let entry = MovieEntry {
-                id: Uuid::new_v4(),
-                library_id: create.library_id,
-                movie_id: create.movie_id,
-                edition: create.edition,
-                is_primary: create.is_primary,
-                created_at: chrono::Utc::now(),
-            };
-            self.entries.lock().unwrap().insert(entry.id, entry.clone());
-            Ok(entry)
-        }
-
-        async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr> {
-            Ok(self
-                .entries
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|e| e.movie_id == movie_id)
-                .cloned()
-                .collect())
-        }
-
-        async fn ensure_library_association(
-            &self,
-            _library_id: Uuid,
-            _movie_id: Uuid,
-        ) -> Result<(), DbErr> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, Default)]
-    struct InMemoryShowRepository {
-        shows: Mutex<HashMap<Uuid, Show>>,
-        seasons: Mutex<HashMap<Uuid, Season>>,
-        episodes: Mutex<HashMap<Uuid, Episode>>,
-    }
-
-    #[async_trait]
-    impl ShowRepository for InMemoryShowRepository {
-        async fn find_by_id(&self, id: Uuid) -> Result<Option<Show>, DbErr> {
-            Ok(self.shows.lock().unwrap().get(&id).cloned())
-        }
-
-        async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr> {
-            Ok(self
-                .shows
-                .lock()
-                .unwrap()
-                .values()
-                .find(|s| s.title == title)
-                .cloned())
-        }
-
-        async fn find_all(&self) -> Result<Vec<Show>, DbErr> {
-            Ok(self.shows.lock().unwrap().values().cloned().collect())
-        }
-
-        async fn create(&self, title: String) -> Result<Show, DbErr> {
-            let show = Show {
-                id: Uuid::new_v4(),
-                title,
-                title_localized: None,
-                description: None,
-                year: None,
-                poster_url: None,
-                backdrop_url: None,
-                tmdb_id: None,
-                imdb_id: None,
-                tvdb_id: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-            self.shows.lock().unwrap().insert(show.id, show.clone());
-            Ok(show)
-        }
-
-        async fn ensure_library_association(
-            &self,
-            _library_id: Uuid,
-            _show_id: Uuid,
-        ) -> Result<(), DbErr> {
-            Ok(())
-        }
-
-        async fn find_or_create_season(
-            &self,
-            show_id: Uuid,
-            season_number: u32,
-        ) -> Result<Season, DbErr> {
-            {
-                let guard = self.seasons.lock().unwrap();
-                if let Some(s) = guard
-                    .values()
-                    .find(|s| s.show_id == show_id && s.season_number == season_number)
-                {
-                    return Ok(s.clone());
-                }
-            }
-            let season = Season {
-                id: Uuid::new_v4(),
-                show_id,
-                season_number,
-                poster_url: None,
-                first_aired: None,
-                last_aired: None,
-            };
-            self.seasons
-                .lock()
-                .unwrap()
-                .insert(season.id, season.clone());
-            Ok(season)
-        }
-
-        async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr> {
-            Ok(self
-                .seasons
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|s| s.show_id == show_id)
-                .cloned()
-                .collect())
-        }
-
-        async fn find_episodes_by_season_id(&self, season_id: Uuid) -> Result<Vec<Episode>, DbErr> {
-            Ok(self
-                .episodes
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|e| e.season_id == season_id)
-                .cloned()
-                .collect())
-        }
-
-        async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
-            let ep = Episode {
-                id: Uuid::new_v4(),
-                season_id: create.season_id,
-                episode_number: create.episode_number,
-                title: create.title,
-                description: None,
-                air_date: None,
-                runtime: create.runtime,
-                thumbnail_url: None,
-                created_at: chrono::Utc::now(),
-            };
-            self.episodes.lock().unwrap().insert(ep.id, ep.clone());
-            Ok(ep)
-        }
-    }
-
-    #[derive(Debug, Default)]
-    struct InMemoryFileRepository {
-        files: Mutex<HashMap<Uuid, MediaFile>>,
-    }
-
-    #[async_trait]
-    impl FileRepository for InMemoryFileRepository {
-        async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr> {
-            Ok(self
-                .files
-                .lock()
-                .unwrap()
-                .values()
-                .find(|f| f.path == Path::new(path))
-                .cloned())
-        }
-
-        async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr> {
-            Ok(self.files.lock().unwrap().get(&id).cloned())
-        }
-
-        async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
-            Ok(self
-                .files
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|f| f.library_id == library_id)
-                .cloned()
-                .collect())
-        }
-
-        async fn find_by_movie_entry_id(
-            &self,
-            movie_entry_id: Uuid,
-        ) -> Result<Vec<MediaFile>, DbErr> {
-            Ok(self
-                .files
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|f| {
-                    matches!(&f.content, Some(MediaFileContent::Movie { movie_entry_id: id }) if *id == movie_entry_id)
-                })
-                .cloned()
-                .collect())
-        }
-
-        async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
-            Ok(self
-                .files
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|f| {
-                    matches!(&f.content, Some(MediaFileContent::Episode { episode_id: id }) if *id == episode_id)
-                })
-                .cloned()
-                .collect())
-        }
-
-        async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr> {
-            let file = MediaFile {
-                id: Uuid::new_v4(),
-                library_id: create.library_id,
-                path: create.path,
-                hash: create.hash,
-                size_bytes: create.size_bytes,
-                mime_type: create.mime_type,
-                duration: create.duration,
-                container_format: create.container_format,
-                content: create.content,
-                status: create.status,
-                scanned_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-            self.files.lock().unwrap().insert(file.id, file.clone());
-            Ok(file)
-        }
-
-        async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr> {
-            let mut files = self.files.lock().unwrap();
-            let file = files
-                .get_mut(&update.id)
-                .ok_or(DbErr::RecordNotFound(format!(
-                    "File {} not found",
-                    update.id
-                )))?;
-            if let Some(status) = update.status {
-                file.status = status;
-            }
-            Ok(file.clone())
-        }
-
-        async fn delete(&self, id: Uuid) -> Result<(), DbErr> {
-            self.files.lock().unwrap().remove(&id);
-            Ok(())
-        }
-
-        async fn delete_by_ids(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {
-            let mut files = self.files.lock().unwrap();
-            let mut count = 0u64;
-            for id in ids {
-                if files.remove(&id).is_some() {
-                    count += 1;
-                }
-            }
-            Ok(count)
-        }
-    }
-
-    #[derive(Debug, Default)]
-    struct InMemoryStreamRepository {
-        streams: Mutex<HashMap<Uuid, Vec<MediaStream>>>,
-    }
-
-    #[async_trait]
-    impl MediaStreamRepository for InMemoryStreamRepository {
-        async fn insert_streams(
-            &self,
-            streams: Vec<crate::models::domain::CreateMediaStream>,
-        ) -> Result<u32, DbErr> {
-            let count = streams.len() as u32;
-            for create in streams {
-                let stream = MediaStream {
-                    id: Uuid::new_v4(),
-                    file_id: create.file_id,
-                    index: create.index,
-                    stream_type: create.stream_type,
-                    codec: create.codec,
-                    metadata: create.metadata,
-                };
-                self.streams
-                    .lock()
-                    .unwrap()
-                    .entry(create.file_id)
-                    .or_default()
-                    .push(stream);
-            }
-            Ok(count)
-        }
-
-        async fn find_by_file_id(&self, file_id: Uuid) -> Result<Vec<MediaStream>, DbErr> {
-            Ok(self
-                .streams
-                .lock()
-                .unwrap()
-                .get(&file_id)
-                .cloned()
-                .unwrap_or_default())
-        }
-    }
 
     // ---------------------------------------------------------------------------
     // Helper builders
@@ -435,7 +68,7 @@ mod tests {
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         )
     }
 
@@ -496,7 +129,7 @@ mod tests {
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             file_repo,
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
         let result = service.get_media_metadata(&movie_id.to_string()).await;
@@ -564,7 +197,7 @@ mod tests {
             Arc::new(InMemoryMovieRepository::default()),
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
         let result = service.get_media_metadata(&show_id.to_string()).await;
@@ -609,7 +242,7 @@ mod tests {
             movie_repo,
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
         let conn = service
@@ -669,7 +302,7 @@ mod tests {
             movie_repo,
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
         let conn = service
@@ -709,7 +342,7 @@ mod tests {
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
         let conn = service
@@ -751,7 +384,7 @@ mod tests {
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
         let conn = service
@@ -792,7 +425,7 @@ mod tests {
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
         // First page of 2
@@ -861,7 +494,7 @@ mod tests {
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryStreamRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
         let conn = service
