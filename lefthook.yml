@@ -1,0 +1,44 @@
+# lefthook.yml
+# Hooks run in parallel per stage; glob guards skip commands when no matching
+# files are changed, keeping iteration fast without hardcoding paths.
+
+# ── pre-commit ───────────────────────────────────────────────────────────────
+# Fast, staged-file-scoped checks. Should complete in seconds.
+pre-commit:
+  parallel: true
+  commands:
+    rust-fmt:
+      glob: "**/*.rs"
+      run: cargo fmt --check
+      fail_text: "Run `cargo fmt` to fix Rust formatting"
+
+    biome-check:
+      # Pass only staged files so biome checks the diff, not the whole tree.
+      # Generated files (api.gen.ts, gql.ts, routeTree.gen.ts) are gitignored
+      # and therefore never appear in staged_files.
+      glob: "**/*.{ts,tsx,js,mjs,cjs,astro}"
+      run: bun biome check {staged_files}
+      fail_text: "Run `bun run check:fix` to auto-fix"
+
+# ── pre-push ─────────────────────────────────────────────────────────────────
+# CI-equivalent checks. Each command is gated on its relevant file types so
+# pushing a docs-only change doesn't wait on Rust compilation.
+pre-push:
+  parallel: true
+  commands:
+    rust-clippy:
+      glob: "{**/*.rs,**/Cargo.toml,Cargo.lock,rust-toolchain.toml}"
+      run: cargo clippy --workspace --all-targets -- -D warnings
+      fail_text: "Fix Clippy warnings before pushing"
+
+    rust-test:
+      glob: "{**/*.rs,**/Cargo.toml,Cargo.lock}"
+      run: cargo test --workspace
+      fail_text: "Fix failing tests before pushing"
+
+    ts-full-check:
+      # Full biome check (respects biome.json includes/excludes) triggered by
+      # any JS/TS source or config change.
+      glob: "**/*.{ts,tsx,js,mjs,cjs,astro,json}"
+      run: bun run check
+      fail_text: "Run `bun run check:fix` to auto-fix"

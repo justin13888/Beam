@@ -88,6 +88,12 @@ For production deployments, we recommend reviewing all configurations in `.env` 
 
 ## Development
 
+0. Install toolchain: rustup, bun
+1. Clone repository
+2. `lefthook install`
+
+### Start up
+
 See individual README files for each component.
 
 To spin up entire dependency stack with Docker Compose for testing, run:
