@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "service_tests.rs"]
+mod service_tests;
+
 use crate::utils::models::{CreateUser, User};
 use crate::utils::repository::UserRepository;
 use crate::utils::session_store::{SessionData, SessionStore};
