@@ -2,13 +2,12 @@
 mod tests {
     use crate::repositories::file::MockFileRepository;
     use crate::repositories::library::MockLibraryRepository;
-    use crate::services::library::LocalLibraryService;
+    use crate::services::library::{InMemoryPathValidator, LocalLibraryService};
     use crate::services::notification::InMemoryNotificationService;
     use beam_index::models::domain::Library as DomainLibrary;
     use beam_index::services::index::MockIndexService;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use tempfile::TempDir;
     use uuid::Uuid;
 
     fn make_service(
@@ -20,9 +19,10 @@ mod tests {
         LocalLibraryService::new(
             Arc::new(mock_library_repo),
             Arc::new(mock_file_repo),
-            video_dir,
+            video_dir.clone(),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(mock_index_service),
+            Arc::new(InMemoryPathValidator::success(video_dir)),
         )
     }
 
@@ -32,8 +32,7 @@ mod tests {
 
         let mock_library_repo = MockLibraryRepository::new();
         let mock_file_repo = MockFileRepository::new();
-        let temp_dir = TempDir::new().unwrap();
-        let video_dir = temp_dir.path().to_path_buf();
+        let video_dir = PathBuf::from("/media/videos");
 
         let lib_id = Uuid::new_v4().to_string();
         let lib_id_clone = lib_id.clone();
@@ -58,8 +57,7 @@ mod tests {
 
         let mock_library_repo = MockLibraryRepository::new();
         let mock_file_repo = MockFileRepository::new();
-        let temp_dir = TempDir::new().unwrap();
-        let video_dir = temp_dir.path().to_path_buf();
+        let video_dir = PathBuf::from("/media/videos");
 
         let mut mock_index = MockIndexService::new();
         mock_index
@@ -79,8 +77,7 @@ mod tests {
 
         let mut mock_library_repo = MockLibraryRepository::new();
         let mock_file_repo = MockFileRepository::new();
-        let temp_dir = TempDir::new().unwrap();
-        let video_dir = temp_dir.path().to_path_buf();
+        let video_dir = PathBuf::from("/media/videos");
         let mock_index = MockIndexService::new();
 
         let lib_id = Uuid::new_v4();
