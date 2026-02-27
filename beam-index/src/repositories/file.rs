@@ -299,9 +299,28 @@ pub mod in_memory {
                     "File {} not found",
                     update.id
                 )))?;
+            if let Some(hash) = update.hash {
+                file.hash = hash;
+            }
+            if let Some(size) = update.size_bytes {
+                file.size_bytes = size;
+            }
+            if let Some(mime_type) = update.mime_type {
+                file.mime_type = Some(mime_type);
+            }
+            if let Some(duration) = update.duration {
+                file.duration = Some(duration);
+            }
+            if let Some(container) = update.container_format {
+                file.container_format = Some(container);
+            }
             if let Some(status) = update.status {
                 file.status = status;
             }
+            if let Some(content) = update.content {
+                file.content = Some(content);
+            }
+            file.updated_at = chrono::Utc::now();
             Ok(file.clone())
         }
 
