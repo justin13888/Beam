@@ -15,7 +15,7 @@ use crate::{
         GrpcIndexService,
         admin_log::{AdminLogService, LocalAdminLogService},
         hash::{HashConfig, HashService, LocalHashService},
-        library::{LibraryService, LocalLibraryService},
+        library::{LibraryService, LocalLibraryService, OsPathValidator},
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
         transcode::{LocalTranscodeService, TranscodeService},
@@ -140,6 +140,7 @@ impl AppServices {
                 config.video_dir.clone(),
                 notification_service.clone(),
                 index_service,
+                Arc::new(OsPathValidator),
             )),
             metadata: Arc::new(DbMetadataService::new(
                 movie_repo,

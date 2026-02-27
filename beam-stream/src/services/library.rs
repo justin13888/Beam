@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sea_orm::DbErr;
@@ -10,7 +11,102 @@ use crate::models::{Library, LibraryFile};
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_index::services::index::{IndexError, IndexService};
 
-use std::path::PathBuf;
+pub trait PathValidator: Send + Sync + std::fmt::Debug {
+    /// Validates that `requested` is within `root`, returning the canonical absolute path.
+    /// Returns `LibraryError::PathNotFound` if the path does not exist.
+    /// Returns `LibraryError::Validation` if the path escapes root.
+    fn validate_library_path(&self, requested: &Path, root: &Path)
+    -> Result<PathBuf, LibraryError>;
+}
+
+#[derive(Debug)]
+pub struct OsPathValidator;
+
+impl PathValidator for OsPathValidator {
+    fn validate_library_path(
+        &self,
+        requested: &Path,
+        root: &Path,
+    ) -> Result<PathBuf, LibraryError> {
+        let canonical_root = root.canonicalize().map_err(|e| {
+            error!("Failed to canonicalize video_dir: {}", e);
+            LibraryError::PathNotFound(root.to_string_lossy().to_string())
+        })?;
+
+        let target_path = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            root.join(requested)
+        };
+
+        let canonical_target = target_path.canonicalize().map_err(|e| {
+            LibraryError::PathNotFound(format!("Library path does not exist or invalid: {}", e))
+        })?;
+
+        if !canonical_target.starts_with(&canonical_root) {
+            return Err(LibraryError::Validation(format!(
+                "Library path must be within the video directory: {}",
+                root.display()
+            )));
+        }
+
+        Ok(canonical_target)
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone)]
+pub enum InMemoryPathValidatorResult {
+    Success(PathBuf),
+    PathNotFound(String),
+    ValidationError(String),
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug)]
+pub struct InMemoryPathValidator {
+    result: InMemoryPathValidatorResult,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl InMemoryPathValidator {
+    pub fn success(path: PathBuf) -> Self {
+        Self {
+            result: InMemoryPathValidatorResult::Success(path),
+        }
+    }
+
+    pub fn path_not_found(msg: impl Into<String>) -> Self {
+        Self {
+            result: InMemoryPathValidatorResult::PathNotFound(msg.into()),
+        }
+    }
+
+    pub fn validation_error(msg: impl Into<String>) -> Self {
+        Self {
+            result: InMemoryPathValidatorResult::ValidationError(msg.into()),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl PathValidator for InMemoryPathValidator {
+    fn validate_library_path(
+        &self,
+        _requested: &Path,
+        _root: &Path,
+    ) -> Result<PathBuf, LibraryError> {
+        match &self.result {
+            InMemoryPathValidatorResult::Success(path) => Ok(path.clone()),
+            InMemoryPathValidatorResult::PathNotFound(msg) => {
+                Err(LibraryError::PathNotFound(msg.clone()))
+            }
+            InMemoryPathValidatorResult::ValidationError(msg) => {
+                Err(LibraryError::Validation(msg.clone()))
+            }
+        }
+    }
+}
 
 #[async_trait::async_trait]
 pub trait LibraryService: Send + Sync + std::fmt::Debug {
@@ -49,6 +145,7 @@ pub struct LocalLibraryService {
     video_dir: PathBuf,
     notification_service: Arc<dyn NotificationService>,
     index_service: Arc<dyn IndexService>,
+    path_validator: Arc<dyn PathValidator>,
 }
 
 impl LocalLibraryService {
@@ -58,6 +155,7 @@ impl LocalLibraryService {
         video_dir: PathBuf,
         notification_service: Arc<dyn NotificationService>,
         index_service: Arc<dyn IndexService>,
+        path_validator: Arc<dyn PathValidator>,
     ) -> Self {
         LocalLibraryService {
             library_repo,
@@ -65,6 +163,7 @@ impl LocalLibraryService {
             video_dir,
             notification_service,
             index_service,
+            path_validator,
         }
     }
 }
@@ -154,27 +253,9 @@ impl LibraryService for LocalLibraryService {
 
         let requested_path = PathBuf::from(&root_path);
 
-        let canonical_video_dir = self.video_dir.canonicalize().map_err(|e| {
-            error!("Failed to canonicalize video_dir: {}", e);
-            LibraryError::PathNotFound(self.video_dir.to_string_lossy().to_string())
-        })?;
-
-        let target_path = if requested_path.is_absolute() {
-            requested_path
-        } else {
-            self.video_dir.join(requested_path)
-        };
-
-        let canonical_target = target_path.canonicalize().map_err(|e| {
-            LibraryError::PathNotFound(format!("Library path does not exist or invalid: {}", e))
-        })?;
-
-        if !canonical_target.starts_with(&canonical_video_dir) {
-            return Err(LibraryError::Validation(format!(
-                "Library path must be within the video directory: {}",
-                self.video_dir.display()
-            )));
-        }
+        let canonical_target = self
+            .path_validator
+            .validate_library_path(&requested_path, &self.video_dir)?;
 
         let create = CreateLibrary {
             name: name.clone(),
