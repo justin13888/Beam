@@ -66,4 +66,4 @@ beam-index = { path = "../beam-index", features = ["test-utils"] }
 mockall = "0.14.0"
 
 [features]
-test-utils = []
+test-utils = ["beam-index/test-utils"]
