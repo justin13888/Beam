@@ -147,11 +147,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let user = user_repo
-            .find_by_username("frank")
-            .await
-            .unwrap()
-            .unwrap();
+        let user = user_repo.find_by_username("frank").await.unwrap().unwrap();
         assert_ne!(
             user.password_hash, raw_password,
             "password should not be stored as plaintext"
@@ -319,7 +315,10 @@ mod tests {
             .unwrap();
         svc.logout(&resp.session_id).await.unwrap();
         let result = svc.verify_token(&resp.token).await;
-        assert!(result.is_err(), "token should fail after session revocation");
+        assert!(
+            result.is_err(),
+            "token should fail after session revocation"
+        );
     }
 
     #[tokio::test]
@@ -423,27 +422,42 @@ mod tests {
             .await
             .unwrap();
         let login_resp = svc
-            .login(
-                "quinn",
-                "password123",
-                "device-hash-2",
-                "127.0.0.2",
-            )
+            .login("quinn", "password123", "device-hash-2", "127.0.0.2")
             .await
             .unwrap();
 
-        assert!(session_store.get(&reg_resp.session_id).await.unwrap().is_some());
-        assert!(session_store.get(&login_resp.session_id).await.unwrap().is_some());
+        assert!(
+            session_store
+                .get(&reg_resp.session_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            session_store
+                .get(&login_resp.session_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         let count = svc.logout_all(&reg_resp.user.id).await.unwrap();
         assert_eq!(count, 2, "should have deleted both sessions");
 
         assert!(
-            session_store.get(&reg_resp.session_id).await.unwrap().is_none(),
+            session_store
+                .get(&reg_resp.session_id)
+                .await
+                .unwrap()
+                .is_none(),
             "first session should be gone"
         );
         assert!(
-            session_store.get(&login_resp.session_id).await.unwrap().is_none(),
+            session_store
+                .get(&login_resp.session_id)
+                .await
+                .unwrap()
+                .is_none(),
             "second session should be gone"
         );
     }

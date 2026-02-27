@@ -23,11 +23,7 @@ fn extract_client_ip(req: &Request) -> String {
     {
         return first.trim().to_string();
     }
-    if let Some(real_ip) = req
-        .headers()
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(real_ip) = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()) {
         return real_ip.to_string();
     }
     "unknown".to_string()
@@ -75,7 +71,13 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let ip = extract_client_ip(req);
 
     match auth
-        .register(&body.username, &body.email, &body.password, &device_hash, &ip)
+        .register(
+            &body.username,
+            &body.email,
+            &body.password,
+            &device_hash,
+            &ip,
+        )
         .await
     {
         Ok(auth_response) => {
