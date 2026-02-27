@@ -16,6 +16,7 @@
 			"beam-docs/src/**/*.tsx",
 			"!beam-web/src/routeTree.gen.ts",
 			"!beam-web/src/api.gen.ts",
+			"!beam-web/src/gql.ts",
 			"!beam-web/src/styles.css"
 		]
 	},
