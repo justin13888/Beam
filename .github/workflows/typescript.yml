@@ -14,6 +14,10 @@ on:
       - "package.json"
       - "**/package.json"
       - "bun.lock"
+      # Rust API changes affect generated OpenAPI types
+      - "beam-auth/src/**/*.rs"
+      - "beam-stream/src/**/*.rs"
+      - "Cargo.lock"
   pull_request:
     branches: [master]
     paths:
@@ -27,92 +31,96 @@ on:
       - "package.json"
       - "**/package.json"
       - "bun.lock"
+      # Rust API changes affect generated OpenAPI types
+      - "beam-auth/src/**/*.rs"
+      - "beam-stream/src/**/*.rs"
+      - "Cargo.lock"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build
+  generate-openapi:
+    name: Generate OpenAPI Artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
+      - uses: dtolnay/rust-toolchain@1.91
 
-      - name: Cache Bun dependencies
-        id: bun-cache
-        uses: actions/cache@v4
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
+          shared-key: openapi-gen
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Generate openapi.json
+        run: cargo run --example export_openapi -p beam-stream > beam-web/openapi.json
+
+      - name: Generate api.gen.ts
+        run: cd beam-web && bun run codegen:openapi
+
+      - name: Upload OpenAPI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-artifacts
           path: |
-            ~/.bun/install/cache
-            **/node_modules
-          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
+            beam-web/openapi.json
+            beam-web/src/api.gen.ts
+          retention-days: 7
 
-      - name: Install dependencies
-        if: steps.bun-cache.outputs.cache-hit != 'true'
-        run: bun install --frozen-lockfile
+  build:
+    name: Build
+    needs: [generate-openapi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-bun
+
+      - name: Download OpenAPI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: openapi-artifacts
+          path: .
 
       - name: Build
         run: bun run build
 
   typecheck:
     name: Type Check
+    needs: [generate-openapi]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-bun
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Download OpenAPI artifacts
+        uses: actions/download-artifact@v4
         with:
-          bun-version: latest
-
-      - name: Cache Bun dependencies
-        id: bun-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.bun/install/cache
-            **/node_modules
-          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
-
-      - name: Install dependencies
-        if: steps.bun-cache.outputs.cache-hit != 'true'
-        run: bun install --frozen-lockfile
+          name: openapi-artifacts
+          path: .
 
       - name: Type check
         run: bun run typecheck
 
   test:
     name: Tests
+    needs: [generate-openapi]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-bun
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Download OpenAPI artifacts
+        uses: actions/download-artifact@v4
         with:
-          bun-version: latest
-
-      - name: Cache Bun dependencies
-        id: bun-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.bun/install/cache
-            **/node_modules
-          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
-
-      - name: Install dependencies
-        if: steps.bun-cache.outputs.cache-hit != 'true'
-        run: bun install --frozen-lockfile
+          name: openapi-artifacts
+          path: .
 
       - name: Run tests with coverage
         run: bun run test:coverage

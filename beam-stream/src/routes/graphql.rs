@@ -1,6 +1,6 @@
+use crate::graphql::AppSchema;
+use crate::state::{AppContext, AppState, UserContext};
 use async_graphql::http::GraphiQLSource;
-use beam_stream::graphql::AppSchema;
-use beam_stream::state::{AppContext, AppState, UserContext};
 use salvo::prelude::*;
 
 const GRAPHQL_PATH: &str = "graphql";

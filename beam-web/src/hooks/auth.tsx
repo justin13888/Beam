@@ -5,19 +5,13 @@ import {
 	useEffect,
 	useState,
 } from "react";
-import { env } from "@/env";
+import type { components } from "@/api.gen";
+import { apiClient } from "@/lib/apiClient";
 
-export interface User {
-	id: string;
-	username: string;
-	email: string;
-	is_admin: boolean;
-}
-
-export interface AuthResponse {
-	token: string;
-	user: User;
-}
+export type User =
+	components["schemas"]["beam_auth.utils.service.AuthUserResponse"];
+export type AuthResponse =
+	components["schemas"]["beam_auth.utils.service.AuthResponse"];
 
 export interface AuthContextType {
 	user: User | null;
@@ -60,11 +54,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 	const logout = () => {
 		// Call API to revoke session (cookie)
-		fetch(`${env.C_STREAM_SERVER_URL}/v1/auth/logout`, {
-			method: "POST",
-			// usage of 'include' ensures cookies are sent
-			credentials: "include",
-		}).catch(console.error);
+		apiClient
+			.POST("/v1/auth/logout", {
+				// usage of 'include' ensures cookies are sent
+				credentials: "include",
+			})
+			.catch(console.error);
 
 		setToken(null);
 		setUser(null);

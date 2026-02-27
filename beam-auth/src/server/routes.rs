@@ -1,27 +1,36 @@
 use crate::utils::service::AuthService;
+use salvo::oapi::ToSchema;
 use salvo::prelude::*;
 use serde::Deserialize;
 use std::sync::Arc;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct RegisterRequest {
     pub username: String,
     pub email: String,
     pub password: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
     pub username_or_email: String,
     pub password: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct RefreshRequest {
     pub session_id: String,
 }
 
-#[handler]
+/// Register a new user account
+#[endpoint(
+    tags("auth"),
+    request_body = RegisterRequest,
+    responses(
+        (status_code = 200, body = crate::utils::service::AuthResponse, description = "User registered successfully"),
+        (status_code = 400, description = "Invalid request or user already exists")
+    )
+)]
 pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
     let body: RegisterRequest = match req.parse_json().await {
@@ -62,7 +71,16 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     }
 }
 
-#[handler]
+/// Login with username/email and password
+#[endpoint(
+    tags("auth"),
+    request_body = LoginRequest,
+    responses(
+        (status_code = 200, body = crate::utils::service::AuthResponse, description = "Login successful"),
+        (status_code = 400, description = "Bad request"),
+        (status_code = 401, description = "Invalid credentials")
+    )
+)]
 pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
     let body: LoginRequest = match req.parse_json().await {
@@ -103,7 +121,15 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     }
 }
 
-#[handler]
+/// Refresh an existing session using a session cookie or request body
+#[endpoint(
+    tags("auth"),
+    request_body(content = RefreshRequest, description = "Session ID (alternative to session cookie)"),
+    responses(
+        (status_code = 200, body = crate::utils::service::AuthResponse, description = "Session refreshed successfully"),
+        (status_code = 401, description = "Invalid or expired session")
+    )
+)]
 pub async fn refresh(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
 
@@ -140,7 +166,14 @@ pub async fn refresh(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     }
 }
 
-#[handler]
+/// Logout and revoke the current session
+#[endpoint(
+    tags("auth"),
+    responses(
+        (status_code = 200, description = "Logged out successfully"),
+        (status_code = 500, description = "Internal server error")
+    )
+)]
 pub async fn logout(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
 

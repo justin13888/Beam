@@ -13,3 +13,8 @@ count.txt
 coverage/
 
 # GraphQL Codegen (src/gql.ts is tracked as a stub; update via `bun run codegen:full`)
+
+# OpenAPI Codegen — generated at build time from the Rust backend
+# Regenerate locally with: bun run codegen:openapi:full
+openapi.json
+src/api.gen.ts

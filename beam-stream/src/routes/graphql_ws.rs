@@ -1,6 +1,6 @@
+use crate::graphql::AppSchema;
+use crate::state::{AppContext, AppState, UserContext};
 use async_graphql::http::{WebSocket as GqlWebSocket, WebSocketProtocols, WsMessage};
-use beam_stream::graphql::AppSchema;
-use beam_stream::state::{AppContext, AppState, UserContext};
 use futures_util::{SinkExt, StreamExt};
 use salvo::prelude::*;
 use salvo::websocket::WebSocketUpgrade;
