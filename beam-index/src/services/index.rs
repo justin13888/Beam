@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use regex::Regex;
@@ -21,6 +21,9 @@ use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use crate::utils::metadata::{StreamMetadata, VideoFileMetadata};
+
+static EPISODE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)S(\d+)E(\d+)").expect("valid regex"));
 
 // TODO: See if these can be improved. Ensure logic can detect all of them properly
 const KNOWN_VIDEO_EXTENSIONS: &[&str] = &[
@@ -168,15 +171,12 @@ impl LocalIndexService {
             CreateEpisode, CreateMovie, CreateMovieEntry, MediaFileContent,
         };
 
-        // Regex for detecting SxxExx pattern
-        let episode_regex = Regex::new(r"(?i)S(\d+)E(\d+)").unwrap();
-
         let file_stem = path
             .file_stem()
             .map(|s| s.to_string_lossy())
             .unwrap_or_default();
 
-        if let Some(captures) = episode_regex.captures(&file_stem) {
+        if let Some(captures) = EPISODE_REGEX.captures(&file_stem) {
             // IT IS AN EPISODE
             let season_num: u32 = captures[1].parse().unwrap_or(1);
             let episode_num: i32 = captures[2].parse().unwrap_or(1);
