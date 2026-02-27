@@ -31,7 +31,11 @@ mod tests {
 
         let result = service.generate_mp4_cache(&source_path, &output_path).await;
 
-        assert!(result.is_ok(), "generate_mp4_cache failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "generate_mp4_cache failed: {:?}",
+            result.err()
+        );
         assert!(output_path.exists(), "Output file was not created");
     }
 
@@ -50,7 +54,14 @@ mod tests {
 
         let result = service.generate_mp4_cache(&source_path, &output_path).await;
 
-        assert!(result.is_ok(), "generate_mp4_cache failed: {:?}", result.err());
-        assert!(output_path.exists(), "Output file should still exist after cache hit");
+        assert!(
+            result.is_ok(),
+            "generate_mp4_cache failed: {:?}",
+            result.err()
+        );
+        assert!(
+            output_path.exists(),
+            "Output file should still exist after cache hit"
+        );
     }
 }
