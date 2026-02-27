@@ -45,8 +45,20 @@ pub async fn get_stream_token(req: &mut Request, depot: &mut Depot, res: &mut Re
         return;
     };
 
+    // Verify the file exists before issuing a token
+    match state.services.library.get_file_by_id(id.clone()).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            return;
+        }
+        Err(_) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            return;
+        }
+    }
+
     // Create stream token
-    // TODO: Verify stream exists
     match state.services.auth.create_stream_token(&user_id, &id) {
         Ok(token) => {
             res.render(Json(StreamTokenResponse { token }));

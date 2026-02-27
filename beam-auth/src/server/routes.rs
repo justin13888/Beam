@@ -2,7 +2,32 @@ use crate::utils::service::AuthService;
 use salvo::oapi::ToSchema;
 use salvo::prelude::*;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
+
+fn device_hash_from_request(req: &Request) -> String {
+    let user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    format!("{:x}", Sha256::digest(user_agent.as_bytes()))
+}
+
+fn extract_client_ip(req: &Request) -> String {
+    if let Some(forwarded_for) = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        && let Some(first) = forwarded_for.split(',').next()
+    {
+        return first.trim().to_string();
+    }
+    if let Some(real_ip) = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        return real_ip.to_string();
+    }
+    "unknown".to_string()
+}
 
 #[derive(Deserialize, ToSchema)]
 pub struct RegisterRequest {
@@ -42,12 +67,17 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         }
     };
 
-    // TODO: Get device info from headers
-    let device_hash = "unknown_device";
-    let ip = "0.0.0.0";
+    let device_hash = device_hash_from_request(req);
+    let ip = extract_client_ip(req);
 
     match auth
-        .register(&body.username, &body.email, &body.password, device_hash, ip)
+        .register(
+            &body.username,
+            &body.email,
+            &body.password,
+            &device_hash,
+            &ip,
+        )
         .await
     {
         Ok(auth_response) => {
@@ -92,12 +122,11 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    // TODO: Get device info from headers
-    let device_hash = "unknown_device";
-    let ip = "0.0.0.0";
+    let device_hash = device_hash_from_request(req);
+    let ip = extract_client_ip(req);
 
     match auth
-        .login(&body.username_or_email, &body.password, device_hash, ip)
+        .login(&body.username_or_email, &body.password, &device_hash, &ip)
         .await
     {
         Ok(auth_response) => {
