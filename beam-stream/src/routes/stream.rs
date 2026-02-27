@@ -11,6 +11,72 @@ pub struct StreamTokenResponse {
     pub token: String,
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum RangeError {
+    MissingBytesPrefix,
+    MalformedRange,
+    NonNumericBound,
+    RangeNotSatisfiable { start: u64, file_size: u64 },
+}
+
+/// Parse an HTTP Range header value against a known file size.
+///
+/// Returns `Ok((start, end))` where both are inclusive byte offsets,
+/// or a `RangeError` describing the failure mode.
+pub(crate) fn parse_byte_range(
+    header_value: &str,
+    file_size: u64,
+) -> Result<(u64, u64), RangeError> {
+    if file_size == 0 {
+        return Err(RangeError::RangeNotSatisfiable {
+            start: 0,
+            file_size: 0,
+        });
+    }
+
+    if !header_value.starts_with("bytes=") {
+        return Err(RangeError::MissingBytesPrefix);
+    }
+
+    let range_part = &header_value[6..]; // strip "bytes="
+    let dash_pos = range_part.find('-').ok_or(RangeError::MalformedRange)?;
+    let start_str = &range_part[..dash_pos];
+    let end_str = &range_part[dash_pos + 1..];
+
+    if start_str.is_empty() && end_str.is_empty() {
+        return Err(RangeError::MalformedRange);
+    }
+
+    let (start, end) = if start_str.is_empty() {
+        // Suffix range: "bytes=-N" means the last N bytes
+        let suffix = end_str
+            .parse::<u64>()
+            .map_err(|_| RangeError::NonNumericBound)?;
+        let start = file_size.saturating_sub(suffix);
+        (start, file_size - 1)
+    } else {
+        let start = start_str
+            .parse::<u64>()
+            .map_err(|_| RangeError::NonNumericBound)?;
+        let end = if end_str.is_empty() {
+            // Open-ended range: "bytes=N-"
+            file_size - 1
+        } else {
+            let e = end_str
+                .parse::<u64>()
+                .map_err(|_| RangeError::NonNumericBound)?;
+            std::cmp::min(e, file_size - 1)
+        };
+        (start, end)
+    };
+
+    if start > end || start >= file_size {
+        return Err(RangeError::RangeNotSatisfiable { start, file_size });
+    }
+
+    Ok((start, end))
+}
+
 /// Get a presigned token for streaming
 #[endpoint(
     tags("stream"),
@@ -170,49 +236,17 @@ async fn serve_mp4_file(file_path: &PathBuf, req: &Request, res: &mut Response) 
             }
         };
 
-        if !range_str.starts_with("bytes=") {
-            res.status_code(StatusCode::BAD_REQUEST);
-            return;
-        }
-
-        let range_part = &range_str[6..]; // Remove "bytes="
-        let parts: Vec<&str> = range_part.split('-').collect();
-
-        if parts.len() != 2 {
-            res.status_code(StatusCode::BAD_REQUEST);
-            return;
-        }
-
-        let start = if parts[0].is_empty() {
-            // Suffix range like "-500"
-            if let Ok(suffix) = parts[1].parse::<u64>() {
-                file_size.saturating_sub(suffix)
-            } else {
+        match parse_byte_range(range_str, file_size) {
+            Ok((start, end)) => (start, end, StatusCode::PARTIAL_CONTENT),
+            Err(RangeError::RangeNotSatisfiable { .. }) => {
+                res.status_code(StatusCode::RANGE_NOT_SATISFIABLE);
+                return;
+            }
+            Err(_) => {
                 res.status_code(StatusCode::BAD_REQUEST);
                 return;
             }
-        } else if let Ok(s) = parts[0].parse::<u64>() {
-            s
-        } else {
-            res.status_code(StatusCode::BAD_REQUEST);
-            return;
-        };
-
-        let end = if parts[1].is_empty() {
-            file_size - 1
-        } else if let Ok(e) = parts[1].parse::<u64>() {
-            std::cmp::min(e, file_size - 1)
-        } else {
-            res.status_code(StatusCode::BAD_REQUEST);
-            return;
-        };
-
-        if start > end || start >= file_size {
-            res.status_code(StatusCode::RANGE_NOT_SATISFIABLE);
-            return;
         }
-
-        (start, end, StatusCode::PARTIAL_CONTENT)
     } else {
         (0, file_size - 1, StatusCode::OK)
     };
@@ -277,4 +311,104 @@ async fn serve_mp4_file(file_path: &PathBuf, req: &Request, res: &mut Response) 
         .insert("ETag", format!("\"{}\"", file_size).parse().unwrap()); // Simple ETag based on file size
 
     res.body(salvo::http::body::ResBody::Once(bytes::Bytes::from(buffer)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_range() {
+        assert_eq!(parse_byte_range("bytes=0-499", 1000), Ok((0, 499)));
+    }
+
+    #[test]
+    fn test_range_end_at_last_byte() {
+        assert_eq!(parse_byte_range("bytes=0-999", 1000), Ok((0, 999)));
+    }
+
+    #[test]
+    fn test_open_ended_range() {
+        assert_eq!(parse_byte_range("bytes=1000-", 5000), Ok((1000, 4999)));
+    }
+
+    #[test]
+    fn test_suffix_range() {
+        assert_eq!(parse_byte_range("bytes=-500", 1000), Ok((500, 999)));
+    }
+
+    #[test]
+    fn test_suffix_range_larger_than_file_clamps_to_start() {
+        assert_eq!(parse_byte_range("bytes=-1500", 1000), Ok((0, 999)));
+    }
+
+    #[test]
+    fn test_start_greater_than_end_is_not_satisfiable() {
+        assert_eq!(
+            parse_byte_range("bytes=500-400", 1000),
+            Err(RangeError::RangeNotSatisfiable {
+                start: 500,
+                file_size: 1000
+            })
+        );
+    }
+
+    #[test]
+    fn test_start_beyond_file_size_is_not_satisfiable() {
+        assert_eq!(
+            parse_byte_range("bytes=2000-2500", 1000),
+            Err(RangeError::RangeNotSatisfiable {
+                start: 2000,
+                file_size: 1000
+            })
+        );
+    }
+
+    #[test]
+    fn test_end_beyond_file_size_is_clamped() {
+        assert_eq!(parse_byte_range("bytes=0-2000", 1000), Ok((0, 999)));
+    }
+
+    #[test]
+    fn test_missing_bytes_prefix() {
+        assert_eq!(
+            parse_byte_range("invalid=0-100", 1000),
+            Err(RangeError::MissingBytesPrefix)
+        );
+    }
+
+    #[test]
+    fn test_non_numeric_bounds() {
+        assert_eq!(
+            parse_byte_range("bytes=abc-def", 1000),
+            Err(RangeError::NonNumericBound)
+        );
+    }
+
+    #[test]
+    fn test_no_dash_is_malformed() {
+        assert_eq!(
+            parse_byte_range("bytes=0", 1000),
+            Err(RangeError::MalformedRange)
+        );
+    }
+
+    #[test]
+    fn test_empty_range_spec_is_malformed() {
+        assert_eq!(
+            parse_byte_range("bytes=", 1000),
+            Err(RangeError::MalformedRange)
+        );
+    }
+
+    #[test]
+    fn test_zero_file_size_is_not_satisfiable() {
+        assert_eq!(
+            parse_byte_range("bytes=0-0", 0),
+            Err(RangeError::RangeNotSatisfiable {
+                start: 0,
+                file_size: 0
+            })
+        );
+    }
 }
