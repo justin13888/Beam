@@ -549,15 +549,26 @@ impl IndexService for LocalIndexService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::domain::{CreateLibrary, Library, MediaFile};
+    use crate::repositories::admin_log::AdminLogRepository;
+    use crate::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use crate::repositories::file::MockFileRepository;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
     use crate::repositories::library::MockLibraryRepository;
+    use crate::repositories::library::in_memory::InMemoryLibraryRepository;
     use crate::repositories::movie::MockMovieRepository;
+    use crate::repositories::movie::in_memory::InMemoryMovieRepository;
     use crate::repositories::show::MockShowRepository;
+    use crate::repositories::show::in_memory::InMemoryShowRepository;
     use crate::repositories::stream::MockMediaStreamRepository;
+    use crate::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+    use crate::services::admin_log::LocalAdminLogService;
     use crate::services::admin_log::NoOpAdminLogService;
     use crate::services::hash::MockHashService;
     use crate::services::media_info::MockMediaInfoService;
+    use crate::services::notification::EventLevel;
     use crate::services::notification::InMemoryNotificationService;
+    use crate::utils::metadata::MetadataError;
     use crate::utils::metadata::VideoFileMetadata;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -829,5 +840,482 @@ mod tests {
         let result = service.process_new_file(&path, lib_id).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
+    }
+
+    // ============================
+    // SCAN LIBRARY INTEGRATION TESTS
+    // ============================
+
+    fn make_video_metadata() -> VideoFileMetadata {
+        VideoFileMetadata {
+            file_path: PathBuf::from("test"),
+            metadata: std::collections::HashMap::default(),
+            best_video_stream: None,
+            best_audio_stream: None,
+            best_subtitle_stream: None,
+            duration: 1_000_000,
+            streams: vec![],
+            format_name: "mp4".to_string(),
+            format_long_name: "MPEG-4".to_string(),
+            file_size: 1024,
+            bit_rate: 1000,
+            probe_score: 100,
+        }
+    }
+
+    async fn make_library_in_tempdir(
+        lib_repo: &InMemoryLibraryRepository,
+        dir: &TempDir,
+    ) -> Library {
+        lib_repo
+            .create(CreateLibrary {
+                name: "Test Library".to_string(),
+                root_path: dir.path().to_path_buf(),
+                description: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_empty() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 0);
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_new_video_file() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("movie.mp4");
+        std::fs::write(&file_path, b"fake video content").unwrap();
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Ok(12345));
+
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Ok(make_video_metadata()));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 1);
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Known);
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_new_non_video_file() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("notes.txt");
+        std::fs::write(&file_path, b"some text content").unwrap();
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 1);
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Unknown);
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_multiple_new_files() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        for name in &["alpha.mkv", "beta.mkv", "gamma.mkv"] {
+            std::fs::write(dir.path().join(name), b"fake video").unwrap();
+        }
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(3)
+            .returning(|_| Ok(99999));
+
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(3)
+            .returning(|_| Ok(make_video_metadata()));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 3);
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_changed_file() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        // Create a real file on disk (16 bytes)
+        let file_path = dir.path().join("movie.mp4");
+        std::fs::write(&file_path, b"new content size").unwrap();
+
+        // Seed the file repo with the same path but a different size
+        let existing = MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: file_path.clone(),
+            hash: 12345,
+            size_bytes: 999, // deliberately wrong size
+            mime_type: Some("video/mp4".to_string()),
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(existing.id, existing.clone());
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 0); // no new files added
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Changed);
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_removed_file() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        // Seed the file repo with a phantom file that doesn't exist on disk
+        let phantom = MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: dir.path().join("ghost.mp4"),
+            hash: 0,
+            size_bytes: 1024,
+            mime_type: None,
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(phantom.id, phantom.clone());
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 0); // no new files
+
+        // Phantom record must have been deleted
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_invalid_root_path() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let notification_svc = Arc::new(InMemoryNotificationService::new());
+
+        // Insert a library whose root_path does not exist on disk
+        let library = Library {
+            id: Uuid::new_v4(),
+            name: "Bad Library".to_string(),
+            root_path: PathBuf::from("/tmp/beam-nonexistent-xyzzy-12345"),
+            description: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_scan_started_at: None,
+            last_scan_finished_at: None,
+            last_scan_file_count: None,
+        };
+        lib_repo
+            .libraries
+            .lock()
+            .unwrap()
+            .insert(library.id, library.clone());
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            notification_svc.clone(),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert!(matches!(result, Err(IndexError::PathNotFound(_))));
+
+        // An error-level notification must have been published
+        let events = notification_svc.published_events();
+        assert!(events.iter().any(|e| matches!(e.level, EventLevel::Error)));
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_media_extraction_failure() {
+        // When media-info extraction fails, process_new_file still inserts the file
+        // with Unknown status and returns Ok(true), so added_count is incremented.
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("corrupt.mp4");
+        std::fs::write(&file_path, b"not real video data").unwrap();
+
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".to_string())));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 1);
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Unknown);
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_process_failure_sends_warning() {
+        // When process_new_file returns Err (e.g. hash fails), scan_library
+        // publishes a warning notification and continues rather than aborting.
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let notification_svc = Arc::new(InMemoryNotificationService::new());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("problem.mp4");
+        std::fs::write(&file_path, b"video data").unwrap();
+
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Ok(make_video_metadata()));
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Err(std::io::Error::other("hash io error")));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            notification_svc.clone(),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        // Scan should succeed overall; the failing file is not counted
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 0);
+
+        // A warning notification should have been published for the failed file
+        let events = notification_svc.published_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.level, EventLevel::Warning))
+        );
+
+        // The file must not have been added to the repo
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_updates_timestamps() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        assert!(library.last_scan_started_at.is_none());
+        assert!(library.last_scan_finished_at.is_none());
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service.scan_library(library.id.to_string()).await.unwrap();
+
+        let updated = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert!(updated.last_scan_started_at.is_some());
+        assert!(updated.last_scan_finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_admin_log_and_notifications() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let notification_svc = Arc::new(InMemoryNotificationService::new());
+        let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+        let admin_log_svc = Arc::new(LocalAdminLogService::new(
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+        ));
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            notification_svc.clone(),
+            admin_log_svc,
+        );
+
+        service.scan_library(library.id.to_string()).await.unwrap();
+
+        // At least one Info notification with LibraryScan category
+        let events = notification_svc.published_events();
+        assert!(events.iter().any(|e| {
+            matches!(e.level, EventLevel::Info) && matches!(e.category, EventCategory::LibraryScan)
+        }));
+
+        // At least one admin log entry with Info level and LibraryScan category
+        let logs = admin_log_repo.list(10, 0).await.unwrap();
+        assert!(!logs.is_empty());
+        assert!(logs.iter().any(|l| {
+            l.level == AdminLogLevel::Info && l.category == AdminLogCategory::LibraryScan
+        }));
     }
 }
