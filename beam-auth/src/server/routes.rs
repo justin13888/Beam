@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "routes_tests.rs"]
+mod routes_tests;
+
 use crate::utils::service::AuthService;
 use salvo::oapi::ToSchema;
 use salvo::prelude::*;
