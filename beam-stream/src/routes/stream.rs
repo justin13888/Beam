@@ -326,6 +326,10 @@ async fn serve_mp4_file(file_path: &PathBuf, req: &Request, res: &mut Response) 
 }
 
 #[cfg(test)]
+#[path = "stream_tests.rs"]
+mod stream_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
