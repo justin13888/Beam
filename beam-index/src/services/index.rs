@@ -573,6 +573,397 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    // ─── helpers ─────────────────────────────────────────────────────────────
+
+    fn make_classify_service() -> (
+        LocalIndexService,
+        Arc<InMemoryMovieRepository>,
+        Arc<InMemoryShowRepository>,
+    ) {
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let service = LocalIndexService::new(
+            Arc::new(InMemoryLibraryRepository::default()),
+            Arc::new(InMemoryFileRepository::default()),
+            movie_repo.clone(),
+            show_repo.clone(),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+        (service, movie_repo, show_repo)
+    }
+
+    // ─── classify_media_content: episode tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_classify_episode_standard_s01e02() {
+        let (service, _, show_repo) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let path = PathBuf::from("/media/Breaking Bad/The.Show.S01E02.mkv");
+
+        let content = service
+            .classify_media_content(&path, lib_id, Duration::from_secs(3600))
+            .await
+            .unwrap();
+
+        let episode_id = match content {
+            MediaFileContent::Episode { episode_id } => episode_id,
+            _ => panic!("expected Episode, got Movie"),
+        };
+
+        let episodes: Vec<_> = show_repo
+            .episodes
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].id, episode_id);
+        assert_eq!(episodes[0].episode_number, 2);
+
+        let seasons: Vec<_> = show_repo
+            .seasons
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(seasons.len(), 1);
+        assert_eq!(seasons[0].season_number, 1);
+
+        let shows: Vec<_> = show_repo.shows.lock().unwrap().values().cloned().collect();
+        assert_eq!(shows.len(), 1);
+        assert_eq!(shows[0].title, "Breaking Bad");
+    }
+
+    #[tokio::test]
+    async fn test_classify_episode_lowercase_pattern() {
+        let (service, _, show_repo) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let path = PathBuf::from("/media/My Show/show.s02e10.mp4");
+
+        let content = service
+            .classify_media_content(&path, lib_id, Duration::from_secs(1800))
+            .await
+            .unwrap();
+
+        assert!(matches!(content, MediaFileContent::Episode { .. }));
+
+        let episodes: Vec<_> = show_repo
+            .episodes
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].episode_number, 10);
+
+        let seasons: Vec<_> = show_repo
+            .seasons
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(seasons[0].season_number, 2);
+    }
+
+    #[tokio::test]
+    async fn test_classify_episode_with_resolution_tag() {
+        let (service, _, show_repo) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let path = PathBuf::from("/shows/Series/Series S01E01 720p.mkv");
+
+        let content = service
+            .classify_media_content(&path, lib_id, Duration::from_secs(2700))
+            .await
+            .unwrap();
+
+        assert!(matches!(content, MediaFileContent::Episode { .. }));
+
+        let episodes: Vec<_> = show_repo
+            .episodes
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(episodes[0].episode_number, 1);
+
+        let seasons: Vec<_> = show_repo
+            .seasons
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(seasons[0].season_number, 1);
+    }
+
+    #[tokio::test]
+    async fn test_classify_episode_show_title_from_parent_dir() {
+        let (service, _, show_repo) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let path = PathBuf::from("/media/Breaking Bad/episode.S03E05.mkv");
+
+        service
+            .classify_media_content(&path, lib_id, Duration::from_secs(3000))
+            .await
+            .unwrap();
+
+        let shows: Vec<_> = show_repo.shows.lock().unwrap().values().cloned().collect();
+        assert_eq!(shows.len(), 1);
+        assert_eq!(shows[0].title, "Breaking Bad");
+    }
+
+    #[tokio::test]
+    async fn test_classify_episode_existing_show_reused() {
+        let (service, _, show_repo) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let duration = Duration::from_secs(3600);
+
+        // First call — creates the show
+        service
+            .classify_media_content(
+                &PathBuf::from("/media/My Show/My.Show.S01E01.mkv"),
+                lib_id,
+                duration,
+            )
+            .await
+            .unwrap();
+
+        // Second call with same parent dir name — must reuse the existing show
+        service
+            .classify_media_content(
+                &PathBuf::from("/media/My Show/My.Show.S01E02.mkv"),
+                lib_id,
+                duration,
+            )
+            .await
+            .unwrap();
+
+        let shows: Vec<_> = show_repo.shows.lock().unwrap().values().cloned().collect();
+        assert_eq!(shows.len(), 1, "show must not be duplicated");
+    }
+
+    #[tokio::test]
+    async fn test_classify_episode_new_season_created() {
+        let (service, _, show_repo) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let duration = Duration::from_secs(3600);
+
+        service
+            .classify_media_content(
+                &PathBuf::from("/media/Show/ep.S01E01.mkv"),
+                lib_id,
+                duration,
+            )
+            .await
+            .unwrap();
+
+        service
+            .classify_media_content(
+                &PathBuf::from("/media/Show/ep.S02E01.mkv"),
+                lib_id,
+                duration,
+            )
+            .await
+            .unwrap();
+
+        let mut season_nums: Vec<u32> = show_repo
+            .seasons
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.season_number)
+            .collect();
+        season_nums.sort_unstable();
+        assert_eq!(season_nums, vec![1, 2]);
+    }
+
+    // ─── classify_media_content: movie tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_classify_movie_simple_title() {
+        let (service, movie_repo, _) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let path = PathBuf::from("/media/movies/Avatar.mp4");
+
+        let content = service
+            .classify_media_content(&path, lib_id, Duration::from_secs(9600))
+            .await
+            .unwrap();
+
+        let entry_id = match content {
+            MediaFileContent::Movie { movie_entry_id } => movie_entry_id,
+            _ => panic!("expected Movie, got Episode"),
+        };
+
+        let entries: Vec<_> = movie_repo
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, entry_id);
+        assert!(entries[0].is_primary);
+
+        let movies: Vec<_> = movie_repo
+            .movies
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(movies.len(), 1);
+        assert_eq!(movies[0].title, "Avatar");
+    }
+
+    #[tokio::test]
+    async fn test_classify_movie_with_year() {
+        let (service, movie_repo, _) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let path = PathBuf::from("/media/The.Matrix.Reloaded.2003.mkv");
+
+        let content = service
+            .classify_media_content(&path, lib_id, Duration::from_secs(7200))
+            .await
+            .unwrap();
+
+        assert!(matches!(content, MediaFileContent::Movie { .. }));
+
+        let movies: Vec<_> = movie_repo
+            .movies
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(movies.len(), 1);
+        assert_eq!(movies[0].title, "The.Matrix.Reloaded.2003");
+    }
+
+    #[tokio::test]
+    async fn test_classify_movie_with_parentheses() {
+        let (service, movie_repo, _) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let path = PathBuf::from("/media/movie (2024).avi");
+
+        let content = service
+            .classify_media_content(&path, lib_id, Duration::from_secs(6000))
+            .await
+            .unwrap();
+
+        assert!(matches!(content, MediaFileContent::Movie { .. }));
+
+        let movies: Vec<_> = movie_repo
+            .movies
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(movies.len(), 1);
+        assert_eq!(movies[0].title, "movie (2024)");
+    }
+
+    #[tokio::test]
+    async fn test_classify_movie_existing_reused() {
+        let (service, movie_repo, _) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        let duration = Duration::from_secs(7200);
+
+        // First call — creates the movie
+        service
+            .classify_media_content(&PathBuf::from("/media/Avatar.mp4"), lib_id, duration)
+            .await
+            .unwrap();
+
+        // Second call with the same title — must reuse the existing movie record
+        service
+            .classify_media_content(&PathBuf::from("/backup/Avatar.mp4"), lib_id, duration)
+            .await
+            .unwrap();
+
+        let movies: Vec<_> = movie_repo
+            .movies
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(movies.len(), 1, "movie must not be duplicated");
+
+        // Two distinct entries should exist (one per file path)
+        let entries: Vec<_> = movie_repo
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert!(entry.is_primary);
+        }
+    }
+
+    // ─── classify_media_content: edge cases ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_classify_empty_file_stem_falls_to_movie() {
+        let (service, movie_repo, _) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        // Root path has no file-stem component — file_stem() returns None → empty string
+        let path = PathBuf::from("/");
+
+        let content = service
+            .classify_media_content(&path, lib_id, Duration::from_secs(100))
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(content, MediaFileContent::Movie { .. }),
+            "path with no file stem should fall back to Movie"
+        );
+
+        let movies: Vec<_> = movie_repo
+            .movies
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(movies.len(), 1);
+        assert_eq!(movies[0].title, "");
+    }
+
+    #[tokio::test]
+    async fn test_classify_episode_no_parent_dir_uses_unknown_show() {
+        let (service, _, show_repo) = make_classify_service();
+        let lib_id = Uuid::new_v4();
+        // Bare filename with no directory component; parent() → Some("") → file_name() → None
+        let path = PathBuf::from("S01E01.mkv");
+
+        let content = service
+            .classify_media_content(&path, lib_id, Duration::from_secs(3600))
+            .await
+            .unwrap();
+
+        assert!(matches!(content, MediaFileContent::Episode { .. }));
+
+        let shows: Vec<_> = show_repo.shows.lock().unwrap().values().cloned().collect();
+        assert_eq!(shows.len(), 1);
+        assert_eq!(shows[0].title, "Unknown Show");
+    }
+
     #[tokio::test]
     async fn test_process_file_movie_success() {
         let mock_library_repo = MockLibraryRepository::new();
