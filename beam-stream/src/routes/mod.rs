@@ -17,8 +17,8 @@ use crate::state::AppState;
 fn rest_routes() -> Router {
     Router::new()
         .push(Router::with_path("health").get(health_check))
-        .push(Router::with_path("stream/<id>/token").post(get_stream_token))
-        .push(Router::with_path("stream/mp4/<id>").get(stream_mp4))
+        .push(Router::with_path("stream/{id}/token").post(get_stream_token))
+        .push(Router::with_path("stream/mp4/{id}").get(stream_mp4))
         .push(Router::with_path("auth").push(beam_auth::server::auth_routes()))
 }
 
