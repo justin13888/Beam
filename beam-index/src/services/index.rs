@@ -91,7 +91,7 @@ impl LocalIndexService {
     }
 
     /// Helper to extract and insert media streams for a file
-    async fn insert_media_streams(
+    pub(crate) async fn insert_media_streams(
         &self,
         file_id: Uuid,
         metadata: &VideoFileMetadata,
@@ -568,8 +568,20 @@ mod tests {
     use crate::services::media_info::MockMediaInfoService;
     use crate::services::notification::EventLevel;
     use crate::services::notification::InMemoryNotificationService;
+    use crate::utils::color::{
+        ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
+        PixelFormat,
+    };
+    use crate::utils::format::{ChannelLayout, Disposition, SampleFormat};
+    use crate::utils::media::{CodecId, Discard};
     use crate::utils::metadata::MetadataError;
-    use crate::utils::metadata::VideoFileMetadata;
+    use crate::utils::metadata::StreamMetadata as UtilStreamMetadata;
+    use crate::utils::metadata::{
+        AudioMetadata, AudioStreamMetadata as UtilAudioStream,
+        SubtitleStreamMetadata as UtilSubtitleStream, VideoFileMetadata, VideoMetadata,
+        VideoStreamMetadata as UtilVideoStream,
+    };
+    use num::rational::Ratio;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -594,6 +606,398 @@ mod tests {
             Arc::new(NoOpAdminLogService),
         );
         (service, movie_repo, show_repo)
+    }
+
+    fn make_service_with_stream_repo(
+        stream_repo: Arc<InMemoryMediaStreamRepository>,
+    ) -> LocalIndexService {
+        LocalIndexService::new(
+            Arc::new(MockLibraryRepository::new()),
+            Arc::new(MockFileRepository::new()),
+            Arc::new(MockMovieRepository::new()),
+            Arc::new(MockShowRepository::new()),
+            stream_repo,
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        )
+    }
+
+    fn make_video_stream(
+        index: usize,
+        width: u32,
+        height: u32,
+        bit_rate: usize,
+        codec_name: &str,
+        frame_rate: Option<Ratio<i32>>,
+    ) -> UtilStreamMetadata {
+        UtilStreamMetadata::Video(UtilVideoStream {
+            index,
+            time_base: Ratio::new(1, 1000),
+            start_time: 0,
+            duration: 1_000_000,
+            frames: 0,
+            disposition: Disposition::default(),
+            discard: Discard::Default,
+            rate: frame_rate,
+            codec_id: CodecId::H264,
+            video: VideoMetadata {
+                bit_rate,
+                max_rate: 0,
+                delay: 0,
+                width,
+                height,
+                format: PixelFormat::None,
+                has_b_frames: false,
+                aspect_ratio: Ratio::new(16, 9),
+                color_space: ColorSpace::BT709,
+                color_range: ColorRange::Unspecified,
+                color_primaries: ColorPrimaries::BT709,
+                color_transfer_characteristic: ColorTransferCharacteristic::BT709,
+                chroma_location: ChromaLocation::Unspecified,
+                references: 0,
+                intra_dc_precision: 0,
+                profile: "Main".to_string(),
+                level: "4.0".to_string(),
+                codec_name: codec_name.to_string(),
+            },
+            metadata: std::collections::HashMap::new(),
+        })
+    }
+
+    fn make_audio_stream(
+        index: usize,
+        language: &str,
+        title: &str,
+        channels: u16,
+        sample_rate: u32,
+        bit_rate: usize,
+        codec_name: &str,
+    ) -> UtilStreamMetadata {
+        UtilStreamMetadata::Audio(UtilAudioStream {
+            index,
+            time_base: Ratio::new(1, 1000),
+            start_time: 0,
+            duration: 1_000_000,
+            frames: 0,
+            disposition: Disposition::default(),
+            discard: Discard::Default,
+            rate: None,
+            codec_id: CodecId::AAC,
+            audio: AudioMetadata {
+                bit_rate,
+                max_rate: 0,
+                delay: 0,
+                rate: sample_rate,
+                channels,
+                format: SampleFormat::None,
+                frames: 0,
+                align: 0,
+                channel_layout: ChannelLayout {
+                    channels,
+                    description: None,
+                },
+                codec_name: codec_name.to_string(),
+                profile: "LC".to_string(),
+                title: title.to_string(),
+                language: language.to_string(),
+            },
+            metadata: std::collections::HashMap::new(),
+        })
+    }
+
+    fn make_subtitle_stream(
+        index: usize,
+        language: Option<&str>,
+        title: Option<&str>,
+    ) -> UtilStreamMetadata {
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(lang) = language {
+            metadata.insert("language".to_string(), lang.to_string());
+        }
+        if let Some(t) = title {
+            metadata.insert("title".to_string(), t.to_string());
+        }
+        UtilStreamMetadata::Subtitle(UtilSubtitleStream {
+            index,
+            time_base: Ratio::new(1, 1000),
+            start_time: 0,
+            duration: 1_000_000,
+            disposition: Disposition::default(),
+            discard: Discard::Default,
+            codec_id: CodecId::SUBRIP,
+            metadata,
+        })
+    }
+
+    fn make_stream_file_metadata(streams: Vec<UtilStreamMetadata>) -> VideoFileMetadata {
+        VideoFileMetadata {
+            file_path: PathBuf::from("test.mp4"),
+            metadata: Default::default(),
+            best_video_stream: None,
+            best_audio_stream: None,
+            best_subtitle_stream: None,
+            duration: 1_000_000,
+            streams,
+            format_name: "mp4".to_string(),
+            format_long_name: "MPEG-4".to_string(),
+            file_size: 1024,
+            bit_rate: 1000,
+            probe_score: 100,
+        }
+    }
+
+    // ── insert_media_streams unit tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_insert_video_stream_fields() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![make_video_stream(
+            0,
+            1920,
+            1080,
+            5_000_000,
+            "h264",
+            Some(Ratio::new(30, 1)),
+        )]);
+
+        let result = service.insert_media_streams(file_id, &metadata).await;
+        assert_eq!(result.unwrap(), 1);
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        assert_eq!(streams.len(), 1);
+
+        let s = &streams[0];
+        assert_eq!(
+            s.stream_type,
+            crate::models::domain::stream::StreamType::Video
+        );
+        assert_eq!(s.codec, "h264");
+        assert_eq!(s.index, 0);
+
+        if let crate::models::domain::stream::StreamMetadata::Video(v) = &s.metadata {
+            assert_eq!(v.width, 1920);
+            assert_eq!(v.height, 1080);
+            assert_eq!(v.frame_rate, Some(30.0));
+            assert_eq!(v.bit_rate, Some(5_000_000));
+        } else {
+            panic!("expected Video metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_audio_stream_with_language() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![make_audio_stream(
+            0, "eng", "English", 2, 48_000, 128_000, "aac",
+        )]);
+
+        let result = service.insert_media_streams(file_id, &metadata).await;
+        assert_eq!(result.unwrap(), 1);
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        assert_eq!(streams.len(), 1);
+
+        let s = &streams[0];
+        assert_eq!(
+            s.stream_type,
+            crate::models::domain::stream::StreamType::Audio
+        );
+        assert_eq!(s.codec, "aac");
+
+        if let crate::models::domain::stream::StreamMetadata::Audio(a) = &s.metadata {
+            assert_eq!(a.language, Some("eng".to_string()));
+        } else {
+            panic!("expected Audio metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_audio_stream_empty_language_becomes_none() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![make_audio_stream(
+            0, "", "", 2, 48_000, 128_000, "aac",
+        )]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        if let crate::models::domain::stream::StreamMetadata::Audio(a) = &streams[0].metadata {
+            assert_eq!(a.language, None);
+            assert_eq!(a.title, None);
+        } else {
+            panic!("expected Audio metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_audio_stream_title_populated_or_none() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![
+            make_audio_stream(0, "eng", "Director Commentary", 2, 48_000, 128_000, "aac"),
+            make_audio_stream(1, "eng", "", 2, 48_000, 128_000, "aac"),
+        ]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        assert_eq!(streams.len(), 2);
+
+        if let crate::models::domain::stream::StreamMetadata::Audio(a) = &streams[0].metadata {
+            assert_eq!(a.title, Some("Director Commentary".to_string()));
+        } else {
+            panic!("expected Audio metadata");
+        }
+        if let crate::models::domain::stream::StreamMetadata::Audio(a) = &streams[1].metadata {
+            assert_eq!(a.title, None);
+        } else {
+            panic!("expected Audio metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_audio_stream_channels_and_sample_rate() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![make_audio_stream(
+            0, "eng", "", 6, 48_000, 448_000, "ac3",
+        )]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        if let crate::models::domain::stream::StreamMetadata::Audio(a) = &streams[0].metadata {
+            assert_eq!(a.channels, 6);
+            assert_eq!(a.sample_rate, 48_000);
+        } else {
+            panic!("expected Audio metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_subtitle_stream_fields() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![make_subtitle_stream(
+            0,
+            Some("eng"),
+            Some("English SDH"),
+        )]);
+
+        let result = service.insert_media_streams(file_id, &metadata).await;
+        assert_eq!(result.unwrap(), 1);
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        assert_eq!(streams.len(), 1);
+
+        let s = &streams[0];
+        assert_eq!(
+            s.stream_type,
+            crate::models::domain::stream::StreamType::Subtitle
+        );
+
+        if let crate::models::domain::stream::StreamMetadata::Subtitle(sub) = &s.metadata {
+            assert_eq!(sub.language, Some("eng".to_string()));
+            assert_eq!(sub.title, Some("English SDH".to_string()));
+        } else {
+            panic!("expected Subtitle metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_mixed_streams_all_inserted() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![
+            make_video_stream(0, 1920, 1080, 5_000_000, "h264", Some(Ratio::new(24, 1))),
+            make_audio_stream(1, "eng", "English", 2, 48_000, 192_000, "aac"),
+            make_audio_stream(2, "fra", "French", 2, 48_000, 128_000, "aac"),
+            make_subtitle_stream(3, Some("eng"), Some("English")),
+        ]);
+
+        let result = service.insert_media_streams(file_id, &metadata).await;
+        assert_eq!(result.unwrap(), 4);
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        assert_eq!(streams.len(), 4);
+
+        use crate::models::domain::stream::StreamType;
+        assert_eq!(streams[0].stream_type, StreamType::Video);
+        assert_eq!(streams[1].stream_type, StreamType::Audio);
+        assert_eq!(streams[2].stream_type, StreamType::Audio);
+        assert_eq!(streams[3].stream_type, StreamType::Subtitle);
+    }
+
+    #[tokio::test]
+    async fn test_insert_empty_streams_returns_zero() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![]);
+
+        let result = service.insert_media_streams(file_id, &metadata).await;
+        assert_eq!(result.unwrap(), 0);
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        assert!(streams.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_insert_streams_db_error_propagates() {
+        let mut mock_stream_repo = MockMediaStreamRepository::new();
+        mock_stream_repo
+            .expect_insert_streams()
+            .times(1)
+            .returning(|_| Err(sea_orm::DbErr::Custom("simulated DB failure".to_string())));
+
+        let service = LocalIndexService::new(
+            Arc::new(MockLibraryRepository::new()),
+            Arc::new(MockFileRepository::new()),
+            Arc::new(MockMovieRepository::new()),
+            Arc::new(MockShowRepository::new()),
+            Arc::new(mock_stream_repo),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let file_id = Uuid::new_v4();
+        let metadata = make_stream_file_metadata(vec![make_video_stream(
+            0, 1280, 720, 2_000_000, "h264", None,
+        )]);
+
+        let result = service.insert_media_streams(file_id, &metadata).await;
+        assert!(matches!(result, Err(IndexError::Db(_))));
     }
 
     // ─── classify_media_content: episode tests ────────────────────────────────
