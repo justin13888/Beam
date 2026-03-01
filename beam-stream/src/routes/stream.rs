@@ -140,7 +140,7 @@ pub async fn get_stream_token(req: &mut Request, depot: &mut Depot, res: &mut Re
     tags("media"),
     parameters(
         ("id" = String, description = "Stream ID"),
-        ("token" = String, description = "Presigned stream token")
+        ("Authorization" = String, Header, description = "Bearer <stream token>")
     ),
     responses(
         (status_code = 200, description = "Media stream"),
@@ -154,7 +154,16 @@ pub async fn get_stream_token(req: &mut Request, depot: &mut Depot, res: &mut Re
 pub async fn stream_mp4(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<AppState>().unwrap();
     let id: String = req.param::<String>("id").unwrap_or_default();
-    let token: String = req.query::<String>("token").unwrap_or_default();
+
+    let token = if let Some(auth_header) = req.headers().get("Authorization")
+        && let Ok(auth_str) = auth_header.to_str()
+        && auth_str.starts_with("Bearer ")
+    {
+        auth_str[7..].to_string()
+    } else {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        return;
+    };
 
     // Validate stream token
     match state.services.auth.verify_stream_token(&token) {
@@ -329,6 +338,8 @@ async fn serve_mp4_file(file_path: &PathBuf, req: &Request, res: &mut Response) 
 mod tests {
     use super::*;
 
+    // ── parse_byte_range unit tests ───────────────────────────────────────
+
     #[test]
     fn test_basic_range() {
         assert_eq!(parse_byte_range("bytes=0-499", 1000), Ok((0, 499)));
@@ -422,5 +433,278 @@ mod tests {
                 file_size: 0
             })
         );
+    }
+
+    // ── stream_mp4 handler tests ──────────────────────────────────────────
+
+    mod handler_tests {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        use beam_auth::utils::{
+            repository::in_memory::InMemoryUserRepository,
+            service::{AuthService, LocalAuthService},
+            session_store::in_memory::InMemorySessionStore,
+        };
+        use salvo::prelude::*;
+        use salvo::test::TestClient;
+
+        use crate::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
+        use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
+        use crate::services::hash::HashService;
+        use crate::services::library::{LibraryError, LibraryService};
+        use crate::services::metadata::{
+            MediaConnection, MediaFilter, MediaSearchFilters, MediaSortField, MetadataError,
+            MetadataService, PageInfo, SortOrder,
+        };
+        use crate::services::notification::InMemoryNotificationService;
+        use crate::services::transcode::TranscodeService;
+        use crate::state::{AppServices, AppState};
+
+        // ── Stubs ─────────────────────────────────────────────────────────
+
+        #[derive(Debug)]
+        struct StubHashService;
+
+        #[async_trait::async_trait]
+        impl HashService for StubHashService {
+            fn hash_sync(&self, _: &std::path::Path) -> std::io::Result<u64> {
+                unimplemented!("not called in stream handler tests")
+            }
+            async fn hash_async(&self, _: PathBuf) -> std::io::Result<u64> {
+                unimplemented!("not called in stream handler tests")
+            }
+        }
+
+        #[derive(Debug)]
+        struct StubMetadataService;
+
+        #[async_trait::async_trait]
+        impl MetadataService for StubMetadataService {
+            async fn get_media_metadata(&self, _: &str) -> Option<crate::models::MediaMetadata> {
+                None
+            }
+            async fn search_media(
+                &self,
+                _: Option<u32>,
+                _: Option<String>,
+                _: Option<u32>,
+                _: Option<String>,
+                _: MediaSortField,
+                _: SortOrder,
+                _: MediaSearchFilters,
+            ) -> MediaConnection {
+                MediaConnection {
+                    edges: vec![],
+                    page_info: PageInfo {
+                        has_next_page: false,
+                        has_previous_page: false,
+                        start_cursor: None,
+                        end_cursor: None,
+                    },
+                }
+            }
+            async fn refresh_metadata(&self, _: MediaFilter) -> Result<(), MetadataError> {
+                Ok(())
+            }
+        }
+
+        #[derive(Debug)]
+        struct StubTranscodeService;
+
+        #[async_trait::async_trait]
+        impl TranscodeService for StubTranscodeService {
+            async fn generate_mp4_cache(
+                &self,
+                _: &std::path::Path,
+                _: &std::path::Path,
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                unimplemented!("not called in stream handler tests")
+            }
+        }
+
+        /// Library stub that always returns `Ok(None)` for file lookups so token
+        /// validation is exercised without touching the filesystem.
+        #[derive(Debug)]
+        struct NotFoundLibraryService;
+
+        #[async_trait::async_trait]
+        impl LibraryService for NotFoundLibraryService {
+            async fn get_libraries(
+                &self,
+                _: String,
+            ) -> Result<Vec<crate::models::Library>, LibraryError> {
+                unimplemented!()
+            }
+            async fn get_library_by_id(
+                &self,
+                _: String,
+            ) -> Result<Option<crate::models::Library>, LibraryError> {
+                unimplemented!()
+            }
+            async fn get_library_files(
+                &self,
+                _: String,
+            ) -> Result<Vec<crate::models::LibraryFile>, LibraryError> {
+                unimplemented!()
+            }
+            async fn create_library(
+                &self,
+                _: String,
+                _: String,
+            ) -> Result<crate::models::Library, LibraryError> {
+                unimplemented!()
+            }
+            async fn scan_library(&self, _: String) -> Result<u32, LibraryError> {
+                unimplemented!()
+            }
+            async fn delete_library(&self, _: String) -> Result<bool, LibraryError> {
+                unimplemented!()
+            }
+            async fn get_file_by_id(
+                &self,
+                _: String,
+            ) -> Result<Option<crate::models::LibraryFile>, LibraryError> {
+                Ok(None)
+            }
+        }
+
+        // ── Test helpers ──────────────────────────────────────────────────
+
+        const TEST_JWT_SECRET: &str = "test-stream-jwt-secret";
+        const TEST_FILE_ID: &str = "test-file-id-123";
+
+        struct TestContext {
+            service: Service,
+            auth: Arc<LocalAuthService>,
+        }
+
+        fn build_test_service() -> TestContext {
+            let session_store = Arc::new(InMemorySessionStore::default());
+            let user_repo = Arc::new(InMemoryUserRepository::default());
+            let auth = Arc::new(LocalAuthService::new(
+                user_repo.clone(),
+                session_store,
+                TEST_JWT_SECRET.to_string(),
+            ));
+
+            let notification = Arc::new(InMemoryNotificationService::new());
+            let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(
+                Arc::new(InMemoryAdminLogRepository::default()),
+            ));
+
+            let services = AppServices {
+                auth: auth.clone(),
+                hash: Arc::new(StubHashService),
+                library: Arc::new(NotFoundLibraryService),
+                metadata: Arc::new(StubMetadataService),
+                transcode: Arc::new(StubTranscodeService),
+                notification,
+                admin_log,
+                user_repo: user_repo.clone(),
+            };
+
+            let config = crate::config::ServerConfig {
+                bind_address: "0.0.0.0:8000".to_string(),
+                server_url: "http://localhost:8000".to_string(),
+                enable_metrics: false,
+                video_dir: PathBuf::from("/tmp"),
+                cache_dir: PathBuf::from("/tmp"),
+                database_url: "postgres://unused:unused@localhost/unused".to_string(),
+                jwt_secret: TEST_JWT_SECRET.to_string(),
+                redis_url: "redis://localhost".to_string(),
+                beam_index_url: "http://localhost:50051".to_string(),
+            };
+
+            let state = AppState::new(config, services);
+            let router = Router::new()
+                .hoop(salvo::affix_state::inject(state))
+                .push(Router::with_path("stream/mp4/{id}").get(super::super::stream_mp4));
+
+            TestContext {
+                service: Service::new(router),
+                auth,
+            }
+        }
+
+        fn stream_url(id: &str) -> String {
+            format!("http://localhost/stream/mp4/{id}")
+        }
+
+        // ── Tests ─────────────────────────────────────────────────────────
+
+        /// No Authorization header → 401.
+        #[tokio::test]
+        async fn test_rejects_missing_auth_header() {
+            let ctx = build_test_service();
+            let response = TestClient::get(stream_url(TEST_FILE_ID))
+                .send(&ctx.service)
+                .await;
+            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+        }
+
+        /// Token supplied as a query parameter (old API) → 401.
+        #[tokio::test]
+        async fn test_rejects_query_param_token() {
+            let ctx = build_test_service();
+            let token = ctx
+                .auth
+                .create_stream_token("user-1", TEST_FILE_ID)
+                .expect("token creation should succeed");
+            let url = format!("{}?token={}", stream_url(TEST_FILE_ID), token);
+            let response = TestClient::get(url).send(&ctx.service).await;
+            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+        }
+
+        /// Bearer token for a different stream ID → 401 (token/id mismatch).
+        #[tokio::test]
+        async fn test_rejects_mismatched_stream_id() {
+            let ctx = build_test_service();
+            let token = ctx
+                .auth
+                .create_stream_token("user-1", "different-file-id")
+                .expect("token creation should succeed");
+            let response = TestClient::get(stream_url(TEST_FILE_ID))
+                .bearer_auth(token)
+                .send(&ctx.service)
+                .await;
+            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+        }
+
+        /// Token signed with a different secret → 401.
+        #[tokio::test]
+        async fn test_rejects_tampered_token() {
+            let ctx = build_test_service();
+            let rogue_auth = LocalAuthService::new(
+                Arc::new(InMemoryUserRepository::default()),
+                Arc::new(InMemorySessionStore::default()),
+                "different-secret".to_string(),
+            );
+            let token = rogue_auth
+                .create_stream_token("user-1", TEST_FILE_ID)
+                .expect("token creation should succeed");
+            let response = TestClient::get(stream_url(TEST_FILE_ID))
+                .bearer_auth(token)
+                .send(&ctx.service)
+                .await;
+            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+        }
+
+        /// A valid Bearer token passes auth; the file not found in the library
+        /// returns 404 — confirming the handler advanced past token validation.
+        #[tokio::test]
+        async fn test_valid_bearer_token_passes_auth() {
+            let ctx = build_test_service();
+            let token = ctx
+                .auth
+                .create_stream_token("user-1", TEST_FILE_ID)
+                .expect("token creation should succeed");
+            let response = TestClient::get(stream_url(TEST_FILE_ID))
+                .bearer_auth(token)
+                .send(&ctx.service)
+                .await;
+            // Token is valid → auth passes; library returns None → 404 (not 401).
+            assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
+        }
     }
 }
