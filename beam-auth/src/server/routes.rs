@@ -1,7 +1,11 @@
+#[cfg(test)]
+#[path = "routes_tests.rs"]
+mod routes_tests;
+
 use crate::utils::service::AuthService;
 use salvo::oapi::ToSchema;
 use salvo::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -231,10 +235,123 @@ pub async fn logout(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     }
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct LogoutAllResponse {
+    /// Number of sessions that were revoked
+    pub revoked: u64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub device_hash: String,
+    pub ip: String,
+    pub created_at: i64,
+    pub last_active: i64,
+}
+
+fn extract_bearer_token(req: &Request) -> Option<String> {
+    req.headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| s.starts_with("Bearer "))
+        .map(|s| s[7..].to_string())
+}
+
+/// Logout all active sessions for the current user
+#[endpoint(
+    tags("auth"),
+    responses(
+        (status_code = 200, body = LogoutAllResponse, description = "All sessions revoked"),
+        (status_code = 401, description = "Invalid or missing JWT")
+    )
+)]
+pub async fn logout_all(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
+
+    let token = match extract_bearer_token(req) {
+        Some(t) => t,
+        None => {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            return;
+        }
+    };
+
+    let user = match auth.verify_token(&token).await {
+        Ok(u) => u,
+        Err(_) => {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            return;
+        }
+    };
+
+    match auth.logout_all(&user.user_id).await {
+        Ok(revoked) => {
+            res.status_code(StatusCode::OK);
+            res.render(Json(LogoutAllResponse { revoked }));
+        }
+        Err(err) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Text::Plain(err.to_string()));
+        }
+    }
+}
+
+/// List all active sessions for the current user
+#[endpoint(
+    tags("auth"),
+    responses(
+        (status_code = 200, body = Vec<SessionSummary>, description = "Active sessions"),
+        (status_code = 401, description = "Invalid or missing JWT")
+    )
+)]
+pub async fn list_sessions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let auth = depot.obtain::<Arc<dyn AuthService>>().unwrap().clone();
+
+    let token = match extract_bearer_token(req) {
+        Some(t) => t,
+        None => {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            return;
+        }
+    };
+
+    let user = match auth.verify_token(&token).await {
+        Ok(u) => u,
+        Err(_) => {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            return;
+        }
+    };
+
+    match auth.get_sessions(&user.user_id).await {
+        Ok(sessions) => {
+            let summaries: Vec<SessionSummary> = sessions
+                .into_iter()
+                .map(|(session_id, data)| SessionSummary {
+                    session_id,
+                    device_hash: data.device_hash,
+                    ip: data.ip,
+                    created_at: data.created_at,
+                    last_active: data.last_active,
+                })
+                .collect();
+            res.status_code(StatusCode::OK);
+            res.render(Json(summaries));
+        }
+        Err(err) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Text::Plain(err.to_string()));
+        }
+    }
+}
+
 pub fn auth_routes() -> Router {
     Router::new()
         .push(Router::with_path("register").post(register))
         .push(Router::with_path("login").post(login))
         .push(Router::with_path("refresh").post(refresh))
         .push(Router::with_path("logout").post(logout))
+        .push(Router::with_path("logout-all").post(logout_all))
+        .push(Router::with_path("sessions").get(list_sessions))
 }
