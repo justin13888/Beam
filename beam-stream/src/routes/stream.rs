@@ -84,7 +84,7 @@ pub(crate) fn parse_byte_range(
         ("id" = String, description = "Stream ID")
     ),
     responses(
-        (status_code = 200, description = "Stream token"),
+        (status_code = 200, description = "Stream token", body = StreamTokenResponse),
         (status_code = 401, description = "Unauthorized"),
         (status_code = 404, description = "Stream not found")
     )
