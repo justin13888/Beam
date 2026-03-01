@@ -1935,6 +1935,11 @@ mod tests {
             .unwrap()
             .insert(library.id, library.clone());
 
+        let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+        let admin_log_svc = Arc::new(LocalAdminLogService::new(
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+        ));
+
         let service = LocalIndexService::new(
             lib_repo.clone(),
             Arc::new(InMemoryFileRepository::default()),
@@ -1944,7 +1949,7 @@ mod tests {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             notification_svc.clone(),
-            Arc::new(NoOpAdminLogService),
+            admin_log_svc,
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -1952,7 +1957,15 @@ mod tests {
 
         // An error-level notification must have been published
         let events = notification_svc.published_events();
-        assert!(events.iter().any(|e| matches!(e.level, EventLevel::Error)));
+        assert!(events.iter().any(|e| {
+            matches!(e.level, EventLevel::Error) && matches!(e.category, EventCategory::LibraryScan)
+        }));
+
+        // Admin log must also record an error-level LibraryScan entry
+        let logs = admin_log_repo.list(10, 0).await.unwrap();
+        assert!(logs.iter().any(|l| {
+            l.level == AdminLogLevel::Error && l.category == AdminLogCategory::LibraryScan
+        }));
     }
 
     #[tokio::test]
@@ -2018,6 +2031,11 @@ mod tests {
             .times(1)
             .returning(|_| Err(std::io::Error::other("hash io error")));
 
+        let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+        let admin_log_svc = Arc::new(LocalAdminLogService::new(
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+        ));
+
         let service = LocalIndexService::new(
             lib_repo.clone(),
             file_repo.clone(),
@@ -2027,7 +2045,7 @@ mod tests {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             notification_svc.clone(),
-            Arc::new(NoOpAdminLogService),
+            admin_log_svc,
         );
 
         // Scan should succeed overall; the failing file is not counted
@@ -2036,11 +2054,19 @@ mod tests {
 
         // A warning notification should have been published for the failed file
         let events = notification_svc.published_events();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e.level, EventLevel::Warning))
-        );
+        assert!(events.iter().any(|e| {
+            matches!(e.level, EventLevel::Warning)
+                && matches!(e.category, EventCategory::LibraryScan)
+        }));
+
+        // Admin log must also have a warning entry mentioning the failed file path
+        let logs = admin_log_repo.list(10, 0).await.unwrap();
+        let file_path_str = file_path.display().to_string();
+        assert!(logs.iter().any(|l| {
+            l.level == AdminLogLevel::Warning
+                && l.category == AdminLogCategory::LibraryScan
+                && l.message.contains(&file_path_str)
+        }));
 
         // The file must not have been added to the repo
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -2100,17 +2126,112 @@ mod tests {
 
         service.scan_library(library.id.to_string()).await.unwrap();
 
-        // At least one Info notification with LibraryScan category
+        // At least one Info notification with LibraryScan category whose message names the library
         let events = notification_svc.published_events();
         assert!(events.iter().any(|e| {
-            matches!(e.level, EventLevel::Info) && matches!(e.category, EventCategory::LibraryScan)
+            matches!(e.level, EventLevel::Info)
+                && matches!(e.category, EventCategory::LibraryScan)
+                && e.message.contains("Test Library")
         }));
 
-        // At least one admin log entry with Info level and LibraryScan category
+        // Admin log must have a "scan started" entry
         let logs = admin_log_repo.list(10, 0).await.unwrap();
         assert!(!logs.is_empty());
         assert!(logs.iter().any(|l| {
-            l.level == AdminLogLevel::Info && l.category == AdminLogCategory::LibraryScan
+            l.level == AdminLogLevel::Info
+                && l.category == AdminLogCategory::LibraryScan
+                && l.message.contains("scan started")
         }));
+
+        // Admin log must have a "scan completed" entry
+        assert!(logs.iter().any(|l| {
+            l.level == AdminLogLevel::Info
+                && l.category == AdminLogCategory::LibraryScan
+                && l.message.contains("scan completed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_scan_publishes_correct_event_counts() {
+        // Seed: 2 pre-existing DB records, 1 matching file on disk and 1 phantom.
+        // Disk: 1 matching file (stays) + 1 phantom (removed) + 1 brand-new file (added).
+        // Expected: added=1, removed=1 in the admin-log completion entry.
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+        let admin_log_svc = Arc::new(LocalAdminLogService::new(
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+        ));
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        // File A: exists in DB and on disk with the same size → stays unchanged
+        let stays_path = dir.path().join("stays.txt");
+        std::fs::write(&stays_path, b"hello").unwrap(); // 5 bytes
+        let file_a = crate::models::domain::MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: stays_path.clone(),
+            hash: 0,
+            size_bytes: 5,
+            mime_type: None,
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        file_repo.files.lock().unwrap().insert(file_a.id, file_a);
+
+        // File B: exists in DB only (phantom, no matching disk file) → will be removed
+        let phantom_path = dir.path().join("phantom.txt");
+        let file_b = crate::models::domain::MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: phantom_path,
+            hash: 0,
+            size_bytes: 100,
+            mime_type: None,
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+
+        // File C: exists on disk only (not in DB) → will be added as Unknown (non-video)
+        let new_path = dir.path().join("new_file.txt");
+        std::fs::write(&new_path, b"new").unwrap();
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            admin_log_svc,
+        );
+
+        let added = service.scan_library(library.id.to_string()).await.unwrap();
+        assert_eq!(added, 1);
+
+        // Admin log completion entry must record added=1, removed=1 in its JSON details
+        let logs = admin_log_repo.list(100, 0).await.unwrap();
+        let completion = logs
+            .iter()
+            .find(|l| l.message.contains("scan completed"))
+            .expect("expected a 'scan completed' admin log entry");
+        let details = completion
+            .details
+            .as_ref()
+            .expect("completion log has JSON details");
+        assert_eq!(details["added"], serde_json::json!(1));
+        assert_eq!(details["removed"], serde_json::json!(1));
     }
 }
