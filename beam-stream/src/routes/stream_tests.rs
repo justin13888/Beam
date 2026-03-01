@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
 
-    // ─── Tests: GET /v1/stream/mp4/:id?token=… ────────────────────────────────
+    // ─── Tests: GET /v1/stream/mp4/:id (Authorization: Bearer) ──────────────────
 
     /// Cache miss: transcode service is invoked and the response is 200/206 with
     /// Content-Type: video/mp4.
@@ -368,12 +368,10 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!(
-            "http://localhost/v1/stream/mp4/{}?token={}",
-            TEST_FILE_ID, stream_token
-        ))
-        .send(&service)
-        .await;
+        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+            .bearer_auth(&stream_token)
+            .send(&service)
+            .await;
 
         let status = res.status_code.unwrap();
         assert!(
@@ -424,12 +422,10 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!(
-            "http://localhost/v1/stream/mp4/{}?token={}",
-            TEST_FILE_ID, stream_token
-        ))
-        .send(&service)
-        .await;
+        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+            .bearer_auth(&stream_token)
+            .send(&service)
+            .await;
 
         let status = res.status_code.unwrap();
         assert!(
@@ -460,12 +456,10 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!(
-            "http://localhost/v1/stream/mp4/{}?token={}",
-            TEST_FILE_ID, stream_token
-        ))
-        .send(&service)
-        .await;
+        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+            .bearer_auth(&stream_token)
+            .send(&service)
+            .await;
 
         assert_eq!(res.status_code, Some(StatusCode::NOT_FOUND));
     }
@@ -483,12 +477,10 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!(
-            "http://localhost/v1/stream/mp4/{}?token={}",
-            TEST_FILE_ID, stream_token
-        ))
-        .send(&service)
-        .await;
+        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+            .bearer_auth(&stream_token)
+            .send(&service)
+            .await;
 
         assert_eq!(res.status_code, Some(StatusCode::NOT_FOUND));
     }
@@ -499,12 +491,10 @@ mod tests {
         let fixture = make_test_state(vec![]);
         let service = build_service(&fixture);
 
-        let res = TestClient::get(format!(
-            "http://localhost/v1/stream/mp4/{}?token=not.a.valid.token",
-            TEST_FILE_ID
-        ))
-        .send(&service)
-        .await;
+        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+            .bearer_auth("not.a.valid.token")
+            .send(&service)
+            .await;
 
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
@@ -526,12 +516,10 @@ mod tests {
             .create_stream_token("dummy-user", different_file_id)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!(
-            "http://localhost/v1/stream/mp4/{}?token={}",
-            TEST_FILE_ID, stream_token
-        ))
-        .send(&service)
-        .await;
+        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+            .bearer_auth(&stream_token)
+            .send(&service)
+            .await;
 
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
@@ -557,12 +545,10 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!(
-            "http://localhost/v1/stream/mp4/{}?token={}",
-            TEST_FILE_ID, stream_token
-        ))
-        .send(&service)
-        .await;
+        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+            .bearer_auth(&stream_token)
+            .send(&service)
+            .await;
 
         assert_eq!(res.status_code, Some(StatusCode::OK));
         assert_eq!(
@@ -605,13 +591,11 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!(
-            "http://localhost/v1/stream/mp4/{}?token={}",
-            TEST_FILE_ID, stream_token
-        ))
-        .add_header("Range", "bytes=0-99", true)
-        .send(&service)
-        .await;
+        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+            .bearer_auth(&stream_token)
+            .add_header("Range", "bytes=0-99", true)
+            .send(&service)
+            .await;
 
         assert_eq!(res.status_code, Some(StatusCode::PARTIAL_CONTENT));
 

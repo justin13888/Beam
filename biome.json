@@ -46,6 +46,16 @@
 					}
 				}
 			}
+		},
+		{
+			"includes": ["beam-web/src/routes/media.$id.tsx"],
+			"linter": {
+				"rules": {
+					"a11y": {
+						"useMediaCaption": "off"
+					}
+				}
+			}
 		}
 	]
 }

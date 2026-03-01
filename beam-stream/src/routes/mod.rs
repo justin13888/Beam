@@ -24,7 +24,7 @@ fn rest_routes() -> Router {
 
 /// Create the main API router with all routes
 pub fn create_router(state: AppState, schema: AppSchema) -> Router {
-    // Note: No authorization is done at the top-level here because only `graphql` is secured with auth the other endpoints are either public or require query params (i.e., presigned URLs)
+    // Note: No authorization is done at the top-level here because only `graphql` is secured with auth; other endpoints are either public or self-contained (e.g., stream token validated in the handler).
     Router::new().hoop(affix_state::inject(state)).push(
         Router::with_path("v1")
             .push(rest_routes())
