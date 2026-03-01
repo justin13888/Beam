@@ -284,17 +284,6 @@ async fn serve_mp4_file(file_path: &PathBuf, req: &Request, res: &mut Response) 
 
     let content_length = end - start + 1;
 
-    // Read the requested range
-    let mut buffer = vec![0u8; content_length as usize];
-    match file.read_exact(&mut buffer).await {
-        Ok(_) => {}
-        Err(err) => {
-            error!("Failed to read file: {:?}", err);
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            return;
-        }
-    }
-
     // Build response
     res.status_code(status_code);
     res.headers_mut()
@@ -322,12 +311,65 @@ async fn serve_mp4_file(file_path: &PathBuf, req: &Request, res: &mut Response) 
     res.headers_mut()
         .insert("ETag", format!("\"{}\"", file_size).parse().unwrap()); // Simple ETag based on file size
 
-    res.body(salvo::http::body::ResBody::Once(bytes::Bytes::from(buffer)));
+    // Stream the range lazily in chunks to avoid buffering the entire range in memory.
+    let chunk_size = 128 * 1024usize;
+    let stream = async_stream::stream! {
+        let mut remaining = content_length as usize;
+        while remaining > 0 {
+            let to_read = chunk_size.min(remaining);
+            let mut buf = vec![0u8; to_read];
+            match file.read_exact(&mut buf).await {
+                Ok(_) => {
+                    remaining -= to_read;
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(buf));
+                }
+                Err(e) => {
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+    };
+    res.body(salvo::http::body::ResBody::stream(stream));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use salvo::test::ResponseExt;
+
+    /// Verify that `serve_mp4_file` streams a requested range correctly and does not
+    /// regress to a single-buffer approach. A 1 MB file is created and only the first
+    /// 1 024 bytes are requested; the response body must be exactly 1 024 bytes.
+    #[tokio::test]
+    async fn test_serve_mp4_file_range_body_length() {
+        use std::io::Write;
+
+        // Write 1 MB of patterned data to a temp file.
+        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+        let data: Vec<u8> = (0u8..=255).cycle().take(1024 * 1024).collect();
+        tmp.write_all(&data).expect("write tempfile");
+        tmp.flush().expect("flush tempfile");
+
+        let file_path = PathBuf::from(tmp.path());
+
+        // Build a minimal Salvo request with a range header.
+        let mut req = salvo::Request::new();
+        req.headers_mut()
+            .insert("range", "bytes=0-1023".parse().unwrap());
+
+        let mut res = salvo::Response::new();
+        serve_mp4_file(&file_path, &req, &mut res).await;
+
+        assert_eq!(
+            res.status_code,
+            Some(salvo::http::StatusCode::PARTIAL_CONTENT)
+        );
+
+        let body = res.take_bytes(None).await.expect("collect body");
+        assert_eq!(body.len(), 1024, "response body must be exactly 1024 bytes");
+        assert_eq!(&body[..], &data[..1024], "response body content must match");
+    }
 
     #[test]
     fn test_basic_range() {
