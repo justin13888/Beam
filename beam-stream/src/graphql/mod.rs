@@ -10,6 +10,9 @@ pub mod schema;
 #[cfg(test)]
 mod auth_tests;
 
+#[cfg(test)]
+mod resolver_tests;
+
 pub use guard::{AdminGuard, AuthGuard};
 
 pub type AppSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
