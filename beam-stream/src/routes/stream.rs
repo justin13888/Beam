@@ -81,7 +81,8 @@ pub(crate) fn parse_byte_range(
 #[endpoint(
     tags("stream"),
     parameters(
-        ("id" = String, description = "Stream ID")
+        ("id" = String, description = "Stream ID"),
+        ("Authorization" = String, Header, description = "Bearer <user JWT>")
     ),
     responses(
         (status_code = 200, description = "Stream token", body = StreamTokenResponse),
