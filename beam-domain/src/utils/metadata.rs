@@ -49,8 +49,8 @@ fn parse_duration_string(duration_str: &str) -> Option<f64> {
 
 #[derive(Clone, Debug)]
 pub struct VideoMetadata {
-    pub bit_rate: usize,
-    pub max_rate: usize,
+    pub bit_rate: u64,
+    pub max_rate: u64,
     pub delay: usize,
     pub width: u32,
     pub height: u32,
@@ -95,8 +95,8 @@ impl VideoMetadata {
 
 #[derive(Clone, Debug)]
 pub struct AudioMetadata {
-    pub bit_rate: usize,
-    pub max_rate: usize,
+    pub bit_rate: u64,
+    pub max_rate: u64,
     pub delay: usize,
     pub rate: u32,
     pub channels: u16,
@@ -444,8 +444,8 @@ impl VideoFileMetadata {
                     let level = "Unknown".to_string(); // Level not directly available in ffmpeg-next
 
                     let video = VideoMetadata {
-                        bit_rate: video_decoder.bit_rate(),
-                        max_rate: video_decoder.max_bit_rate(),
+                        bit_rate: video_decoder.bit_rate() as u64,
+                        max_rate: video_decoder.max_bit_rate() as u64,
                         delay: video_decoder.delay(),
                         width: video_decoder.width(),
                         height: video_decoder.height(),
@@ -537,8 +537,8 @@ impl VideoFileMetadata {
                     }
 
                     let audio = AudioMetadata {
-                        bit_rate: audio_decoder.bit_rate(),
-                        max_rate: audio_decoder.max_bit_rate(),
+                        bit_rate: audio_decoder.bit_rate() as u64,
+                        max_rate: audio_decoder.max_bit_rate() as u64,
                         delay: audio_decoder.delay(),
                         rate: audio_decoder.rate(),
                         channels: audio_decoder.channels(),

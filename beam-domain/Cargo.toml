@@ -27,6 +27,9 @@ optional = true
 version = "0.14.0"
 optional = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
 [features]
 entity = ["dep:beam-entity"]
 test-utils = ["dep:mockall"]

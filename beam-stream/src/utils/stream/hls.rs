@@ -67,8 +67,8 @@ impl HlsStreamGenerator {
                     let variant = VariantStream {
                         is_i_frame: false, // TODO: I think we need another variant for I-frames only
                         uri: playlist_uri.clone(),
-                        bandwidth: stream.max_rate as u64,
-                        average_bandwidth: Some(stream.bit_rate as u64),
+                        bandwidth: stream.max_rate,
+                        average_bandwidth: Some(stream.bit_rate),
                         codecs: Some(stream.codec.to_string()),
                         resolution: Some(m3u8_rs::Resolution {
                             width: stream.resolution.width as u64,

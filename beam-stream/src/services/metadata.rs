@@ -255,8 +255,8 @@ fn build_media_stream_metadata_from_domain_streams(
             StreamMetadata::Video(v) => {
                 video_tracks.push(VideoTrack {
                     codec: OutputVideoCodec::H264, // Simplified: map from codec string
-                    max_rate: v.bit_rate.unwrap_or(0) as usize,
-                    bit_rate: v.bit_rate.unwrap_or(0) as usize,
+                    max_rate: v.bit_rate.unwrap_or(0),
+                    bit_rate: v.bit_rate.unwrap_or(0),
                     resolution: Resolution {
                         width: v.width,
                         height: v.height,

@@ -71,10 +71,10 @@ pub struct VideoTrack {
     pub codec: OutputVideoCodec,
 
     /// Maximum bitrate (in bits per second)
-    pub max_rate: usize, // TODO: usize or u64?
+    pub max_rate: u64,
 
     /// Average bitrate (in bits per second)
-    pub bit_rate: usize, // TODO: usize or u64?
+    pub bit_rate: u64,
 
     /// Resolution
     pub resolution: Resolution,

@@ -112,7 +112,7 @@ impl LocalIndexService {
                         width: v.video.width,
                         height: v.video.height,
                         frame_rate: v.frame_rate(),
-                        bit_rate: Some(v.video.bit_rate as u64),
+                        bit_rate: Some(v.video.bit_rate),
                         color_space: None,
                         color_range: None,
                         hdr_format: None,
@@ -126,7 +126,7 @@ impl LocalIndexService {
                         channels: a.audio.channels,
                         sample_rate: a.audio.rate,
                         channel_layout: Some(a.audio.channel_layout_description().to_string()),
-                        bit_rate: Some(a.audio.bit_rate as u64),
+                        bit_rate: Some(a.audio.bit_rate),
                         is_default: false,
                         is_forced: false,
                     });
@@ -626,7 +626,7 @@ mod tests {
         index: usize,
         width: u32,
         height: u32,
-        bit_rate: usize,
+        bit_rate: u64,
         codec_name: &str,
         frame_rate: Option<Ratio<i32>>,
     ) -> UtilStreamMetadata {
@@ -670,7 +670,7 @@ mod tests {
         title: &str,
         channels: u16,
         sample_rate: u32,
-        bit_rate: usize,
+        bit_rate: u64,
         codec_name: &str,
     ) -> UtilStreamMetadata {
         UtilStreamMetadata::Audio(UtilAudioStream {
