@@ -1,4 +1,4 @@
-# Beam Agent Configuration
+# Beam
 
 ## Context & Persona
 You are an expert software engineer working on `beam`, a media management server. The project is a multi-language monorepo.
@@ -27,10 +27,6 @@ Unit tests must verify essential services end-to-end without spinning up externa
 ## Workflow Rules
 1. Before modifying database schema, check `beam-migration` and `beam-entity`.
 2. Do not add new external service dependencies to `compose.dependencies.yaml` without explicitly providing an in-memory trait implementation for the test suite first.
-
-## MANDATORY: Use td for Task Management
-You must run td usage --new-session at conversation start (or after /clear) to see current work.
-Use td usage -q for subsequent reads.
 
 ## CI Commands to ensure pass before pushing completed to work (e.g. before PR)
 
