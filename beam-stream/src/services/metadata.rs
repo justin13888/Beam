@@ -72,6 +72,7 @@ impl DbMetadataService {
 
         let mut streams = Vec::new();
         let mut duration: Option<f64> = None;
+        let mut file_id: Option<String> = None;
 
         for entry in &entries {
             let files = self
@@ -81,6 +82,10 @@ impl DbMetadataService {
                 .map_err(|e| MetadataError::InternalError(e.to_string()))?;
 
             for file in &files {
+                // Capture the first file's id as the movie's streamable handle.
+                if file_id.is_none() {
+                    file_id = Some(file.id.to_string());
+                }
                 // Use the first file's duration as the movie duration
                 if duration.is_none() {
                     duration = file.duration.map(|d| d.as_secs_f64());
@@ -117,6 +122,7 @@ impl DbMetadataService {
         });
 
         Ok(MediaMetadata::Movie(MovieMetadata {
+            id: movie.id.to_string(),
             title: Title {
                 original: movie.title.clone(),
                 localized: movie.title_localized.clone(),
@@ -138,6 +144,7 @@ impl DbMetadataService {
             ratings,
             identifiers,
             streams,
+            file_id,
         }))
     }
 
@@ -171,6 +178,7 @@ impl DbMetadataService {
                 let duration = files
                     .first()
                     .and_then(|f| f.duration.map(|d| d.as_secs_f64()));
+                let file_id = files.first().map(|f| f.id.to_string());
 
                 let mut ep_streams = Vec::new();
                 for file in &files {
@@ -187,6 +195,7 @@ impl DbMetadataService {
                 }
 
                 episodes.push(EpisodeMetadata {
+                    id: ep.id.to_string(),
                     episode_number: ep.episode_number,
                     title: ep.title,
                     description: ep.description,
@@ -194,6 +203,7 @@ impl DbMetadataService {
                     thumbnail_url: ep.thumbnail_url,
                     duration,
                     streams: ep_streams,
+                    file_id,
                 });
             }
 
@@ -225,6 +235,7 @@ impl DbMetadataService {
         }
 
         Ok(MediaMetadata::Show(ShowMetadata {
+            id: show.id.to_string(),
             title: Title {
                 original: show.title.clone(),
                 localized: show.title_localized.clone(),
@@ -429,6 +440,7 @@ impl MetadataService for DbMetadataService {
                         }
                         // Build lightweight metadata (no deep stream loading for search)
                         let metadata = MediaMetadata::Movie(MovieMetadata {
+                            id: id.to_string(),
                             title: Title {
                                 original: movie.title.clone(),
                                 localized: movie.title_localized.clone(),
@@ -458,6 +470,7 @@ impl MetadataService for DbMetadataService {
                                 None
                             },
                             streams: vec![],
+                            file_id: None,
                         });
                         items.push(MediaItem::Movie {
                             id,
@@ -502,6 +515,7 @@ impl MetadataService for DbMetadataService {
                             continue;
                         }
                         let metadata = MediaMetadata::Show(ShowMetadata {
+                            id: id.to_string(),
                             title: Title {
                                 original: show.title.clone(),
                                 localized: show.title_localized.clone(),

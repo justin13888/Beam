@@ -34,6 +34,10 @@ pub struct Model {
     pub scanned_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
     pub file_status: String,
+
+    /// Filesystem modification time, used with `file_size` as the cheap
+    /// change-detection gate before an XXH3 rehash.
+    pub mtime: Option<DateTimeWithTimeZone>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

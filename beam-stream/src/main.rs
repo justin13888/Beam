@@ -67,7 +67,9 @@ async fn main() -> Result<()> {
             "content-type",
             "accept",
             "x-requested-with",
+            "range",
         ])
+        .expose_headers(vec!["accept-ranges", "content-length", "content-range"])
         .allow_credentials(true)
         .max_age(3600) // Cache the preflight for 1 hour to reduce noise
         .into_handler();

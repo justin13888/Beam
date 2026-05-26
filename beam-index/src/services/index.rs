@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use sea_orm::DbErr;
 use serde_json;
@@ -15,9 +16,12 @@ use crate::services::admin_log::AdminLogService;
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
+use crate::services::watcher::FsEventKind;
 use crate::utils::metadata::{StreamMetadata, VideoFileMetadata};
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
-use beam_domain::models::file::{FileStatus, MediaFileContent, UpdateMediaFile};
+use beam_domain::models::file::{
+    CreateMediaFile, FileStatus, MediaFile, MediaFileContent, UpdateMediaFile,
+};
 use beam_domain::repositories::{
     FileRepository, LibraryRepository, MediaStreamRepository, MovieRepository, ShowRepository,
 };
@@ -30,6 +34,21 @@ const KNOWN_VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "m2ts", "flv", "wmv", "3gp", "ogv", "mpg",
     "mpeg",
 ];
+
+/// Read the size and modification time of a file in a single stat call.
+fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
+    let meta = std::fs::metadata(path)?;
+    let mtime: Option<DateTime<Utc>> = meta.modified().ok().map(|t| t.into());
+    Ok((meta.len(), mtime))
+}
+
+/// Whether a path has a recognised video file extension.
+fn is_known_video(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .is_some_and(|e| KNOWN_VIDEO_EXTENSIONS.contains(&e.as_str()))
+}
 
 #[derive(Debug, Error)]
 pub enum IndexError {
@@ -62,6 +81,7 @@ pub struct LocalIndexService {
     media_info_service: Arc<dyn MediaInfoService>,
     notification_service: Arc<dyn NotificationService>,
     admin_log: Arc<dyn AdminLogService>,
+    hash_unknown_files: bool,
 }
 
 impl LocalIndexService {
@@ -87,7 +107,15 @@ impl LocalIndexService {
             media_info_service,
             notification_service,
             admin_log,
+            hash_unknown_files: true,
         }
+    }
+
+    /// Override whether files with unknown extensions are hashed for duplicate
+    /// detection. Defaults to `true`.
+    pub fn with_hash_unknown_files(mut self, value: bool) -> Self {
+        self.hash_unknown_files = value;
+        self
     }
 
     /// Helper to extract and insert media streams for a file
@@ -251,65 +279,72 @@ impl LocalIndexService {
         }
     }
 
-    /// Process a NEW file to add it to the library
+    /// Process a NEW file to add it to the library.
     async fn process_new_file(&self, path: &Path, lib_uuid: Uuid) -> Result<bool, IndexError> {
-        use beam_domain::models::CreateMediaFile;
-
         info!("Processing new file: {}", path.display());
 
-        // Check extension
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_lowercase())
-            .unwrap_or_default();
+        let (size, mtime) = read_fs_meta(path).map_err(|e| {
+            IndexError::PathNotFound(format!(
+                "Failed to read metadata for {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
-        let is_known_video = KNOWN_VIDEO_EXTENSIONS.contains(&ext.as_str());
-
-        if !is_known_video {
-            // Index as Unknown file
-            let metadata = std::fs::metadata(path)
-                .map_err(|e| IndexError::PathNotFound(format!("Failed to read metadata: {}", e)))?;
-
-            let create_file = CreateMediaFile {
-                library_id: lib_uuid,
-                path: path.to_path_buf(),
-                hash: 0,
-                size_bytes: metadata.len(),
-                mime_type: None,
-                duration: None,
-                container_format: None,
-                content: None,
-                status: FileStatus::Unknown,
+        if !is_known_video(path) {
+            // Unsupported extension: index as Unknown. Hash it (when enabled) so
+            // duplicate detection still covers it.
+            let hash = if self.hash_unknown_files {
+                self.hash_service
+                    .hash_async(path.to_path_buf())
+                    .await
+                    .unwrap_or(0)
+            } else {
+                0
             };
-            self.file_repo.create(create_file).await?;
-            return Ok(true);
-        }
-
-        // Known video: Extract Metadata and Hash
-        let metadata = match self.media_info_service.get_video_metadata(path).await {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("Failed to extract metadata for {}: {}", path.display(), e);
-                let fs_meta = std::fs::metadata(path)
-                    .map_err(|ioe| IndexError::PathNotFound(format!("IO Error: {}", ioe)))?;
-                let create_file = CreateMediaFile {
+            let file = self
+                .file_repo
+                .create(CreateMediaFile {
                     library_id: lib_uuid,
                     path: path.to_path_buf(),
-                    hash: 0,
-                    size_bytes: fs_meta.len(),
+                    hash,
+                    size_bytes: size,
+                    mtime,
                     mime_type: None,
                     duration: None,
                     container_format: None,
                     content: None,
                     status: FileStatus::Unknown,
-                };
-                self.file_repo.create(create_file).await?;
+                })
+                .await?;
+            self.check_and_report_duplicate(&file).await;
+            return Ok(true);
+        }
+
+        // Known video: extract metadata first.
+        let metadata = match self.media_info_service.get_video_metadata(path).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Failed to extract metadata for {}: {}", path.display(), e);
+                self.file_repo
+                    .create(CreateMediaFile {
+                        library_id: lib_uuid,
+                        path: path.to_path_buf(),
+                        hash: 0,
+                        size_bytes: size,
+                        mtime,
+                        mime_type: None,
+                        duration: None,
+                        container_format: None,
+                        content: None,
+                        status: FileStatus::Unknown,
+                    })
+                    .await?;
                 return Ok(true);
             }
         };
 
-        let hash_value = self
+        let hash = self
             .hash_service
             .hash_async(path.to_path_buf())
             .await
@@ -318,31 +353,306 @@ impl LocalIndexService {
                 IndexError::PathNotFound(format!("Hash failed: {}", e))
             })?;
 
-        // Classify content
         let duration = Duration::from_secs_f64(metadata.duration_seconds());
         let content = self
             .classify_media_content(path, lib_uuid, duration)
             .await?;
 
-        // Create media file
-        let create_file = CreateMediaFile {
-            library_id: lib_uuid,
-            path: path.to_path_buf(),
-            hash: hash_value,
-            size_bytes: metadata.file_size,
-            mime_type: Some(format!("video/{}", metadata.format_name)),
-            duration: Some(duration),
-            container_format: Some(metadata.format_name.clone()),
-            content: Some(content),
-            status: FileStatus::Known,
+        let file = self
+            .file_repo
+            .create(CreateMediaFile {
+                library_id: lib_uuid,
+                path: path.to_path_buf(),
+                hash,
+                size_bytes: size,
+                mtime,
+                mime_type: Some(format!("video/{}", metadata.format_name)),
+                duration: Some(duration),
+                container_format: Some(metadata.format_name.clone()),
+                content: Some(content),
+                status: FileStatus::Known,
+            })
+            .await?;
+
+        self.insert_media_streams(file.id, &metadata).await?;
+        self.check_and_report_duplicate(&file).await;
+        Ok(true)
+    }
+
+    /// Reconcile a file already present in the index against its current state
+    /// on disk. Shared by the full scan and single-path watcher events.
+    async fn reconcile_existing_file(
+        &self,
+        existing: &MediaFile,
+        path: &Path,
+    ) -> Result<(), IndexError> {
+        let (size, mtime) = match read_fs_meta(path) {
+            Ok(m) => m,
+            Err(e) => {
+                // A transient stat failure must not delete or corrupt the row.
+                warn!("Failed to stat {}: {}", path.display(), e);
+                return Ok(());
+            }
         };
 
-        let file = self.file_repo.create(create_file).await?;
+        // Cheap gate: only a size or mtime change warrants a rehash.
+        if size == existing.size_bytes && mtime == existing.mtime {
+            return Ok(());
+        }
 
-        // Extract and insert media streams
-        self.insert_media_streams(file.id, &metadata).await?;
+        let known_video = is_known_video(path);
+        if !known_video && !self.hash_unknown_files {
+            // Unsupported extension with hashing disabled: just record size/mtime.
+            self.file_repo
+                .update(UpdateMediaFile {
+                    id: existing.id,
+                    hash: None,
+                    size_bytes: Some(size),
+                    mtime,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: None,
+                    status: None,
+                })
+                .await?;
+            return Ok(());
+        }
 
-        Ok(true)
+        // Rehash to confirm the content actually changed.
+        let new_hash = match self.hash_service.hash_async(path.to_path_buf()).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("Failed to hash {}: {}", path.display(), e);
+                return Ok(());
+            }
+        };
+
+        if new_hash == existing.hash {
+            // Content unchanged (e.g. mtime bumped by `touch`): refresh size/mtime.
+            self.file_repo
+                .update(UpdateMediaFile {
+                    id: existing.id,
+                    hash: None,
+                    size_bytes: Some(size),
+                    mtime,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: None,
+                    status: None,
+                })
+                .await?;
+            return Ok(());
+        }
+
+        self.reconcile_changed_file(existing, path, size, mtime, new_hash, known_video)
+            .await
+    }
+
+    /// Apply a confirmed content change: refresh hash, metadata and streams.
+    /// The file's movie/episode classification is intentionally left unchanged
+    /// since the path (and therefore the inferred title) has not moved.
+    async fn reconcile_changed_file(
+        &self,
+        existing: &MediaFile,
+        path: &Path,
+        size: u64,
+        mtime: Option<DateTime<Utc>>,
+        new_hash: u64,
+        known_video: bool,
+    ) -> Result<(), IndexError> {
+        info!("File content changed, reconciling: {}", path.display());
+
+        if !known_video {
+            let updated = self
+                .file_repo
+                .update(UpdateMediaFile {
+                    id: existing.id,
+                    hash: Some(new_hash),
+                    size_bytes: Some(size),
+                    mtime,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: None,
+                    status: Some(FileStatus::Unknown),
+                })
+                .await?;
+            self.check_and_report_duplicate(&updated).await;
+            return Ok(());
+        }
+
+        match self.media_info_service.get_video_metadata(path).await {
+            Ok(metadata) => {
+                // Replace the file's stream set with the freshly extracted one.
+                self.stream_repo.delete_by_file_id(existing.id).await?;
+                self.insert_media_streams(existing.id, &metadata).await?;
+
+                let duration = Duration::from_secs_f64(metadata.duration_seconds());
+                let updated = self
+                    .file_repo
+                    .update(UpdateMediaFile {
+                        id: existing.id,
+                        hash: Some(new_hash),
+                        size_bytes: Some(size),
+                        mtime,
+                        mime_type: Some(format!("video/{}", metadata.format_name)),
+                        duration: Some(duration),
+                        container_format: Some(metadata.format_name.clone()),
+                        content: None,
+                        status: Some(FileStatus::Known),
+                    })
+                    .await?;
+                self.check_and_report_duplicate(&updated).await;
+                Ok(())
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to re-extract metadata for changed file {}: {}",
+                    path.display(),
+                    e
+                );
+                let updated = self
+                    .file_repo
+                    .update(UpdateMediaFile {
+                        id: existing.id,
+                        hash: Some(new_hash),
+                        size_bytes: Some(size),
+                        mtime,
+                        mime_type: None,
+                        duration: None,
+                        container_format: None,
+                        content: None,
+                        status: Some(FileStatus::Changed),
+                    })
+                    .await?;
+                self.check_and_report_duplicate(&updated).await;
+                Ok(())
+            }
+        }
+    }
+
+    /// Report files that share content (same XXH3 hash) with `file`.
+    async fn check_and_report_duplicate(&self, file: &MediaFile) {
+        if file.hash == 0 {
+            return; // unhashed sentinel
+        }
+        let matches = match self.file_repo.find_by_hash(file.hash).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Duplicate check failed for {}: {}", file.path.display(), e);
+                return;
+            }
+        };
+        let duplicates: Vec<String> = matches
+            .into_iter()
+            .filter(|f| f.id != file.id)
+            .map(|f| f.path.display().to_string())
+            .collect();
+        if duplicates.is_empty() {
+            return;
+        }
+
+        let message = format!(
+            "Duplicate content detected: '{}' shares its hash with {} other file(s)",
+            file.path.display(),
+            duplicates.len()
+        );
+        self.notification_service.publish(AdminEvent::info(
+            EventCategory::LibraryScan,
+            message.clone(),
+            Some(file.library_id.to_string()),
+            None,
+        ));
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Info,
+                AdminLogCategory::LibraryScan,
+                message,
+                Some(serde_json::json!({
+                    "file": file.path.display().to_string(),
+                    "duplicates": duplicates,
+                })),
+            )
+            .await;
+    }
+
+    /// Publish a warning for a file that could not be processed, without
+    /// aborting the rest of the scan.
+    async fn report_file_failure(
+        &self,
+        lib_uuid: Uuid,
+        library_name: &str,
+        path: &Path,
+        err: &IndexError,
+    ) {
+        error!("Failed to process file {}: {}", path.display(), err);
+        self.notification_service.publish(AdminEvent::warning(
+            EventCategory::LibraryScan,
+            format!("Failed to process file '{}': {}", path.display(), err),
+            Some(lib_uuid.to_string()),
+            Some(library_name.to_string()),
+        ));
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Warning,
+                AdminLogCategory::LibraryScan,
+                format!("Failed to process file: {}", path.display()),
+                Some(serde_json::json!({
+                    "library_id": lib_uuid.to_string(),
+                    "path": path.display().to_string(),
+                    "error": err.to_string(),
+                })),
+            )
+            .await;
+    }
+
+    /// Scan every library. Used for the startup scan and the periodic backstop.
+    /// A failure in one library is logged and does not abort the others.
+    pub async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
+        let libraries = self.library_repo.find_all().await?;
+        let mut total_added = 0;
+        for library in libraries {
+            match self.scan_library(library.id.to_string()).await {
+                Ok(added) => total_added += added,
+                Err(e) => error!("Scan failed for library {}: {}", library.id, e),
+            }
+        }
+        Ok(total_added)
+    }
+
+    /// Reconcile a single path in response to a filesystem-watcher event.
+    pub async fn reconcile_path(
+        &self,
+        library_id: Uuid,
+        path: PathBuf,
+        kind: FsEventKind,
+    ) -> Result<(), IndexError> {
+        // Ignore events for libraries that no longer exist.
+        if self.library_repo.find_by_id(library_id).await?.is_none() {
+            return Ok(());
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+
+        if kind == FsEventKind::Removed || !path.is_file() {
+            if let Some(file) = self.file_repo.find_by_path(&path_str).await? {
+                info!("Removing deleted file from index: {}", path.display());
+                self.file_repo.delete(file.id).await?;
+            }
+            return Ok(());
+        }
+
+        match self.file_repo.find_by_path(&path_str).await? {
+            Some(existing) => self.reconcile_existing_file(&existing, &path).await,
+            None => {
+                self.process_new_file(&path, library_id).await?;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -438,54 +748,18 @@ impl IndexService for LocalIndexService {
             }
 
             if let Some(existing_file) = existing_map.remove(&path) {
-                // File exists in DB. Check if changed (size).
-                let metadata = match std::fs::metadata(&path) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-
-                if metadata.len() != existing_file.size_bytes {
-                    info!("File changed: {}", path.display());
-                    if existing_file.status != FileStatus::Changed {
-                        self.file_repo
-                            .update(UpdateMediaFile {
-                                id: existing_file.id,
-                                hash: None,
-                                size_bytes: Some(metadata.len()),
-                                mime_type: None,
-                                duration: None,
-                                container_format: None,
-                                content: None,
-                                status: Some(FileStatus::Changed),
-                            })
-                            .await?;
-                    }
+                // Known file: reconcile against its current on-disk state.
+                if let Err(e) = self.reconcile_existing_file(&existing_file, &path).await {
+                    self.report_file_failure(lib_uuid, &library.name, &path, &e)
+                        .await;
                 }
             } else {
-                // New file
+                // New file.
                 match self.process_new_file(&path, lib_uuid).await {
                     Ok(true) => added_count += 1,
                     Ok(false) => {}
                     Err(e) => {
-                        error!("Failed to process file {}: {}", path.display(), e);
-                        self.notification_service.publish(AdminEvent::warning(
-                            EventCategory::LibraryScan,
-                            format!("Failed to process file '{}': {}", path.display(), e),
-                            Some(lib_uuid.to_string()),
-                            Some(library.name.clone()),
-                        ));
-                        let _ = self
-                            .admin_log
-                            .log(
-                                AdminLogLevel::Warning,
-                                AdminLogCategory::LibraryScan,
-                                format!("Failed to process file: {}", path.display()),
-                                Some(serde_json::json!({
-                                    "library_id": library_id,
-                                    "path": path.display().to_string(),
-                                    "error": e.to_string()
-                                })),
-                            )
+                        self.report_file_failure(lib_uuid, &library.name, &path, &e)
                             .await;
                     }
                 }
@@ -1378,6 +1652,8 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("movies/Avatar.mp4");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"fake movie data").unwrap();
         let lib_id = Uuid::new_v4();
 
         mock_media_info_service
@@ -1453,6 +1729,11 @@ mod tests {
                 })
             });
 
+        mock_file_repo
+            .expect_find_by_hash()
+            .times(1)
+            .returning(|_| Ok(vec![]));
+
         let file_id = Uuid::new_v4();
         mock_file_repo.expect_create().times(1).returning(move |_| {
             Ok(beam_domain::models::MediaFile {
@@ -1461,6 +1742,7 @@ mod tests {
                 path: PathBuf::from("test"),
                 hash: 12345,
                 size_bytes: 1024,
+                mtime: None,
                 mime_type: Some("video/mp4".to_string()),
                 duration: None,
                 container_format: None,
@@ -1509,6 +1791,8 @@ mod tests {
         let path = temp_dir
             .path()
             .join("shows/The Show/Season 1/The Show - S01E01.mkv");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"fake episode data").unwrap();
         let lib_id = Uuid::new_v4();
 
         mock_media_info_service
@@ -1595,6 +1879,11 @@ mod tests {
                 })
             });
 
+        mock_file_repo
+            .expect_find_by_hash()
+            .times(1)
+            .returning(|_| Ok(vec![]));
+
         let file_id = Uuid::new_v4();
         mock_file_repo.expect_create().times(1).returning(move |_| {
             Ok(beam_domain::models::MediaFile {
@@ -1603,6 +1892,7 @@ mod tests {
                 path: PathBuf::from("test"),
                 hash: 67890,
                 size_bytes: 500 * 1024 * 1024,
+                mtime: None,
                 mime_type: Some("video/x-matroska".to_string()),
                 duration: None,
                 container_format: None,
@@ -1758,7 +2048,8 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-        );
+        )
+        .with_hash_unknown_files(false);
 
         let result = service.scan_library(library.id.to_string()).await;
         assert_eq!(result.unwrap(), 1);
@@ -1817,17 +2108,19 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
-        // Create a real file on disk (16 bytes)
+        // A real video file on disk (16 bytes).
         let file_path = dir.path().join("movie.mp4");
         std::fs::write(&file_path, b"new content size").unwrap();
 
-        // Seed the file repo with the same path but a different size
+        // Seed the DB with the same path but a stale hash/size, so the scan
+        // detects the content change and reconciles it.
         let existing = MediaFile {
             id: Uuid::new_v4(),
             library_id: library.id,
             path: file_path.clone(),
             hash: 12345,
-            size_bytes: 999, // deliberately wrong size
+            size_bytes: 999,
+            mtime: None,
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: None,
@@ -1842,14 +2135,25 @@ mod tests {
             .unwrap()
             .insert(existing.id, existing.clone());
 
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Ok(99999));
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Ok(make_video_metadata()));
+
         let service = LocalIndexService::new(
             lib_repo.clone(),
             file_repo.clone(),
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
         );
@@ -1859,7 +2163,10 @@ mod tests {
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].status, FileStatus::Changed);
+        // The changed file was re-hashed, re-extracted and is healthy again.
+        assert_eq!(files[0].status, FileStatus::Known);
+        assert_eq!(files[0].size_bytes, 16);
+        assert_eq!(files[0].hash, 99999);
     }
 
     #[tokio::test]
@@ -1876,6 +2183,7 @@ mod tests {
             path: dir.path().join("ghost.mp4"),
             hash: 0,
             size_bytes: 1024,
+            mtime: None,
             mime_type: None,
             duration: None,
             container_format: None,
@@ -2172,6 +2480,7 @@ mod tests {
             path: stays_path.clone(),
             hash: 0,
             size_bytes: 5,
+            mtime: None,
             mime_type: None,
             duration: None,
             container_format: None,
@@ -2190,6 +2499,7 @@ mod tests {
             path: phantom_path,
             hash: 0,
             size_bytes: 100,
+            mtime: None,
             mime_type: None,
             duration: None,
             container_format: None,
@@ -2214,7 +2524,8 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             admin_log_svc,
-        );
+        )
+        .with_hash_unknown_files(false);
 
         let added = service.scan_library(library.id.to_string()).await.unwrap();
         assert_eq!(added, 1);
@@ -2231,5 +2542,432 @@ mod tests {
             .expect("completion log has JSON details");
         assert_eq!(details["added"], serde_json::json!(1));
         assert_eq!(details["removed"], serde_json::json!(1));
+    }
+
+    // ─── reconcile, dedup, reconcile_path, scan_all_libraries ───────────────
+
+    #[tokio::test]
+    async fn test_reconcile_unchanged_file_skips_rehash() {
+        // A file whose size AND mtime match the DB record must not be rehashed.
+        // MockHashService::new() has no expectation, so any hash call would panic.
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("movie.mp4");
+        std::fs::write(&file_path, b"unchanged content").unwrap();
+        let disk_meta = std::fs::metadata(&file_path).unwrap();
+        let mtime: Option<DateTime<Utc>> = disk_meta.modified().ok().map(|t| t.into());
+
+        let existing = MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: file_path.clone(),
+            hash: 4242,
+            size_bytes: disk_meta.len(),
+            mtime,
+            mime_type: Some("video/mp4".to_string()),
+            duration: None,
+            container_format: Some("mp4".to_string()),
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(existing.id, existing);
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service.scan_library(library.id.to_string()).await.unwrap();
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].hash, 4242, "hash must not have been rewritten");
+        assert_eq!(files[0].status, FileStatus::Known);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_same_hash_touches_mtime_only() {
+        // Suspected change (mtime differs) but rehash matches → only mtime is
+        // refreshed; no ffmpeg call, no status change.
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("movie.mp4");
+        std::fs::write(&file_path, b"same content as hash").unwrap();
+        let disk_meta = std::fs::metadata(&file_path).unwrap();
+
+        let existing = MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: file_path.clone(),
+            hash: 8888,
+            size_bytes: disk_meta.len(), // size matches
+            mtime: None,                 // stale → suspected
+            mime_type: Some("video/mp4".to_string()),
+            duration: None,
+            container_format: Some("mp4".to_string()),
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(existing.id, existing);
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Ok(8888));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(MockMediaInfoService::new()), // no expectation: ffmpeg must NOT be called
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service.scan_library(library.id.to_string()).await.unwrap();
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].hash, 8888);
+        assert_eq!(files[0].status, FileStatus::Known);
+        assert!(files[0].mtime.is_some(), "mtime was refreshed");
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_changed_file_ffmpeg_failure_marks_changed() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("movie.mp4");
+        std::fs::write(&file_path, b"new content").unwrap();
+
+        let existing = MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: file_path.clone(),
+            hash: 100,
+            size_bytes: 999, // wrong size → suspected
+            mtime: None,
+            mime_type: Some("video/mp4".to_string()),
+            duration: None,
+            container_format: Some("mp4".to_string()),
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(existing.id, existing);
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Ok(200)); // differs from existing.hash
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".into())));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service.scan_library(library.id.to_string()).await.unwrap();
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Changed);
+        assert_eq!(files[0].hash, 200);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_path_removed_deletes_file() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let ghost_path = dir.path().join("ghost.mp4");
+        // The file is intentionally NOT created on disk.
+
+        let phantom = MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: ghost_path.clone(),
+            hash: 0,
+            size_bytes: 10,
+            mtime: None,
+            mime_type: None,
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        file_repo.files.lock().unwrap().insert(phantom.id, phantom);
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service
+            .reconcile_path(library.id, ghost_path, FsEventKind::Removed)
+            .await
+            .unwrap();
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert!(files.is_empty(), "removed file must be deleted from index");
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_path_creates_new_file() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("new.mp4");
+        std::fs::write(&file_path, b"fresh video").unwrap();
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash.expect_hash_async().times(1).returning(|_| Ok(42));
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Ok(make_video_metadata()));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service
+            .reconcile_path(library.id, file_path.clone(), FsEventKind::Created)
+            .await
+            .unwrap();
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, file_path);
+        assert_eq!(files[0].hash, 42);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_path_unknown_library_is_noop() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        // No library matches this id; reconcile_path must be a no-op.
+        service
+            .reconcile_path(
+                Uuid::new_v4(),
+                PathBuf::from("/nonexistent/path.mp4"),
+                FsEventKind::Created,
+            )
+            .await
+            .unwrap();
+
+        assert!(file_repo.files.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unknown_file_hashed_when_enabled() {
+        // hash_unknown_files defaults to true, so even a .txt file is hashed
+        // for duplicate detection. Status still ends up Unknown.
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("notes.txt");
+        std::fs::write(&file_path, b"text").unwrap();
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Ok(555));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service.scan_library(library.id.to_string()).await.unwrap();
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Unknown);
+        assert_eq!(files[0].hash, 555);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_detection_logs() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+        let admin_log_svc = Arc::new(LocalAdminLogService::new(
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+        ));
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        // Two .mp4 files that the mock hash service deliberately hashes to the
+        // same value, exercising the dedup-on-create path.
+        std::fs::write(dir.path().join("first.mp4"), b"one").unwrap();
+        std::fs::write(dir.path().join("second.mp4"), b"two").unwrap();
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(2)
+            .returning(|_| Ok(777));
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(2)
+            .returning(|_| Ok(make_video_metadata()));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            admin_log_svc,
+        );
+
+        service.scan_library(library.id.to_string()).await.unwrap();
+
+        let logs = admin_log_repo.list(100, 0).await.unwrap();
+        assert!(
+            logs.iter().any(|l| {
+                l.level == AdminLogLevel::Info
+                    && l.category == AdminLogCategory::LibraryScan
+                    && l.message.contains("Duplicate")
+            }),
+            "an admin log entry must flag the duplicate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_all_libraries_sums_added_counts() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+        let _ = make_library_in_tempdir(&lib_repo, &dir_a).await;
+        let _ = make_library_in_tempdir(&lib_repo, &dir_b).await;
+        std::fs::write(dir_a.path().join("a.mp4"), b"video a").unwrap();
+        std::fs::write(dir_b.path().join("b.mp4"), b"video b").unwrap();
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(2)
+            .returning(|_| Ok(1234));
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(2)
+            .returning(|_| Ok(make_video_metadata()));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let total = service.scan_all_libraries().await.unwrap();
+        assert_eq!(total, 2);
     }
 }

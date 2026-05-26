@@ -39,6 +39,18 @@ impl FileRepository for SqlFileRepository {
         Ok(model.map(MediaFile::from))
     }
 
+    async fn find_by_hash(&self, hash: u64) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let models = files::Entity::find()
+            .filter(files::Column::HashXxh3.eq(hash as i64))
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
     async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
         use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -105,6 +117,7 @@ impl FileRepository for SqlFileRepository {
             scanned_at: Set(now.into()),
             updated_at: Set(now.into()),
             file_status: Set(create.status.to_string()),
+            mtime: Set(create.mtime.map(|d| d.into())),
         };
 
         let result = new_file.insert(&self.db).await?;
@@ -125,6 +138,9 @@ impl FileRepository for SqlFileRepository {
         }
         if let Some(size) = update.size_bytes {
             active_model.file_size = Set(size as i64);
+        }
+        if let Some(mtime) = update.mtime {
+            active_model.mtime = Set(Some(mtime.into()));
         }
         if let Some(mime_type) = update.mime_type {
             active_model.mime_type = Set(Some(mime_type));

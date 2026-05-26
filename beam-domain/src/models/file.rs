@@ -12,6 +12,8 @@ pub struct MediaFile {
     pub path: PathBuf,
     pub hash: u64,
     pub size_bytes: u64,
+    /// Filesystem modification time; paired with `size_bytes` for change detection.
+    pub mtime: Option<DateTime<Utc>>,
     pub mime_type: Option<String>,
     pub duration: Option<Duration>,
     pub container_format: Option<String>,
@@ -71,6 +73,7 @@ pub struct CreateMediaFile {
     pub path: PathBuf,
     pub hash: u64,
     pub size_bytes: u64,
+    pub mtime: Option<DateTime<Utc>>,
     pub mime_type: Option<String>,
     pub duration: Option<Duration>,
     pub container_format: Option<String>,
@@ -84,6 +87,8 @@ pub struct UpdateMediaFile {
     pub id: Uuid,
     pub hash: Option<u64>,
     pub size_bytes: Option<u64>,
+    /// `Some` sets the stored mtime; `None` leaves it unchanged.
+    pub mtime: Option<DateTime<Utc>>,
     pub mime_type: Option<String>,
     pub duration: Option<Duration>,
     pub container_format: Option<String>,
@@ -111,6 +116,7 @@ impl From<beam_entity::files::Model> for MediaFile {
             path: PathBuf::from(model.file_path),
             hash: model.hash_xxh3 as u64,
             size_bytes: model.file_size as u64,
+            mtime: model.mtime.map(|d| d.with_timezone(&Utc)),
             mime_type: model.mime_type,
             duration: model.duration_secs.map(Duration::from_secs_f64),
             container_format: model.container_format,

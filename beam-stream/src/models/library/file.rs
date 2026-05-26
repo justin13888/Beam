@@ -44,6 +44,9 @@ pub struct LibraryFile {
     pub path: String,
     /// File size in bytes
     pub size_bytes: i64,
+    /// Content hash (XXH3) as a decimal string. Identifies the file's content
+    /// for caching and duplicate detection.
+    pub hash: String,
     /// MIME type (e.g. "video/mp4")
     pub mime_type: Option<String>,
     /// Duration in seconds
@@ -66,8 +69,9 @@ impl From<beam_domain::models::MediaFile> for LibraryFile {
             id,
             library_id,
             path,
-            hash: _,
+            hash,
             size_bytes,
+            mtime: _,
             mime_type,
             duration,
             container_format,
@@ -87,6 +91,7 @@ impl From<beam_domain::models::MediaFile> for LibraryFile {
             library_id: library_id.to_string(),
             path: path.to_string_lossy().to_string(),
             size_bytes: size_bytes as i64,
+            hash: hash.to_string(),
             mime_type,
             duration_secs: duration.map(|d| d.as_secs_f64()),
             container_format,

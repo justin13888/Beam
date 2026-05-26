@@ -9,6 +9,9 @@ use crate::models::file::{CreateMediaFile, MediaFile, UpdateMediaFile};
 pub trait FileRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr>;
     async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr>;
+    /// Find all files whose content hash matches, across every library.
+    /// Used for duplicate detection.
+    async fn find_by_hash(&self, hash: u64) -> Result<Vec<MediaFile>, DbErr>;
     async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
@@ -45,6 +48,17 @@ pub mod in_memory {
                 .values()
                 .find(|f| f.path == Path::new(path))
                 .cloned())
+        }
+
+        async fn find_by_hash(&self, hash: u64) -> Result<Vec<MediaFile>, DbErr> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|f| f.hash == hash)
+                .cloned()
+                .collect())
         }
 
         async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
@@ -94,6 +108,7 @@ pub mod in_memory {
                 path: create.path,
                 hash: create.hash,
                 size_bytes: create.size_bytes,
+                mtime: create.mtime,
                 mime_type: create.mime_type,
                 duration: create.duration,
                 container_format: create.container_format,
@@ -119,6 +134,9 @@ pub mod in_memory {
             }
             if let Some(size) = update.size_bytes {
                 file.size_bytes = size;
+            }
+            if let Some(mtime) = update.mtime {
+                file.mtime = Some(mtime);
             }
             if let Some(mime_type) = update.mime_type {
                 file.mime_type = Some(mime_type);

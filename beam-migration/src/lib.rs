@@ -5,6 +5,7 @@ mod m20260210_000001_create_users;
 
 mod m20260212_000001_ensure_cascade;
 mod m20260222_000001_create_admin_log;
+mod m20260522_000001_add_file_mtime;
 
 pub struct Migrator;
 
@@ -16,6 +17,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260210_000001_create_users::Migration),
             Box::new(m20260212_000001_ensure_cascade::Migration),
             Box::new(m20260222_000001_create_admin_log::Migration),
+            Box::new(m20260522_000001_add_file_mtime::Migration),
         ]
     }
 }

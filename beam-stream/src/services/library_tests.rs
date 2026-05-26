@@ -54,6 +54,7 @@ mod tests {
             path: PathBuf::from("/media/videos/test.mp4"),
             hash: 0,
             size_bytes: 1024,
+            mtime: None,
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: Some("mp4".to_string()),

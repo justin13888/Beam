@@ -8,6 +8,8 @@ use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
 pub struct MovieMetadata {
+    /// Stable identifier for this movie (UUID).
+    pub id: String,
     /// Title of the movie
     pub title: Title,
     /// Optional description of the movie
@@ -33,6 +35,8 @@ pub struct MovieMetadata {
 
     /// List of unique streams associated with this movie
     pub streams: Vec<MediaStreamMetadata>,
+    /// Identifier of the primary streamable file, if any.
+    pub file_id: Option<String>,
     //
     // TODO: Add people involved (cast, crew, directors, writers, etc.)
 }

@@ -271,6 +271,7 @@ mod tests {
             library_id: "00000000-0000-0000-0000-000000000001".to_string(),
             path: path.to_string(),
             size_bytes: 1024,
+            hash: "0".to_string(),
             mime_type: Some("video/mp4".to_string()),
             duration_secs: Some(60.0),
             container_format: Some("mp4".to_string()),
@@ -410,7 +411,7 @@ mod tests {
             .state
             .config
             .cache_dir
-            .join(format!("{}.mp4", TEST_FILE_ID));
+            .join(format!("{}-0.mp4", TEST_FILE_ID));
         std::fs::write(&cache_file, b"CACHED MP4 CONTENT").unwrap();
 
         let service = build_service(&fixture);
@@ -579,7 +580,7 @@ mod tests {
             .state
             .config
             .cache_dir
-            .join(format!("{}.mp4", TEST_FILE_ID));
+            .join(format!("{}-0.mp4", TEST_FILE_ID));
         std::fs::write(&cache_file, &data).unwrap();
 
         let service = build_service(&fixture);

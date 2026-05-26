@@ -10,6 +10,8 @@ use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
 pub struct ShowMetadata {
+    /// Stable identifier for this show (UUID).
+    pub id: String,
     /// Title of the show
     pub title: Title,
     /// Optional description of the show
@@ -53,6 +55,8 @@ pub struct ShowDates {
 
 #[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
 pub struct EpisodeMetadata {
+    /// Stable identifier for this episode (UUID).
+    pub id: String,
     /// Episode number within the season
     pub episode_number: u32,
     /// Title of the episode
@@ -68,5 +72,7 @@ pub struct EpisodeMetadata {
 
     /// List of unique streams associated with this episode
     pub streams: Vec<MediaStreamMetadata>,
+    /// Identifier of the streamable file backing this episode, if any.
+    pub file_id: Option<String>,
 }
 // TODO: detect discrepancy in video file length to detected episode length

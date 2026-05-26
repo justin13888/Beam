@@ -53,6 +53,7 @@ mod tests {
             path: PathBuf::from("/media/test.mp4"),
             hash: 0,
             size_bytes: 1024,
+            mtime: None,
             mime_type: Some("video/mp4".to_string()),
             duration: Some(Duration::from_secs(7200)),
             container_format: Some("mp4".to_string()),
@@ -136,9 +137,11 @@ mod tests {
         assert!(result.is_some());
         match result.unwrap() {
             MediaMetadata::Movie(m) => {
+                assert_eq!(m.id, movie_id.to_string());
                 assert_eq!(m.title.original, "Test Movie");
                 assert_eq!(m.year, Some(2023));
                 assert!(m.duration.is_some());
+                assert!(m.file_id.is_some(), "file_id must point at the seeded file");
             }
             _ => panic!("Expected Movie metadata"),
         }
@@ -191,6 +194,7 @@ mod tests {
             thumbnail_url: None,
             created_at: chrono::Utc::now(),
         };
+        let episode_id = ep.id;
         show_repo.episodes.lock().unwrap().insert(ep.id, ep);
 
         let service = DbMetadataService::new(
@@ -204,11 +208,18 @@ mod tests {
         assert!(result.is_some());
         match result.unwrap() {
             MediaMetadata::Show(s) => {
+                assert_eq!(s.id, show_id.to_string());
                 assert_eq!(s.title.original, "Test Show");
                 assert_eq!(s.year, Some(2022));
                 assert_eq!(s.seasons.len(), 1);
                 assert_eq!(s.seasons[0].episodes.len(), 1);
-                assert_eq!(s.seasons[0].episodes[0].title, "Pilot");
+                let episode = &s.seasons[0].episodes[0];
+                assert_eq!(episode.id, episode_id.to_string());
+                assert_eq!(episode.title, "Pilot");
+                assert!(
+                    episode.file_id.is_none(),
+                    "no file seeded \u{2192} file_id should be None"
+                );
             }
             _ => panic!("Expected Show metadata"),
         }

@@ -9,6 +9,9 @@ use crate::models::stream::{CreateMediaStream, MediaStream};
 pub trait MediaStreamRepository: Send + Sync + std::fmt::Debug {
     async fn insert_streams(&self, streams: Vec<CreateMediaStream>) -> Result<u32, DbErr>;
     async fn find_by_file_id(&self, file_id: Uuid) -> Result<Vec<MediaStream>, DbErr>;
+    /// Delete every stream belonging to a file. Used when reconciling a changed
+    /// file replaces its stream set. Returns the number of rows removed.
+    async fn delete_by_file_id(&self, file_id: Uuid) -> Result<u64, DbErr>;
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -55,6 +58,16 @@ pub mod in_memory {
                 .unwrap_or_default();
             streams.sort_by_key(|s| s.index);
             Ok(streams)
+        }
+
+        async fn delete_by_file_id(&self, file_id: Uuid) -> Result<u64, DbErr> {
+            Ok(self
+                .streams
+                .lock()
+                .unwrap()
+                .remove(&file_id)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0))
         }
     }
 }

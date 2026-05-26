@@ -143,22 +143,6 @@ impl StreamBuilder {
                                     };
 
                                     local_streams.push(OutputStream::Video(stream));
-
-                                    // TODO: Add audio stream if present vv. Need metadata.rs to extract audio metadata out of video track as well? does ffmpeg always separate the video and audio streams?
-                                    // // Append corresponding audio stream (required by CMAF)
-                                    // let stream = AudioStream {
-                                    //     source_file_index: i,
-                                    //     source_stream_index: j,
-                                    //     codec: OutputAudioCodec::Remuxed(
-                                    //         stream_metadata.video.codec_name.clone(),
-                                    //     ),
-                                    //     // max_rate: stream_metadata.video.max_rate,
-                                    //     // bit_rate: stream_metadata.video.bit_rate,
-                                    //     // resolution: stream_metadata.video.resolution(),
-                                    //     // frame_rate: stream_metadata.rate,
-                                    // };
-
-                                    // local_streams.push(OutputStream::Audio(stream));
                                 }
                                 StreamMetadata::Audio(stream_metadata) => {
                                     let stream = AudioStream {

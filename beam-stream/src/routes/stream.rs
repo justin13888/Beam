@@ -222,7 +222,8 @@ pub async fn get_stream_token(
     tags("media"),
     parameters(
         ("id" = String, description = "Stream ID"),
-        ("Authorization" = String, Header, description = "Bearer <stream token>")
+        ("Authorization" = String, Header, description = "Bearer <stream token> (alternative to ?token=)"),
+        ("token" = String, Query, description = "Stream token (alternative to the Authorization header, required for <video> playback)"),
     ),
 )]
 #[tracing::instrument(skip_all)]
@@ -234,16 +235,18 @@ pub async fn stream_mp4(
     let state = depot.obtain::<AppState>().unwrap();
     let id: String = req.param::<String>("id").unwrap_or_default();
 
-    let token = if let Some(auth_header) = req.headers().get("Authorization")
-        && let Ok(auth_str) = auth_header.to_str()
-        && auth_str.starts_with("Bearer ")
-    {
-        auth_str[7..].to_string()
-    } else {
-        return Err(StreamMp4Error::Unauthorized(
-            "Missing Authorization header".into(),
-        ));
-    };
+    // Accept the stream token from either the Authorization header (for
+    // programmatic clients) or the ?token= query param (the <video> element
+    // can't set custom headers).
+    let header_token = req
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let token = header_token
+        .or_else(|| req.queries().get("token").map(|s| s.to_string()))
+        .ok_or_else(|| StreamMp4Error::Unauthorized("Missing stream token".into()))?;
 
     // Validate stream token
     match state.services.auth.verify_stream_token(&token) {
@@ -277,7 +280,12 @@ pub async fn stream_mp4(
     };
 
     let source_video_path = PathBuf::from(&file.path);
-    let cache_mp4_path = state.config.cache_dir.join(format!("{}.mp4", id));
+    // Cache key includes the content hash so a reconciled file (content changed
+    // → new hash) does not serve the stale MP4 from before the change.
+    let cache_mp4_path = state
+        .config
+        .cache_dir
+        .join(format!("{}-{}.mp4", id, file.hash));
 
     if !source_video_path.exists() {
         error!("Source video file not found: {:?}", source_video_path);
@@ -783,9 +791,12 @@ mod tests {
             assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
         }
 
-        /// Token supplied as a query parameter (old API) → 401.
+        /// A valid stream token supplied as a query parameter passes auth.
+        /// The library stub returns Ok(None) so the handler proceeds past auth
+        /// and returns 404 — proving the token was accepted (any failure to
+        /// authenticate would surface as 401, not 404).
         #[tokio::test]
-        async fn test_rejects_query_param_token() {
+        async fn test_accepts_query_param_token() {
             let ctx = build_test_service();
             let token = ctx
                 .auth
@@ -793,7 +804,7 @@ mod tests {
                 .expect("token creation should succeed");
             let url = format!("{}?token={}", stream_url(TEST_FILE_ID), token);
             let response = TestClient::get(url).send(&ctx.service).await;
-            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
+            assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
         }
 
         /// Bearer token for a different stream ID → 401 (token/id mismatch).

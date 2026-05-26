@@ -17,6 +17,7 @@ confique = { workspace = true }
 dotenvy = "0.15.7"
 eyre = "0.6.12"
 ffmpeg-next = { workspace = true }
+notify = "6"
 num = { version = "0.4.3", features = ["serde"] }
 num_cpus = "1.17.0"
 parking_lot = "0.12.5"

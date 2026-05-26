@@ -140,4 +140,16 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
 
         Ok(models.into_iter().map(MediaStream::from).collect())
     }
+
+    async fn delete_by_file_id(&self, file_id: Uuid) -> Result<u64, DbErr> {
+        use beam_entity::media_stream;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let result = media_stream::Entity::delete_many()
+            .filter(media_stream::Column::FileId.eq(file_id))
+            .exec(&self.db)
+            .await?;
+
+        Ok(result.rows_affected)
+    }
 }
