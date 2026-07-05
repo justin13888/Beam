@@ -56,6 +56,7 @@ impl MovieRepository for SqlMovieRepository {
         let new_movie = movie::ActiveModel {
             id: Set(Uuid::new_v4()),
             title: Set(create.title),
+            year: Set(create.year.map(|y| y as i32)),
             runtime_mins: Set(create.runtime.map(|d| (d.as_secs() / 60) as i32)),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),

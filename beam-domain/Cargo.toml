@@ -10,6 +10,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 num = { version = "0.4.3", features = ["serde"] }
 parking_lot = "0.12.5"
+regex = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

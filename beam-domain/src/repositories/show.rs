@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::show::{CreateEpisode, Episode, Season, Show};
+use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show};
 
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
@@ -10,7 +10,7 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Show>, DbErr>;
     async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr>;
     async fn find_all(&self) -> Result<Vec<Show>, DbErr>;
-    async fn create(&self, title: String) -> Result<Show, DbErr>;
+    async fn create(&self, create: CreateShow) -> Result<Show, DbErr>;
     async fn ensure_library_association(
         &self,
         library_id: Uuid,
@@ -59,13 +59,13 @@ pub mod in_memory {
             Ok(self.shows.lock().unwrap().values().cloned().collect())
         }
 
-        async fn create(&self, title: String) -> Result<Show, DbErr> {
+        async fn create(&self, create: CreateShow) -> Result<Show, DbErr> {
             let show = Show {
                 id: Uuid::new_v4(),
-                title,
+                title: create.title,
                 title_localized: None,
                 description: None,
-                year: None,
+                year: create.year,
                 poster_url: None,
                 backdrop_url: None,
                 tmdb_id: None,

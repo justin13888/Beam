@@ -477,6 +477,7 @@ dependencies = [
  "mockall",
  "num",
  "parking_lot",
+ "regex",
  "sea-orm",
  "serde",
  "serde_json",

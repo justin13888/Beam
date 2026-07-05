@@ -58,7 +58,7 @@ pub mod in_memory {
                 title: create.title,
                 title_localized: None,
                 description: None,
-                year: None,
+                year: create.year,
                 release_date: None,
                 runtime: create.runtime,
                 poster_url: None,

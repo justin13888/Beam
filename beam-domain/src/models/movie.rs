@@ -38,6 +38,7 @@ pub struct MovieEntry {
 #[derive(Debug, Clone)]
 pub struct CreateMovie {
     pub title: String,
+    pub year: Option<u32>,
     pub runtime: Option<Duration>,
 }
 

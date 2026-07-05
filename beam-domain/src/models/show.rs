@@ -44,6 +44,13 @@ pub struct Episode {
     pub created_at: DateTime<Utc>,
 }
 
+/// Parameters for creating a show
+#[derive(Debug, Clone)]
+pub struct CreateShow {
+    pub title: String,
+    pub year: Option<u32>,
+}
+
 /// Parameters for creating an episode
 #[derive(Debug, Clone)]
 pub struct CreateEpisode {

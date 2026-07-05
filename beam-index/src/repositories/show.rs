@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
-use beam_domain::models::{CreateEpisode, Episode, Season, Show};
+use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show};
 use beam_domain::repositories::ShowRepository;
 
 /// SQL-based implementation of the ShowRepository trait.
@@ -47,7 +47,7 @@ impl ShowRepository for SqlShowRepository {
         Ok(models.into_iter().map(Show::from).collect())
     }
 
-    async fn create(&self, title: String) -> Result<Show, DbErr> {
+    async fn create(&self, create: CreateShow) -> Result<Show, DbErr> {
         use beam_entity::show;
         use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
@@ -55,7 +55,8 @@ impl ShowRepository for SqlShowRepository {
         let now = Utc::now();
         let new_show = show::ActiveModel {
             id: Set(Uuid::new_v4()),
-            title: Set(title),
+            title: Set(create.title),
+            year: Set(create.year.map(|y| y as i32)),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
             ..Default::default()

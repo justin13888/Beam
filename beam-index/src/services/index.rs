@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use regex::Regex;
 use sea_orm::DbErr;
 use serde_json;
 use thiserror::Error;
@@ -25,9 +24,6 @@ use beam_domain::models::file::{
 use beam_domain::repositories::{
     FileRepository, LibraryRepository, MediaStreamRepository, MovieRepository, ShowRepository,
 };
-
-static EPISODE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)S(\d+)E(\d+)").expect("valid regex"));
 
 // TODO: See if these can be improved. Ensure logic can detect all of them properly
 const KNOWN_VIDEO_EXTENSIONS: &[&str] = &[
@@ -195,36 +191,51 @@ impl LocalIndexService {
         Ok(count)
     }
 
-    /// Classify media content (Movie vs Episode) based on regex
+    /// Classify media content (Movie vs Episode) using the scene-filename parser.
     async fn classify_media_content(
         &self,
         path: &Path,
         lib_uuid: Uuid,
         duration: Duration,
     ) -> Result<MediaFileContent, IndexError> {
-        use beam_domain::models::{CreateEpisode, CreateMovie, CreateMovieEntry, MediaFileContent};
+        use beam_domain::models::{
+            CreateEpisode, CreateMovie, CreateMovieEntry, CreateShow, MediaFileContent,
+        };
+        use beam_domain::utils::filename::parse_media_filename;
 
         let file_stem = path
             .file_stem()
             .map(|s| s.to_string_lossy())
             .unwrap_or_default();
+        let parsed = parse_media_filename(&file_stem);
 
-        if let Some(captures) = EPISODE_REGEX.captures(&file_stem) {
+        if let (Some(season_num), Some(episode_num)) = (parsed.season, parsed.episode) {
             // IT IS AN EPISODE
-            let season_num: u32 = captures[1].parse().unwrap_or(1);
-            let episode_num: i32 = captures[2].parse().unwrap_or(1);
 
-            // Show title guess: Parent directory name
-            let show_title = path
+            // Show title/year guess: parent directory name, parsed the same way.
+            let dir_name = path
                 .parent()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Unknown Show".to_string());
+                .unwrap_or_default();
+            let parsed_show = parse_media_filename(&dir_name);
+            let show_title = if parsed_show.title.is_empty() {
+                "Unknown Show".to_string()
+            } else {
+                parsed_show.title
+            };
 
             // Find or create show using repository
             let show = match self.show_repo.find_by_title(&show_title).await? {
                 Some(s) => s,
-                None => self.show_repo.create(show_title.clone()).await?,
+                None => {
+                    self.show_repo
+                        .create(CreateShow {
+                            title: show_title.clone(),
+                            year: parsed_show.year,
+                        })
+                        .await?
+                }
             };
 
             // Ensure library-show association exists
@@ -239,10 +250,15 @@ impl LocalIndexService {
                 .await?;
 
             // Create episode
+            let episode_title = if parsed.title.is_empty() {
+                file_stem.to_string()
+            } else {
+                parsed.title
+            };
             let create_episode = CreateEpisode {
                 season_id: season.id,
-                episode_number: episode_num as u32,
-                title: file_stem.to_string(),
+                episode_number: episode_num,
+                title: episode_title,
                 runtime: Some(duration),
             };
             let episode = self.show_repo.create_episode(create_episode).await?;
@@ -252,7 +268,11 @@ impl LocalIndexService {
             })
         } else {
             // IT IS A MOVIE
-            let movie_title = file_stem.to_string();
+            let movie_title = if parsed.title.is_empty() {
+                file_stem.to_string()
+            } else {
+                parsed.title
+            };
 
             // Find or create movie using repository
             let movie = match self.movie_repo.find_by_title(&movie_title).await? {
@@ -260,6 +280,7 @@ impl LocalIndexService {
                 None => {
                     let create_movie = CreateMovie {
                         title: movie_title,
+                        year: parsed.year,
                         runtime: Some(duration),
                     };
                     self.movie_repo.create(create_movie).await?
@@ -1530,7 +1551,8 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(movies.len(), 1);
-        assert_eq!(movies[0].title, "The.Matrix.Reloaded.2003");
+        assert_eq!(movies[0].title, "The Matrix Reloaded");
+        assert_eq!(movies[0].year, Some(2003));
     }
 
     #[tokio::test]
@@ -1554,7 +1576,8 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(movies.len(), 1);
-        assert_eq!(movies[0].title, "movie (2024)");
+        assert_eq!(movies[0].title, "movie");
+        assert_eq!(movies[0].year, Some(2024));
     }
 
     #[tokio::test]
