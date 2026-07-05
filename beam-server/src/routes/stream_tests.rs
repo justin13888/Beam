@@ -9,19 +9,18 @@ mod tests {
 
     use beam_auth::server::OidcRuntimeConfig;
     use beam_auth::utils::{
+        models::CreateUser,
         oidc::NotConfiguredOidcClient,
         pending_auth_store::in_memory::InMemoryPendingAuthStore,
-        repository::in_memory::InMemoryUserRepository,
-        service::{AuthService, LocalAuthService},
-        session_store::in_memory::InMemorySessionStore,
+        repository::{UserRepository, in_memory::InMemoryUserRepository},
+        session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
     };
     use salvo::prelude::*;
     use salvo::test::{ResponseExt, TestClient};
-    use serde_json::Value;
     use tempfile::TempDir;
 
     use crate::models::{FileContentType, FileIndexStatus, LibraryFile};
-    use crate::routes::{download_file, get_stream_token, stream_file};
+    use crate::routes::{download_file, stream_file};
     use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
     use crate::services::hash::HashService;
     use crate::services::library::{LibraryError, LibraryService};
@@ -62,7 +61,6 @@ mod tests {
 
     // ─── Constants ────────────────────────────────────────────────────────────
 
-    const TEST_JWT_SECRET: &str = "test-jwt-secret-for-stream-route-tests";
     const TEST_FILE_ID: &str = "11111111-1111-1111-1111-111111111111";
 
     // ─── Stub service implementations ─────────────────────────────────────────
@@ -185,17 +183,13 @@ mod tests {
 
     struct TestFixture {
         state: AppState,
-        auth: Arc<LocalAuthService>,
+        session_store: Arc<InMemorySessionStore>,
+        user_repo: Arc<InMemoryUserRepository>,
     }
 
     fn make_test_state(files: Vec<LibraryFile>) -> TestFixture {
         let session_store = Arc::new(InMemorySessionStore::default());
         let user_repo = Arc::new(InMemoryUserRepository::default());
-        let auth = Arc::new(LocalAuthService::new(
-            user_repo.clone(),
-            session_store.clone(),
-            TEST_JWT_SECRET.to_string(),
-        ));
 
         let notification = Arc::new(InMemoryNotificationService::new());
         let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
@@ -203,7 +197,6 @@ mod tests {
         )));
 
         let services = AppServices {
-            auth: auth.clone(),
             hash: Arc::new(StubHashService),
             library: Arc::new(StubLibraryService::new(files)),
             metadata: Arc::new(StubMetadataService),
@@ -211,7 +204,7 @@ mod tests {
             admin_log,
             user_repo: user_repo.clone(),
             playback: Arc::new(StubPlaybackService),
-            session_store,
+            session_store: session_store.clone(),
             oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
             oidc_config: OidcRuntimeConfig {
@@ -230,7 +223,6 @@ mod tests {
             video_dir: PathBuf::from("/tmp"),
             cache_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
-            jwt_secret: TEST_JWT_SECRET.to_string(),
             hash_unknown_files: true,
             scan_interval_secs: 3600,
             watch_enabled: false,
@@ -252,33 +244,55 @@ mod tests {
 
         let state = AppState::new(config, services);
 
-        TestFixture { state, auth }
+        TestFixture {
+            state,
+            session_store,
+            user_repo,
+        }
     }
 
-    /// Registers a test user and returns `(jwt_token, user_id)`.
-    async fn register_and_get_token(auth: &LocalAuthService) -> (String, String) {
-        let resp = auth
-            .register(
-                "testuser",
-                "test@example.com",
-                "password123",
-                "device-hash",
-                "127.0.0.1",
+    /// Seeds a user + session directly (bypassing the OIDC login flow, which
+    /// isn't under test here) and returns a `Cookie` header value.
+    async fn seed_session_cookie(fixture: &TestFixture) -> String {
+        let user = fixture
+            .user_repo
+            .create(CreateUser {
+                oidc_issuer: "https://test.example".to_string(),
+                oidc_subject: "subj-1".to_string(),
+                email: Some("test@example.com".to_string()),
+                display_name: "Test User".to_string(),
+                avatar_url: None,
+                is_admin: false,
+            })
+            .await
+            .expect("seed user should succeed");
+
+        let token = fixture
+            .session_store
+            .create(
+                &SessionData {
+                    user_id: user.id.to_string(),
+                    device_hash: "test-device".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    last_active: chrono::Utc::now().timestamp(),
+                },
+                86400,
+                86400,
             )
             .await
-            .expect("registration should succeed");
-        (resp.token, resp.user.id)
+            .expect("seed session should succeed");
+
+        format!("beam_session={token}")
     }
 
     fn build_service(fixture: &TestFixture) -> Service {
         // Use a minimal router containing only the stream endpoints under test.
-        // This avoids pulling in the full GraphQL schema and any unrelated middleware.
         let router = Router::new()
             .hoop(affix_state::inject(fixture.state.clone()))
             .push(
                 Router::with_path("v1").push(
                     Router::with_path("files/{file_id}")
-                        .push(Router::with_path("stream-token").post(get_stream_token))
                         .push(Router::with_path("stream").get(stream_file))
                         .push(Router::with_path("download").get(download_file)),
                 ),
@@ -304,82 +318,7 @@ mod tests {
         }
     }
 
-    // ─── Tests: POST /v1/files/:file_id/stream-token ──────────────────────────
-
-    /// A valid Bearer JWT should yield 200 and a JSON body containing `"token"`.
-    #[tokio::test]
-    async fn test_get_stream_token_valid_jwt() {
-        let fixture = make_test_state(vec![make_library_file(TEST_FILE_ID, "/tmp/video.mkv")]);
-        let service = build_service(&fixture);
-        let (jwt, _user_id) = register_and_get_token(&fixture.auth).await;
-
-        let mut res = TestClient::post(format!(
-            "http://localhost/v1/files/{}/stream-token",
-            TEST_FILE_ID
-        ))
-        .bearer_auth(&jwt)
-        .send(&service)
-        .await;
-
-        assert_eq!(res.status_code, Some(StatusCode::OK));
-        let body: Value = res.take_json().await.expect("valid JSON body");
-        assert!(
-            body.get("token").and_then(Value::as_str).is_some(),
-            "Expected 'token' field in response body, got: {body}"
-        );
-    }
-
-    /// A request without an Authorization header must return 401.
-    #[tokio::test]
-    async fn test_get_stream_token_missing_authorization() {
-        let fixture = make_test_state(vec![make_library_file(TEST_FILE_ID, "/tmp/video.mkv")]);
-        let service = build_service(&fixture);
-
-        let res = TestClient::post(format!(
-            "http://localhost/v1/files/{}/stream-token",
-            TEST_FILE_ID
-        ))
-        .send(&service)
-        .await;
-
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    /// An Authorization header without the `Bearer ` prefix must return 401.
-    #[tokio::test]
-    async fn test_get_stream_token_malformed_authorization() {
-        let fixture = make_test_state(vec![make_library_file(TEST_FILE_ID, "/tmp/video.mkv")]);
-        let service = build_service(&fixture);
-
-        let res = TestClient::post(format!(
-            "http://localhost/v1/files/{}/stream-token",
-            TEST_FILE_ID
-        ))
-        .add_header("Authorization", "NotBearer some-token", true)
-        .send(&service)
-        .await;
-
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    /// An invalid/tampered JWT must return 401.
-    #[tokio::test]
-    async fn test_get_stream_token_invalid_jwt() {
-        let fixture = make_test_state(vec![make_library_file(TEST_FILE_ID, "/tmp/video.mkv")]);
-        let service = build_service(&fixture);
-
-        let res = TestClient::post(format!(
-            "http://localhost/v1/files/{}/stream-token",
-            TEST_FILE_ID
-        ))
-        .bearer_auth("not.a.valid.jwt.token")
-        .send(&service)
-        .await;
-
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    // ─── Tests: GET /v1/files/:file_id/stream (Authorization: Bearer) ─────────
+    // ─── Tests: GET /v1/files/:file_id/stream ──────────────────────────────────
 
     /// The handler must serve the source file's bytes directly -- no
     /// transcoding, no remuxing, no cache copy -- and must reflect the
@@ -395,16 +334,10 @@ mod tests {
         file.mime_type = Some("video/x-matroska".to_string());
         let fixture = make_test_state(vec![file]);
         let service = build_service(&fixture);
-
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", TEST_FILE_ID)
-            .expect("create_stream_token should succeed");
+        let cookie = seed_session_cookie(&fixture).await;
 
         let mut res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
-            .bearer_auth(&stream_token)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
 
@@ -440,16 +373,10 @@ mod tests {
         file.mime_type = None;
         let fixture = make_test_state(vec![file]);
         let service = build_service(&fixture);
-
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", TEST_FILE_ID)
-            .expect("create_stream_token should succeed");
+        let cookie = seed_session_cookie(&fixture).await;
 
         let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
-            .bearer_auth(&stream_token)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
 
@@ -470,16 +397,10 @@ mod tests {
             "/tmp/__nonexistent_source_video_xyz_beam_test__.mkv",
         )]);
         let service = build_service(&fixture);
-
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", TEST_FILE_ID)
-            .expect("create_stream_token should succeed");
+        let cookie = seed_session_cookie(&fixture).await;
 
         let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
-            .bearer_auth(&stream_token)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
 
@@ -491,55 +412,37 @@ mod tests {
     async fn test_stream_file_file_id_not_in_library() {
         let fixture = make_test_state(vec![]); // empty library
         let service = build_service(&fixture);
-
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", TEST_FILE_ID)
-            .expect("create_stream_token should succeed");
+        let cookie = seed_session_cookie(&fixture).await;
 
         let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
-            .bearer_auth(&stream_token)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
 
         assert_eq!(res.status_code, Some(StatusCode::NOT_FOUND));
     }
 
-    /// An invalid/tampered stream token must return 401.
+    /// No session cookie at all must return 401.
     #[tokio::test]
-    async fn test_stream_file_invalid_stream_token() {
+    async fn test_stream_file_missing_session_cookie() {
         let fixture = make_test_state(vec![]);
         let service = build_service(&fixture);
 
         let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
-            .bearer_auth("not.a.valid.token")
             .send(&service)
             .await;
 
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
 
-    /// A stream token issued for a *different* file ID than the path param must
-    /// return 401.
+    /// A cookie value that doesn't match any known session must return 401.
     #[tokio::test]
-    async fn test_stream_file_token_wrong_file_id() {
-        let different_file_id = "22222222-2222-2222-2222-222222222222";
-
+    async fn test_stream_file_unknown_session_cookie() {
         let fixture = make_test_state(vec![]);
         let service = build_service(&fixture);
 
-        // Token is for `different_file_id`, but the path requests `TEST_FILE_ID`.
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", different_file_id)
-            .expect("create_stream_token should succeed");
-
         let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
-            .bearer_auth(&stream_token)
+            .add_header("Cookie", "beam_session=not-a-real-session", true)
             .send(&service)
             .await;
 
@@ -559,16 +462,10 @@ mod tests {
             source_file.to_str().unwrap(),
         )]);
         let service = build_service(&fixture);
-
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", TEST_FILE_ID)
-            .expect("create_stream_token should succeed");
+        let cookie = seed_session_cookie(&fixture).await;
 
         let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
-            .bearer_auth(&stream_token)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
 
@@ -597,16 +494,10 @@ mod tests {
         )]);
 
         let service = build_service(&fixture);
-
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", TEST_FILE_ID)
-            .expect("create_stream_token should succeed");
+        let cookie = seed_session_cookie(&fixture).await;
 
         let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
-            .bearer_auth(&stream_token)
+            .add_header("Cookie", cookie, true)
             .add_header("Range", "bytes=0-99", true)
             .send(&service)
             .await;
@@ -647,19 +538,13 @@ mod tests {
             source_file.to_str().unwrap(),
         )]);
         let service = build_service(&fixture);
-
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", TEST_FILE_ID)
-            .expect("create_stream_token should succeed");
+        let cookie = seed_session_cookie(&fixture).await;
 
         let mut res = TestClient::get(format!(
             "http://localhost/v1/files/{}/download",
             TEST_FILE_ID
         ))
-        .bearer_auth(&stream_token)
+        .add_header("Cookie", cookie, true)
         .send(&service)
         .await;
 
@@ -688,19 +573,13 @@ mod tests {
             source_file.to_str().unwrap(),
         )]);
         let service = build_service(&fixture);
-
-        let stream_token = fixture
-            .state
-            .services
-            .auth
-            .create_stream_token("dummy-user", TEST_FILE_ID)
-            .expect("create_stream_token should succeed");
+        let cookie = seed_session_cookie(&fixture).await;
 
         let res = TestClient::get(format!(
             "http://localhost/v1/files/{}/download",
             TEST_FILE_ID
         ))
-        .bearer_auth(&stream_token)
+        .add_header("Cookie", cookie, true)
         .add_header("Range", "bytes=100-199", true)
         .send(&service)
         .await;
@@ -714,9 +593,9 @@ mod tests {
         );
     }
 
-    /// An invalid/tampered stream token must return 401 for downloads too.
+    /// No session cookie must return 401 for downloads too.
     #[tokio::test]
-    async fn test_download_file_invalid_stream_token() {
+    async fn test_download_file_missing_session_cookie() {
         let fixture = make_test_state(vec![]);
         let service = build_service(&fixture);
 
@@ -724,7 +603,6 @@ mod tests {
             "http://localhost/v1/files/{}/download",
             TEST_FILE_ID
         ))
-        .bearer_auth("not.a.valid.token")
         .send(&service)
         .await;
 

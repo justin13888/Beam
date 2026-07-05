@@ -77,7 +77,7 @@ function ScanStatusBadge({ library }: { library: Library }) {
 }
 
 function LibrariesPage() {
-	const { token } = useAuth();
+	const { isAuthenticated } = useAuth();
 	const queryClient = useQueryClient();
 	const {
 		data,
@@ -88,12 +88,12 @@ function LibrariesPage() {
 		queryKey: ["libraries"],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/libraries", {
-				params: { header: { Authorization: `Bearer ${token}` } },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to load libraries");
 			return data;
 		},
-		enabled: !!token,
+		enabled: isAuthenticated,
 	});
 
 	const invalidateLibraries = () =>
@@ -102,8 +102,8 @@ function LibrariesPage() {
 	const createLibraryMutation = useMutation({
 		mutationFn: async (vars: { name: string; rootPath: string }) => {
 			const { data, error } = await apiClient.POST("/v1/admin/libraries", {
-				params: { header: { Authorization: `Bearer ${token}` } },
 				body: { name: vars.name, root_path: vars.rootPath },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to create library");
 			return data;
@@ -113,10 +113,8 @@ function LibrariesPage() {
 	const scanLibraryMutation = useMutation({
 		mutationFn: async (libraryId: string) => {
 			const { error } = await apiClient.POST("/v1/admin/libraries/{id}/scan", {
-				params: {
-					path: { id: libraryId },
-					header: { Authorization: `Bearer ${token}` },
-				},
+				params: { path: { id: libraryId } },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to scan library");
 		},
@@ -127,10 +125,8 @@ function LibrariesPage() {
 			const { error, response } = await apiClient.DELETE(
 				"/v1/admin/libraries/{id}",
 				{
-					params: {
-						path: { id: libraryId },
-						header: { Authorization: `Bearer ${token}` },
-					},
+					params: { path: { id: libraryId } },
+					credentials: "include",
 				},
 			);
 			if (error || !response.ok) throw new Error("Failed to delete library");

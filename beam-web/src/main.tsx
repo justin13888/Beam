@@ -35,6 +35,13 @@ declare module "@tanstack/react-router" {
 
 function App() {
 	const auth = useAuth();
+	// Block router rendering until the initial `GET /v1/me` check resolves --
+	// route `beforeLoad` guards read `context.auth.isAuthenticated`
+	// synchronously and must never see a transient "logged out" state while
+	// the session cookie is still being verified.
+	if (auth.isLoading) {
+		return null;
+	}
 	return <RouterProvider router={router} context={{ auth }} />;
 }
 

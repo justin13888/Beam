@@ -20,9 +20,9 @@ type AdminLogEntry =
 const PAGE_SIZE = 50;
 
 export const Route = createFileRoute("/admin")({
-	beforeLoad: ({ context }) => {
+	beforeLoad: ({ context, location }) => {
 		if (!context.auth.isAuthenticated) {
-			throw redirect({ to: "/login" });
+			throw redirect({ to: "/login", search: { redirect: location.href } });
 		}
 		if (!context.auth.user?.is_admin) {
 			throw redirect({ to: "/" });
@@ -79,7 +79,7 @@ function formatTimestamp(iso: string): string {
 }
 
 function AdminPage() {
-	const { user, token } = useAuth();
+	const { user, isAuthenticated } = useAuth();
 	const [page, setPage] = useState(0);
 	const offset = page * PAGE_SIZE;
 
@@ -92,27 +92,25 @@ function AdminPage() {
 		queryKey: ["admin", "logs", offset],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/admin/logs", {
-				params: {
-					header: { Authorization: `Bearer ${token}` },
-					query: { limit: PAGE_SIZE, offset },
-				},
+				params: { query: { limit: PAGE_SIZE, offset } },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to load admin logs");
 			return data;
 		},
-		enabled: !!token,
+		enabled: isAuthenticated,
 	});
 
 	const { data: countData, refetch: refetchCount } = useQuery({
 		queryKey: ["admin", "logs", "count"],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/admin/logs/count", {
-				params: { header: { Authorization: `Bearer ${token}` } },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to load admin log count");
 			return data;
 		},
-		enabled: !!token,
+		enabled: isAuthenticated,
 	});
 
 	const refetch = () => {
@@ -140,7 +138,7 @@ function AdminPage() {
 						<span className="text-sm text-gray-500">
 							Logged in as{" "}
 							<span className="text-gray-300 font-medium">
-								{user?.username}
+								{user?.display_name}
 							</span>
 						</span>
 						<Button

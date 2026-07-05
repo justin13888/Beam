@@ -1,19 +1,21 @@
 //! Shared v1 REST conventions: a single JSON error body shape and a
-//! Bearer-JWT `CurrentUser` extractor, reused across every `/v1` endpoint so
-//! new routes don't reinvent auth parsing or error formatting.
+//! cookie-session `CurrentUser` extractor, reused across every `/v1`
+//! endpoint so new routes don't reinvent auth parsing or error formatting.
 //!
-//! Auth here stays Bearer-JWT-compatible deliberately -- the OIDC BFF /
-//! cookie-session cutover lands later and will replace `require_auth`'s
-//! internals without changing callers' error handling.
+//! Auth is the `beam_session` cookie set by the OIDC login flow (see
+//! ADR-0003) -- looked up via `SessionStore::get`, sliding the idle expiry
+//! forward on activity the same way `beam_auth`'s own `/me` endpoint does.
 
 use async_trait::async_trait;
-use beam_auth::utils::service::AuthenticatedUser;
+use beam_auth::utils::session_store::get_and_touch;
 use salvo::http::StatusCode;
 use salvo::oapi::{ToResponses, ToSchema};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
+
+const SESSION_COOKIE: &str = "beam_session";
 
 /// Uniform JSON error body: `{"error": "message"}` for every `/v1` endpoint.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -55,21 +57,28 @@ impl Writer for ApiError {
     }
 }
 
-/// Extract the caller's identity from a `Bearer <jwt>` Authorization header.
+/// The caller's identity, resolved from the `beam_session` cookie.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedUser {
+    pub user_id: String,
+}
+
+/// Extract the caller's identity from the `beam_session` cookie.
 pub async fn require_auth(req: &Request, state: &AppState) -> Result<AuthenticatedUser, ApiError> {
     let token = req
-        .headers()
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or_else(|| ApiError::Unauthorized("Missing Authorization header".to_string()))?;
+        .cookie(SESSION_COOKIE)
+        .map(|c| c.value().to_string())
+        .ok_or_else(|| ApiError::Unauthorized("Missing session cookie".to_string()))?;
 
-    state
-        .services
-        .auth
-        .verify_token(token)
+    let idle_ttl_secs = state.config.session_idle_days * 24 * 60 * 60;
+    let session = get_and_touch(state.services.session_store.as_ref(), &token, idle_ttl_secs)
         .await
-        .map_err(|_| ApiError::Unauthorized("Invalid or expired token".to_string()))
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::Unauthorized("Invalid or expired session".to_string()))?;
+
+    Ok(AuthenticatedUser {
+        user_id: session.user_id,
+    })
 }
 
 /// Like [`require_auth`], but additionally requires the caller to be an

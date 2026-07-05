@@ -4,17 +4,12 @@ use uuid::Uuid;
 
 use crate::utils::models::{CreateUser, User};
 
-/// Repository for managing user data.
+/// Repository for managing user data. Identity is `(oidc_issuer,
+/// oidc_subject)` -- there is no username/password (see ADR-0003).
 #[async_trait]
 pub trait UserRepository: Send + Sync + std::fmt::Debug {
     /// Finds a user by their unique identifier.
     async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, DbErr>;
-
-    /// Finds a user by their username.
-    async fn find_by_username(&self, username: &str) -> Result<Option<User>, DbErr>;
-
-    /// Finds a user by their email address.
-    async fn find_by_email(&self, email: &str) -> Result<Option<User>, DbErr>;
 
     /// Finds a user by their `(oidc_issuer, oidc_subject)` identity -- the
     /// JIT-provisioning lookup key.
@@ -39,7 +34,7 @@ pub trait UserRepository: Send + Sync + std::fmt::Debug {
     async fn update_oidc_profile(
         &self,
         id: Uuid,
-        display_name: Option<String>,
+        display_name: String,
         avatar_url: Option<String>,
     ) -> Result<(), DbErr>;
 }
@@ -65,28 +60,6 @@ impl UserRepository for SqlUserRepository {
         Ok(model.map(User::from))
     }
 
-    async fn find_by_username(&self, username: &str) -> Result<Option<User>, DbErr> {
-        use beam_entity::user;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-        let model = user::Entity::find()
-            .filter(user::Column::Username.eq(username))
-            .one(&self.db)
-            .await?;
-        Ok(model.map(User::from))
-    }
-
-    async fn find_by_email(&self, email: &str) -> Result<Option<User>, DbErr> {
-        use beam_entity::user;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-        let model = user::Entity::find()
-            .filter(user::Column::Email.eq(email))
-            .one(&self.db)
-            .await?;
-        Ok(model.map(User::from))
-    }
-
     async fn find_by_oidc_identity(
         &self,
         issuer: &str,
@@ -109,27 +82,23 @@ impl UserRepository for SqlUserRepository {
         use sea_orm::{ActiveModelTrait, Set};
 
         let CreateUser {
-            username,
-            email,
-            password_hash,
-            is_admin,
             oidc_issuer,
             oidc_subject,
+            email,
             display_name,
             avatar_url,
+            is_admin,
         } = create;
 
         let now = Utc::now();
         let new_user = user::ActiveModel {
             id: Set(Uuid::new_v4()),
-            username: Set(username),
-            email: Set(email),
-            password_hash: Set(password_hash),
-            is_admin: Set(is_admin),
             oidc_issuer: Set(oidc_issuer),
             oidc_subject: Set(oidc_subject),
+            email: Set(email),
             display_name: Set(display_name),
             avatar_url: Set(avatar_url),
+            is_admin: Set(is_admin),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
         };
@@ -154,7 +123,7 @@ impl UserRepository for SqlUserRepository {
     async fn update_oidc_profile(
         &self,
         id: Uuid,
-        display_name: Option<String>,
+        display_name: String,
         avatar_url: Option<String>,
     ) -> Result<(), DbErr> {
         use beam_entity::user;
@@ -190,16 +159,6 @@ pub mod in_memory {
             Ok(self.users.lock().unwrap().get(&id).cloned())
         }
 
-        async fn find_by_username(&self, username: &str) -> Result<Option<User>, DbErr> {
-            let users = self.users.lock().unwrap();
-            Ok(users.values().find(|u| u.username == username).cloned())
-        }
-
-        async fn find_by_email(&self, email: &str) -> Result<Option<User>, DbErr> {
-            let users = self.users.lock().unwrap();
-            Ok(users.values().find(|u| u.email == email).cloned())
-        }
-
         async fn find_by_oidc_identity(
             &self,
             issuer: &str,
@@ -208,10 +167,7 @@ pub mod in_memory {
             let users = self.users.lock().unwrap();
             Ok(users
                 .values()
-                .find(|u| {
-                    u.oidc_issuer.as_deref() == Some(issuer)
-                        && u.oidc_subject.as_deref() == Some(subject)
-                })
+                .find(|u| u.oidc_issuer == issuer && u.oidc_subject == subject)
                 .cloned())
         }
 
@@ -219,14 +175,12 @@ pub mod in_memory {
             let now = Utc::now();
             let new_user = User {
                 id: Uuid::new_v4(),
-                username: user.username,
-                email: user.email,
-                password_hash: user.password_hash,
-                is_admin: user.is_admin,
                 oidc_issuer: user.oidc_issuer,
                 oidc_subject: user.oidc_subject,
+                email: user.email,
                 display_name: user.display_name,
                 avatar_url: user.avatar_url,
+                is_admin: user.is_admin,
                 created_at: now,
                 updated_at: now,
             };
@@ -247,7 +201,7 @@ pub mod in_memory {
         async fn update_oidc_profile(
             &self,
             id: Uuid,
-            display_name: Option<String>,
+            display_name: String,
             avatar_url: Option<String>,
         ) -> Result<(), DbErr> {
             if let Some(user) = self.users.lock().unwrap().get_mut(&id) {

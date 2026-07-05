@@ -1,9 +1,8 @@
 import { queryOptions } from "@tanstack/react-query";
 import { createFileRoute, ErrorComponent } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import type { components } from "@/api.gen";
 import { env } from "@/env";
-import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
 
 type MediaMetadata =
@@ -11,15 +10,13 @@ type MediaMetadata =
 type ShowMetadata =
 	components["schemas"]["beam_server.models.media.show.ShowMetadata"];
 
-const mediaQueryOptions = (mediaId: string, token: string) =>
+const mediaQueryOptions = (mediaId: string) =>
 	queryOptions({
 		queryKey: ["media", mediaId],
 		queryFn: async (): Promise<MediaMetadata | null> => {
 			const { data, error, response } = await apiClient.GET("/v1/media/{id}", {
-				params: {
-					path: { id: mediaId },
-					header: { Authorization: `Bearer ${token}` },
-				},
+				params: { path: { id: mediaId } },
+				credentials: "include",
 			});
 			if (response.status === 404) return null;
 			if (error) throw new Error("Failed to load media metadata");
@@ -28,8 +25,8 @@ const mediaQueryOptions = (mediaId: string, token: string) =>
 	});
 
 export const Route = createFileRoute("/media/$id")({
-	loader: async ({ context: { queryClient, auth }, params: { id } }) => {
-		return queryClient.ensureQueryData(mediaQueryOptions(id, auth.token ?? ""));
+	loader: async ({ context: { queryClient }, params: { id } }) => {
+		return queryClient.ensureQueryData(mediaQueryOptions(id));
 	},
 	errorComponent: ({ error }) => <ErrorComponent error={error} />,
 	component: RouteComponent,
@@ -37,7 +34,6 @@ export const Route = createFileRoute("/media/$id")({
 
 function RouteComponent() {
 	const metadata = Route.useLoaderData();
-	const { token } = useAuth();
 
 	const movie = metadata && "Movie" in metadata ? metadata.Movie : null;
 	const show = metadata && "Show" in metadata ? metadata.Show : null;
@@ -48,45 +44,15 @@ function RouteComponent() {
 	const [activeFileId, setActiveFileId] = useState<string | null>(
 		initialFileId,
 	);
-	const [streamUrl, setStreamUrl] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 
-	useEffect(() => {
-		if (!token || !activeFileId) {
-			setStreamUrl(null);
-			return;
-		}
-		let cancelled = false;
-		setError(null);
-		(async () => {
-			const tokenRes = await apiClient.POST(
-				"/v1/files/{file_id}/stream-token",
-				{
-					params: {
-						path: { file_id: activeFileId },
-						header: { Authorization: `Bearer ${token}` },
-					},
-				},
-			);
-			if (cancelled) return;
-			if (tokenRes.error || !tokenRes.data) {
-				setError("Failed to obtain stream token.");
-				return;
-			}
-			const streamToken = tokenRes.data.token;
-			// <video src> can't set headers, so the short-lived stream token
-			// rides in the query string; the browser then performs range
-			// requests directly against the streaming endpoint.
-			setStreamUrl(
-				`${env.C_STREAM_SERVER_URL}/v1/files/${activeFileId}/stream?token=${encodeURIComponent(streamToken)}`,
-			);
-		})().catch((err) => {
-			if (!cancelled) setError(`Error loading video: ${err}`);
-		});
-		return () => {
-			cancelled = true;
-		};
-	}, [token, activeFileId]);
+	// `beam_session` is a same-site cookie (see ADR-0003), so a plain <video
+	// src> pointed straight at the streaming endpoint carries it automatically
+	// -- no separate stream-token round trip needed.
+	const streamUrl = useMemo(() => {
+		if (!activeFileId) return null;
+		return `${env.C_STREAM_SERVER_URL}/v1/files/${activeFileId}/stream`;
+	}, [activeFileId]);
 
 	if (!metadata || (!movie && !show)) {
 		return (
@@ -134,6 +100,11 @@ function RouteComponent() {
 					key={streamUrl}
 					controls
 					src={streamUrl}
+					onError={() =>
+						setError(
+							"Failed to load video. Your session may have expired -- try refreshing the page.",
+						)
+					}
 					className="mb-6 w-full max-w-4xl"
 				/>
 			) : (
@@ -146,7 +117,10 @@ function RouteComponent() {
 				<EpisodeList
 					show={show}
 					activeFileId={activeFileId}
-					onSelect={setActiveFileId}
+					onSelect={(fileId) => {
+						setError(null);
+						setActiveFileId(fileId);
+					}}
 				/>
 			)}
 		</div>

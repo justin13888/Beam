@@ -1,78 +1,75 @@
 import {
 	createContext,
 	type ReactNode,
+	useCallback,
 	useContext,
 	useEffect,
 	useState,
 } from "react";
 import type { components } from "@/api.gen";
+import { env } from "@/env";
 import { apiClient } from "@/lib/apiClient";
 
 export type User =
-	components["schemas"]["beam_auth.utils.service.AuthUserResponse"];
-export type AuthResponse =
-	components["schemas"]["beam_auth.utils.service.AuthResponse"];
+	components["schemas"]["beam_auth.server.oidc_routes.MeResponse"];
 
 export interface AuthContextType {
 	user: User | null;
-	token: string | null;
 	isAuthenticated: boolean;
-	login: (data: AuthResponse) => void;
-	logout: () => void;
+	/** True until the initial `GET /v1/me` check resolves. */
+	isLoading: boolean;
+	/** Redirects the browser into the server's OIDC login flow. `redirectTo`
+	 * must be a same-origin-relative path (e.g. `/libraries`); defaults to the
+	 * current location. */
+	login: (redirectTo?: string) => void;
+	logout: () => Promise<void>;
+	/** Re-checks `GET /v1/me`; useful right after the OIDC callback redirects
+	 * back into the app. */
+	refresh: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
 	const [user, setUser] = useState<User | null>(null);
-	const [token, setToken] = useState<string | null>(null);
+	const [isLoading, setIsLoading] = useState(true);
 
-	useEffect(() => {
-		// Initialize from localStorage
-		const storedToken = localStorage.getItem("token");
-		const storedUser = localStorage.getItem("user");
-
-		if (storedToken && storedUser) {
-			setToken(storedToken);
-			try {
-				setUser(JSON.parse(storedUser));
-			} catch (error) {
-				console.error("Failed to parse user from local storage:", error);
-				localStorage.removeItem("user");
-				localStorage.removeItem("token");
-			}
-		}
+	const refresh = useCallback(async () => {
+		const { data, response } = await apiClient.GET("/v1/me", {
+			credentials: "include",
+		});
+		setUser(response.ok && data ? data : null);
 	}, []);
 
-	const login = (data: AuthResponse) => {
-		setToken(data.token);
-		setUser(data.user);
+	useEffect(() => {
+		refresh().finally(() => setIsLoading(false));
+	}, [refresh]);
 
-		localStorage.setItem("token", data.token);
-		localStorage.setItem("user", JSON.stringify(data.user));
+	const login = (redirectTo?: string) => {
+		const target =
+			redirectTo ?? `${window.location.pathname}${window.location.search}`;
+		const url = new URL("/v1/auth/login", env.C_STREAM_SERVER_URL);
+		url.searchParams.set("redirect", target);
+		window.location.assign(url.toString());
 	};
 
-	const logout = () => {
-		// Call API to revoke session (cookie)
-		apiClient
-			.POST("/v1/auth/logout", {
-				// usage of 'include' ensures cookies are sent
-				credentials: "include",
-			})
+	const logout = async () => {
+		await apiClient
+			.POST("/v1/logout", { credentials: "include" })
 			.catch(console.error);
-
-		setToken(null);
 		setUser(null);
-
-		localStorage.removeItem("token");
-		localStorage.removeItem("user");
 	};
-
-	const isAuthenticated = !!token;
 
 	return (
 		<AuthContext.Provider
-			value={{ user, token, isAuthenticated, login, logout }}
+			value={{
+				user,
+				isAuthenticated: !!user,
+				isLoading,
+				login,
+				logout,
+				refresh,
+			}}
 		>
 			{children}
 		</AuthContext.Provider>

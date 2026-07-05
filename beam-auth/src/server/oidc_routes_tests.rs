@@ -144,12 +144,12 @@ mod tests {
 
         let user = harness
             .user_repo
-            .find_by_email("newuser@example.com")
+            .find_by_oidc_identity("https://dex.test", "subj-1")
             .await
             .unwrap()
             .expect("user should be JIT-provisioned");
-        assert_eq!(user.oidc_issuer.as_deref(), Some("https://dex.test"));
-        assert_eq!(user.oidc_subject.as_deref(), Some("subj-1"));
+        assert_eq!(user.oidc_issuer, "https://dex.test");
+        assert_eq!(user.oidc_subject, "subj-1");
         assert!(
             !user.is_admin,
             "newuser@example.com is not in the admin allowlist"
@@ -175,7 +175,7 @@ mod tests {
 
         let user = harness
             .user_repo
-            .find_by_email("returning@example.com")
+            .find_by_oidc_identity("https://dex.test", "subj-1")
             .await
             .unwrap();
         // Only one user was ever created for this (issuer, subject).
@@ -204,7 +204,7 @@ mod tests {
 
         let user = harness
             .user_repo
-            .find_by_email("admin@beam.localhost")
+            .find_by_oidc_identity("https://dex.test", "subj-1")
             .await
             .unwrap()
             .expect("user should still be provisioned");
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(res.status_code, Some(StatusCode::OK));
         let sessions: Vec<Value> = res.take_json().await.unwrap();
         assert_eq!(sessions.len(), 1);
-        let session_id = sessions[0]["session_id"].as_str().unwrap().to_string();
+        let session_id = sessions[0]["id"].as_str().unwrap().to_string();
 
         let res = TestClient::delete(format!("http://0.0.0.0/sessions/{session_id}"))
             .add_header("Cookie", format!("beam_session={session_cookie}"), true)

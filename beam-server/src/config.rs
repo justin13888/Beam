@@ -39,9 +39,6 @@ pub struct ServerConfig {
     )]
     pub database_url: String,
 
-    #[config(env = "JWT_SECRET")]
-    pub jwt_secret: String,
-
     /// Whether to hash files with unknown/unsupported extensions during
     /// indexing. Hashing them lets duplicate detection cover every file;
     /// disable to save scan IO.
@@ -143,7 +140,7 @@ impl ServerConfig {
     /// The OIDC redirect URL registered with the IdP: always this server's
     /// own callback endpoint, never the web client's origin.
     pub fn oidc_redirect_url(&self) -> String {
-        format!("{}/v1/auth/oidc/callback", self.server_url)
+        format!("{}/v1/auth/callback", self.server_url)
     }
 
     /// Whether enough OIDC configuration is present to attempt discovery.

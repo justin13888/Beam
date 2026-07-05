@@ -1,15 +1,10 @@
+use crate::routes::api_error::{ApiError, require_auth};
 use crate::state::AppState;
-use salvo::oapi::{ToResponses, ToSchema};
+use salvo::oapi::ToResponses;
 use salvo::prelude::*;
-use serde::Serialize;
 use std::path::PathBuf;
 use tokio::fs::File;
-use tracing::{debug, error};
-
-#[derive(Serialize, ToSchema)]
-pub struct StreamTokenResponse {
-    pub token: String,
-}
+use tracing::error;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum RangeError {
@@ -93,39 +88,6 @@ fn sanitize_disposition_filename(name: &str) -> String {
 
 // ── Error enums ───────────────────────────────────────────────────────────────
 
-#[derive(ToResponses)]
-pub enum GetStreamTokenError {
-    /// Unauthorized
-    #[salvo(response(status_code = 401))]
-    Unauthorized(String),
-    /// Stream not found
-    #[salvo(response(status_code = 404))]
-    NotFound(String),
-    /// Internal server error
-    #[salvo(response(status_code = 500))]
-    InternalError(String),
-}
-
-#[async_trait]
-impl Writer for GetStreamTokenError {
-    async fn write(self, _req: &mut Request, _depot: &mut Depot, res: &mut Response) {
-        match self {
-            Self::Unauthorized(msg) => {
-                res.status_code(StatusCode::UNAUTHORIZED);
-                res.render(Text::Plain(msg));
-            }
-            Self::NotFound(msg) => {
-                res.status_code(StatusCode::NOT_FOUND);
-                res.render(Text::Plain(msg));
-            }
-            Self::InternalError(msg) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Text::Plain(msg));
-            }
-        }
-    }
-}
-
 /// Errors shared by both file-delivery endpoints (`stream_file`, `download_file`).
 #[derive(Debug, ToResponses)]
 pub enum FileDeliveryError {
@@ -176,65 +138,10 @@ impl Writer for FileDeliveryError {
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
 
-/// Get a presigned token for streaming or downloading a file.
-#[endpoint(
-    tags("stream"),
-    parameters(
-        ("file_id" = String, description = "File ID"),
-        ("Authorization" = String, Header, description = "Bearer <user JWT>")
-    ),
-)]
-pub async fn get_stream_token(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<StreamTokenResponse>, GetStreamTokenError> {
-    let state = depot.obtain::<AppState>().unwrap();
-    let id: String = req.param::<String>("file_id").unwrap_or_default();
-
-    // Validate user auth
-    let user_id = if let Some(auth_header) = req.headers().get("Authorization")
-        && let Ok(auth_str) = auth_header.to_str()
-        && auth_str.starts_with("Bearer ")
-    {
-        let token = &auth_str[7..];
-        state
-            .services
-            .auth
-            .verify_token(token)
-            .await
-            .map(|user| user.user_id)
-            .map_err(|_| GetStreamTokenError::Unauthorized("Invalid or expired token".into()))?
-    } else {
-        return Err(GetStreamTokenError::Unauthorized(
-            "Missing Authorization header".into(),
-        ));
-    };
-
-    // Verify the file exists before issuing a token
-    match state.services.library.get_file_by_id(id.clone()).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return Err(GetStreamTokenError::NotFound("Stream not found".into()));
-        }
-        Err(_) => {
-            return Err(GetStreamTokenError::InternalError(
-                "Failed to look up stream".into(),
-            ));
-        }
-    }
-
-    // Create stream token
-    state
-        .services
-        .auth
-        .create_stream_token(&user_id, &id)
-        .map(|token| Json(StreamTokenResponse { token }))
-        .map_err(|_| GetStreamTokenError::InternalError("Failed to create stream token".into()))
-}
-
-/// Resolve `file_id` (path param) + an auth token (Bearer header or `?token=`
-/// query, either form accepted since a `<video>` element can't set custom
-/// headers) to the file's on-disk path and detected content type.
+/// Resolve `file_id` (path param) to the file's on-disk path and detected
+/// content type, requiring the caller to be logged in via the
+/// `beam_session` cookie (see ADR-0003) -- a `<video>` element sends that
+/// cookie automatically, so there is no separate stream-token step anymore.
 async fn authorize_and_locate_file(
     req: &Request,
     depot: &Depot,
@@ -242,32 +149,13 @@ async fn authorize_and_locate_file(
 ) -> Result<(PathBuf, String), FileDeliveryError> {
     let state = depot.obtain::<AppState>().unwrap();
 
-    let header_token = req
-        .headers()
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(str::to_owned);
-    let token = header_token
-        .or_else(|| req.queries().get("token").map(|s| s.to_string()))
-        .ok_or_else(|| FileDeliveryError::Unauthorized("Missing stream token".into()))?;
-
-    match state.services.auth.verify_stream_token(&token) {
-        Ok(stream_id) => {
-            if stream_id != id {
-                return Err(FileDeliveryError::Unauthorized(
-                    "Token does not match stream ID".into(),
-                ));
-            }
-        }
-        Err(_) => {
-            return Err(FileDeliveryError::Unauthorized(
-                "Invalid or expired stream token".into(),
-            ));
-        }
-    }
-
-    debug!("Resolving media file with ID: {}", id);
+    require_auth(req, state).await.map_err(|e| match e {
+        ApiError::Unauthorized(msg) => FileDeliveryError::Unauthorized(msg),
+        ApiError::BadRequest(msg) => FileDeliveryError::BadRequest(msg),
+        ApiError::NotFound(msg) => FileDeliveryError::NotFound(msg),
+        ApiError::Forbidden(msg) => FileDeliveryError::Unauthorized(msg),
+        ApiError::Internal(msg) => FileDeliveryError::InternalError(msg),
+    })?;
 
     let file = match state.services.library.get_file_by_id(id.to_string()).await {
         Ok(Some(f)) => f,
@@ -305,11 +193,7 @@ async fn authorize_and_locate_file(
 /// `Content-Disposition`) so a `<video>` element plays it in place.
 #[endpoint(
     tags("media"),
-    parameters(
-        ("file_id" = String, description = "File ID"),
-        ("Authorization" = String, Header, description = "Bearer <stream token> (alternative to ?token=)"),
-        ("token" = String, Query, description = "Stream token (alternative to the Authorization header, required for <video> playback)"),
-    ),
+    parameters(("file_id" = String, description = "File ID")),
 )]
 #[tracing::instrument(skip_all)]
 pub async fn stream_file(
@@ -328,11 +212,7 @@ pub async fn stream_file(
 /// the browser saves it rather than attempting inline playback.
 #[endpoint(
     tags("media"),
-    parameters(
-        ("file_id" = String, description = "File ID"),
-        ("Authorization" = String, Header, description = "Bearer <stream token> (alternative to ?token=)"),
-        ("token" = String, Query, description = "Stream token (alternative to the Authorization header)"),
-    ),
+    parameters(("file_id" = String, description = "File ID")),
 )]
 #[tracing::instrument(skip_all)]
 pub async fn download_file(
@@ -680,11 +560,11 @@ mod tests {
 
         use beam_auth::server::OidcRuntimeConfig;
         use beam_auth::utils::{
+            models::CreateUser,
             oidc::NotConfiguredOidcClient,
             pending_auth_store::in_memory::InMemoryPendingAuthStore,
-            repository::in_memory::InMemoryUserRepository,
-            service::{AuthService, LocalAuthService},
-            session_store::in_memory::InMemorySessionStore,
+            repository::{UserRepository, in_memory::InMemoryUserRepository},
+            session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
         };
         use salvo::prelude::*;
         use salvo::test::TestClient;
@@ -830,22 +710,17 @@ mod tests {
 
         // ── Test helpers ──────────────────────────────────────────────────
 
-        const TEST_JWT_SECRET: &str = "test-stream-jwt-secret";
         const TEST_FILE_ID: &str = "test-file-id-123";
 
         struct TestContext {
             service: Service,
-            auth: Arc<LocalAuthService>,
+            session_store: Arc<InMemorySessionStore>,
+            user_repo: Arc<InMemoryUserRepository>,
         }
 
         fn build_test_service() -> TestContext {
             let session_store = Arc::new(InMemorySessionStore::default());
             let user_repo = Arc::new(InMemoryUserRepository::default());
-            let auth = Arc::new(LocalAuthService::new(
-                user_repo.clone(),
-                session_store.clone(),
-                TEST_JWT_SECRET.to_string(),
-            ));
 
             let notification = Arc::new(InMemoryNotificationService::new());
             let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(
@@ -853,7 +728,6 @@ mod tests {
             ));
 
             let services = AppServices {
-                auth: auth.clone(),
                 hash: Arc::new(StubHashService),
                 library: Arc::new(NotFoundLibraryService),
                 metadata: Arc::new(StubMetadataService),
@@ -861,7 +735,7 @@ mod tests {
                 admin_log,
                 user_repo: user_repo.clone(),
                 playback: Arc::new(StubPlaybackService),
-                session_store,
+                session_store: session_store.clone(),
                 oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
                 pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
                 oidc_config: OidcRuntimeConfig {
@@ -880,7 +754,6 @@ mod tests {
                 video_dir: PathBuf::from("/tmp"),
                 cache_dir: PathBuf::from("/tmp"),
                 database_url: "postgres://unused:unused@localhost/unused".to_string(),
-                jwt_secret: TEST_JWT_SECRET.to_string(),
                 hash_unknown_files: true,
                 scan_interval_secs: 3600,
                 watch_enabled: false,
@@ -907,8 +780,44 @@ mod tests {
 
             TestContext {
                 service: Service::new(router),
-                auth,
+                session_store,
+                user_repo,
             }
+        }
+
+        /// Seeds a user + session directly (bypassing the OIDC login flow,
+        /// which isn't under test here) and returns a `Cookie` header value.
+        async fn seed_session_cookie(ctx: &TestContext) -> String {
+            let user = ctx
+                .user_repo
+                .create(CreateUser {
+                    oidc_issuer: "https://test.example".to_string(),
+                    oidc_subject: "subj-1".to_string(),
+                    email: Some("test@example.com".to_string()),
+                    display_name: "Test User".to_string(),
+                    avatar_url: None,
+                    is_admin: false,
+                })
+                .await
+                .expect("seed user should succeed");
+
+            let token = ctx
+                .session_store
+                .create(
+                    &SessionData {
+                        user_id: user.id.to_string(),
+                        device_hash: "test-device".to_string(),
+                        ip: "127.0.0.1".to_string(),
+                        created_at: chrono::Utc::now().timestamp(),
+                        last_active: chrono::Utc::now().timestamp(),
+                    },
+                    86400,
+                    86400,
+                )
+                .await
+                .expect("seed session should succeed");
+
+            format!("beam_session={token}")
         }
 
         fn stream_url(id: &str) -> String {
@@ -917,9 +826,9 @@ mod tests {
 
         // ── Tests ─────────────────────────────────────────────────────────
 
-        /// No Authorization header → 401.
+        /// No session cookie → 401.
         #[tokio::test]
-        async fn test_rejects_missing_auth_header() {
+        async fn test_rejects_missing_session_cookie() {
             let ctx = build_test_service();
             let response = TestClient::get(stream_url(TEST_FILE_ID))
                 .send(&ctx.service)
@@ -927,70 +836,28 @@ mod tests {
             assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
         }
 
-        /// A valid stream token supplied as a query parameter passes auth.
-        /// The library stub returns Ok(None) so the handler proceeds past auth
-        /// and returns 404 — proving the token was accepted (any failure to
-        /// authenticate would surface as 401, not 404).
+        /// A garbage cookie value (no matching session) → 401.
         #[tokio::test]
-        async fn test_accepts_query_param_token() {
+        async fn test_rejects_unknown_session_cookie() {
             let ctx = build_test_service();
-            let token = ctx
-                .auth
-                .create_stream_token("user-1", TEST_FILE_ID)
-                .expect("token creation should succeed");
-            let url = format!("{}?token={}", stream_url(TEST_FILE_ID), token);
-            let response = TestClient::get(url).send(&ctx.service).await;
-            assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
-        }
-
-        /// Bearer token for a different stream ID → 401 (token/id mismatch).
-        #[tokio::test]
-        async fn test_rejects_mismatched_stream_id() {
-            let ctx = build_test_service();
-            let token = ctx
-                .auth
-                .create_stream_token("user-1", "different-file-id")
-                .expect("token creation should succeed");
             let response = TestClient::get(stream_url(TEST_FILE_ID))
-                .bearer_auth(token)
+                .add_header("Cookie", "beam_session=not-a-real-session", true)
                 .send(&ctx.service)
                 .await;
             assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
         }
 
-        /// Token signed with a different secret → 401.
+        /// A valid session cookie passes auth; the file not found in the
+        /// library returns 404 — confirming the handler advanced past the
+        /// session check (any auth failure would be 401, not 404).
         #[tokio::test]
-        async fn test_rejects_tampered_token() {
+        async fn test_valid_session_cookie_passes_auth() {
             let ctx = build_test_service();
-            let rogue_auth = LocalAuthService::new(
-                Arc::new(InMemoryUserRepository::default()),
-                Arc::new(InMemorySessionStore::default()),
-                "different-secret".to_string(),
-            );
-            let token = rogue_auth
-                .create_stream_token("user-1", TEST_FILE_ID)
-                .expect("token creation should succeed");
+            let cookie = seed_session_cookie(&ctx).await;
             let response = TestClient::get(stream_url(TEST_FILE_ID))
-                .bearer_auth(token)
+                .add_header("Cookie", cookie, true)
                 .send(&ctx.service)
                 .await;
-            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
-        }
-
-        /// A valid Bearer token passes auth; the file not found in the library
-        /// returns 404 — confirming the handler advanced past token validation.
-        #[tokio::test]
-        async fn test_valid_bearer_token_passes_auth() {
-            let ctx = build_test_service();
-            let token = ctx
-                .auth
-                .create_stream_token("user-1", TEST_FILE_ID)
-                .expect("token creation should succeed");
-            let response = TestClient::get(stream_url(TEST_FILE_ID))
-                .bearer_auth(token)
-                .send(&ctx.service)
-                .await;
-            // Token is valid → auth passes; library returns None → 404 (not 401).
             assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
         }
     }

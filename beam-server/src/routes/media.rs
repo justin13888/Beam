@@ -1,7 +1,8 @@
 //! `/v1/media` -- browse, detail, and sources endpoints. Domain REST API
-//! conventions established here (uniform JSON error body, Bearer `CurrentUser`
-//! extraction, cursor pagination reused from the existing Relay-style
-//! `search_media`) are meant to be followed by every subsequent `/v1` route.
+//! conventions established here (uniform JSON error body, cookie-based
+//! `CurrentUser` extraction, cursor pagination reused from the existing
+//! Relay-style `search_media`) are meant to be followed by every subsequent
+//! `/v1` route.
 
 use salvo::prelude::*;
 
@@ -17,7 +18,6 @@ use crate::state::AppState;
 #[endpoint(
     tags("media"),
     parameters(
-        ("Authorization" = String, Header, description = "Bearer <user JWT>"),
         ("first" = Option<u32>, Query, description = "Number of items to return from the start"),
         ("after" = Option<String>, Query, description = "Cursor to start after"),
         ("last" = Option<u32>, Query, description = "Number of items to return from the end"),
@@ -70,10 +70,7 @@ pub async fn browse_media(
 /// Fetch a single media item's full metadata by id.
 #[endpoint(
     tags("media"),
-    parameters(
-        ("id" = String, description = "Media id (movie or show UUID)"),
-        ("Authorization" = String, Header, description = "Bearer <user JWT>"),
-    ),
+    parameters(("id" = String, description = "Media id (movie or show UUID)")),
 )]
 pub async fn get_media_detail(
     req: &mut Request,
@@ -92,10 +89,7 @@ pub async fn get_media_detail(
 /// List the playable/downloadable source files for a movie.
 #[endpoint(
     tags("media"),
-    parameters(
-        ("id" = String, description = "Movie id (UUID)"),
-        ("Authorization" = String, Header, description = "Bearer <user JWT>"),
-    ),
+    parameters(("id" = String, description = "Movie id (UUID)")),
 )]
 pub async fn get_media_sources(
     req: &mut Request,

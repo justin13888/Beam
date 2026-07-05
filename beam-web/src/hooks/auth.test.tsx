@@ -1,17 +1,26 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider, useAuth } from "./auth";
 
-const mockAuthResponse = {
-	token: "test-jwt-token",
-	session_id: "test-session-id",
-	user: {
-		id: "user-1",
-		username: "testuser",
-		email: "test@example.com",
-		is_admin: false,
+const { mockGet, mockPost } = vi.hoisted(() => ({
+	mockGet: vi.fn(),
+	mockPost: vi.fn(),
+}));
+
+vi.mock("@/lib/apiClient", () => ({
+	apiClient: {
+		GET: mockGet,
+		POST: mockPost,
 	},
+}));
+
+const mockUser = {
+	id: "user-1",
+	email: "test@example.com",
+	is_admin: false,
+	display_name: "Test User",
+	avatar_url: null,
 };
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -19,8 +28,9 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("useAuth", () => {
-	afterEach(() => {
-		localStorage.clear();
+	beforeEach(() => {
+		mockGet.mockReset();
+		mockPost.mockReset();
 	});
 
 	it("throws when used outside AuthProvider", () => {
@@ -29,58 +39,88 @@ describe("useAuth", () => {
 		);
 	});
 
-	it("initial state: user is null and not authenticated", () => {
+	it("starts loading, then resolves to unauthenticated when GET /v1/me is unauthorized", async () => {
+		mockGet.mockResolvedValue({ data: undefined, response: { ok: false } });
+
 		const { result } = renderHook(() => useAuth(), { wrapper });
+		expect(result.current.isLoading).toBe(true);
+		expect(result.current.isAuthenticated).toBe(false);
+
+		await waitFor(() => expect(result.current.isLoading).toBe(false));
 		expect(result.current.user).toBeNull();
-		expect(result.current.token).toBeNull();
+		expect(result.current.isAuthenticated).toBe(false);
+		expect(mockGet).toHaveBeenCalledWith("/v1/me", { credentials: "include" });
+	});
+
+	it("resolves the user from GET /v1/me when a valid session cookie exists", async () => {
+		mockGet.mockResolvedValue({ data: mockUser, response: { ok: true } });
+
+		const { result } = renderHook(() => useAuth(), { wrapper });
+		await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+		expect(result.current.user).toEqual(mockUser);
+		expect(result.current.isAuthenticated).toBe(true);
+	});
+
+	it("logout() calls POST /v1/logout and clears the user", async () => {
+		mockGet.mockResolvedValue({ data: mockUser, response: { ok: true } });
+		mockPost.mockResolvedValue({ data: undefined, response: { ok: true } });
+
+		const { result } = renderHook(() => useAuth(), { wrapper });
+		await waitFor(() => expect(result.current.isLoading).toBe(false));
+		expect(result.current.isAuthenticated).toBe(true);
+
+		await act(async () => {
+			await result.current.logout();
+		});
+
+		expect(mockPost).toHaveBeenCalledWith("/v1/logout", {
+			credentials: "include",
+		});
+		expect(result.current.user).toBeNull();
 		expect(result.current.isAuthenticated).toBe(false);
 	});
 
-	it("after login(): user is set, isAuthenticated is true, localStorage updated", () => {
-		const { result } = renderHook(() => useAuth(), { wrapper });
-
-		act(() => {
-			result.current.login(mockAuthResponse);
+	it("login() redirects the browser to the server's OIDC login endpoint with a redirect param", async () => {
+		mockGet.mockResolvedValue({ data: undefined, response: { ok: false } });
+		const assignSpy = vi.fn();
+		vi.stubGlobal("location", {
+			...window.location,
+			pathname: "/libraries",
+			search: "",
+			assign: assignSpy,
 		});
 
-		expect(result.current.user).toEqual(mockAuthResponse.user);
-		expect(result.current.token).toBe(mockAuthResponse.token);
-		expect(result.current.isAuthenticated).toBe(true);
-		expect(localStorage.getItem("token")).toBe(mockAuthResponse.token);
-		expect(JSON.parse(localStorage.getItem("user") ?? "null")).toEqual(
-			mockAuthResponse.user,
+		const { result } = renderHook(() => useAuth(), { wrapper });
+		await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+		act(() => {
+			result.current.login();
+		});
+
+		expect(assignSpy).toHaveBeenCalledWith(
+			"http://localhost:8000/v1/auth/login?redirect=%2Flibraries",
 		);
+
+		vi.unstubAllGlobals();
 	});
 
-	it("after logout(): user is null, isAuthenticated is false, localStorage cleared", () => {
-		const { result } = renderHook(() => useAuth(), { wrapper });
-
-		act(() => {
-			result.current.login(mockAuthResponse);
-		});
-
-		act(() => {
-			result.current.logout();
-		});
-
-		expect(result.current.user).toBeNull();
-		expect(result.current.token).toBeNull();
-		expect(result.current.isAuthenticated).toBe(false);
-		expect(localStorage.getItem("token")).toBeNull();
-		expect(localStorage.getItem("user")).toBeNull();
-	});
-
-	it("on mount with existing localStorage token: state is restored", async () => {
-		localStorage.setItem("token", mockAuthResponse.token);
-		localStorage.setItem("user", JSON.stringify(mockAuthResponse.user));
+	it("login(redirectTo) uses the explicit redirect target over the current location", async () => {
+		mockGet.mockResolvedValue({ data: undefined, response: { ok: false } });
+		const assignSpy = vi.fn();
+		vi.stubGlobal("location", { ...window.location, assign: assignSpy });
 
 		const { result } = renderHook(() => useAuth(), { wrapper });
+		await waitFor(() => expect(result.current.isLoading).toBe(false));
 
-		// Wait for useEffect to restore state from localStorage
-		await act(async () => {});
+		act(() => {
+			result.current.login("/media/abc");
+		});
 
-		expect(result.current.user).toEqual(mockAuthResponse.user);
-		expect(result.current.token).toBe(mockAuthResponse.token);
-		expect(result.current.isAuthenticated).toBe(true);
+		expect(assignSpy).toHaveBeenCalledWith(
+			"http://localhost:8000/v1/auth/login?redirect=%2Fmedia%2Fabc",
+		);
+
+		vi.unstubAllGlobals();
 	});
 });

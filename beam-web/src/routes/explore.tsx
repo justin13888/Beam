@@ -13,19 +13,19 @@ interface SearchParams {
 	sortOrder?: "asc" | "desc";
 }
 
-const searchQueryOptions = (params: SearchParams, token: string) =>
+const searchQueryOptions = (params: SearchParams) =>
 	queryOptions({
 		queryKey: ["media", "search", params],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/media", {
 				params: {
-					header: { Authorization: `Bearer ${token}` },
 					query: {
 						first: params.first,
 						sort_by: params.sortBy,
 						sort_order: params.sortOrder,
 					},
 				},
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to search media");
 			return data;
@@ -41,15 +41,13 @@ export const Route = createFileRoute("/explore")({
 			});
 		}
 	},
-	loader: async ({ context: { queryClient, auth } }) => {
+	loader: async ({ context: { queryClient } }) => {
 		const params: SearchParams = {
 			first: 24,
 			sortBy: "title",
 			sortOrder: "asc",
 		};
-		return queryClient.ensureQueryData(
-			searchQueryOptions(params, auth.token ?? ""),
-		);
+		return queryClient.ensureQueryData(searchQueryOptions(params));
 	},
 	errorComponent: ({ error }) => <ErrorComponent error={error} />,
 	component: RouteComponent,

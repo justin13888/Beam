@@ -1,36 +1,34 @@
 //! OIDC BFF endpoints (see ADR-0003): `login`/`callback` drive the
 //! Authorization Code + PKCE round-trip, `me`/`logout`/`logout-all`/
 //! `sessions`/`sessions/{id}` operate on the resulting `beam_session`
-//! cookie. Mounted at `/v1/auth/oidc/*`, alongside (not replacing) the
-//! legacy password endpoints at `/v1/auth/*` -- coexistence is temporary,
-//! until the auth cutover deletes the password flow and these move up to
-//! take over the primary `/v1/auth/*` paths.
+//! cookie -- the sole credential beam-server now issues. beam-server mounts
+//! `login`/`callback` under `/v1/auth/*` and the rest at the top level
+//! (`/v1/me`, `/v1/logout`, ...), matching the final ratified shape now that
+//! the legacy password endpoints are gone.
 //!
 //! The browser never sees an IdP token; `beam_session` is the only
 //! credential it holds, set as an httpOnly, `SameSite=Lax` cookie.
 
-use argon2::password_hash::rand_core::{OsRng, RngCore};
 use async_trait::async_trait;
 use chrono::Utc;
 use salvo::http::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
 use salvo::oapi::{ToResponses, ToSchema};
 use salvo::prelude::*;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::server::routes::{SessionSummary, device_hash_from_request, extract_client_ip};
 use crate::utils::admin_allowlist::is_admin_email;
 use crate::utils::models::CreateUser;
 use crate::utils::oidc::{OidcClient, OidcError};
 use crate::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use crate::utils::repository::UserRepository;
-use crate::utils::session_store::{SessionData, SessionStore};
+use crate::utils::session_store::{SessionData, SessionStore, get_and_touch};
 
 const STATE_COOKIE: &str = "beam_oidc_state";
 const SESSION_COOKIE: &str = "beam_session";
 const STATE_TTL_SECS: u64 = 600; // 10 minutes to complete the round trip
-const TOUCH_THROTTLE_SECS: i64 = 3600; // touch the idle expiry at most once/hour
 
 /// Runtime configuration the OIDC routes need beyond what a single service
 /// trait naturally carries -- injected into the depot alongside the
@@ -46,6 +44,30 @@ pub struct OidcRuntimeConfig {
     pub admin_emails_csv: String,
     pub session_idle_days: u64,
     pub session_max_days: u64,
+}
+
+fn device_hash_from_request(req: &Request) -> String {
+    let user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    format!("{:x}", Sha256::digest(user_agent.as_bytes()))
+}
+
+fn extract_client_ip(req: &Request) -> String {
+    if let Some(forwarded_for) = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        && let Some(first) = forwarded_for.split(',').next()
+    {
+        return first.trim().to_string();
+    }
+    if let Some(real_ip) = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        return real_ip.to_string();
+    }
+    "unknown".to_string()
 }
 
 fn build_cookie(
@@ -79,34 +101,44 @@ fn sanitize_redirect_path(raw: Option<&str>) -> String {
     }
 }
 
-/// Generates a password hash for a random value nobody can ever type --
-/// OIDC-provisioned users authenticate via the IdP only, but the legacy
-/// `users.password_hash` column stays `NOT NULL` while password auth and
-/// OIDC auth coexist (see ADR-0003; the column is dropped at the auth
-/// cutover).
-fn unusable_password_hash() -> String {
-    use argon2::{
-        Argon2,
-        password_hash::{PasswordHasher, SaltString},
-    };
-
-    let mut random_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut random_bytes);
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(&random_bytes, &salt)
-        .expect("hashing random bytes never fails")
-        .to_string()
+/// Picks a display name when the IdP doesn't release a `name` claim: the
+/// local part of the email if one is available, else a subject-derived
+/// placeholder. Real IdPs (including Dex) send `name`, so this is a rare
+/// fallback, not the common case.
+fn derive_display_name(name: Option<&str>, email: Option<&str>, subject: &str) -> String {
+    if let Some(name) = name
+        && !name.is_empty()
+    {
+        return name.to_string();
+    }
+    if let Some(local_part) = email.and_then(|e| e.split('@').next())
+        && !local_part.is_empty()
+    {
+        return local_part.to_string();
+    }
+    format!("user-{subject}")
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MeResponse {
     pub id: String,
-    pub username: String,
-    pub email: String,
+    pub email: Option<String>,
     pub is_admin: bool,
-    pub display_name: Option<String>,
+    pub display_name: String,
     pub avatar_url: Option<String>,
+}
+
+/// One of the current user's active sessions, as returned by `GET
+/// /sessions`. `id` is an opaque row identifier for revocation via `DELETE
+/// /sessions/{id}` -- never the session credential itself, which is hashed
+/// at rest and cannot be recovered.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SessionSummary {
+    pub id: String,
+    pub device_hash: String,
+    pub ip: String,
+    pub created_at: i64,
+    pub last_active: i64,
 }
 
 #[derive(ToResponses)]
@@ -162,8 +194,7 @@ impl Writer for OidcAuthError {
 }
 
 /// Resolves the current user from the `beam_session` cookie, sliding the
-/// idle expiry forward (throttled to at most once/hour so every request
-/// isn't a write).
+/// idle expiry forward (throttled via [`get_and_touch`]).
 async fn require_web_session(
     req: &Request,
     depot: &Depot,
@@ -176,16 +207,11 @@ async fn require_web_session(
         .map(|c| c.value().to_string())
         .ok_or_else(|| OidcAuthError::Unauthorized("Missing session cookie".into()))?;
 
-    let session = session_store
-        .get(&token)
+    let idle_ttl_secs = config.session_idle_days * 24 * 60 * 60;
+    let session = get_and_touch(session_store.as_ref(), &token, idle_ttl_secs)
         .await
         .map_err(|e| OidcAuthError::InternalError(e.to_string()))?
         .ok_or_else(|| OidcAuthError::Unauthorized("Invalid or expired session".into()))?;
-
-    if Utc::now().timestamp() - session.last_active > TOUCH_THROTTLE_SECS {
-        let idle_ttl_secs = config.session_idle_days * 24 * 60 * 60;
-        let _ = session_store.touch(&token, idle_ttl_secs).await;
-    }
 
     Ok((session.user_id, token))
 }
@@ -232,7 +258,7 @@ pub async fn oidc_login(req: &mut Request, depot: &mut Depot, res: &mut Response
     res.add_cookie(build_cookie(
         STATE_COOKIE,
         begin.state,
-        "/v1/auth/oidc",
+        "/v1/auth",
         config.cookie_secure,
         CookieDuration::seconds(STATE_TTL_SECS as i64),
     ));
@@ -307,12 +333,18 @@ pub async fn oidc_callback(
             other => OidcCallbackError::BadRequest(format!("Login failed: {other}")),
         })?;
 
-    let email = identity
-        .email
-        .clone()
-        .ok_or_else(|| OidcCallbackError::BadRequest("IdP did not provide an email".into()))?;
-
-    let is_admin = identity.email_verified && is_admin_email(&email, &config.admin_emails_csv);
+    // Not all IdPs release an email claim -- absence just means the user
+    // can never match the admin allowlist, not a login failure.
+    let is_admin = identity.email_verified
+        && identity
+            .email
+            .as_deref()
+            .is_some_and(|email| is_admin_email(email, &config.admin_emails_csv));
+    let display_name = derive_display_name(
+        identity.name.as_deref(),
+        identity.email.as_deref(),
+        &identity.subject,
+    );
 
     let user = match user_repo
         .find_by_oidc_identity(&identity.issuer, &identity.subject)
@@ -326,44 +358,27 @@ pub async fn oidc_callback(
                     .await
                     .map_err(|e| OidcCallbackError::InternalError(e.to_string()))?;
             }
-            if existing.display_name != identity.name || existing.avatar_url != identity.picture {
+            if existing.display_name != display_name || existing.avatar_url != identity.picture {
                 user_repo
-                    .update_oidc_profile(
-                        existing.id,
-                        identity.name.clone(),
-                        identity.picture.clone(),
-                    )
+                    .update_oidc_profile(existing.id, display_name, identity.picture.clone())
                     .await
                     .map_err(|e| OidcCallbackError::InternalError(e.to_string()))?;
             }
             existing
         }
-        None => {
-            let username = email
-                .split('@')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("user-{}", &identity.subject));
-
-            user_repo
-                .create(CreateUser {
-                    username,
-                    email: email.clone(),
-                    password_hash: unusable_password_hash(),
-                    is_admin,
-                    oidc_issuer: Some(identity.issuer.clone()),
-                    oidc_subject: Some(identity.subject.clone()),
-                    display_name: identity.name.clone(),
-                    avatar_url: identity.picture.clone(),
-                })
-                .await
-                .map_err(|e| {
-                    OidcCallbackError::InternalError(format!(
-                        "Failed to provision user (username/email conflict?): {e}"
-                    ))
-                })?
-        }
+        None => user_repo
+            .create(CreateUser {
+                oidc_issuer: identity.issuer.clone(),
+                oidc_subject: identity.subject.clone(),
+                email: identity.email.clone(),
+                display_name,
+                avatar_url: identity.picture.clone(),
+                is_admin,
+            })
+            .await
+            .map_err(|e| {
+                OidcCallbackError::InternalError(format!("Failed to provision user: {e}"))
+            })?,
     };
 
     let device_hash = device_hash_from_request(req);
@@ -423,7 +438,6 @@ pub async fn oidc_me(
 
     Ok(Json(MeResponse {
         id: user.id.to_string(),
-        username: user.username,
         email: user.email,
         is_admin: user.is_admin,
         display_name: user.display_name,
@@ -479,8 +493,8 @@ pub async fn oidc_list_sessions(
     Ok(Json(
         sessions
             .into_iter()
-            .map(|(session_id, data)| SessionSummary {
-                session_id,
+            .map(|(id, data)| SessionSummary {
+                id,
                 device_hash: data.device_hash,
                 ip: data.ip,
                 created_at: data.created_at,
@@ -491,7 +505,7 @@ pub async fn oidc_list_sessions(
 }
 
 /// Revokes a specific session by its listing id, scoped to the current user
-/// (returns 404 for a session that doesn't exist or belongs to someone
+/// (returns 401 for a session that doesn't exist or belongs to someone
 /// else, never distinguishing the two).
 #[endpoint(
     tags("auth"),
@@ -527,6 +541,13 @@ pub async fn oidc_delete_session(
     Ok(())
 }
 
+/// Assembles the OIDC routes as a standalone router, at the paths this
+/// module's own tests exercise. beam-server does *not* use this -- it
+/// mounts the handlers above individually, split between `/v1/auth/*`
+/// (login/callback) and top-level `/v1/*` (me/logout/sessions), matching
+/// the final ratified endpoint shape now that no legacy routes remain to
+/// coexist with.
+#[cfg(test)]
 pub fn oidc_routes() -> Router {
     Router::new()
         .push(Router::with_path("login").get(oidc_login))

@@ -31,6 +31,34 @@ pub enum SessionError {
 
 type Result<T> = std::result::Result<T, SessionError>;
 
+/// How long a session's idle expiry must go untouched before `get_and_touch`
+/// bothers sliding it forward again. Avoids a write on every single
+/// authenticated request while still keeping the idle window meaningfully
+/// accurate.
+pub const SESSION_TOUCH_THROTTLE_SECS: i64 = 3600;
+
+/// Resolves a presented session token to its [`SessionData`], sliding the
+/// idle expiry forward (throttled per [`SESSION_TOUCH_THROTTLE_SECS`]) if the
+/// session is still valid. Shared by every caller that authenticates a
+/// request via the `beam_session` cookie -- REST route guards and the OIDC
+/// `/me`/`/logout`/`/sessions` handlers alike -- so the touch-throttling
+/// policy lives in exactly one place.
+pub async fn get_and_touch(
+    store: &dyn SessionStore,
+    token: &str,
+    idle_ttl_secs: u64,
+) -> Result<Option<SessionData>> {
+    let Some(session) = store.get(token).await? else {
+        return Ok(None);
+    };
+
+    if Utc::now().timestamp() - session.last_active > SESSION_TOUCH_THROTTLE_SECS {
+        let _ = store.touch(token, idle_ttl_secs).await;
+    }
+
+    Ok(Some(session))
+}
+
 /// A thread-safe, asynchronous store for managing user sessions.
 ///
 /// This trait abstracts the underlying storage mechanism (Postgres, or an

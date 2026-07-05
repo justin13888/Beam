@@ -44,10 +44,7 @@ impl From<LibraryError> for ApiError {
 
 // ── Library reads (any authenticated user) ─────────────────────────────────
 
-#[endpoint(
-    tags("admin"),
-    parameters(("Authorization" = String, Header, description = "Bearer <user JWT>")),
-)]
+#[endpoint(tags("admin"))]
 pub async fn list_libraries(
     req: &mut Request,
     depot: &mut Depot,
@@ -62,7 +59,6 @@ pub async fn list_libraries(
     tags("admin"),
     parameters(
         ("id" = String, description = "Library id (UUID)"),
-        ("Authorization" = String, Header, description = "Bearer <user JWT>"),
     ),
 )]
 pub async fn get_library(req: &mut Request, depot: &mut Depot) -> Result<Json<Library>, ApiError> {
@@ -79,7 +75,6 @@ pub async fn get_library(req: &mut Request, depot: &mut Depot) -> Result<Json<Li
     tags("admin"),
     parameters(
         ("id" = String, description = "Library id (UUID)"),
-        ("Authorization" = String, Header, description = "Bearer <user JWT>"),
     ),
 )]
 pub async fn get_library_files(
@@ -97,8 +92,7 @@ pub async fn get_library_files(
 
 #[endpoint(
     tags("admin"),
-    parameters(("Authorization" = String, Header, description = "Bearer <admin JWT>")),
-    request_body = CreateLibraryRequest,
+        request_body = CreateLibraryRequest,
 )]
 pub async fn create_library(
     req: &mut Request,
@@ -122,7 +116,6 @@ pub async fn create_library(
     tags("admin"),
     parameters(
         ("id" = String, description = "Library id (UUID)"),
-        ("Authorization" = String, Header, description = "Bearer <admin JWT>"),
     ),
 )]
 pub async fn scan_library(
@@ -144,7 +137,6 @@ pub async fn scan_library(
     tags("admin"),
     parameters(
         ("id" = String, description = "Media id (movie or show UUID)"),
-        ("Authorization" = String, Header, description = "Bearer <admin JWT>"),
     ),
 )]
 pub async fn refresh_media_metadata(
@@ -168,7 +160,6 @@ pub async fn refresh_media_metadata(
     tags("admin"),
     parameters(
         ("id" = String, description = "Library id (UUID)"),
-        ("Authorization" = String, Header, description = "Bearer <admin JWT>"),
     ),
 )]
 pub async fn delete_library(
@@ -195,7 +186,6 @@ pub async fn delete_library(
     parameters(
         ("limit" = Option<u32>, Query, description = "Max entries to return (default 50)"),
         ("offset" = Option<u32>, Query, description = "Number of entries to skip"),
-        ("Authorization" = String, Header, description = "Bearer <admin JWT>"),
     ),
 )]
 pub async fn get_admin_logs(
@@ -215,10 +205,7 @@ pub async fn get_admin_logs(
     Ok(Json(logs.into_iter().map(AdminLogEntryDto::from).collect()))
 }
 
-#[endpoint(
-    tags("admin"),
-    parameters(("Authorization" = String, Header, description = "Bearer <admin JWT>")),
-)]
+#[endpoint(tags("admin"))]
 pub async fn get_admin_log_count(
     req: &mut Request,
     depot: &mut Depot,
@@ -240,7 +227,6 @@ pub async fn get_admin_log_count(
     tags("admin"),
     parameters(
         ("limit" = Option<u32>, Query, description = "Max events to return (default 100, max 1000)"),
-        ("Authorization" = String, Header, description = "Bearer <admin JWT>"),
     ),
 )]
 pub async fn get_admin_events(
@@ -257,10 +243,7 @@ pub async fn get_admin_events(
 /// Live stream of admin events over Server-Sent Events, replacing the old
 /// GraphQL-subscription-over-websocket transport with a plain HTTP stream a
 /// browser's `EventSource` can consume directly.
-#[endpoint(
-    tags("admin"),
-    parameters(("Authorization" = String, Header, description = "Bearer <admin JWT>")),
-)]
+#[endpoint(tags("admin"))]
 pub async fn stream_admin_events(
     req: &mut Request,
     depot: &mut Depot,

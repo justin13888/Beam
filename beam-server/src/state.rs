@@ -7,7 +7,6 @@ use beam_auth::utils::{
     oidc::{DiscoveredOidcClient, NotConfiguredOidcClient, OidcClient},
     pending_auth_store::{PendingAuthStore, SqlPendingAuthStore},
     repository::{SqlUserRepository, UserRepository},
-    service::{AuthService, LocalAuthService},
     session_store::{PgSessionStore, SessionStore},
 };
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
@@ -57,7 +56,6 @@ impl Deref for AppState {
 
 #[derive(Debug)]
 pub struct AppServices {
-    pub auth: Arc<dyn AuthService>,
     pub hash: Arc<dyn HashService>,
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
@@ -65,9 +63,8 @@ pub struct AppServices {
     pub admin_log: Arc<dyn AdminLogService>,
     pub user_repo: Arc<dyn UserRepository>,
     pub playback: Arc<dyn PlaybackService>,
-    /// Shared with `auth` -- the OIDC BFF session cookie and the legacy
-    /// password-JWT-refresh session both mint/read sessions through this
-    /// same store (see ADR-0003/ADR-0005).
+    /// Backs the `beam_session` cookie -- the only credential the server
+    /// issues (see ADR-0003/ADR-0005).
     pub session_store: Arc<dyn SessionStore>,
     pub oidc_client: Arc<dyn OidcClient>,
     pub pending_auth_store: Arc<dyn PendingAuthStore>,
@@ -123,12 +120,6 @@ impl AppServices {
             Arc::new(crate::services::media_info::LocalMediaInfoService::default());
 
         let session_store: Arc<dyn SessionStore> = Arc::new(PgSessionStore::new(db.clone()));
-
-        let auth_service = Arc::new(LocalAuthService::new(
-            user_repo.clone(),
-            session_store.clone(),
-            config.jwt_secret.clone(),
-        ));
 
         let pending_auth_store: Arc<dyn PendingAuthStore> =
             Arc::new(SqlPendingAuthStore::new(db.clone()));
@@ -225,7 +216,6 @@ impl AppServices {
         ));
 
         let services = Self {
-            auth: auth_service,
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
                 library_repo,

@@ -7,11 +7,11 @@ mod tests {
 
     use beam_auth::server::OidcRuntimeConfig;
     use beam_auth::utils::{
+        models::CreateUser,
         oidc::NotConfiguredOidcClient,
         pending_auth_store::in_memory::InMemoryPendingAuthStore,
-        repository::in_memory::InMemoryUserRepository,
-        service::{AuthService, LocalAuthService},
-        session_store::in_memory::InMemorySessionStore,
+        repository::{UserRepository, in_memory::InMemoryUserRepository},
+        session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
     };
     use beam_domain::models::movie::Movie;
     use beam_domain::models::{MediaFile, MediaFileContent, MovieEntry};
@@ -34,8 +34,6 @@ mod tests {
     use crate::services::notification::InMemoryNotificationService;
     use crate::services::playback::{ContinueWatchingItem, DbPlaybackService, PlaybackProgressDto};
     use crate::state::{AppServices, AppState};
-
-    const TEST_JWT_SECRET: &str = "test-jwt-secret-for-playback-route-tests";
 
     #[derive(Debug)]
     struct StubHashService;
@@ -138,7 +136,8 @@ mod tests {
 
     struct TestFixture {
         state: AppState,
-        auth: Arc<LocalAuthService>,
+        session_store: Arc<InMemorySessionStore>,
+        user_repo: Arc<InMemoryUserRepository>,
         file_repo: Arc<InMemoryFileRepository>,
         movie_repo: Arc<InMemoryMovieRepository>,
     }
@@ -146,11 +145,6 @@ mod tests {
     fn make_test_state() -> TestFixture {
         let session_store = Arc::new(InMemorySessionStore::default());
         let user_repo = Arc::new(InMemoryUserRepository::default());
-        let auth = Arc::new(LocalAuthService::new(
-            user_repo.clone(),
-            session_store.clone(),
-            TEST_JWT_SECRET.to_string(),
-        ));
 
         let notification = Arc::new(InMemoryNotificationService::new());
         let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
@@ -169,7 +163,6 @@ mod tests {
             ));
 
         let services = AppServices {
-            auth: auth.clone(),
             hash: Arc::new(StubHashService),
             library: Arc::new(StubLibraryService),
             metadata: Arc::new(StubMetadataService),
@@ -177,7 +170,7 @@ mod tests {
             admin_log,
             user_repo: user_repo.clone(),
             playback,
-            session_store,
+            session_store: session_store.clone(),
             oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
             oidc_config: OidcRuntimeConfig {
@@ -196,7 +189,6 @@ mod tests {
             video_dir: PathBuf::from("/tmp"),
             cache_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
-            jwt_secret: TEST_JWT_SECRET.to_string(),
             hash_unknown_files: true,
             scan_interval_secs: 3600,
             watch_enabled: false,
@@ -219,23 +211,46 @@ mod tests {
         let state = AppState::new(config, services);
         TestFixture {
             state,
-            auth,
+            session_store,
+            user_repo,
             file_repo,
             movie_repo,
         }
     }
 
-    async fn register_and_get_token(auth: &LocalAuthService) -> String {
-        auth.register(
-            "testuser",
-            "test@example.com",
-            "password123",
-            "device-hash",
-            "127.0.0.1",
-        )
-        .await
-        .expect("registration should succeed")
-        .token
+    /// Seeds a user + session directly (bypassing the OIDC login flow, which
+    /// isn't under test here) and returns a `Cookie` header value.
+    async fn seed_session_cookie(fixture: &TestFixture) -> String {
+        let user = fixture
+            .user_repo
+            .create(CreateUser {
+                oidc_issuer: "https://test.example".to_string(),
+                oidc_subject: "subj-1".to_string(),
+                email: Some("test@example.com".to_string()),
+                display_name: "Test User".to_string(),
+                avatar_url: None,
+                is_admin: false,
+            })
+            .await
+            .expect("seed user should succeed");
+
+        let token = fixture
+            .session_store
+            .create(
+                &SessionData {
+                    user_id: user.id.to_string(),
+                    device_hash: "test-device".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    last_active: chrono::Utc::now().timestamp(),
+                },
+                86400,
+                86400,
+            )
+            .await
+            .expect("seed session should succeed");
+
+        format!("beam_session={token}")
     }
 
     fn build_service(fixture: &TestFixture) -> Service {
@@ -290,13 +305,13 @@ mod tests {
     async fn test_report_progress_unknown_file_returns_404() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = register_and_get_token(&fixture.auth).await;
+        let cookie = seed_session_cookie(&fixture).await;
 
         let res = TestClient::put(format!(
             "http://localhost/v1/files/{}/progress",
             uuid::Uuid::new_v4()
         ))
-        .add_header("Authorization", format!("Bearer {token}"), true)
+        .add_header("Cookie", cookie, true)
         .json(&ReportProgressRequest {
             position_secs: 10.0,
             duration_secs: Some(100.0),
@@ -321,10 +336,10 @@ mod tests {
             .insert(file.id, file);
 
         let service = build_service(&fixture);
-        let token = register_and_get_token(&fixture.auth).await;
+        let cookie = seed_session_cookie(&fixture).await;
 
         let mut res = TestClient::put(format!("http://localhost/v1/files/{file_id}/progress"))
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .json(&ReportProgressRequest {
                 position_secs: 42.0,
                 duration_secs: Some(100.0),
@@ -406,10 +421,10 @@ mod tests {
             .insert(file.id, file);
 
         let service = build_service(&fixture);
-        let token = register_and_get_token(&fixture.auth).await;
+        let cookie = seed_session_cookie(&fixture).await;
 
         TestClient::put(format!("http://localhost/v1/files/{file_id}/progress"))
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie.clone(), true)
             .json(&ReportProgressRequest {
                 position_secs: 10.0,
                 duration_secs: Some(100.0),
@@ -418,7 +433,7 @@ mod tests {
             .await;
 
         let mut res = TestClient::get("http://localhost/v1/continue-watching")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
         assert_eq!(res.status_code, Some(StatusCode::OK));

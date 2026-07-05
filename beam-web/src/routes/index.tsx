@@ -17,17 +17,17 @@ export const Route = createFileRoute("/")({
 });
 
 function DashboardPage() {
-	const { token } = useAuth();
+	const { isAuthenticated } = useAuth();
 	const { data, isLoading: loading } = useQuery({
 		queryKey: ["libraries"],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/libraries", {
-				params: { header: { Authorization: `Bearer ${token}` } },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to load libraries");
 			return data;
 		},
-		enabled: !!token,
+		enabled: isAuthenticated,
 	});
 	const libraries = data ?? [];
 	const totalFiles = libraries.reduce((sum, lib) => sum + lib.size, 0);

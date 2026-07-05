@@ -9,16 +9,13 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use argon2::password_hash::{SaltString, rand_core::OsRng};
-    use argon2::{Argon2, PasswordHasher};
     use beam_auth::server::OidcRuntimeConfig;
     use beam_auth::utils::{
         models::CreateUser,
         oidc::NotConfiguredOidcClient,
         pending_auth_store::in_memory::InMemoryPendingAuthStore,
         repository::{UserRepository, in_memory::InMemoryUserRepository},
-        service::{AuthService, LocalAuthService},
-        session_store::in_memory::InMemorySessionStore,
+        session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
     };
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
@@ -43,9 +40,6 @@ mod tests {
         ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackService,
     };
     use crate::state::{AppServices, AppState};
-
-    const TEST_JWT_SECRET: &str = "test-jwt-secret-for-admin-route-tests";
-    const ADMIN_PASSWORD: &str = "admin-password-123";
 
     #[derive(Debug)]
     struct StubPlaybackService;
@@ -128,26 +122,13 @@ mod tests {
 
     struct TestFixture {
         state: AppState,
-        auth: Arc<LocalAuthService>,
+        session_store: Arc<InMemorySessionStore>,
         user_repo: Arc<InMemoryUserRepository>,
-    }
-
-    fn hash_password(password: &str) -> String {
-        let salt = SaltString::generate(&mut OsRng);
-        Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
-            .unwrap()
-            .to_string()
     }
 
     fn make_test_state() -> TestFixture {
         let session_store = Arc::new(InMemorySessionStore::default());
         let user_repo = Arc::new(InMemoryUserRepository::default());
-        let auth = Arc::new(LocalAuthService::new(
-            user_repo.clone(),
-            session_store.clone(),
-            TEST_JWT_SECRET.to_string(),
-        ));
 
         let notification = Arc::new(InMemoryNotificationService::new());
         let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
@@ -170,7 +151,6 @@ mod tests {
         ));
 
         let services = AppServices {
-            auth: auth.clone(),
             hash: Arc::new(StubHashService),
             library,
             metadata: Arc::new(StubMetadataService),
@@ -178,7 +158,7 @@ mod tests {
             admin_log,
             user_repo: user_repo.clone(),
             playback: Arc::new(StubPlaybackService),
-            session_store,
+            session_store: session_store.clone(),
             oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
             oidc_config: OidcRuntimeConfig {
@@ -197,7 +177,6 @@ mod tests {
             video_dir: PathBuf::from("/tmp"),
             cache_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
-            jwt_secret: TEST_JWT_SECRET.to_string(),
             hash_unknown_files: true,
             scan_interval_secs: 3600,
             watch_enabled: false,
@@ -220,48 +199,50 @@ mod tests {
         let state = AppState::new(config, services);
         TestFixture {
             state,
-            auth,
+            session_store,
             user_repo,
         }
     }
 
-    async fn register_regular_user(fixture: &TestFixture) -> String {
-        fixture
-            .auth
-            .register(
-                "regularuser",
-                "regular@example.com",
-                "password123",
-                "device-hash",
-                "127.0.0.1",
-            )
-            .await
-            .expect("registration should succeed")
-            .token
-    }
+    /// Seeds a user + session directly (bypassing the OIDC login flow, which
+    /// isn't under test here) and returns a `Cookie` header value.
+    async fn seed_user_cookie(fixture: &TestFixture, is_admin: bool) -> String {
+        let (oidc_subject, email, display_name) = if is_admin {
+            ("admin-subj", "admin@example.com", "Admin User")
+        } else {
+            ("regular-subj", "regular@example.com", "Regular User")
+        };
 
-    async fn login_as_admin(fixture: &TestFixture) -> String {
-        fixture
+        let user = fixture
             .user_repo
             .create(CreateUser {
-                username: "admin".to_string(),
-                email: "admin@example.com".to_string(),
-                password_hash: hash_password(ADMIN_PASSWORD),
-                is_admin: true,
-                oidc_issuer: None,
-                oidc_subject: None,
-                display_name: None,
+                oidc_issuer: "https://test.example".to_string(),
+                oidc_subject: oidc_subject.to_string(),
+                email: Some(email.to_string()),
+                display_name: display_name.to_string(),
                 avatar_url: None,
+                is_admin,
             })
             .await
-            .expect("should seed admin user");
+            .expect("seed user should succeed");
 
-        fixture
-            .auth
-            .login("admin", ADMIN_PASSWORD, "device-hash", "127.0.0.1")
+        let token = fixture
+            .session_store
+            .create(
+                &SessionData {
+                    user_id: user.id.to_string(),
+                    device_hash: "test-device".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    last_active: chrono::Utc::now().timestamp(),
+                },
+                86400,
+                86400,
+            )
             .await
-            .expect("admin login should succeed")
-            .token
+            .expect("seed session should succeed");
+
+        format!("beam_session={token}")
     }
 
     fn build_service(fixture: &TestFixture) -> Service {
@@ -307,10 +288,10 @@ mod tests {
     async fn test_list_libraries_authenticated_returns_empty_list() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = register_regular_user(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, false).await;
 
         let mut res = TestClient::get("http://localhost/v1/libraries")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
         assert_eq!(res.status_code, Some(StatusCode::OK));
@@ -324,10 +305,10 @@ mod tests {
     async fn test_create_library_regular_user_returns_403() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = register_regular_user(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, false).await;
 
         let res = TestClient::post("http://localhost/v1/admin/libraries")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .json(&CreateLibraryRequest {
                 name: "Movies".to_string(),
                 root_path: "movies".to_string(),
@@ -341,10 +322,10 @@ mod tests {
     async fn test_create_library_admin_succeeds_and_is_then_listed() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = login_as_admin(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, true).await;
 
         let mut res = TestClient::post("http://localhost/v1/admin/libraries")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie.clone(), true)
             .json(&CreateLibraryRequest {
                 name: "Movies".to_string(),
                 root_path: "movies".to_string(),
@@ -356,7 +337,7 @@ mod tests {
         assert_eq!(created.name, "Movies");
 
         let mut list_res = TestClient::get("http://localhost/v1/libraries")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
         let libraries: Vec<Library> = list_res.take_json().await.unwrap();
@@ -368,10 +349,10 @@ mod tests {
     async fn test_scan_library_admin_returns_added_count() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = login_as_admin(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, true).await;
 
         let mut create_res = TestClient::post("http://localhost/v1/admin/libraries")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie.clone(), true)
             .json(&CreateLibraryRequest {
                 name: "Movies".to_string(),
                 root_path: "movies".to_string(),
@@ -384,7 +365,7 @@ mod tests {
             "http://localhost/v1/admin/libraries/{}/scan",
             created.id
         ))
-        .add_header("Authorization", format!("Bearer {token}"), true)
+        .add_header("Cookie", cookie, true)
         .send(&service)
         .await;
         assert_eq!(scan_res.status_code, Some(StatusCode::OK));
@@ -399,10 +380,10 @@ mod tests {
     async fn test_delete_library_admin_returns_204_then_404_on_repeat() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = login_as_admin(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, true).await;
 
         let mut create_res = TestClient::post("http://localhost/v1/admin/libraries")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie.clone(), true)
             .json(&CreateLibraryRequest {
                 name: "Movies".to_string(),
                 root_path: "movies".to_string(),
@@ -415,7 +396,7 @@ mod tests {
             "http://localhost/v1/admin/libraries/{}",
             created.id
         ))
-        .add_header("Authorization", format!("Bearer {token}"), true)
+        .add_header("Cookie", cookie.clone(), true)
         .send(&service)
         .await;
         assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
@@ -424,7 +405,7 @@ mod tests {
             "http://localhost/v1/admin/libraries/{}",
             created.id
         ))
-        .add_header("Authorization", format!("Bearer {token}"), true)
+        .add_header("Cookie", cookie, true)
         .send(&service)
         .await;
         assert_eq!(res_again.status_code, Some(StatusCode::NOT_FOUND));
@@ -436,10 +417,10 @@ mod tests {
     async fn test_get_admin_logs_regular_user_returns_403() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = register_regular_user(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, false).await;
 
         let res = TestClient::get("http://localhost/v1/admin/logs")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
         assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
@@ -462,10 +443,10 @@ mod tests {
             .unwrap();
 
         let service = build_service(&fixture);
-        let token = login_as_admin(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, true).await;
 
         let mut res = TestClient::get("http://localhost/v1/admin/logs")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
         assert_eq!(res.status_code, Some(StatusCode::OK));
@@ -490,10 +471,10 @@ mod tests {
     async fn test_refresh_media_metadata_regular_user_returns_403() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = register_regular_user(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, false).await;
 
         let res = TestClient::post("http://localhost/v1/admin/media/some-id/refresh")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
         assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
@@ -503,10 +484,10 @@ mod tests {
     async fn test_refresh_media_metadata_admin_returns_204() {
         let fixture = make_test_state();
         let service = build_service(&fixture);
-        let token = login_as_admin(&fixture).await;
+        let cookie = seed_user_cookie(&fixture, true).await;
 
         let res = TestClient::post("http://localhost/v1/admin/media/some-id/refresh")
-            .add_header("Authorization", format!("Bearer {token}"), true)
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
         assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));

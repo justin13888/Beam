@@ -18,8 +18,8 @@ export default function Header() {
 	const { isAuthenticated, user, logout } = useAuth();
 	const navigate = useNavigate();
 
-	const handleLogout = () => {
-		logout();
+	const handleLogout = async () => {
+		await logout();
 		setIsOpen(false);
 		navigate({ to: "/login" });
 	};
@@ -51,7 +51,7 @@ export default function Header() {
 								className="flex items-center gap-2 text-sm text-gray-300 hover:text-white transition-colors"
 							>
 								<User size={16} />
-								<span>Hello, {user?.username}</span>
+								<span>Hello, {user?.display_name}</span>
 							</Link>
 							<Button
 								variant="ghost"
@@ -148,7 +148,9 @@ export default function Header() {
 							>
 								<div className="flex items-center gap-3 px-3 py-2 text-gray-300 hover:bg-gray-800 rounded-lg transition-colors">
 									<User size={20} />
-									<span className="font-medium truncate">{user?.username}</span>
+									<span className="font-medium truncate">
+										{user?.display_name}
+									</span>
 								</div>
 							</Link>
 							<button
@@ -169,18 +171,6 @@ export default function Header() {
 							>
 								<Button className="w-full bg-cyan-600 hover:bg-cyan-700 text-white">
 									Sign In
-								</Button>
-							</Link>
-							<Link
-								to="/register"
-								onClick={() => setIsOpen(false)}
-								className="block w-full"
-							>
-								<Button
-									variant="outline"
-									className="w-full border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700"
-								>
-									Create Account
 								</Button>
 							</Link>
 						</div>

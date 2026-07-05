@@ -30,7 +30,6 @@ fn rest_routes() -> Router {
         .push(Router::with_path("libraries/{id}").get(get_library))
         .push(Router::with_path("libraries/{id}/files").get(get_library_files))
         .push(Router::with_path("files/{file_id}/progress").put(report_playback_progress))
-        .push(Router::with_path("files/{file_id}/stream-token").post(get_stream_token))
         .push(Router::with_path("files/{file_id}/stream").get(stream_file))
         .push(Router::with_path("files/{file_id}/download").get(download_file))
         .push(Router::with_path("continue-watching").get(get_continue_watching))
@@ -45,21 +44,33 @@ fn rest_routes() -> Router {
                 .push(Router::with_path("events").get(get_admin_events))
                 .push(Router::with_path("events/stream").get(stream_admin_events)),
         )
-        .push(Router::with_path("auth").push(beam_auth::server::auth_routes()))
+        // OIDC login/callback stay under /auth; everything else that acts on
+        // the resulting session cookie is top-level, matching the final
+        // ratified shape (see ADR-0003) now that no legacy auth routes
+        // remain to coexist with.
+        .push(
+            Router::with_path("auth")
+                .push(Router::with_path("login").get(beam_auth::server::oidc_login))
+                .push(Router::with_path("callback").get(beam_auth::server::oidc_callback)),
+        )
+        .push(Router::with_path("me").get(beam_auth::server::oidc_me))
+        .push(Router::with_path("logout").post(beam_auth::server::oidc_logout))
+        .push(Router::with_path("logout-all").post(beam_auth::server::oidc_logout_all))
+        .push(Router::with_path("sessions").get(beam_auth::server::oidc_list_sessions))
+        .push(Router::with_path("sessions/{id}").delete(beam_auth::server::oidc_delete_session))
 }
 
 /// Create the main API router with all routes
 pub fn create_router(state: AppState) -> Router {
     // Note: No authorization is done at the top-level here -- each endpoint is
-    // either public or self-contained (e.g. stream token validated in the
-    // handler, admin routes gated via `require_admin`).
+    // either public or self-contained (admin routes gated via
+    // `require_admin`).
     //
-    // `beam_auth::server::auth_routes()` (mounted inside `rest_routes()`)
-    // pulls its dependencies straight from the depot via
+    // The `beam_auth::server::oidc_*` handlers (mounted individually above)
+    // pull their dependencies straight from the depot via
     // `depot.obtain::<Arc<dyn ...>>()`, so they're injected here individually
     // rather than only injecting the outer `AppState`.
     let services = &state.services;
-    let auth = services.auth.clone();
     let user_repo = services.user_repo.clone();
     let session_store = services.session_store.clone();
     let oidc_client = services.oidc_client.clone();
@@ -68,7 +79,6 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         .hoop(affix_state::inject(state))
-        .hoop(affix_state::inject(auth))
         .hoop(affix_state::inject(user_repo))
         .hoop(affix_state::inject(session_store))
         .hoop(affix_state::inject(oidc_client))

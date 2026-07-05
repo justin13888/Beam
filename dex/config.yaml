@@ -16,7 +16,7 @@ staticClients:
     secret: beam-dev-secret
     name: "Beam"
     redirectURIs:
-      - "http://localhost:8000/v1/auth/oidc/callback"
+      - "http://localhost:8000/v1/auth/callback"
 
 enablePasswordDB: true
 staticPasswords:

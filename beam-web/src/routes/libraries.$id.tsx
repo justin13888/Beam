@@ -159,7 +159,7 @@ function SortHeader({
 
 function LibraryDetailPage() {
 	const { id } = Route.useParams();
-	const { token } = useAuth();
+	const { isAuthenticated } = useAuth();
 	const queryClient = useQueryClient();
 
 	const {
@@ -171,15 +171,13 @@ function LibraryDetailPage() {
 		queryKey: ["library", id],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/libraries/{id}", {
-				params: {
-					path: { id },
-					header: { Authorization: `Bearer ${token}` },
-				},
+				params: { path: { id } },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to load library");
 			return data;
 		},
-		enabled: !!token,
+		enabled: isAuthenticated,
 	});
 
 	const {
@@ -191,15 +189,13 @@ function LibraryDetailPage() {
 		queryKey: ["library", id, "files"],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/libraries/{id}/files", {
-				params: {
-					path: { id },
-					header: { Authorization: `Bearer ${token}` },
-				},
+				params: { path: { id } },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to load library files");
 			return data;
 		},
-		enabled: !!token,
+		enabled: isAuthenticated,
 	});
 
 	const loading = libraryLoading || filesLoading;
@@ -212,10 +208,8 @@ function LibraryDetailPage() {
 	const scanLibraryMutation = useMutation({
 		mutationFn: async () => {
 			const { error } = await apiClient.POST("/v1/admin/libraries/{id}/scan", {
-				params: {
-					path: { id },
-					header: { Authorization: `Bearer ${token}` },
-				},
+				params: { path: { id } },
+				credentials: "include",
 			});
 			if (error) throw new Error("Failed to scan library");
 		},

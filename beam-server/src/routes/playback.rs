@@ -1,6 +1,7 @@
 //! `/v1/files/{file_id}/progress` and `/v1/continue-watching` (FR-507,
-//! FR-508). The reporting user is always derived from the Bearer JWT, never
-//! from the request body -- one user can never overwrite another's progress.
+//! FR-508). The reporting user is always derived from the session cookie,
+//! never from the request body -- one user can never overwrite another's
+//! progress.
 
 use salvo::oapi::ToSchema;
 use salvo::prelude::*;
@@ -33,10 +34,7 @@ fn parse_user_id(user_id: &str) -> Result<Uuid, ApiError> {
 
 #[endpoint(
     tags("playback"),
-    parameters(
-        ("file_id" = String, description = "File id (UUID)"),
-        ("Authorization" = String, Header, description = "Bearer <user JWT>"),
-    ),
+    parameters(("file_id" = String, description = "File id (UUID)")),
     request_body = ReportProgressRequest,
 )]
 pub async fn report_playback_progress(
@@ -67,10 +65,7 @@ pub async fn report_playback_progress(
 
 #[endpoint(
     tags("playback"),
-    parameters(
-        ("limit" = Option<u32>, Query, description = "Max items to return (default 20)"),
-        ("Authorization" = String, Header, description = "Bearer <user JWT>"),
-    ),
+    parameters(("limit" = Option<u32>, Query, description = "Max items to return (default 20)")),
 )]
 pub async fn get_continue_watching(
     req: &mut Request,

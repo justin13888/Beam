@@ -21,8 +21,8 @@ function ProfilePage() {
 	const { user, logout } = useAuth();
 	const navigate = useNavigate();
 
-	const handleLogout = () => {
-		logout();
+	const handleLogout = async () => {
+		await logout();
 		navigate({ to: "/login" });
 	};
 
@@ -34,7 +34,9 @@ function ProfilePage() {
 						<UserIcon size={32} className="text-white" />
 					</div>
 					<div>
-						<h1 className="text-2xl font-bold text-white">{user?.username}</h1>
+						<h1 className="text-2xl font-bold text-white">
+							{user?.display_name}
+						</h1>
 						<p className="text-gray-400">{user?.email}</p>
 					</div>
 				</div>

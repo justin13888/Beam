@@ -9,7 +9,6 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as RegisterRouteImport } from './routes/register'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as LibrariesRouteImport } from './routes/libraries'
@@ -19,11 +18,6 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as MediaIdRouteImport } from './routes/media.$id'
 import { Route as LibrariesIdRouteImport } from './routes/libraries.$id'
 
-const RegisterRoute = RegisterRouteImport.update({
-  id: '/register',
-  path: '/register',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ProfileRoute = ProfileRouteImport.update({
   id: '/profile',
   path: '/profile',
@@ -72,7 +66,6 @@ export interface FileRoutesByFullPath {
   '/libraries': typeof LibrariesRouteWithChildren
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
-  '/register': typeof RegisterRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
 }
@@ -83,7 +76,6 @@ export interface FileRoutesByTo {
   '/libraries': typeof LibrariesRouteWithChildren
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
-  '/register': typeof RegisterRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
 }
@@ -95,7 +87,6 @@ export interface FileRoutesById {
   '/libraries': typeof LibrariesRouteWithChildren
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
-  '/register': typeof RegisterRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
 }
@@ -108,7 +99,6 @@ export interface FileRouteTypes {
     | '/libraries'
     | '/login'
     | '/profile'
-    | '/register'
     | '/libraries/$id'
     | '/media/$id'
   fileRoutesByTo: FileRoutesByTo
@@ -119,7 +109,6 @@ export interface FileRouteTypes {
     | '/libraries'
     | '/login'
     | '/profile'
-    | '/register'
     | '/libraries/$id'
     | '/media/$id'
   id:
@@ -130,7 +119,6 @@ export interface FileRouteTypes {
     | '/libraries'
     | '/login'
     | '/profile'
-    | '/register'
     | '/libraries/$id'
     | '/media/$id'
   fileRoutesById: FileRoutesById
@@ -142,19 +130,11 @@ export interface RootRouteChildren {
   LibrariesRoute: typeof LibrariesRouteWithChildren
   LoginRoute: typeof LoginRoute
   ProfileRoute: typeof ProfileRoute
-  RegisterRoute: typeof RegisterRoute
   MediaIdRoute: typeof MediaIdRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/register': {
-      id: '/register'
-      path: '/register'
-      fullPath: '/register'
-      preLoaderRoute: typeof RegisterRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/profile': {
       id: '/profile'
       path: '/profile'
@@ -233,7 +213,6 @@ const rootRouteChildren: RootRouteChildren = {
   LibrariesRoute: LibrariesRouteWithChildren,
   LoginRoute: LoginRoute,
   ProfileRoute: ProfileRoute,
-  RegisterRoute: RegisterRoute,
   MediaIdRoute: MediaIdRoute,
 }
 export const routeTree = rootRouteImport
