@@ -1,6 +1,6 @@
 //! Example program that extracts and displays metadata from a media file.
 
-use beam_stream::utils::metadata::{StreamMetadata, VideoFileMetadata};
+use beam_server::utils::metadata::{StreamMetadata, VideoFileMetadata};
 use ffmpeg_next as ffmpeg;
 
 use std::{env, path::Path};
@@ -8,7 +8,7 @@ use std::{env, path::Path};
 fn main() -> Result<(), eyre::Error> {
     color_eyre::install()?;
     dotenvy::dotenv().ok();
-    beam_stream::logging::init_tracing();
+    beam_server::logging::init_tracing();
 
     ffmpeg::init().unwrap();
 

@@ -12,6 +12,7 @@
 			"beam-web/.vscode/**/*",
 			"beam-web/index.html",
 			"beam-web/vite.config.ts",
+			"beam-web/codegen.ts",
 			"beam-docs/src/**/*.ts",
 			"beam-docs/src/**/*.tsx",
 			"!beam-web/src/routeTree.gen.ts",

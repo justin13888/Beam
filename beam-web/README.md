@@ -6,7 +6,7 @@ This is the web client for Beam. It is built with React, Vite, and Bun.
 
 ### Start development server
 
-Prerequisite: It is assumed [beam-stream](../beam-stream/README.md) is running and accessible.
+Prerequisite: It is assumed [beam-server](../beam-server/README.md) is running and accessible.
 
 Copy `.env.example` to `.env` and modify any necessary environment variables (necessary for codegen in next step).
 

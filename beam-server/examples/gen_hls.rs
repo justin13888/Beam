@@ -1,10 +1,10 @@
 //! Example code to generate a HLS media playlist (to a hypothetical server) from a video file
 
-use beam_stream::services::{hash::LocalHashService, media_info::LocalMediaInfoService};
-use beam_stream::utils::file::FileType;
-use beam_stream::utils::metadata::VideoFileMetadata;
-use beam_stream::utils::stream::StreamBuilder;
-use beam_stream::utils::stream::hls::HlsStreamGenerator;
+use beam_server::services::{hash::LocalHashService, media_info::LocalMediaInfoService};
+use beam_server::utils::file::FileType;
+use beam_server::utils::metadata::VideoFileMetadata;
+use beam_server::utils::stream::StreamBuilder;
+use beam_server::utils::stream::hls::HlsStreamGenerator;
 use eyre::Result;
 use m3u8_rs::WRITE_OPT_FLOAT_PRECISION;
 use std::{path::PathBuf, sync::Arc, sync::atomic::Ordering, time::Instant};
@@ -13,7 +13,7 @@ use std::{path::PathBuf, sync::Arc, sync::atomic::Ordering, time::Instant};
 async fn main() -> Result<()> {
     color_eyre::install()?;
     dotenvy::dotenv().ok();
-    beam_stream::logging::init_tracing();
+    beam_server::logging::init_tracing();
 
     // Get first argument as file path
     let args: Vec<String> = std::env::args().collect();

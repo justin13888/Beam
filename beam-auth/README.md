@@ -1,41 +1,16 @@
 # Beam Auth
 
-A standalone authentication service for the Beam platform, providing user registration, login, session management, and JWT issuance.
+A library crate providing user, session, and authentication logic for `beam-server`. There is no
+standalone `beam-auth` binary or container image -- `beam-server` links this crate and mounts its
+routes in-process. See [`docs/components/server.md`](../docs/components/server.md) and
+[`docs/architecture/security.md`](../docs/architecture/security.md) for the current architecture,
+and run/test `beam-server` per its own README for local development.
 
-## Development
-
-- Copy `.env.example` to `.env` and modify as needed:
-
-    ```bash
-    cp .env.example .env
-    ```
-
-- Install some dependencies:
-
-    ```bash
-    cargo install cargo-watch
-    ```
-
-- Start other dependencies:
-
-    ```bash
-    podman compose -f compose.dependencies.yaml up -d
-    ```
-
-- Make sure you applied [migrations](../beam-migration/README.md)
-
-- Start development server:
-
-    ```bash
-    cargo watch -x run
-    ```
-
-### Build container image
-
-```bash
-# In root directory
-podman build -f beam-auth/Containerfile -t beam-auth .
-```
+> Note: the design described below (username/password, JWT access tokens, Redis-backed sessions,
+> scoped stream tokens) is the pre-OIDC design and is being replaced per
+> [ADR-0003](../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md) and
+> [ADR-0005](../docs/architecture/decisions/ADR-0005-sessions-in-postgres.md). This document will be
+> rewritten once that work lands.
 
 ## API Endpoints
 
@@ -49,12 +24,13 @@ podman build -f beam-auth/Containerfile -t beam-auth .
 
 ## Architecture
 
-`beam-auth` is both a standalone binary service and a library crate with two feature flags:
+`beam-auth` is a library crate with two feature flags:
 
 - **`utils`** — Core domain types, trait abstractions, and concrete implementations for user repositories, session stores, and the auth service.
 - **`server`** (implies `utils`) — Salvo HTTP handlers that wire the auth service into a router.
 
-Other services (e.g., `beam-stream`) depend on `beam-auth` as a library (with the `utils` feature) to perform local JWT verification without making network calls.
+`beam-server` depends on `beam-auth` and mounts its routes directly into its own router; there is
+no network call between them.
 
 ### Session & Token Strategy
 

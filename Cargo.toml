@@ -1,5 +1,5 @@
 [workspace]
-members = ["beam-auth", "beam-domain", "beam-index", "beam-stream", "beam-migration", "beam-entity"]
+members = ["beam-auth", "beam-domain", "beam-index", "beam-server", "beam-migration", "beam-entity"]
 resolver = "3"
 
 [workspace.dependencies]

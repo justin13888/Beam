@@ -68,7 +68,6 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
     clang libclang-dev pkg-config \
-    protobuf-compiler \
     libx264-dev libx265-dev libvpx-dev \
     libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
     libfribidi-dev libogg-dev libssl-dev \
@@ -84,11 +83,11 @@ ENV PATH=/opt/ffmpeg/bin:$PATH
 
 # Copy the dependency recipe
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json --bin beam-stream
+RUN cargo chef cook --release --recipe-path recipe.json --bin beam-server
 
 # Build application
 COPY . .
-RUN cargo build --release --package beam-stream
+RUN cargo build --release --package beam-server
 
 # ----------------------------------------------------
 # Runtime stage
@@ -121,7 +120,7 @@ ENV VIDEO_DIR=/videos
 ENV CACHE_DIR=/cache
 
 # Copy the binary from builder
-COPY --from=builder /app/target/release/beam-stream /usr/local/bin/beam-stream
+COPY --from=builder /app/target/release/beam-server /usr/local/bin/beam-server
 
 # Create non-root user
 RUN useradd -m -u 1000 -s /bin/bash appuser
@@ -129,7 +128,6 @@ USER appuser
 
 # Expose ports
 EXPOSE 8000/tcp
-EXPOSE 8001/tcp
 
 # Run the binary
-CMD ["beam-stream"]
+CMD ["beam-server"]

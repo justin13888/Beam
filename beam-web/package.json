@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "export-schema": "cd ../beam-stream && cargo run --bin export_schema > schema.graphql",
+    "export-schema": "cd ../beam-server && cargo run --bin export_schema > schema.graphql",
     "codegen": "graphql-codegen --config codegen.ts",
     "codegen:full": "bun run export-schema && bun run codegen",
-    "export-openapi": "cd ../beam-stream && cargo run --example export_openapi > ../beam-web/openapi.json",
+    "export-openapi": "cd ../beam-server && cargo run --example export_openapi > ../beam-web/openapi.json",
     "codegen:openapi": "openapi-typescript ./openapi.json -o ./src/api.gen.ts",
     "codegen:openapi:full": "bun run export-openapi && bun run codegen:openapi",
     "dev": "vite",

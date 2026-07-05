@@ -20,7 +20,7 @@ Beam originally started as a project to surpass the limitations of Jellyfin, a p
 
 Beam consists of multiple backend services that work together to provide a seamless media streaming experience. The main components are:
 
-- `beam-stream`: Media streaming service that handles live transcoding, caching, and streaming of media files (Rust/GraphQL/gRPC/ffmpeg).
+- `beam-server`: Main server -- HTTP API, auth, in-process media indexing, and streaming (Rust). See [`docs/`](docs/) for the current, ratified architecture (this section predates it and is due a rewrite).
 <!-- - `beam-auth`: Authentication and user management service that handles user registration, login, and permissions (Rust/GraphQL). -->
 <!-- - `beam-tasks`: GRPC microservice that manages background tasks such as transcoding, indexing, and metadata retrieval (Rust/Tonic). -->
 <!-- - `beam-index`: Media indexing service that scans and indexes media files on disk (Rust). -->
@@ -82,7 +82,7 @@ For production deployments, we recommend reviewing all configurations in `.env` 
    - Consider using external volumes for `HOST_POSTGRES_DATA`
 
 3. **Performance**:
-   - Enable hardware acceleration for transcoding (configure in beam-stream)
+   - Enable hardware acceleration for transcoding (configure in beam-server)
    - Set `ENABLE_METRICS=true` for monitoring
    - Adjust `RUST_LOG` to `info` or `warn` in production
 

@@ -16,7 +16,7 @@ on:
       - "bun.lock"
       # Rust API changes affect generated OpenAPI types
       - "beam-auth/src/**/*.rs"
-      - "beam-stream/src/**/*.rs"
+      - "beam-server/src/**/*.rs"
       - "Cargo.lock"
   pull_request:
     branches: [master]
@@ -33,7 +33,7 @@ on:
       - "bun.lock"
       # Rust API changes affect generated OpenAPI types
       - "beam-auth/src/**/*.rs"
-      - "beam-stream/src/**/*.rs"
+      - "beam-server/src/**/*.rs"
       - "Cargo.lock"
 
 concurrency:
@@ -60,13 +60,13 @@ jobs:
       - uses: ./.github/actions/setup-bun
 
       - name: Generate openapi.json
-        run: cargo run --example export_openapi -p beam-stream > beam-web/openapi.json
+        run: cargo run --example export_openapi -p beam-server > beam-web/openapi.json
 
       - name: Generate api.gen.ts
         run: cd beam-web && bun run codegen:openapi
 
       - name: Generate schema.graphql
-        run: cargo run --bin export_schema -p beam-stream > beam-stream/schema.graphql
+        run: cargo run --bin export_schema -p beam-server > beam-server/schema.graphql
 
       - name: Generate gql.ts
         run: cd beam-web && bun run codegen

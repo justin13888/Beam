@@ -6,11 +6,11 @@
 //! Example:
 //!   cargo run --example gen_mp4 -- input.mkv output.mp4
 
-use beam_stream::services::hash::LocalHashService;
-use beam_stream::services::media_info::LocalMediaInfoService;
-use beam_stream::utils::file::FileType;
-use beam_stream::utils::stream::StreamBuilder;
-use beam_stream::utils::stream::mp4::MP4StreamGenerator;
+use beam_server::services::hash::LocalHashService;
+use beam_server::services::media_info::LocalMediaInfoService;
+use beam_server::utils::file::FileType;
+use beam_server::utils::stream::StreamBuilder;
+use beam_server::utils::stream::mp4::MP4StreamGenerator;
 use eyre::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use std::time::Instant;
 async fn main() -> Result<()> {
     color_eyre::install()?;
     dotenvy::dotenv().ok();
-    beam_stream::logging::init_tracing();
+    beam_server::logging::init_tracing();
 
     // Get command-line arguments
     let args: Vec<String> = std::env::args().collect();

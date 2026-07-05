@@ -6,9 +6,9 @@ use salvo::cors::Cors;
 use salvo::prelude::*;
 use tracing::info;
 
-use beam_stream::config::ServerConfig;
-use beam_stream::graphql::create_schema;
-use beam_stream::routes::create_router;
+use beam_server::config::ServerConfig;
+use beam_server::graphql::create_schema;
+use beam_server::routes::create_router;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,9 +17,9 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     // Initialize JSON logging
-    beam_stream::logging::init_tracing();
+    beam_server::logging::init_tracing();
 
-    info!("Starting beam-stream...");
+    info!("Starting beam-server...");
 
     // Load configuration
     let config = ServerConfig::load_and_validate().map_err(|e| eyre!(e))?;
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
     info!("Connected to database");
 
     // Initialize App Services and State
-    let (services, index_service) = beam_stream::state::AppServices::new(&config, db)
+    let (services, index_service) = beam_server::state::AppServices::new(&config, db)
         .await
         .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
 
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         },
     );
 
-    let state = beam_stream::state::AppState::new(config.clone(), services);
+    let state = beam_server::state::AppState::new(config.clone(), services);
 
     let schema = create_schema(state.clone());
 
@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
     let router = create_router(state.clone(), schema);
 
     // Generate OpenAPI documentation
-    let doc = OpenApi::new("Beam Stream API", "1.0.0").merge_router(&router);
+    let doc = OpenApi::new("Beam Server API", "1.0.0").merge_router(&router);
     let router = router
         .push(doc.into_router("/api-doc/openapi.json"))
         .push(Scalar::new("/api-doc/openapi.json").into_router("/openapi"));

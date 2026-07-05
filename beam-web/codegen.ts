@@ -2,8 +2,8 @@ import type { CodegenConfig } from "@graphql-codegen/cli";
 
 const config: CodegenConfig = {
 	overwrite: true,
-	// Use schema from beam-stream (source of truth)
-	schema: "../beam-stream/schema.graphql",
+	// Use schema from beam-server (source of truth)
+	schema: "../beam-server/schema.graphql",
 	// This assumes that all your source files are in a top-level `src/` directory - you might need to adjust this to your file structure
 	documents: ["src/**/*.{ts,tsx}"],
 	// Don't exit with non-zero status when there are no documents

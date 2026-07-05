@@ -20,7 +20,7 @@ target/
 .DS_Store
 Thumbs.db
 
-# Non-Rust packages (for beam-stream builds)
+# Non-Rust packages (for beam-server builds)
 old-api/
 
 # Test video directory

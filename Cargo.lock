@@ -482,10 +482,6 @@ dependencies = [
  "bb8-redis",
  "beam-entity",
  "chrono",
- "color-eyre",
- "confique",
- "dotenvy",
- "eyre",
  "http",
  "jsonwebtoken",
  "rand 0.10.0",
@@ -498,7 +494,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -571,7 +566,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "beam-stream"
+name = "beam-server"
 version = "0.1.0"
 dependencies = [
  "async-graphql",

@@ -84,7 +84,7 @@ RUN cargo chef cook --recipe-path recipe.json --bin export_schema
 
 COPY . .
 RUN cargo build --bin export_schema
-RUN cd beam-stream && ../target/debug/export_schema
+RUN cd beam-server && ../target/debug/export_schema
 
 # ----------------------------------------------------
 # Build: Build the application using Bun
@@ -107,7 +107,7 @@ RUN bun install --frozen-lockfile
 
 # Copy beam-web source and the generated schema from schema-builder
 COPY beam-web ./beam-web
-COPY --from=schema-builder /app/beam-stream/schema.graphql ./beam-stream/schema.graphql
+COPY --from=schema-builder /app/beam-server/schema.graphql ./beam-server/schema.graphql
 
 # Generate TypeScript types from the schema
 WORKDIR /app/beam-web

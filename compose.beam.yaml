@@ -1,42 +1,8 @@
 services:
-  auth:
+  server:
     build:
       context: .
-      dockerfile: beam-auth/Containerfile
-    environment:
-      BIND_ADDRESS: ${AUTH_BIND_ADDRESS:-0.0.0.0:8001}
-      SERVER_URL: ${AUTH_SERVER_URL:-http://localhost:8001}
-      DATABASE_URL: ${DATABASE_URL:-postgres://beam:password@postgres:5432/beam}
-      RUST_LOG: ${RUST_LOG:-beam_auth=info}
-      REDIS_URL: ${REDIS_URL:-redis://valkey:6379}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is not set or is empty}
-    ports:
-      - "${AUTH_HOST_PORT:-8001}:8001"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      valkey:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/v1/health"]
-      interval: 30s
-      timeout: 3s
-      start_period: 10s
-      retries: 3
-    networks:
-      - default
-      - beam_proxy
-    labels:
-      traefik.enable: "true"
-      traefik.http.routers.auth.rule: "Host(`auth.beam.localhost`)"
-      traefik.http.routers.auth.entrypoints: websecure
-      traefik.http.routers.auth.tls: "true"
-      traefik.http.services.auth.loadbalancer.server.port: "8001"
-
-  stream:
-    build:
-      context: .
-      dockerfile: beam-stream/Containerfile
+      dockerfile: beam-server/Containerfile
     environment:
       # Backend server configuration
       BIND_ADDRESS: ${BIND_ADDRESS:-0.0.0.0:8000}
@@ -46,7 +12,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgres://beam:password@postgres:5432/beam}
 
       # Logging configuration
-      RUST_LOG: ${RUST_LOG:-beam_stream=info,tower_http=debug,axum=debug}
+      RUST_LOG: ${RUST_LOG:-beam_server=info,tower_http=debug,axum=debug}
 
       # Media directories
       VIDEO_DIR: ${VIDEO_DIR:-/videos}
@@ -62,8 +28,8 @@ services:
       - "${STREAM_HOST_PORT:-8000}:8000"
     volumes:
       # Use named volumes by default, or custom host paths if specified
-      - ${HOST_VIDEO_DIR:-stream_videos}:${VIDEO_DIR:-/videos}
-      - ${HOST_CACHE_DIR:-stream_cache}:${CACHE_DIR:-/cache}
+      - ${HOST_VIDEO_DIR:-server_videos}:${VIDEO_DIR:-/videos}
+      - ${HOST_CACHE_DIR:-server_cache}:${CACHE_DIR:-/cache}
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,12 +48,12 @@ services:
       - beam_proxy
     labels:
       traefik.enable: "true"
-      traefik.http.routers.stream.rule: "Host(`stream.beam.localhost`)"
-      traefik.http.routers.stream.entrypoints: websecure
-      traefik.http.routers.stream.tls: "true"
-      traefik.http.services.stream.loadbalancer.server.port: "8000"
+      traefik.http.routers.server.rule: "Host(`server.beam.localhost`)"
+      traefik.http.routers.server.entrypoints: websecure
+      traefik.http.routers.server.tls: "true"
+      traefik.http.services.server.loadbalancer.server.port: "8000"
       # Disable response buffering for low-latency media streaming
-      traefik.http.services.stream.loadbalancer.responseForwarding.flushInterval: "-1"
+      traefik.http.services.server.loadbalancer.responseForwarding.flushInterval: "-1"
 
   web:
     build:
@@ -104,7 +70,7 @@ services:
     ports:
       - "${WEB_HOST_PORT:-8080}:80"
     depends_on:
-      stream:
+      server:
         condition: service_healthy
     networks:
       - default
@@ -118,8 +84,8 @@ services:
 
 # Named volumes for video and cache (used when HOST_*_DIR is not set)
 volumes:
-  stream_videos:
-  stream_cache:
+  server_videos:
+  server_cache:
 
 networks:
   beam_proxy:
