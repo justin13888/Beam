@@ -118,6 +118,13 @@ impl LocalIndexService {
         self
     }
 
+    /// The repository backing this service's library lookups, exposed so
+    /// callers (e.g. background maintenance tasks) can list/query libraries
+    /// without needing their own separate handle to the same repository.
+    pub fn library_repo(&self) -> &Arc<dyn LibraryRepository> {
+        &self.library_repo
+    }
+
     /// Helper to extract and insert media streams for a file
     pub(crate) async fn insert_media_streams(
         &self,

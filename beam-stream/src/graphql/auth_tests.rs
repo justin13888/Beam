@@ -179,7 +179,10 @@ mod tests {
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
             jwt_secret: TEST_JWT_SECRET.to_string(),
             redis_url: "redis://localhost".to_string(),
-            beam_index_url: "http://localhost:50051".to_string(),
+            hash_unknown_files: true,
+            scan_interval_secs: 3600,
+            watch_enabled: false,
+            watch_debounce_ms: 2000,
         };
 
         let state = AppState::new(config, services);

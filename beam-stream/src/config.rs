@@ -45,8 +45,26 @@ pub struct ServerConfig {
     #[config(env = "REDIS_URL", default = "redis://localhost:6379")]
     pub redis_url: String,
 
-    #[config(env = "BEAM_INDEX_URL", default = "http://localhost:50051")]
-    pub beam_index_url: String,
+    /// Whether to hash files with unknown/unsupported extensions during
+    /// indexing. Hashing them lets duplicate detection cover every file;
+    /// disable to save scan IO.
+    #[config(env = "HASH_UNKNOWN_FILES", default = true)]
+    pub hash_unknown_files: bool,
+
+    /// Interval between periodic full rescans of every library, in seconds.
+    /// Acts as the backstop that catches changes the filesystem watcher missed.
+    #[config(env = "SCAN_INTERVAL_SECS", default = 3600)]
+    pub scan_interval_secs: u64,
+
+    /// Whether to run the inotify-based filesystem watcher for near-real-time
+    /// index updates. When false, only the startup scan and periodic rescans run.
+    #[config(env = "WATCH_ENABLED", default = true)]
+    pub watch_enabled: bool,
+
+    /// Debounce window for filesystem-watcher events, in milliseconds. Bursts
+    /// of events for the same path within this window collapse into one.
+    #[config(env = "WATCH_DEBOUNCE_MS", default = 2000)]
+    pub watch_debounce_ms: u64,
 }
 
 impl ServerConfig {

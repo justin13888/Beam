@@ -7,12 +7,11 @@ use beam_auth::utils::{
     service::{AuthService, LocalAuthService},
     session_store::RedisSessionStore,
 };
-use beam_index::services::index::IndexService;
+use beam_index::services::index::{IndexService, LocalIndexService};
 
 use crate::{
     config::ServerConfig,
     services::{
-        GrpcIndexService,
         admin_log::{AdminLogService, LocalAdminLogService},
         hash::{HashConfig, HashService, LocalHashService},
         library::{LibraryService, LocalLibraryService, OsPathValidator},
@@ -83,7 +82,18 @@ pub struct AppServices {
 }
 
 impl AppServices {
-    pub async fn new(config: &ServerConfig, db: DatabaseConnection) -> eyre::Result<Self> {
+    /// Build the application's services. Also returns the concrete
+    /// [`LocalIndexService`] (rather than folding it into `AppServices`
+    /// itself) so the process entry point can spawn beam-index's background
+    /// scan/watch tasks via `beam_index::runtime::spawn_background_indexing`
+    /// -- those need methods (`scan_all_libraries`, `reconcile_path`) beyond
+    /// the narrow `IndexService` trait object stored on `library`. Test
+    /// fixtures that only need an `AppServices` (not a real indexer) are
+    /// unaffected by this extra return value.
+    pub async fn new(
+        config: &ServerConfig,
+        db: DatabaseConnection,
+    ) -> eyre::Result<(Self, Arc<LocalIndexService>)> {
         let hash_config = HashConfig::default();
 
         // Create repository implementations
@@ -131,13 +141,22 @@ impl AppServices {
         let admin_log_service: Arc<dyn AdminLogService> =
             Arc::new(LocalAdminLogService::new(admin_log_repo));
 
-        let index_service: Arc<dyn IndexService> = Arc::new(
-            GrpcIndexService::connect(config.beam_index_url.clone())
-                .await
-                .map_err(|e| eyre::eyre!("Failed to connect to beam-index: {}", e))?,
+        let index_service = Arc::new(
+            LocalIndexService::new(
+                library_repo.clone(),
+                file_repo.clone(),
+                movie_repo.clone(),
+                show_repo.clone(),
+                stream_repo.clone(),
+                hash_service.clone(),
+                media_info_service.clone(),
+                notification_service.clone(),
+                admin_log_service.clone(),
+            )
+            .with_hash_unknown_files(config.hash_unknown_files),
         );
 
-        Ok(Self {
+        let services = Self {
             auth: auth_service,
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
@@ -145,7 +164,7 @@ impl AppServices {
                 file_repo.clone(),
                 config.video_dir.clone(),
                 notification_service.clone(),
-                index_service,
+                index_service.clone() as Arc<dyn IndexService>,
                 Arc::new(OsPathValidator),
             )),
             metadata: Arc::new(DbMetadataService::new(
@@ -158,6 +177,8 @@ impl AppServices {
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
-        })
+        };
+
+        Ok((services, index_service))
     }
 }

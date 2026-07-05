@@ -45,9 +45,21 @@ async fn main() -> Result<()> {
     info!("Connected to database");
 
     // Initialize App Services and State
-    let services = beam_stream::state::AppServices::new(&config, db)
+    let (services, index_service) = beam_stream::state::AppServices::new(&config, db)
         .await
         .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
+
+    // Start in-process indexing (startup scan, filesystem watcher, periodic
+    // rescan backstop). There is no separate indexer process.
+    beam_index::runtime::spawn_background_indexing(
+        index_service,
+        beam_index::runtime::BackgroundIndexingConfig {
+            scan_interval_secs: config.scan_interval_secs,
+            watch_enabled: config.watch_enabled,
+            watch_debounce_ms: config.watch_debounce_ms,
+        },
+    );
+
     let state = beam_stream::state::AppState::new(config.clone(), services);
 
     let schema = create_schema(state.clone());
