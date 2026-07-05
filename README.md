@@ -65,7 +65,7 @@ Currently, there is one client app to interact with Beam:
 
    - Frontend: <http://localhost:8080>
    - Backend API: <http://localhost:8000>
-   - GraphQL Playground: <http://localhost:8000/graphql>
+   - API docs (Scalar): <http://localhost:8000/openapi>
 
 ### Production Deployment
 

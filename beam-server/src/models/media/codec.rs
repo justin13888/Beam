@@ -1,8 +1,7 @@
-use async_graphql::Enum;
 use salvo::oapi::ToSchema;
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema, Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
 pub enum OutputVideoCodec {
     H264,
     H265,
@@ -28,7 +27,7 @@ impl From<&crate::utils::codec::OutputVideoCodec> for OutputVideoCodec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema, Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
 pub enum OutputAudioCodec {
     Aac,
     Opus,
@@ -51,7 +50,7 @@ impl From<&crate::utils::codec::OutputAudioCodec> for OutputAudioCodec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema, Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
 pub enum OutputSubtitleCodec {
     WebVTT,
 }

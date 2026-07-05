@@ -9,20 +9,20 @@ use uuid::Uuid;
 const BROADCAST_CAPACITY: usize = 256;
 const DEFAULT_LOG_SIZE: usize = 1000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, async_graphql::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventLevel {
     Info,
     Warning,
     Error,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, async_graphql::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventCategory {
     LibraryScan,
     System,
 }
 
-#[derive(Clone, Debug, async_graphql::SimpleObject)]
+#[derive(Clone, Debug)]
 pub struct AdminEvent {
     pub id: String,
     pub timestamp: DateTime<Utc>,

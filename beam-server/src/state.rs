@@ -52,27 +52,6 @@ impl Deref for AppState {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct UserContext {
-    pub user_id: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct AppContextInner {
-    pub user_context: Option<UserContext>,
-}
-pub struct AppContext(Arc<AppContextInner>);
-
-impl AppContext {
-    pub fn new(user_context: Option<UserContext>) -> Self {
-        Self(Arc::new(AppContextInner { user_context }))
-    }
-
-    pub fn user_context(&self) -> Option<UserContext> {
-        self.0.user_context.clone()
-    }
-}
-
 #[derive(Debug)]
 pub struct AppServices {
     pub auth: Arc<dyn AuthService>,

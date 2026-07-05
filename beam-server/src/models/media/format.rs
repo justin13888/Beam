@@ -1,8 +1,7 @@
-use async_graphql::SimpleObject;
 use salvo::oapi::ToSchema;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
 pub struct Resolution {
     pub width: u32,
     pub height: u32,

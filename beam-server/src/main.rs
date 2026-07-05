@@ -5,7 +5,6 @@ use salvo::prelude::*;
 use tracing::info;
 
 use beam_server::config::ServerConfig;
-use beam_server::graphql::create_schema;
 use beam_server::routes::create_router;
 
 #[tokio::main]
@@ -68,8 +67,6 @@ async fn main() -> Result<()> {
 
     let state = beam_server::state::AppState::new(config.clone(), services);
 
-    let schema = create_schema(state.clone());
-
     // Build CORS handler
     let cors = Cors::new()
         .allow_origin(salvo::cors::AllowOrigin::mirror_request())
@@ -93,7 +90,7 @@ async fn main() -> Result<()> {
         .into_handler();
 
     // Build API router
-    let router = create_router(state.clone(), schema);
+    let router = create_router(state.clone());
 
     // Generate OpenAPI documentation
     let doc = OpenApi::new("Beam Server API", "1.0.0").merge_router(&router);
@@ -109,10 +106,6 @@ async fn main() -> Result<()> {
     info!("Server listening on {}", config.bind_address);
     info!(
         "API documentation available at http://{}/openapi",
-        config.bind_address
-    );
-    info!(
-        "GraphiQL interface available at http://{}/v1/graphql",
         config.bind_address
     );
 

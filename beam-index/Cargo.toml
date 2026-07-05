@@ -8,7 +8,6 @@ publish = false
 [dependencies]
 beam-domain = { path = "../beam-domain", features = ["entity"] }
 beam-entity = { path = "../beam-entity" }
-async-graphql = { version = "7.0.17", features = ["chrono", "uuid"] }
 async-trait = { workspace = true }
 # `cache` (rusqlite, bundled) is deliberately left disabled: it pins
 # libsqlite3-sys to a version range that hard-conflicts with the one

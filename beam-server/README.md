@@ -38,13 +38,6 @@ and Salvo. See [`docs/components/server.md`](../docs/components/server.md) for a
     cargo watch -x run
     ```
 
-### Generate GraphQL Schema
-
-```bash
-# With dependencies like database started up...
-cargo run --bin export_schema
-```
-
 ### Build container image
 
 ```bash

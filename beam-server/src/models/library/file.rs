@@ -1,10 +1,9 @@
-use async_graphql::{Enum, SimpleObject};
 use chrono::{DateTime, Utc};
 use salvo::oapi::ToSchema;
 use serde::Serialize;
 
-/// File indexing status exposed via GraphQL
-#[derive(Clone, Copy, Debug, Serialize, ToSchema, Enum, Eq, PartialEq)]
+/// File indexing status
+#[derive(Clone, Copy, Debug, Serialize, ToSchema, Eq, PartialEq)]
 pub enum FileIndexStatus {
     /// File is indexed and metadata matches
     Known,
@@ -25,7 +24,7 @@ impl From<beam_domain::models::file::FileStatus> for FileIndexStatus {
 }
 
 /// The kind of content a media file represents
-#[derive(Clone, Copy, Debug, Serialize, ToSchema, Enum, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, ToSchema, Eq, PartialEq)]
 pub enum FileContentType {
     /// File is associated with a movie
     Movie,
@@ -35,8 +34,8 @@ pub enum FileContentType {
     Unclassified,
 }
 
-/// A media file within a library, exposed via the GraphQL API
-#[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
+/// A media file within a library
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct LibraryFile {
     pub id: String,
     pub library_id: String,

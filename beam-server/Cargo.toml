@@ -12,18 +12,6 @@ beam-domain = { path = "../beam-domain" }
 beam-entity = { path = "../beam-entity" }
 beam-index = { path = "../beam-index" }
 http = { workspace = true }
-async-graphql = { version = "7.0.17", features = [
-    "apollo_persisted_queries",
-    "chrono",
-    "dataloader",
-    "decimal",
-    "log",
-    "opentelemetry",
-    "secrecy",
-    "unblock",
-    "uuid",
-    "url",
-] }
 async-stream = "0.3"
 async-trait = { workspace = true }
 bytes = "1"
@@ -32,7 +20,6 @@ color-eyre = "0.6.5"
 confique = { workspace = true }
 dotenvy = "0.15.7"
 eyre = "0.6.12"
-futures-util = "0.3"
 rand = { workspace = true }
 regex = { workspace = true }
 rust_decimal = "1.39.0"

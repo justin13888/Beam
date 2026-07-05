@@ -1,4 +1,3 @@
-use async_graphql::{SimpleObject, Union};
 use salvo::oapi::ToSchema;
 use serde::Serialize;
 
@@ -17,7 +16,7 @@ pub use source::*;
 pub use stream::*;
 
 /// Media metadata
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, Union)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
 pub enum MediaMetadata {
     Show(ShowMetadata),
     Movie(MovieMetadata),
@@ -32,7 +31,7 @@ impl MediaMetadata {
     }
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
 pub struct Title {
     /// Original title
     pub original: String,
@@ -42,7 +41,7 @@ pub struct Title {
     pub alternatives: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
 pub struct ExternalIdentifiers {
     /// IMDb ID (e.g., tt1234567)
     pub imdb_id: Option<String>,
@@ -52,7 +51,7 @@ pub struct ExternalIdentifiers {
     pub tvdb_id: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
 pub struct Ratings {
     /// TMDB rating as a percentage (0-100)
     pub tmdb: Option<u32>,

@@ -1,4 +1,3 @@
-use async_graphql::{Enum, SimpleObject};
 use salvo::oapi::ToSchema;
 use serde::Serialize;
 use std::sync::Arc;
@@ -729,9 +728,7 @@ pub enum MediaFilter {
 }
 
 /// Sort field options for media search
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Enum, Default, Serialize, serde::Deserialize, ToSchema,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaSortField {
     /// Sort by title (alphabetical)
@@ -748,9 +745,7 @@ pub enum MediaSortField {
 }
 
 /// Sort order
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Enum, Default, Serialize, serde::Deserialize, ToSchema,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SortOrder {
     /// Ascending order
@@ -761,7 +756,7 @@ pub enum SortOrder {
 }
 
 /// Media type filter
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaTypeFilter {
     /// Movies only
@@ -783,7 +778,7 @@ pub struct MediaSearchFilters {
 }
 
 /// Relay-style connection for media search results
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
 pub struct MediaConnection {
     /// List of edges containing media items and cursors
     pub edges: Vec<MediaEdge>,
@@ -792,7 +787,7 @@ pub struct MediaConnection {
 }
 
 /// Relay-style edge for media
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
 pub struct MediaEdge {
     /// Cursor for this edge
     pub cursor: String,
@@ -801,7 +796,7 @@ pub struct MediaEdge {
 }
 
 /// Relay-style page info
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
 pub struct PageInfo {
     /// Whether there is a next page
     pub has_next_page: bool,

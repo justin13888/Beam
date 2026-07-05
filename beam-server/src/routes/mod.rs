@@ -1,7 +1,5 @@
 pub mod admin;
 pub mod api_error;
-pub mod graphql;
-pub mod graphql_ws;
 pub mod health;
 pub mod media;
 pub mod playback;
@@ -15,7 +13,6 @@ pub use media::*;
 pub use playback::*;
 pub use stream::*;
 
-use crate::graphql::AppSchema;
 use crate::state::AppState;
 
 /// REST-only sub-routes (health, stream, media, libraries, admin, auth).
@@ -51,30 +48,19 @@ fn rest_routes() -> Router {
 }
 
 /// Create the main API router with all routes
-pub fn create_router(state: AppState, schema: AppSchema) -> Router {
-    // Note: No authorization is done at the top-level here because only `graphql` is secured with auth; other endpoints are either public or self-contained (e.g., stream token validated in the handler).
-    Router::new().hoop(affix_state::inject(state)).push(
-        Router::with_path("v1")
-            .push(rest_routes())
-            .push(
-                Router::with_path("graphql")
-                    .hoop(affix_state::inject(schema.clone()))
-                    .get(graphql::graphiql)
-                    .post(graphql::graphql_handler),
-            )
-            .push(
-                Router::with_path("graphql/ws")
-                    .hoop(affix_state::inject(schema))
-                    .get(graphql_ws::graphql_ws_handler),
-            ),
-    )
+pub fn create_router(state: AppState) -> Router {
+    // Note: No authorization is done at the top-level here -- each endpoint is
+    // either public or self-contained (e.g. stream token validated in the
+    // handler, admin routes gated via `require_admin`).
+    Router::new()
+        .hoop(affix_state::inject(state))
+        .push(Router::with_path("v1").push(rest_routes()))
 }
 
 /// Create a minimal router for OpenAPI documentation export.
 ///
 /// Includes only the REST endpoints (health, stream, auth) without state
-/// injection middleware or GraphQL routes (which use `#[handler]` and
-/// contribute nothing to the OpenAPI spec).
+/// injection middleware.
 pub fn create_docs_router() -> Router {
     Router::new().push(Router::with_path("v1").push(rest_routes()))
 }

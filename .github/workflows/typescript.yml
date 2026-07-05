@@ -65,12 +65,6 @@ jobs:
       - name: Generate api.gen.ts
         run: cd beam-web && bun run codegen:openapi
 
-      - name: Generate schema.graphql
-        run: cargo run --bin export_schema -p beam-server > beam-server/schema.graphql
-
-      - name: Generate gql.ts
-        run: cd beam-web && bun run codegen
-
       - name: Upload OpenAPI artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -78,7 +72,6 @@ jobs:
           path: |
             beam-web/openapi.json
             beam-web/src/api.gen.ts
-            beam-web/src/gql.ts
           retention-days: 7
 
   build:
