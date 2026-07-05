@@ -4,6 +4,7 @@ import {
 	AlertCircle,
 	AlertTriangle,
 	Info,
+	Radio,
 	RefreshCw,
 	Shield,
 } from "lucide-react";
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/apiClient";
 import { RouteError } from "../components/RouteError";
 import { useAuth } from "../hooks/auth";
+import { useAdminEventStream } from "../hooks/useAdminEventStream";
 
 type AdminLogEntry =
 	components["schemas"]["beam_server.models.admin.AdminLogEntryDto"];
@@ -80,6 +82,8 @@ function formatTimestamp(iso: string): string {
 
 function AdminPage() {
 	const { user, isAuthenticated } = useAuth();
+	const { events: liveEvents, connected: liveConnected } =
+		useAdminEventStream(isAuthenticated);
 	const [page, setPage] = useState(0);
 	const offset = page * PAGE_SIZE;
 
@@ -177,6 +181,47 @@ function AdminPage() {
 							Warnings (this page)
 						</div>
 					</div>
+				</div>
+
+				{/* Live Activity (SSE) */}
+				<div className="rounded-xl bg-gray-800/30 border border-gray-700/50 overflow-hidden mb-8">
+					<div className="px-6 py-4 border-b border-gray-700/50 flex items-center justify-between">
+						<h2 className="text-lg font-semibold text-white flex items-center gap-2">
+							<Radio
+								size={16}
+								className={liveConnected ? "text-emerald-400" : "text-gray-600"}
+							/>
+							Live Activity
+						</h2>
+						<span className="text-xs text-gray-500">
+							{liveConnected ? "Connected" : "Connecting…"}
+						</span>
+					</div>
+					{liveEvents.length === 0 ? (
+						<div className="px-6 py-8 text-center text-gray-500 text-sm">
+							Waiting for scans and other admin events…
+						</div>
+					) : (
+						<div className="divide-y divide-gray-700/30 max-h-80 overflow-y-auto">
+							{liveEvents.map((event) => (
+								<div key={event.id} className="px-6 py-3">
+									<div className="flex items-center gap-2 mb-1 flex-wrap">
+										<LevelBadge level={event.level} />
+										<CategoryBadge category={event.category} />
+										{event.library_name && (
+											<span className="text-xs text-gray-500">
+												{event.library_name}
+											</span>
+										)}
+										<span className="text-xs text-gray-500 ml-auto">
+											{formatTimestamp(event.timestamp)}
+										</span>
+									</div>
+									<p className="text-gray-200 text-sm">{event.message}</p>
+								</div>
+							))}
+						</div>
+					)}
 				</div>
 
 				{/* Logs Table */}
