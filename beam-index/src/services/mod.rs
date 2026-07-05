@@ -1,5 +1,6 @@
 pub mod admin_log;
 pub mod clock;
+pub mod enrichment;
 pub mod hash;
 pub mod index;
 pub mod media_info;
@@ -10,6 +11,7 @@ pub use admin_log::{AdminLogService, LocalAdminLogService, NoOpAdminLogService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use clock::TestClock;
 pub use clock::{Clock, RealClock};
+pub use enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 pub use hash::{HashConfig, HashService, LocalHashService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use index::MockIndexService;

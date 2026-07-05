@@ -42,9 +42,10 @@ async fn main() -> Result<()> {
     info!("Connected to database");
 
     // Initialize App Services and State
-    let (services, index_service) = beam_server::state::AppServices::new(&config, db)
-        .await
-        .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
+    let (services, index_service, enrichment_service) =
+        beam_server::state::AppServices::new(&config, db)
+            .await
+            .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
 
     // Start in-process indexing (startup scan, filesystem watcher, periodic
     // rescan backstop). There is no separate indexer process.
@@ -55,6 +56,14 @@ async fn main() -> Result<()> {
             watch_enabled: config.watch_enabled,
             watch_debounce_ms: config.watch_debounce_ms,
         },
+    );
+
+    // Start the metadata-enrichment sweep loop. Wired to a no-op provider
+    // until D4 lands the cameo adapter -- every sweep is a fast, harmless
+    // skip until then.
+    beam_index::runtime::spawn_enrichment_worker(
+        enrichment_service,
+        std::time::Duration::from_secs(config.enrich_interval_secs),
     );
 
     let state = beam_server::state::AppState::new(config.clone(), services);

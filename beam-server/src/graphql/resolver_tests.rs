@@ -130,6 +130,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_enabled: false,
             watch_debounce_ms: 2000,
+            enrich_interval_secs: 300,
         };
 
         TestContext {
@@ -202,6 +203,7 @@ mod tests {
             tmdb_id: None,
             imdb_id: None,
             tvdb_id: None,
+            anilist_id: None,
             rating_tmdb: None,
             rating_imdb: None,
             created_at: chrono::Utc::now(),
@@ -221,6 +223,7 @@ mod tests {
             tmdb_id: None,
             imdb_id: None,
             tvdb_id: None,
+            anilist_id: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -431,6 +434,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_enabled: false,
             watch_debounce_ms: 2000,
+            enrich_interval_secs: 300,
         };
 
         let state = AppState::new(config, services);

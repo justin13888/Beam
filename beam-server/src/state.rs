@@ -7,6 +7,9 @@ use beam_auth::utils::{
     service::{AuthService, LocalAuthService},
     session_store::PgSessionStore,
 };
+use beam_domain::providers::enrichment::NoopEnrichmentProvider;
+use beam_index::services::clock::RealClock;
+use beam_index::services::enrichment::MetadataEnrichmentService;
 use beam_index::services::index::{IndexService, LocalIndexService};
 
 use crate::{
@@ -81,17 +84,17 @@ pub struct AppServices {
 
 impl AppServices {
     /// Build the application's services. Also returns the concrete
-    /// [`LocalIndexService`] (rather than folding it into `AppServices`
-    /// itself) so the process entry point can spawn beam-index's background
-    /// scan/watch tasks via `beam_index::runtime::spawn_background_indexing`
-    /// -- those need methods (`scan_all_libraries`, `reconcile_path`) beyond
-    /// the narrow `IndexService` trait object stored on `library`. Test
-    /// fixtures that only need an `AppServices` (not a real indexer) are
-    /// unaffected by this extra return value.
+    /// [`LocalIndexService`] and [`MetadataEnrichmentService`] (rather than
+    /// folding them into `AppServices` itself) so the process entry point can
+    /// spawn beam-index's background scan/watch/enrichment tasks via
+    /// `beam_index::runtime` -- those need methods beyond the narrow
+    /// `IndexService`/`MetadataService` trait objects stored on `library`/
+    /// `metadata`. Test fixtures that only need an `AppServices` (not a real
+    /// indexer) are unaffected by these extra return values.
     pub async fn new(
         config: &ServerConfig,
         db: DatabaseConnection,
-    ) -> eyre::Result<(Self, Arc<LocalIndexService>)> {
+    ) -> eyre::Result<(Self, Arc<LocalIndexService>, Arc<MetadataEnrichmentService>)> {
         let hash_config = HashConfig::default();
 
         // Create repository implementations
@@ -112,6 +115,13 @@ impl AppServices {
         let admin_log_repo = Arc::new(beam_index::repositories::SqlAdminLogRepository::new(
             db.clone(),
         ));
+        let enrichment_repo: Arc<dyn beam_domain::repositories::EnrichmentStateRepository> =
+            Arc::new(beam_index::repositories::SqlEnrichmentStateRepository::new(
+                db.clone(),
+            ));
+        let genre_repo: Arc<dyn beam_domain::repositories::GenreRepository> = Arc::new(
+            beam_index::repositories::SqlGenreRepository::new(db.clone()),
+        );
 
         let notification_service = Arc::new(LocalNotificationService::new());
         let hash_service = Arc::new(LocalHashService::new(hash_config));
@@ -127,7 +137,7 @@ impl AppServices {
         ));
 
         let admin_log_service: Arc<dyn AdminLogService> =
-            Arc::new(LocalAdminLogService::new(admin_log_repo));
+            Arc::new(LocalAdminLogService::new(admin_log_repo.clone()));
 
         let index_service = Arc::new(
             LocalIndexService::new(
@@ -141,8 +151,22 @@ impl AppServices {
                 notification_service.clone(),
                 admin_log_service.clone(),
             )
-            .with_hash_unknown_files(config.hash_unknown_files),
+            .with_hash_unknown_files(config.hash_unknown_files)
+            .with_enrichment_repo(enrichment_repo.clone()),
         );
+
+        // Wired to `NoopEnrichmentProvider` for now: every sweep is a no-op
+        // until D4 replaces this with the cameo-backed adapter. The queue,
+        // matcher, and worker are already fully live and tested against it.
+        let enrichment_service = Arc::new(MetadataEnrichmentService::new(
+            enrichment_repo.clone(),
+            movie_repo.clone(),
+            show_repo.clone(),
+            genre_repo,
+            Arc::new(NoopEnrichmentProvider),
+            admin_log_service.clone(),
+            Arc::new(RealClock),
+        ));
 
         let services = Self {
             auth: auth_service,
@@ -155,17 +179,15 @@ impl AppServices {
                 index_service.clone() as Arc<dyn IndexService>,
                 Arc::new(OsPathValidator),
             )),
-            metadata: Arc::new(DbMetadataService::new(
-                movie_repo,
-                show_repo,
-                file_repo,
-                stream_repo,
-            )),
+            metadata: Arc::new(
+                DbMetadataService::new(movie_repo, show_repo, file_repo, stream_repo)
+                    .with_enrichment_repo(enrichment_repo),
+            ),
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
         };
 
-        Ok((services, index_service))
+        Ok((services, index_service, enrichment_service))
     }
 }

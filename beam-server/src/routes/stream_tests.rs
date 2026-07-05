@@ -187,6 +187,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_enabled: false,
             watch_debounce_ms: 2000,
+            enrich_interval_secs: 300,
         };
 
         let state = AppState::new(config, services);

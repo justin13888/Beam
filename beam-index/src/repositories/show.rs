@@ -3,6 +3,7 @@ use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
 use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show};
+use beam_domain::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 use beam_domain::repositories::ShowRepository;
 
 /// SQL-based implementation of the ShowRepository trait.
@@ -168,5 +169,89 @@ impl ShowRepository for SqlShowRepository {
 
         let result = new_episode.insert(&self.db).await?;
         Ok(Episode::from(result))
+    }
+
+    async fn apply_enrichment(
+        &self,
+        show_id: Uuid,
+        enrichment: &ShowEnrichment,
+    ) -> Result<(), DbErr> {
+        use beam_entity::show;
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+        let Some(model) = show::Entity::find_by_id(show_id).one(&self.db).await? else {
+            return Ok(());
+        };
+
+        let mut active: show::ActiveModel = model.into();
+        active.title = Set(enrichment.title.clone());
+        active.title_localized = Set(enrichment.original_title.clone());
+        active.description = Set(enrichment.description.clone());
+        active.year = Set(enrichment.year.map(|y| y as i32));
+        active.poster_url = Set(enrichment.poster_url.clone());
+        active.backdrop_url = Set(enrichment.backdrop_url.clone());
+        active.tmdb_id = Set(enrichment.tmdb_id.map(|id| id as i32));
+        active.imdb_id = Set(enrichment.imdb_id.clone());
+        active.anilist_id = Set(enrichment.anilist_id.map(|id| id as i32));
+        active.updated_at = Set(chrono::Utc::now().into());
+        active.update(&self.db).await?;
+        Ok(())
+    }
+
+    async fn apply_season_enrichment(
+        &self,
+        show_id: Uuid,
+        enrichment: &SeasonEnrichment,
+    ) -> Result<u32, DbErr> {
+        use beam_entity::{episode, season};
+        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+        let Some(season_model) = season::Entity::find()
+            .filter(season::Column::ShowId.eq(show_id))
+            .filter(season::Column::SeasonNumber.eq(enrichment.season_number as i32))
+            .one(&self.db)
+            .await?
+        else {
+            return Ok(0);
+        };
+        let season_id = season_model.id;
+
+        let mut active_season: season::ActiveModel = season_model.into();
+        active_season.poster_url = Set(enrichment.poster_url.clone());
+        active_season.first_aired = Set(enrichment.air_date);
+        active_season.update(&self.db).await?;
+
+        let mut updated = 0u32;
+        for ep_enrichment in &enrichment.episodes {
+            let Some(ep_model) = episode::Entity::find()
+                .filter(episode::Column::SeasonId.eq(season_id))
+                .filter(episode::Column::EpisodeNumber.eq(ep_enrichment.episode_number as i32))
+                .one(&self.db)
+                .await?
+            else {
+                continue;
+            };
+
+            let mut active_ep: episode::ActiveModel = ep_model.into();
+            if let Some(title) = &ep_enrichment.title {
+                active_ep.title = Set(title.clone());
+            }
+            if ep_enrichment.description.is_some() {
+                active_ep.description = Set(ep_enrichment.description.clone());
+            }
+            if ep_enrichment.air_date.is_some() {
+                active_ep.air_date = Set(ep_enrichment.air_date);
+            }
+            if ep_enrichment.runtime_mins.is_some() {
+                active_ep.runtime_mins = Set(ep_enrichment.runtime_mins.map(|m| m as i32));
+            }
+            if ep_enrichment.thumbnail_url.is_some() {
+                active_ep.thumbnail_url = Set(ep_enrichment.thumbnail_url.clone());
+            }
+            active_ep.update(&self.db).await?;
+            updated += 1;
+        }
+
+        Ok(updated)
     }
 }

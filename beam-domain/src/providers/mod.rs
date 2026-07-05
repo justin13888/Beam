@@ -1,3 +1,3 @@
-pub mod metadata;
+pub mod enrichment;
 
-pub use metadata::MetadataProvider;
+pub use enrichment::EnrichmentProvider;

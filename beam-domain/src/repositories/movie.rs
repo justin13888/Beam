@@ -3,6 +3,7 @@ use sea_orm::DbErr;
 use uuid::Uuid;
 
 use crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
+use crate::providers::enrichment::MovieEnrichment;
 
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
@@ -17,6 +18,15 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
         &self,
         library_id: Uuid,
         movie_id: Uuid,
+    ) -> Result<(), DbErr>;
+    /// Apply enrichment-provider data to an existing movie (title, year,
+    /// description, external IDs, artwork, rating). Overwrites the current
+    /// values -- enrichment is treated as the more authoritative source once
+    /// a match is accepted.
+    async fn apply_enrichment(
+        &self,
+        movie_id: Uuid,
+        enrichment: &MovieEnrichment,
     ) -> Result<(), DbErr>;
 }
 
@@ -66,6 +76,7 @@ pub mod in_memory {
                 tmdb_id: None,
                 imdb_id: None,
                 tvdb_id: None,
+                anilist_id: None,
                 rating_tmdb: None,
                 rating_imdb: None,
                 created_at: chrono::Utc::now(),
@@ -104,6 +115,29 @@ pub mod in_memory {
             _library_id: Uuid,
             _movie_id: Uuid,
         ) -> Result<(), DbErr> {
+            Ok(())
+        }
+
+        async fn apply_enrichment(
+            &self,
+            movie_id: Uuid,
+            enrichment: &MovieEnrichment,
+        ) -> Result<(), DbErr> {
+            let mut movies = self.movies.lock().unwrap();
+            if let Some(movie) = movies.get_mut(&movie_id) {
+                movie.title = enrichment.title.clone();
+                movie.title_localized = enrichment.original_title.clone();
+                movie.description = enrichment.description.clone();
+                movie.year = enrichment.year;
+                movie.release_date = enrichment.release_date;
+                movie.poster_url = enrichment.poster_url.clone();
+                movie.backdrop_url = enrichment.backdrop_url.clone();
+                movie.tmdb_id = enrichment.tmdb_id;
+                movie.imdb_id = enrichment.imdb_id.clone();
+                movie.anilist_id = enrichment.anilist_id;
+                movie.rating_tmdb = enrichment.rating;
+                movie.updated_at = chrono::Utc::now();
+            }
             Ok(())
         }
     }

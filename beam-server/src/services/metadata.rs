@@ -8,8 +8,10 @@ use crate::models::{
     EpisodeMetadata, ExternalIdentifiers, MediaMetadata, MovieMetadata, Ratings, SeasonMetadata,
     ShowDates, ShowMetadata, Title,
 };
+use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::repositories::{
-    FileRepository, MediaStreamRepository, MovieRepository, ShowRepository,
+    EnrichmentStateRepository, FileRepository, MediaStreamRepository, MovieRepository,
+    ShowRepository,
 };
 
 #[async_trait::async_trait]
@@ -41,6 +43,7 @@ pub struct DbMetadataService {
     show_repo: Arc<dyn ShowRepository>,
     file_repo: Arc<dyn FileRepository>,
     stream_repo: Arc<dyn MediaStreamRepository>,
+    enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
 }
 
 impl DbMetadataService {
@@ -55,7 +58,17 @@ impl DbMetadataService {
             show_repo,
             file_repo,
             stream_repo,
+            enrichment_repo: None,
         }
+    }
+
+    /// Wire up `refresh_metadata` to actually flip enrichment-queue rows back
+    /// to `Pending` rather than being a no-op. Defaults to `None`, under
+    /// which `refresh_metadata` is a no-op (matches this service's prior
+    /// behavior when no enrichment pipeline is configured).
+    pub fn with_enrichment_repo(mut self, repo: Arc<dyn EnrichmentStateRepository>) -> Self {
+        self.enrichment_repo = Some(repo);
+        self
     }
 
     /// Build MediaMetadata for a movie by its DB model
@@ -598,10 +611,49 @@ impl MetadataService for DbMetadataService {
     }
 
     /// Refresh metadata for by media filter
-    async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
-        // Metadata refresh (re-enriching from external APIs or ffmpeg) is a future
-        // enhancement. Currently the indexer populates basic metadata on scan.
-        Ok(())
+    async fn refresh_metadata(&self, filter: MediaFilter) -> Result<(), MetadataError> {
+        let Some(enrichment_repo) = &self.enrichment_repo else {
+            return Ok(());
+        };
+
+        match filter {
+            MediaFilter::All => {
+                enrichment_repo
+                    .request_refresh_all(false)
+                    .await
+                    .map_err(|e| MetadataError::InternalError(e.to_string()))?;
+                Ok(())
+            }
+            MediaFilter::ByMediaId(media_id) => {
+                let id = Uuid::parse_str(&media_id)
+                    .map_err(|_| MetadataError::InternalError("invalid media id".to_string()))?;
+
+                let target = if matches!(self.movie_repo.find_by_id(id).await, Ok(Some(_))) {
+                    EnrichmentTargetId::Movie(id)
+                } else if matches!(self.show_repo.find_by_id(id).await, Ok(Some(_))) {
+                    EnrichmentTargetId::Show(id)
+                } else {
+                    return Err(MetadataError::MediaNotFound);
+                };
+
+                let found = enrichment_repo
+                    .request_refresh(target, false)
+                    .await
+                    .map_err(|e| MetadataError::InternalError(e.to_string()))?;
+                if !found {
+                    warn!("No enrichment row exists for media {media_id}; nothing to refresh");
+                }
+                Ok(())
+            }
+            MediaFilter::ByLibraryId(_) => {
+                // Library-scoped bulk refresh needs a "titles in this
+                // library" query this crate doesn't expose yet; the REST
+                // admin API (E3) adds a proper library-scoped endpoint.
+                // GraphQL's ByLibraryId variant is left a no-op until then,
+                // rather than approximating it as a global refresh.
+                Ok(())
+            }
+        }
     }
 }
 

@@ -3,6 +3,7 @@ use sea_orm::DbErr;
 use uuid::Uuid;
 
 use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show};
+use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
@@ -24,6 +25,22 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr>;
     async fn find_episodes_by_season_id(&self, season_id: Uuid) -> Result<Vec<Episode>, DbErr>;
     async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
+    /// Apply enrichment-provider data to an existing show. Overwrites the
+    /// current values, same as `MovieRepository::apply_enrichment`.
+    async fn apply_enrichment(
+        &self,
+        show_id: Uuid,
+        enrichment: &ShowEnrichment,
+    ) -> Result<(), DbErr>;
+    /// Apply a season's enrichment to the show's *existing* season/episode
+    /// rows. Never fabricates a season or episode that scanning hasn't
+    /// already created from a real file -- rows with no local counterpart
+    /// are silently skipped. Returns the number of episodes updated.
+    async fn apply_season_enrichment(
+        &self,
+        show_id: Uuid,
+        enrichment: &SeasonEnrichment,
+    ) -> Result<u32, DbErr>;
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -71,6 +88,7 @@ pub mod in_memory {
                 tmdb_id: None,
                 imdb_id: None,
                 tvdb_id: None,
+                anilist_id: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
@@ -155,6 +173,73 @@ pub mod in_memory {
             };
             self.episodes.lock().unwrap().insert(ep.id, ep.clone());
             Ok(ep)
+        }
+
+        async fn apply_enrichment(
+            &self,
+            show_id: Uuid,
+            enrichment: &ShowEnrichment,
+        ) -> Result<(), DbErr> {
+            let mut shows = self.shows.lock().unwrap();
+            if let Some(show) = shows.get_mut(&show_id) {
+                show.title = enrichment.title.clone();
+                show.title_localized = enrichment.original_title.clone();
+                show.description = enrichment.description.clone();
+                show.year = enrichment.year;
+                show.poster_url = enrichment.poster_url.clone();
+                show.backdrop_url = enrichment.backdrop_url.clone();
+                show.tmdb_id = enrichment.tmdb_id;
+                show.imdb_id = enrichment.imdb_id.clone();
+                show.anilist_id = enrichment.anilist_id;
+                show.updated_at = chrono::Utc::now();
+            }
+            Ok(())
+        }
+
+        async fn apply_season_enrichment(
+            &self,
+            show_id: Uuid,
+            enrichment: &SeasonEnrichment,
+        ) -> Result<u32, DbErr> {
+            let season_id = {
+                let mut seasons = self.seasons.lock().unwrap();
+                let Some(season) = seasons
+                    .values_mut()
+                    .find(|s| s.show_id == show_id && s.season_number == enrichment.season_number)
+                else {
+                    return Ok(0);
+                };
+                season.poster_url = enrichment.poster_url.clone();
+                season.first_aired = enrichment.air_date;
+                season.id
+            };
+
+            let mut episodes = self.episodes.lock().unwrap();
+            let mut updated = 0u32;
+            for ep_enrichment in &enrichment.episodes {
+                if let Some(episode) = episodes.values_mut().find(|e| {
+                    e.season_id == season_id && e.episode_number == ep_enrichment.episode_number
+                }) {
+                    if let Some(title) = &ep_enrichment.title {
+                        episode.title = title.clone();
+                    }
+                    if ep_enrichment.description.is_some() {
+                        episode.description = ep_enrichment.description.clone();
+                    }
+                    if let Some(air_date) = ep_enrichment.air_date {
+                        episode.air_date = Some(air_date.to_string());
+                    }
+                    if let Some(runtime_mins) = ep_enrichment.runtime_mins {
+                        episode.runtime =
+                            Some(std::time::Duration::from_secs((runtime_mins as u64) * 60));
+                    }
+                    if ep_enrichment.thumbnail_url.is_some() {
+                        episode.thumbnail_url = ep_enrichment.thumbnail_url.clone();
+                    }
+                    updated += 1;
+                }
+            }
+            Ok(updated)
         }
     }
 }

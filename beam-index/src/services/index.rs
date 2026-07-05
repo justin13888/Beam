@@ -22,7 +22,8 @@ use beam_domain::models::file::{
     CreateMediaFile, FileStatus, MediaFile, MediaFileContent, UpdateMediaFile,
 };
 use beam_domain::repositories::{
-    FileRepository, LibraryRepository, MediaStreamRepository, MovieRepository, ShowRepository,
+    EnrichmentStateRepository, FileRepository, LibraryRepository, MediaStreamRepository,
+    MovieRepository, ShowRepository,
 };
 
 // TODO: See if these can be improved. Ensure logic can detect all of them properly
@@ -78,6 +79,7 @@ pub struct LocalIndexService {
     notification_service: Arc<dyn NotificationService>,
     admin_log: Arc<dyn AdminLogService>,
     hash_unknown_files: bool,
+    enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
 }
 
 impl LocalIndexService {
@@ -104,6 +106,7 @@ impl LocalIndexService {
             notification_service,
             admin_log,
             hash_unknown_files: true,
+            enrichment_repo: None,
         }
     }
 
@@ -111,6 +114,15 @@ impl LocalIndexService {
     /// detection. Defaults to `true`.
     pub fn with_hash_unknown_files(mut self, value: bool) -> Self {
         self.hash_unknown_files = value;
+        self
+    }
+
+    /// Wire up the enrichment queue: when set, every movie/show
+    /// found-or-created during classification gets a `Pending` enrichment row
+    /// (idempotent -- a no-op if one already exists). Defaults to `None`,
+    /// which disables enrichment-queue bookkeeping entirely.
+    pub fn with_enrichment_repo(mut self, repo: Arc<dyn EnrichmentStateRepository>) -> Self {
+        self.enrichment_repo = Some(repo);
         self
     }
 
@@ -243,6 +255,14 @@ impl LocalIndexService {
                 .ensure_library_association(lib_uuid, show.id)
                 .await?;
 
+            if let Some(enrichment_repo) = &self.enrichment_repo {
+                enrichment_repo
+                    .ensure_pending(beam_domain::models::enrichment::EnrichmentTargetId::Show(
+                        show.id,
+                    ))
+                    .await?;
+            }
+
             // Find or create season
             let season = self
                 .show_repo
@@ -291,6 +311,14 @@ impl LocalIndexService {
             self.movie_repo
                 .ensure_library_association(lib_uuid, movie.id)
                 .await?;
+
+            if let Some(enrichment_repo) = &self.enrichment_repo {
+                enrichment_repo
+                    .ensure_pending(beam_domain::models::enrichment::EnrichmentTargetId::Movie(
+                        movie.id,
+                    ))
+                    .await?;
+            }
 
             // Create movie entry
             let create_entry = CreateMovieEntry {
@@ -1733,6 +1761,7 @@ mod tests {
                     tmdb_id: None,
                     imdb_id: None,
                     tvdb_id: None,
+                    anilist_id: None,
                     rating_tmdb: None,
                     rating_imdb: None,
                     created_at: chrono::Utc::now(),
@@ -1867,6 +1896,7 @@ mod tests {
                 tmdb_id: None,
                 imdb_id: None,
                 tvdb_id: None,
+                anilist_id: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })

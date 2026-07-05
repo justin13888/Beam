@@ -21,6 +21,8 @@ pub enum AdminLogCategory {
     System,
     #[sea_orm(string_value = "auth")]
     Auth,
+    #[sea_orm(string_value = "enrichment")]
+    Enrichment,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]

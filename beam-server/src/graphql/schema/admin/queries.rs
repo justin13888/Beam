@@ -38,6 +38,7 @@ fn category_to_str(cat: &AdminLogCategory) -> &'static str {
         AdminLogCategory::LibraryScan => "library_scan",
         AdminLogCategory::System => "system",
         AdminLogCategory::Auth => "auth",
+        AdminLogCategory::Enrichment => "enrichment",
     }
 }
 

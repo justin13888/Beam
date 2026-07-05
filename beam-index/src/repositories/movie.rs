@@ -3,6 +3,7 @@ use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
 use beam_domain::models::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
+use beam_domain::providers::enrichment::MovieEnrichment;
 use beam_domain::repositories::MovieRepository;
 
 /// SQL-based implementation of the MovieRepository trait.
@@ -122,6 +123,36 @@ impl MovieRepository for SqlMovieRepository {
             new_assoc.insert(&self.db).await?;
         }
 
+        Ok(())
+    }
+
+    async fn apply_enrichment(
+        &self,
+        movie_id: Uuid,
+        enrichment: &MovieEnrichment,
+    ) -> Result<(), DbErr> {
+        use beam_entity::movie;
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+        let Some(model) = movie::Entity::find_by_id(movie_id).one(&self.db).await? else {
+            return Ok(());
+        };
+
+        let mut active: movie::ActiveModel = model.into();
+        active.title = Set(enrichment.title.clone());
+        active.title_localized = Set(enrichment.original_title.clone());
+        active.description = Set(enrichment.description.clone());
+        active.year = Set(enrichment.year.map(|y| y as i32));
+        active.release_date = Set(enrichment.release_date);
+        active.runtime_mins = Set(enrichment.runtime_mins.map(|m| m as i32));
+        active.poster_url = Set(enrichment.poster_url.clone());
+        active.backdrop_url = Set(enrichment.backdrop_url.clone());
+        active.tmdb_id = Set(enrichment.tmdb_id.map(|id| id as i32));
+        active.imdb_id = Set(enrichment.imdb_id.clone());
+        active.anilist_id = Set(enrichment.anilist_id.map(|id| id as i32));
+        active.rating_tmdb = Set(enrichment.rating);
+        active.updated_at = Set(chrono::Utc::now().into());
+        active.update(&self.db).await?;
         Ok(())
     }
 }

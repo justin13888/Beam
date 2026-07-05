@@ -62,6 +62,12 @@ pub struct ServerConfig {
     /// of events for the same path within this window collapse into one.
     #[config(env = "WATCH_DEBOUNCE_MS", default = 2000)]
     pub watch_debounce_ms: u64,
+
+    /// Interval between metadata-enrichment sweeps, in seconds. New titles
+    /// are also swept immediately when queued by a scan; this is the backstop
+    /// for retries and anything the immediate poke missed.
+    #[config(env = "ENRICH_INTERVAL_SECS", default = 300)]
+    pub enrich_interval_secs: u64,
 }
 
 impl ServerConfig {

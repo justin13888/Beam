@@ -12,8 +12,21 @@ use uuid::Uuid;
 use beam_domain::repositories::LibraryRepository;
 
 use crate::services::clock::{Clock, RealClock};
+use crate::services::enrichment::MetadataEnrichmentService;
 use crate::services::index::LocalIndexService;
 use crate::services::watcher::{FsWatcher, NotifyFsWatcher, PathDebouncer};
+
+/// Spawn the metadata-enrichment sweep loop. Runs forever, sweeping
+/// `interval` apart unless poked sooner via
+/// [`MetadataEnrichmentService::notify_handle`] (e.g. from a scan that just
+/// queued new titles). Safe to call with a service backed by
+/// `NoopEnrichmentProvider` -- every sweep short-circuits immediately since
+/// no providers are configured.
+pub fn spawn_enrichment_worker(service: Arc<MetadataEnrichmentService>, interval: Duration) {
+    tokio::spawn(async move {
+        service.run(interval).await;
+    });
+}
 
 /// Configuration for beam-index's background scanning/watching tasks.
 #[derive(Debug, Clone)]

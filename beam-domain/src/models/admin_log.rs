@@ -14,6 +14,7 @@ pub enum AdminLogCategory {
     LibraryScan,
     System,
     Auth,
+    Enrichment,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +64,7 @@ impl From<beam_entity::admin_log::AdminLogCategory> for AdminLogCategory {
             beam_entity::admin_log::AdminLogCategory::LibraryScan => AdminLogCategory::LibraryScan,
             beam_entity::admin_log::AdminLogCategory::System => AdminLogCategory::System,
             beam_entity::admin_log::AdminLogCategory::Auth => AdminLogCategory::Auth,
+            beam_entity::admin_log::AdminLogCategory::Enrichment => AdminLogCategory::Enrichment,
         }
     }
 }
@@ -74,6 +76,7 @@ impl From<AdminLogCategory> for beam_entity::admin_log::AdminLogCategory {
             AdminLogCategory::LibraryScan => beam_entity::admin_log::AdminLogCategory::LibraryScan,
             AdminLogCategory::System => beam_entity::admin_log::AdminLogCategory::System,
             AdminLogCategory::Auth => beam_entity::admin_log::AdminLogCategory::Auth,
+            AdminLogCategory::Enrichment => beam_entity::admin_log::AdminLogCategory::Enrichment,
         }
     }
 }
