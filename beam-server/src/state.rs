@@ -2,10 +2,13 @@ use sea_orm::DatabaseConnection;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use beam_auth::server::OidcRuntimeConfig;
 use beam_auth::utils::{
+    oidc::{DiscoveredOidcClient, NotConfiguredOidcClient, OidcClient},
+    pending_auth_store::{PendingAuthStore, SqlPendingAuthStore},
     repository::{SqlUserRepository, UserRepository},
     service::{AuthService, LocalAuthService},
-    session_store::PgSessionStore,
+    session_store::{PgSessionStore, SessionStore},
 };
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
@@ -62,6 +65,13 @@ pub struct AppServices {
     pub admin_log: Arc<dyn AdminLogService>,
     pub user_repo: Arc<dyn UserRepository>,
     pub playback: Arc<dyn PlaybackService>,
+    /// Shared with `auth` -- the OIDC BFF session cookie and the legacy
+    /// password-JWT-refresh session both mint/read sessions through this
+    /// same store (see ADR-0003/ADR-0005).
+    pub session_store: Arc<dyn SessionStore>,
+    pub oidc_client: Arc<dyn OidcClient>,
+    pub pending_auth_store: Arc<dyn PendingAuthStore>,
+    pub oidc_config: OidcRuntimeConfig,
 }
 
 impl AppServices {
@@ -112,13 +122,55 @@ impl AppServices {
         let media_info_service =
             Arc::new(crate::services::media_info::LocalMediaInfoService::default());
 
-        let session_store = Arc::new(PgSessionStore::new(db.clone()));
+        let session_store: Arc<dyn SessionStore> = Arc::new(PgSessionStore::new(db.clone()));
 
         let auth_service = Arc::new(LocalAuthService::new(
             user_repo.clone(),
-            session_store,
+            session_store.clone(),
             config.jwt_secret.clone(),
         ));
+
+        let pending_auth_store: Arc<dyn PendingAuthStore> =
+            Arc::new(SqlPendingAuthStore::new(db.clone()));
+
+        // Real discovered client when issuer/client_id/client_secret are all
+        // configured and discovery succeeds; a clear "not configured" error
+        // otherwise (login is simply unavailable, never a panic).
+        let oidc_client: Arc<dyn OidcClient> = if config.oidc_configured() {
+            match DiscoveredOidcClient::discover(
+                config.oidc_issuer.as_deref().unwrap_or_default(),
+                config.oidc_client_id.as_deref().unwrap_or_default(),
+                config.oidc_client_secret.as_deref().unwrap_or_default(),
+                &config.oidc_redirect_url(),
+                config
+                    .oidc_scopes
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect(),
+            )
+            .await
+            {
+                Ok(client) => Arc::new(client),
+                Err(e) => {
+                    tracing::warn!(error = %e, "OIDC discovery failed; login disabled until fixed");
+                    Arc::new(NotConfiguredOidcClient::new(format!(
+                        "OIDC discovery failed: {e}"
+                    )))
+                }
+            }
+        } else {
+            Arc::new(NotConfiguredOidcClient::new(
+                "OIDC not configured (set BEAM_OIDC_ISSUER, BEAM_OIDC_CLIENT_ID, BEAM_OIDC_CLIENT_SECRET)",
+            ))
+        };
+
+        let oidc_config = OidcRuntimeConfig {
+            web_url: config.web_url.clone(),
+            cookie_secure: config.resolved_cookie_secure(),
+            admin_emails_csv: config.admin_emails.clone().unwrap_or_default(),
+            session_idle_days: config.session_idle_days,
+            session_max_days: config.session_max_days,
+        };
 
         let admin_log_service: Arc<dyn AdminLogService> =
             Arc::new(LocalAdminLogService::new(admin_log_repo.clone()));
@@ -191,6 +243,10 @@ impl AppServices {
             admin_log: admin_log_service,
             user_repo,
             playback: playback_service,
+            session_store,
+            oidc_client,
+            pending_auth_store,
+            oidc_config,
         };
 
         Ok((services, index_service, enrichment_service))

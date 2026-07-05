@@ -12,6 +12,7 @@ mod m20260704_000003_metadata_enrichment;
 mod m20260704_000004_add_enrichment_admin_log_category;
 mod m20260704_000005_enable_pg_trgm;
 mod m20260704_000006_playback_progress;
+mod m20260705_000001_oidc_auth;
 
 pub struct Migrator;
 
@@ -30,6 +31,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260704_000004_add_enrichment_admin_log_category::Migration),
             Box::new(m20260704_000005_enable_pg_trgm::Migration),
             Box::new(m20260704_000006_playback_progress::Migration),
+            Box::new(m20260705_000001_oidc_auth::Migration),
         ]
     }
 }

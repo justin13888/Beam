@@ -1,0 +1,36 @@
+# Dev-only Dex config (see ADR-0003 and docs/operations/dev-setup.md).
+# Static users + a single static client -- no real user data, safe to commit.
+
+issuer: http://localhost:5556/dex
+
+storage:
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
+
+web:
+  http: 0.0.0.0:5556
+
+staticClients:
+  - id: beam
+    secret: beam-dev-secret
+    name: "Beam"
+    redirectURIs:
+      - "http://localhost:8000/v1/auth/oidc/callback"
+
+enablePasswordDB: true
+staticPasswords:
+  # Both use the password "password". The hash below is bcrypt cost 10; if
+  # it doesn't work with your Dex build, regenerate it with:
+  #   echo -n password | htpasswd -BinC 10 admin | cut -d: -f2
+  - email: "admin@beam.localhost"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: "admin"
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+  - email: "user@beam.localhost"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: "user"
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5467"
+
+oauth2:
+  skipApprovalScreen: true

@@ -16,6 +16,19 @@ services:
       retries: 5
       start_period: 10s
 
+  # Lightweight dev OIDC IdP (see ADR-0003). Ships static test users so local
+  # dev/evaluation doesn't require standing up a real identity provider;
+  # production deployments point BEAM_OIDC_ISSUER at Keycloak/Authentik/
+  # Authelia/a hosted IdP instead.
+  dex:
+    image: ghcr.io/dexidp/dex:v2.44.0
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex/config.yaml:/etc/dex/config.yaml:ro
+      - dex:/var/dex
+    ports:
+      - "${DEX_HOST_PORT:-5556}:5556"
+
   traefik:
     image: docker.io/traefik:v3
     command:
@@ -47,6 +60,7 @@ services:
 
 volumes:
   postgres:
+  dex:
 
 networks:
   beam_proxy:

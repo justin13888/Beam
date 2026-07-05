@@ -5,8 +5,10 @@ use sea_orm::{
     QueryFilter,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::debug;
+use uuid::Uuid;
 
 use beam_entity::session::{ActiveModel as SessionActiveModel, Column, Entity as SessionEntity};
 
@@ -33,36 +35,56 @@ type Result<T> = std::result::Result<T, SessionError>;
 ///
 /// This trait abstracts the underlying storage mechanism (Postgres, or an
 /// in-memory map for tests) used to persist session data across requests.
+/// Shared by the legacy password-JWT-refresh flow and the OIDC BFF cookie
+/// flow -- both mint sessions through the same store, they just differ in
+/// how the resulting opaque token reaches the client (JWT claim vs. cookie
+/// value) and in what idle/absolute TTLs they pass.
+///
+/// The token returned by `create` and accepted by `get`/`touch`/`delete` is
+/// always the plaintext opaque credential; only its SHA-256 hash is ever
+/// persisted; see `beam_entity::session::Model`.
 #[async_trait]
 pub trait SessionStore: Send + Sync + std::fmt::Debug {
-    /// Persists new session data and returns a unique session identifier.
+    /// Persists new session data and returns the plaintext opaque token the
+    /// caller should hand to the client (as a cookie value, JWT claim, etc).
     ///
     /// # Parameters
     /// - `data`: The session state to be stored.
-    /// - `ttl_secs`: Time-to-live in seconds before the session expires.
-    ///
-    /// # Returns
-    /// A `Result` containing the generated `String` session ID.
-    async fn create(&self, data: &SessionData, ttl_secs: u64) -> Result<String>;
+    /// - `idle_ttl_secs`: How long the session survives without activity;
+    ///   `touch` slides this forward, capped by `absolute_ttl_secs`.
+    /// - `absolute_ttl_secs`: Hard ceiling on session lifetime from creation,
+    ///   regardless of activity.
+    async fn create(
+        &self,
+        data: &SessionData,
+        idle_ttl_secs: u64,
+        absolute_ttl_secs: u64,
+    ) -> Result<String>;
 
-    /// Retrieves session data associated with a specific session ID.
+    /// Retrieves session data for the session identified by the presented
+    /// plaintext token.
     ///
     /// # Returns
-    /// - `Ok(Some(SessionData))` if the session exists and has not expired.
+    /// - `Ok(Some(SessionData))` if the session exists and has not expired
+    ///   (idle or absolute).
     /// - `Ok(None)` if the session is not found or is expired.
     /// - `Err` if a storage backend error occurs.
-    async fn get(&self, session_id: &str) -> Result<Option<SessionData>>;
+    async fn get(&self, token: &str) -> Result<Option<SessionData>>;
 
-    /// Updates the expiration time (TTL) of an existing session.
+    /// Slides the idle expiry forward by `idle_ttl_secs` from now, never
+    /// extending past the session's absolute expiry ceiling.
     ///
-    /// This is typically called on every request to keep the user's session active.
+    /// This is typically called on every request to keep the user's session
+    /// active.
     ///
     /// # Errors
-    /// Returns an error if the session does not exist or the store is unreachable.
-    async fn touch(&self, session_id: &str, ttl_secs: u64) -> Result<()>;
+    /// Returns an error if the store is unreachable. A missing session is
+    /// not an error -- there is nothing to touch.
+    async fn touch(&self, token: &str, idle_ttl_secs: u64) -> Result<()>;
 
-    /// Immediately invalidates and removes a specific session.
-    async fn delete(&self, session_id: &str) -> Result<()>;
+    /// Immediately invalidates and removes the session identified by the
+    /// presented plaintext token.
+    async fn delete(&self, token: &str) -> Result<()>;
 
     /// Invalidates all active sessions associated with a specific user.
     ///
@@ -74,12 +96,19 @@ pub trait SessionStore: Send + Sync + std::fmt::Debug {
 
     /// Returns a list of all active sessions belonging to a specific user.
     ///
-    /// Each entry in the vector is a tuple containing the `(session_id, SessionData)`.
+    /// Each entry is `(id, SessionData)`, where `id` is the session's stable
+    /// internal identifier -- NOT the credential itself, which cannot be
+    /// recovered once hashed. Use `delete_by_id` to revoke one of these.
     async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>>;
+
+    /// Revokes a specific session by its internal id, scoped to the given
+    /// owning user (so one user can never revoke another's session by
+    /// guessing an id). Returns `true` if a session was deleted.
+    async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool>;
 }
 
-/// Generates an opaque, random 32-byte URL-safe base64 session identifier.
-fn generate_session_id() -> String {
+/// Generates an opaque, random 32-byte URL-safe base64 session token.
+fn generate_session_token() -> String {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use rand::Rng;
 
@@ -88,6 +117,12 @@ fn generate_session_id() -> String {
     rng.fill_bytes(&mut bytes);
 
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Hashes a plaintext session token for at-rest storage/lookup. The
+/// plaintext token is never persisted.
+fn hash_token(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
 fn to_session_data(model: &beam_entity::session::Model) -> SessionData {
@@ -102,11 +137,11 @@ fn to_session_data(model: &beam_entity::session::Model) -> SessionData {
 
 /// Postgres-backed session store.
 ///
-/// Sessions carry their own `expires_at`; this store filters expired rows out
-/// of reads rather than deleting them proactively (there is no background
-/// sweep here yet -- unlike Redis, Postgres does not expire rows on its own).
-/// A periodic cleanup task belongs with the broader session-model work
-/// tracked in ADR-0005/ADR-0003, not this storage-backend swap.
+/// Sessions carry their own idle/absolute expiry; this store filters expired
+/// rows out of reads rather than deleting them proactively (there is no
+/// background sweep here yet -- a periodic cleanup task is future work, not
+/// required for correctness since every read already filters on both
+/// expiries).
 #[derive(Debug, Clone)]
 pub struct PgSessionStore {
     db: DatabaseConnection,
@@ -120,43 +155,54 @@ impl PgSessionStore {
 
 #[async_trait]
 impl SessionStore for PgSessionStore {
-    async fn create(&self, data: &SessionData, ttl_secs: u64) -> Result<String> {
-        let session_id = generate_session_id();
+    async fn create(
+        &self,
+        data: &SessionData,
+        idle_ttl_secs: u64,
+        absolute_ttl_secs: u64,
+    ) -> Result<String> {
+        let token = generate_session_token();
         let now = Utc::now();
-        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+        let idle_expires_at = now + chrono::Duration::seconds(idle_ttl_secs as i64);
+        let absolute_expires_at = now + chrono::Duration::seconds(absolute_ttl_secs as i64);
 
         let active_model = SessionActiveModel {
-            id: Set(session_id.clone()),
+            id: Set(Uuid::new_v4()),
             user_id: Set(data.user_id.parse()?),
+            token_hash: Set(hash_token(&token)),
             device_hash: Set(data.device_hash.clone()),
             ip: Set(data.ip.clone()),
             created_at: Set(now.into()),
             last_active: Set(now.into()),
-            expires_at: Set(expires_at.into()),
+            idle_expires_at: Set(idle_expires_at.into()),
+            absolute_expires_at: Set(absolute_expires_at.into()),
         };
         active_model.insert(&self.db).await?;
 
-        debug!("Created session {} for user {}", session_id, data.user_id);
-        Ok(session_id)
+        debug!("Created session for user {}", data.user_id);
+        Ok(token)
     }
 
-    async fn get(&self, session_id: &str) -> Result<Option<SessionData>> {
-        let Some(model) = SessionEntity::find_by_id(session_id.to_string())
+    async fn get(&self, token: &str) -> Result<Option<SessionData>> {
+        let Some(model) = SessionEntity::find()
+            .filter(Column::TokenHash.eq(hash_token(token)))
             .one(&self.db)
             .await?
         else {
             return Ok(None);
         };
 
-        if model.expires_at < Utc::now() {
+        let now = Utc::now();
+        if model.idle_expires_at < now || model.absolute_expires_at < now {
             return Ok(None);
         }
 
         Ok(Some(to_session_data(&model)))
     }
 
-    async fn touch(&self, session_id: &str, ttl_secs: u64) -> Result<()> {
-        let Some(model) = SessionEntity::find_by_id(session_id.to_string())
+    async fn touch(&self, token: &str, idle_ttl_secs: u64) -> Result<()> {
+        let Some(model) = SessionEntity::find()
+            .filter(Column::TokenHash.eq(hash_token(token)))
             .one(&self.db)
             .await?
         else {
@@ -164,25 +210,28 @@ impl SessionStore for PgSessionStore {
         };
 
         let now = Utc::now();
-        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+        let requested_idle_expiry = now + chrono::Duration::seconds(idle_ttl_secs as i64);
+        // Never slide the idle deadline past the absolute ceiling.
+        let idle_expires_at = requested_idle_expiry.min(model.absolute_expires_at.into());
         let mut active_model: SessionActiveModel = model.into();
         active_model.last_active = Set(now.into());
-        active_model.expires_at = Set(expires_at.into());
+        active_model.idle_expires_at = Set(idle_expires_at.into());
         active_model.update(&self.db).await?;
 
         Ok(())
     }
 
-    async fn delete(&self, session_id: &str) -> Result<()> {
-        SessionEntity::delete_by_id(session_id.to_string())
+    async fn delete(&self, token: &str) -> Result<()> {
+        SessionEntity::delete_many()
+            .filter(Column::TokenHash.eq(hash_token(token)))
             .exec(&self.db)
             .await?;
-        debug!("Deleted session {}", session_id);
+        debug!("Deleted session");
         Ok(())
     }
 
     async fn delete_all_for_user(&self, user_id: &str) -> Result<u64> {
-        let user_uuid: uuid::Uuid = user_id.parse()?;
+        let user_uuid: Uuid = user_id.parse()?;
         let result: DeleteResult = SessionEntity::delete_many()
             .filter(Column::UserId.eq(user_uuid))
             .exec(&self.db)
@@ -196,17 +245,30 @@ impl SessionStore for PgSessionStore {
     }
 
     async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
-        let user_uuid: uuid::Uuid = user_id.parse()?;
+        let user_uuid: Uuid = user_id.parse()?;
+        let now = Utc::now();
         let models = SessionEntity::find()
             .filter(Column::UserId.eq(user_uuid))
-            .filter(Column::ExpiresAt.gt(Utc::now()))
+            .filter(Column::IdleExpiresAt.gt(now))
+            .filter(Column::AbsoluteExpiresAt.gt(now))
             .all(&self.db)
             .await?;
 
         Ok(models
             .iter()
-            .map(|m| (m.id.clone(), to_session_data(m)))
+            .map(|m| (m.id.to_string(), to_session_data(m)))
             .collect())
+    }
+
+    async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool> {
+        let id: Uuid = id.parse()?;
+        let user_uuid: Uuid = user_id.parse()?;
+        let result: DeleteResult = SessionEntity::delete_many()
+            .filter(Column::Id.eq(id))
+            .filter(Column::UserId.eq(user_uuid))
+            .exec(&self.db)
+            .await?;
+        Ok(result.rows_affected > 0)
     }
 }
 
@@ -216,34 +278,66 @@ pub mod in_memory {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use uuid::Uuid;
+
+    #[derive(Debug, Clone)]
+    struct StoredSession {
+        id: String,
+        data: SessionData,
+        idle_expires_at: chrono::DateTime<Utc>,
+        absolute_expires_at: chrono::DateTime<Utc>,
+    }
 
     #[derive(Debug, Default)]
     pub struct InMemorySessionStore {
-        sessions: Mutex<HashMap<String, SessionData>>,
+        // Keyed by hashed token, matching the Postgres store's lookup shape.
+        sessions: Mutex<HashMap<String, StoredSession>>,
     }
 
     #[async_trait]
     impl SessionStore for InMemorySessionStore {
-        async fn create(&self, data: &SessionData, _ttl_secs: u64) -> Result<String> {
-            let session_id = Uuid::new_v4().to_string();
-            self.sessions
+        async fn create(
+            &self,
+            data: &SessionData,
+            idle_ttl_secs: u64,
+            absolute_ttl_secs: u64,
+        ) -> Result<String> {
+            let token = generate_session_token();
+            let now = Utc::now();
+            self.sessions.lock().unwrap().insert(
+                hash_token(&token),
+                StoredSession {
+                    id: Uuid::new_v4().to_string(),
+                    data: data.clone(),
+                    idle_expires_at: now + chrono::Duration::seconds(idle_ttl_secs as i64),
+                    absolute_expires_at: now + chrono::Duration::seconds(absolute_ttl_secs as i64),
+                },
+            );
+            Ok(token)
+        }
+
+        async fn get(&self, token: &str) -> Result<Option<SessionData>> {
+            let now = Utc::now();
+            Ok(self
+                .sessions
                 .lock()
                 .unwrap()
-                .insert(session_id.clone(), data.clone());
-            Ok(session_id)
+                .get(&hash_token(token))
+                .filter(|s| s.idle_expires_at >= now && s.absolute_expires_at >= now)
+                .map(|s| s.data.clone()))
         }
 
-        async fn get(&self, session_id: &str) -> Result<Option<SessionData>> {
-            Ok(self.sessions.lock().unwrap().get(session_id).cloned())
-        }
-
-        async fn touch(&self, _session_id: &str, _ttl_secs: u64) -> Result<()> {
+        async fn touch(&self, token: &str, idle_ttl_secs: u64) -> Result<()> {
+            let now = Utc::now();
+            if let Some(session) = self.sessions.lock().unwrap().get_mut(&hash_token(token)) {
+                session.data.last_active = now.timestamp();
+                session.idle_expires_at = (now + chrono::Duration::seconds(idle_ttl_secs as i64))
+                    .min(session.absolute_expires_at);
+            }
             Ok(())
         }
 
-        async fn delete(&self, session_id: &str) -> Result<()> {
-            self.sessions.lock().unwrap().remove(session_id);
+        async fn delete(&self, token: &str) -> Result<()> {
+            self.sessions.lock().unwrap().remove(&hash_token(token));
             Ok(())
         }
 
@@ -251,12 +345,12 @@ pub mod in_memory {
             let mut sessions = self.sessions.lock().unwrap();
             let to_remove: Vec<String> = sessions
                 .iter()
-                .filter(|(_, v)| v.user_id == user_id)
+                .filter(|(_, v)| v.data.user_id == user_id)
                 .map(|(k, _)| k.clone())
                 .collect();
             let count = to_remove.len() as u64;
-            for id in to_remove {
-                sessions.remove(&id);
+            for key in to_remove {
+                sessions.remove(&key);
             }
             Ok(count)
         }
@@ -264,10 +358,25 @@ pub mod in_memory {
         async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
             let sessions = self.sessions.lock().unwrap();
             Ok(sessions
-                .iter()
-                .filter(|(_, v)| v.user_id == user_id)
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .values()
+                .filter(|s| s.data.user_id == user_id)
+                .map(|s| (s.id.clone(), s.data.clone()))
                 .collect())
+        }
+
+        async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool> {
+            let mut sessions = self.sessions.lock().unwrap();
+            let key = sessions
+                .iter()
+                .find(|(_, s)| s.id == id && s.data.user_id == user_id)
+                .map(|(k, _)| k.clone());
+            match key {
+                Some(key) => {
+                    sessions.remove(&key);
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
         }
     }
 }

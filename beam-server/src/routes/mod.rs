@@ -2,6 +2,7 @@ pub mod admin;
 pub mod api_error;
 pub mod health;
 pub mod media;
+pub mod middleware;
 pub mod playback;
 pub mod stream;
 
@@ -52,9 +53,32 @@ pub fn create_router(state: AppState) -> Router {
     // Note: No authorization is done at the top-level here -- each endpoint is
     // either public or self-contained (e.g. stream token validated in the
     // handler, admin routes gated via `require_admin`).
+    //
+    // `beam_auth::server::auth_routes()` (mounted inside `rest_routes()`)
+    // pulls its dependencies straight from the depot via
+    // `depot.obtain::<Arc<dyn ...>>()`, so they're injected here individually
+    // rather than only injecting the outer `AppState`.
+    let services = &state.services;
+    let auth = services.auth.clone();
+    let user_repo = services.user_repo.clone();
+    let session_store = services.session_store.clone();
+    let oidc_client = services.oidc_client.clone();
+    let pending_auth_store = services.pending_auth_store.clone();
+    let oidc_config = services.oidc_config.clone();
+
     Router::new()
         .hoop(affix_state::inject(state))
-        .push(Router::with_path("v1").push(rest_routes()))
+        .hoop(affix_state::inject(auth))
+        .hoop(affix_state::inject(user_repo))
+        .hoop(affix_state::inject(session_store))
+        .hoop(affix_state::inject(oidc_client))
+        .hoop(affix_state::inject(pending_auth_store))
+        .hoop(affix_state::inject(oidc_config))
+        .push(
+            Router::with_path("v1")
+                .hoop(middleware::enforce_same_origin)
+                .push(rest_routes()),
+        )
 }
 
 /// Create a minimal router for OpenAPI documentation export.

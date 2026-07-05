@@ -23,8 +23,17 @@ utils = [
     "dep:tracing",
     "dep:uuid",
 ]
+# Real OIDC discovery/exchange via the `openidconnect` crate. Split out from
+# `utils` because it pulls in reqwest + a real HTTP client -- tests that only
+# need `FakeOidcClient` (under `test-utils`) don't need this.
+oidc = [
+    "utils",
+    "dep:openidconnect",
+    "dep:reqwest",
+]
 server = [
     "utils",
+    "oidc",
     "dep:salvo",
 ]
 test-utils = ["utils"]
@@ -41,7 +50,12 @@ base64 = { version = "0.22.1", optional = true }
 beam-entity = { path = "../beam-entity", optional = true }
 chrono = { workspace = true, features = ["serde"], optional = true }
 jsonwebtoken = { workspace = true, optional = true }
+openidconnect = { version = "4.0.1", optional = true }
 rand = { workspace = true, optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
 salvo = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-fn device_hash_from_request(req: &Request) -> String {
+pub(crate) fn device_hash_from_request(req: &Request) -> String {
     let user_agent = req
         .headers()
         .get("user-agent")
@@ -18,7 +18,7 @@ fn device_hash_from_request(req: &Request) -> String {
     format!("{:x}", Sha256::digest(user_agent.as_bytes()))
 }
 
-fn extract_client_ip(req: &Request) -> String {
+pub(crate) fn extract_client_ip(req: &Request) -> String {
     if let Some(forwarded_for) = req
         .headers()
         .get("x-forwarded-for")
@@ -432,4 +432,5 @@ pub fn auth_routes() -> Router {
         .push(Router::with_path("logout").post(logout))
         .push(Router::with_path("logout-all").post(logout_all))
         .push(Router::with_path("sessions").get(list_sessions))
+        .push(Router::with_path("oidc").push(crate::server::oidc_routes::oidc_routes()))
 }

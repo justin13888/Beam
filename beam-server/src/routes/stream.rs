@@ -678,7 +678,10 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::Arc;
 
+        use beam_auth::server::OidcRuntimeConfig;
         use beam_auth::utils::{
+            oidc::NotConfiguredOidcClient,
+            pending_auth_store::in_memory::InMemoryPendingAuthStore,
             repository::in_memory::InMemoryUserRepository,
             service::{AuthService, LocalAuthService},
             session_store::in_memory::InMemorySessionStore,
@@ -840,7 +843,7 @@ mod tests {
             let user_repo = Arc::new(InMemoryUserRepository::default());
             let auth = Arc::new(LocalAuthService::new(
                 user_repo.clone(),
-                session_store,
+                session_store.clone(),
                 TEST_JWT_SECRET.to_string(),
             ));
 
@@ -858,6 +861,16 @@ mod tests {
                 admin_log,
                 user_repo: user_repo.clone(),
                 playback: Arc::new(StubPlaybackService),
+                session_store,
+                oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
+                pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
+                oidc_config: OidcRuntimeConfig {
+                    web_url: "http://localhost:5173".to_string(),
+                    cookie_secure: false,
+                    admin_emails_csv: String::new(),
+                    session_idle_days: 14,
+                    session_max_days: 60,
+                },
             };
 
             let config = crate::config::ServerConfig {
@@ -875,6 +888,16 @@ mod tests {
                 enrich_interval_secs: 300,
                 tmdb_api_token: None,
                 anilist_enabled: false,
+                oidc_issuer: None,
+                oidc_client_id: None,
+                oidc_client_secret: None,
+                oidc_scopes: "openid profile email".to_string(),
+                web_url: "http://localhost:5173".to_string(),
+                extra_allowed_origins: None,
+                admin_emails: None,
+                cookie_secure: Some(false),
+                session_idle_days: 14,
+                session_max_days: 60,
             };
 
             let state = AppState::new(config, services);

@@ -182,7 +182,8 @@ impl LocalAuthService {
         device_hash: &str,
         ip: &str,
     ) -> Result<(String, String)> {
-        // 7 days session TTL
+        // 7 days session TTL (idle == absolute -- legacy sessions don't
+        // distinguish the two, unlike the OIDC BFF session).
         let ttl_secs = 7 * 24 * 60 * 60;
 
         let session_data = SessionData {
@@ -195,7 +196,7 @@ impl LocalAuthService {
 
         let session_id = self
             .session_store
-            .create(&session_data, ttl_secs)
+            .create(&session_data, ttl_secs, ttl_secs)
             .await
             .map_err(|e| AuthError::Session(e.to_string()))?;
 
@@ -242,6 +243,10 @@ impl AuthService for LocalAuthService {
             email: email.to_string(),
             password_hash,
             is_admin: false,
+            oidc_issuer: None,
+            oidc_subject: None,
+            display_name: None,
+            avatar_url: None,
         };
 
         let user = self

@@ -9,6 +9,10 @@ pub struct User {
     pub email: String,
     pub password_hash: String,
     pub is_admin: bool,
+    pub oidc_issuer: Option<String>,
+    pub oidc_subject: Option<String>,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -20,6 +24,10 @@ pub struct CreateUser {
     pub email: String,
     pub password_hash: String,
     pub is_admin: bool,
+    pub oidc_issuer: Option<String>,
+    pub oidc_subject: Option<String>,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 impl From<beam_entity::user::Model> for User {
@@ -30,6 +38,10 @@ impl From<beam_entity::user::Model> for User {
             email: model.email,
             password_hash: model.password_hash,
             is_admin: model.is_admin,
+            oidc_issuer: model.oidc_issuer,
+            oidc_subject: model.oidc_subject,
+            display_name: model.display_name,
+            avatar_url: model.avatar_url,
             created_at: model.created_at.into(),
             updated_at: model.updated_at.into(),
         }
