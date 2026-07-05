@@ -4,7 +4,7 @@ use salvo::prelude::*;
 use serde::Serialize;
 use std::path::PathBuf;
 use tokio::fs::File;
-use tracing::{debug, error, trace};
+use tracing::{debug, error};
 
 #[derive(Serialize, ToSchema)]
 pub struct StreamTokenResponse {
@@ -217,7 +217,14 @@ pub async fn get_stream_token(
         .map_err(|_| GetStreamTokenError::InternalError("Failed to create stream token".into()))
 }
 
-/// Stream via MP4 - serves AVFoundation-friendly fragmented MP4
+/// Direct-play stream via HTTP Range. Serves the source file's bytes exactly
+/// as indexed on disk -- Beam never transcodes or remuxes media server-side
+/// (see ADR-0004); the response `Content-Type` reflects the file's actual
+/// detected MIME type rather than assuming MP4.
+///
+/// The route path and stream-token auth scheme here are interim: the
+/// forthcoming REST API pass (direct-play/download endpoints, cookie-based
+/// auth) will replace both.
 #[endpoint(
     tags("media"),
     parameters(
@@ -280,12 +287,6 @@ pub async fn stream_mp4(
     };
 
     let source_video_path = PathBuf::from(&file.path);
-    // Cache key includes the content hash so a reconciled file (content changed
-    // → new hash) does not serve the stale MP4 from before the change.
-    let cache_mp4_path = state
-        .config
-        .cache_dir
-        .join(format!("{}-{}.mp4", id, file.hash));
 
     if !source_video_path.exists() {
         error!("Source video file not found: {:?}", source_video_path);
@@ -294,34 +295,20 @@ pub async fn stream_mp4(
         ));
     }
 
-    // Generate MP4 if it doesn't exist or is outdated
-    if !cache_mp4_path.exists() {
-        trace!("Cached MP4 not found, generating: {:?}", cache_mp4_path);
+    let content_type = file
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if let Err(err) = state
-            .services
-            .transcode
-            .generate_mp4_cache(&source_video_path, &cache_mp4_path)
-            .await
-        {
-            error!("Failed to generate MP4: {:?}", err);
-            return Err(StreamMp4Error::InternalError(
-                "Failed to generate MP4".into(),
-            ));
-        }
-
-        trace!("MP4 generation complete: {:?}", cache_mp4_path);
-    } else {
-        trace!("Using cached MP4: {:?}", cache_mp4_path);
-    }
-
-    // Serve the MP4 file with range request support
-    serve_mp4_file(&cache_mp4_path, req, res).await
+    // Serve the source file directly with range request support -- no
+    // transcoding, no remuxing, no cache copy.
+    serve_file_range(&source_video_path, &content_type, req, res).await
 }
 
-/// Serve MP4 file with HTTP range request support for AVFoundation
-async fn serve_mp4_file(
+/// Serve a file with HTTP range request support, using the given content type.
+async fn serve_file_range(
     file_path: &PathBuf,
+    content_type: &str,
     req: &Request,
     res: &mut Response,
 ) -> Result<(), StreamMp4Error> {
@@ -339,9 +326,6 @@ async fn serve_mp4_file(
     };
 
     let file_size = file_metadata.len();
-
-    // Always use video/mp4 content type since we're serving MP4
-    let content_type = "video/mp4";
 
     // Handle range requests
     let range = req.headers().get("range");
@@ -451,11 +435,11 @@ mod tests {
     use super::*;
     use salvo::test::ResponseExt;
 
-    /// Verify that `serve_mp4_file` streams a requested range correctly and does not
+    /// Verify that `serve_file_range` streams a requested range correctly and does not
     /// regress to a single-buffer approach. A 1 MB file is created and only the first
     /// 1 024 bytes are requested; the response body must be exactly 1 024 bytes.
     #[tokio::test]
-    async fn test_serve_mp4_file_range_body_length() {
+    async fn test_serve_file_range_body_length() {
         use std::io::Write;
 
         // Write 1 MB of patterned data to a temp file.
@@ -472,9 +456,9 @@ mod tests {
             .insert("range", "bytes=0-1023".parse().unwrap());
 
         let mut res = salvo::Response::new();
-        serve_mp4_file(&file_path, &req, &mut res)
+        serve_file_range(&file_path, "video/mp4", &req, &mut res)
             .await
-            .expect("serve_mp4_file should succeed");
+            .expect("serve_file_range should succeed");
 
         assert_eq!(
             res.status_code,
@@ -605,7 +589,6 @@ mod tests {
             MetadataService, PageInfo, SortOrder,
         };
         use crate::services::notification::InMemoryNotificationService;
-        use crate::services::transcode::TranscodeService;
         use crate::state::{AppServices, AppState};
         use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 
@@ -654,20 +637,6 @@ mod tests {
             }
             async fn refresh_metadata(&self, _: MediaFilter) -> Result<(), MetadataError> {
                 Ok(())
-            }
-        }
-
-        #[derive(Debug)]
-        struct StubTranscodeService;
-
-        #[async_trait::async_trait]
-        impl TranscodeService for StubTranscodeService {
-            async fn generate_mp4_cache(
-                &self,
-                _: &std::path::Path,
-                _: &std::path::Path,
-            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                unimplemented!("not called in stream handler tests")
             }
         }
 
@@ -746,7 +715,6 @@ mod tests {
                 hash: Arc::new(StubHashService),
                 library: Arc::new(NotFoundLibraryService),
                 metadata: Arc::new(StubMetadataService),
-                transcode: Arc::new(StubTranscodeService),
                 notification,
                 admin_log,
                 user_repo: user_repo.clone(),

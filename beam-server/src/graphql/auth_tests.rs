@@ -25,7 +25,6 @@ mod tests {
         MetadataService, PageInfo, SortOrder,
     };
     use crate::services::notification::InMemoryNotificationService;
-    use crate::services::transcode::TranscodeService;
     use crate::state::{AppContext, AppServices, AppState, UserContext};
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 
@@ -121,20 +120,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct StubTranscodeService;
-
-    #[async_trait::async_trait]
-    impl TranscodeService for StubTranscodeService {
-        async fn generate_mp4_cache(
-            &self,
-            _source_path: &std::path::Path,
-            _output_path: &std::path::Path,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            unimplemented!("not called in auth tests")
-        }
-    }
-
     // ─── Test helpers ────────────────────────────────────────────────────────
 
     const TEST_JWT_SECRET: &str = "test-jwt-secret-for-auth-tests";
@@ -164,7 +149,6 @@ mod tests {
             hash: Arc::new(StubHashService),
             library: Arc::new(StubLibraryService),
             metadata: Arc::new(StubMetadataService),
-            transcode: Arc::new(StubTranscodeService),
             notification,
             admin_log,
             user_repo: user_repo.clone(),

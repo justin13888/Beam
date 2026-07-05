@@ -1,6 +1,4 @@
 pub mod codec;
-pub mod math;
-pub mod stream;
 
 // `beam-domain` stays framework/FFI-agnostic and only exposes plain,
 // ffmpeg-free utilities (file, hash). FFmpeg-dependent probing types

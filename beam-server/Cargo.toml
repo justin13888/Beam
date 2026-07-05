@@ -32,16 +32,8 @@ color-eyre = "0.6.5"
 confique = { workspace = true }
 dotenvy = "0.15.7"
 eyre = "0.6.12"
-ffmpeg-next = { workspace = true }
-fs2 = "0.4.3"
 futures-util = "0.3"
-hex = { version = "0.4.3", features = ["serde"] }
-m3u8-rs = "6.0.0"
-num = { version = "0.4.3", features = ["serde"] }
-num_cpus = "1.17.0"
-parking_lot = "0.12.5"
 rand = { workspace = true }
-rayon = "1.11.0"
 regex = { workspace = true }
 rust_decimal = "1.39.0"
 salvo = { workspace = true }
@@ -54,8 +46,6 @@ tokio = { workspace = true }
 tracing = { workspace = true, features = ["log", "release_max_level_debug"] }
 tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
 uuid = { workspace = true }
-walkdir = { workspace = true }
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
 futures = "0.3.31"
@@ -67,4 +57,4 @@ mockall = "0.14.0"
 
 [features]
 test-utils = ["beam-domain/test-utils", "beam-index/test-utils"]
-vendored-ffmpeg = ["ffmpeg-next/build", "beam-index/vendored-ffmpeg"]
+vendored-ffmpeg = ["beam-index/vendored-ffmpeg"]

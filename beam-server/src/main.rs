@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use eyre::{Result, eyre};
 use http::Method;
 use salvo::cors::Cors;
@@ -31,11 +29,10 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| eyre!("Failed to create cache directory: {e}"))?;
 
-    // Initialize ffmpeg bindings
-    ffmpeg_next::init().map_err(|e| eyre!("Failed to initialize ffmpeg: {e}"))?;
-
-    // Initialize m3u8-rs static variables
-    m3u8_rs::WRITE_OPT_FLOAT_PRECISION.store(5, Ordering::Relaxed);
+    // Initialize ffmpeg bindings (beam-index's probing at index time is the
+    // only thing in this process that needs them -- beam-server itself
+    // never transcodes/remuxes and has no direct ffmpeg dependency).
+    beam_index::probe::init().map_err(|e| eyre!("Failed to initialize ffmpeg: {e}"))?;
 
     // Connect to Database
     info!("Connecting to database at {}", config.database_url);

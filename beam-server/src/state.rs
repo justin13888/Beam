@@ -17,7 +17,6 @@ use crate::{
         library::{LibraryService, LocalLibraryService, OsPathValidator},
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
-        transcode::{LocalMp4Generator, LocalTranscodeService, TranscodeService},
     },
 };
 
@@ -75,7 +74,6 @@ pub struct AppServices {
     pub hash: Arc<dyn HashService>,
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
-    pub transcode: Arc<dyn TranscodeService>,
     pub notification: Arc<dyn NotificationService>,
     pub admin_log: Arc<dyn AdminLogService>,
     pub user_repo: Arc<dyn UserRepository>,
@@ -119,11 +117,6 @@ impl AppServices {
         let hash_service = Arc::new(LocalHashService::new(hash_config));
         let media_info_service =
             Arc::new(crate::services::media_info::LocalMediaInfoService::default());
-        let mp4_generator = Arc::new(LocalMp4Generator::new(
-            hash_service.clone(),
-            media_info_service.clone(),
-        ));
-        let transcode_service = Arc::new(LocalTranscodeService::new(mp4_generator));
 
         // Initialize Redis session store
         let session_store = Arc::new(
@@ -173,7 +166,6 @@ impl AppServices {
                 file_repo,
                 stream_repo,
             )),
-            transcode: transcode_service,
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,

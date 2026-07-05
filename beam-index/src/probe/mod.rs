@@ -10,3 +10,11 @@ pub mod color;
 pub mod format;
 pub mod media;
 pub mod metadata;
+
+/// Initialize the FFmpeg bindings. Must be called once, before any probing
+/// happens. Exposed here (rather than requiring callers to depend on
+/// `ffmpeg-next` directly) since this crate is the sole place in the
+/// workspace that links against it.
+pub fn init() -> Result<(), ffmpeg_next::Error> {
+    ffmpeg_next::init()
+}

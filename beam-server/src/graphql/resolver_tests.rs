@@ -26,7 +26,6 @@ mod tests {
     use crate::services::library::{InMemoryPathValidator, LocalLibraryService};
     use crate::services::metadata::DbMetadataService;
     use crate::services::notification::{InMemoryNotificationService, NotificationService};
-    use crate::services::transcode::TranscodeService;
     use crate::state::{AppContext, AppServices, AppState, UserContext};
     use beam_domain::repositories::AdminLogRepository;
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
@@ -47,20 +46,6 @@ mod tests {
             unimplemented!("not called in resolver tests")
         }
         async fn hash_async(&self, _path: PathBuf) -> std::io::Result<u64> {
-            unimplemented!("not called in resolver tests")
-        }
-    }
-
-    #[derive(Debug)]
-    struct StubTranscodeService;
-
-    #[async_trait::async_trait]
-    impl TranscodeService for StubTranscodeService {
-        async fn generate_mp4_cache(
-            &self,
-            _source_path: &std::path::Path,
-            _output_path: &std::path::Path,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             unimplemented!("not called in resolver tests")
         }
     }
@@ -128,7 +113,6 @@ mod tests {
             hash: Arc::new(StubHashService),
             library: library_service,
             metadata: metadata_service,
-            transcode: Arc::new(StubTranscodeService),
             notification: notification.clone(),
             admin_log,
             user_repo: user_repo.clone(),
@@ -431,7 +415,6 @@ mod tests {
             hash: Arc::new(StubHashService),
             library: library_service,
             metadata: metadata_service,
-            transcode: Arc::new(StubTranscodeService),
             notification,
             admin_log,
             user_repo: user_repo.clone(),

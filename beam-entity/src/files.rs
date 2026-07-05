@@ -62,8 +62,6 @@ pub enum Relation {
     Episode,
     #[sea_orm(has_many = "super::media_stream::Entity")]
     MediaStreams,
-    #[sea_orm(has_many = "super::stream_cache::Entity")]
-    StreamCaches,
 }
 
 impl Related<super::library::Entity> for Entity {
@@ -87,12 +85,6 @@ impl Related<super::episode::Entity> for Entity {
 impl Related<super::media_stream::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::MediaStreams.def()
-    }
-}
-
-impl Related<super::stream_cache::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::StreamCaches.def()
     }
 }
 

@@ -5,10 +5,7 @@
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Arc;
 
     use beam_auth::utils::{
         repository::in_memory::InMemoryUserRepository,
@@ -30,7 +27,6 @@ mod tests {
         MetadataService, PageInfo, SortOrder,
     };
     use crate::services::notification::InMemoryNotificationService;
-    use crate::services::transcode::TranscodeService;
     use crate::state::{AppServices, AppState};
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 
@@ -148,46 +144,14 @@ mod tests {
         }
     }
 
-    /// Stub transcode service: writes fake bytes to the output path instead of
-    /// running ffmpeg, and counts how many times it is invoked.
-    #[derive(Debug)]
-    struct StubTranscodeService {
-        call_count: Arc<AtomicUsize>,
-    }
-
-    impl StubTranscodeService {
-        fn new(call_count: Arc<AtomicUsize>) -> Self {
-            Self { call_count }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TranscodeService for StubTranscodeService {
-        async fn generate_mp4_cache(
-            &self,
-            _source_path: &std::path::Path,
-            output_path: &std::path::Path,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            self.call_count.fetch_add(1, Ordering::SeqCst);
-            // Write fake bytes so `serve_mp4_file` can read the resulting file.
-            std::fs::write(output_path, b"FAKE_MP4_DATA_FOR_TESTING")?;
-            Ok(())
-        }
-    }
-
     // ─── Test fixture ─────────────────────────────────────────────────────────
 
     struct TestFixture {
         state: AppState,
         auth: Arc<LocalAuthService>,
-        transcode_call_count: Arc<AtomicUsize>,
-        /// Keeps the cache TempDir alive for the duration of the test.
-        _cache_dir: TempDir,
     }
 
     fn make_test_state(files: Vec<LibraryFile>) -> TestFixture {
-        let cache_dir = TempDir::new().expect("create cache tmpdir");
-
         let session_store = Arc::new(InMemorySessionStore::default());
         let user_repo = Arc::new(InMemoryUserRepository::default());
         let auth = Arc::new(LocalAuthService::new(
@@ -201,14 +165,11 @@ mod tests {
             InMemoryAdminLogRepository::default(),
         )));
 
-        let transcode_call_count = Arc::new(AtomicUsize::new(0));
-
         let services = AppServices {
             auth: auth.clone(),
             hash: Arc::new(StubHashService),
             library: Arc::new(StubLibraryService::new(files)),
             metadata: Arc::new(StubMetadataService),
-            transcode: Arc::new(StubTranscodeService::new(transcode_call_count.clone())),
             notification,
             admin_log,
             user_repo: user_repo.clone(),
@@ -219,7 +180,7 @@ mod tests {
             server_url: "http://localhost:8000".to_string(),
             enable_metrics: false,
             video_dir: PathBuf::from("/tmp"),
-            cache_dir: cache_dir.path().to_path_buf(),
+            cache_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
             jwt_secret: TEST_JWT_SECRET.to_string(),
             redis_url: "redis://localhost".to_string(),
@@ -231,12 +192,7 @@ mod tests {
 
         let state = AppState::new(config, services);
 
-        TestFixture {
-            state,
-            auth,
-            transcode_call_count,
-            _cache_dir: cache_dir,
-        }
+        TestFixture { state, auth }
     }
 
     /// Registers a test user and returns `(jwt_token, user_id)`.
@@ -351,18 +307,19 @@ mod tests {
 
     // ─── Tests: GET /v1/stream/mp4/:id (Authorization: Bearer) ──────────────────
 
-    /// Cache miss: transcode service is invoked and the response is 200/206 with
-    /// Content-Type: video/mp4.
+    /// The handler must serve the source file's bytes directly -- no
+    /// transcoding, no remuxing, no cache copy -- and must reflect the
+    /// file's actual mime type in the response, not a hardcoded "video/mp4".
     #[tokio::test]
-    async fn test_stream_mp4_cache_miss_triggers_transcode() {
+    async fn test_stream_mp4_serves_source_file_directly() {
         let source_dir = TempDir::new().unwrap();
         let source_file = source_dir.path().join("video.mkv");
-        std::fs::write(&source_file, b"FAKE SOURCE DATA").unwrap();
+        let source_bytes = b"REAL SOURCE FILE BYTES, SERVED AS-IS";
+        std::fs::write(&source_file, source_bytes).unwrap();
 
-        let fixture = make_test_state(vec![make_library_file(
-            TEST_FILE_ID,
-            source_file.to_str().unwrap(),
-        )]);
+        let mut file = make_library_file(TEST_FILE_ID, source_file.to_str().unwrap());
+        file.mime_type = Some("video/x-matroska".to_string());
+        let fixture = make_test_state(vec![file]);
         let service = build_service(&fixture);
 
         let stream_token = fixture
@@ -372,51 +329,38 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let mut res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
             .bearer_auth(&stream_token)
             .send(&service)
             .await;
 
-        let status = res.status_code.unwrap();
-        assert!(
-            status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT,
-            "Expected 200 or 206, got: {status}"
-        );
+        assert_eq!(res.status_code, Some(StatusCode::OK));
         assert_eq!(
             res.headers()
                 .get("Content-Type")
                 .and_then(|v| v.to_str().ok()),
-            Some("video/mp4"),
-            "Expected Content-Type: video/mp4"
+            Some("video/x-matroska"),
+            "Content-Type must reflect the file's actual mime type, not an assumed video/mp4"
         );
+        let body = res.take_bytes(None).await.expect("collect body");
         assert_eq!(
-            fixture.transcode_call_count.load(Ordering::SeqCst),
-            1,
-            "Expected transcode service to be called exactly once (cache miss)"
+            &body[..],
+            &source_bytes[..],
+            "response body must be the untouched source file bytes"
         );
     }
 
-    /// Cache hit: the transcode service must NOT be invoked when the cache file
-    /// already exists.
+    /// When the file has no known mime type, fall back to a generic binary
+    /// content type rather than assuming a container format.
     #[tokio::test]
-    async fn test_stream_mp4_cache_hit_skips_transcode() {
+    async fn test_stream_mp4_falls_back_to_octet_stream_without_mime_type() {
         let source_dir = TempDir::new().unwrap();
-        let source_file = source_dir.path().join("video.mkv");
-        std::fs::write(&source_file, b"FAKE SOURCE DATA").unwrap();
+        let source_file = source_dir.path().join("video.unknown");
+        std::fs::write(&source_file, b"DATA").unwrap();
 
-        let fixture = make_test_state(vec![make_library_file(
-            TEST_FILE_ID,
-            source_file.to_str().unwrap(),
-        )]);
-
-        // Pre-populate the cache file so the handler skips transcoding.
-        let cache_file = fixture
-            .state
-            .config
-            .cache_dir
-            .join(format!("{}-0.mp4", TEST_FILE_ID));
-        std::fs::write(&cache_file, b"CACHED MP4 CONTENT").unwrap();
-
+        let mut file = make_library_file(TEST_FILE_ID, source_file.to_str().unwrap());
+        file.mime_type = None;
+        let fixture = make_test_state(vec![file]);
         let service = build_service(&fixture);
 
         let stream_token = fixture
@@ -431,15 +375,11 @@ mod tests {
             .send(&service)
             .await;
 
-        let status = res.status_code.unwrap();
-        assert!(
-            status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT,
-            "Expected 200 or 206, got: {status}"
-        );
         assert_eq!(
-            fixture.transcode_call_count.load(Ordering::SeqCst),
-            0,
-            "Expected transcode service to NOT be called (cache hit)"
+            res.headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/octet-stream")
         );
     }
 
@@ -564,7 +504,7 @@ mod tests {
         );
     }
 
-    /// A `Range: bytes=0-99` request against a 200-byte cache file must return
+    /// A `Range: bytes=0-99` request against a 200-byte source file must return
     /// 206 with the correct `Content-Range` and `Content-Length` headers.
     #[tokio::test]
     async fn test_stream_mp4_range_header_returns_206() {
@@ -577,14 +517,6 @@ mod tests {
             TEST_FILE_ID,
             source_file.to_str().unwrap(),
         )]);
-
-        // Pre-create the 200-byte cache file so no transcoding is needed.
-        let cache_file = fixture
-            .state
-            .config
-            .cache_dir
-            .join(format!("{}-0.mp4", TEST_FILE_ID));
-        std::fs::write(&cache_file, &data).unwrap();
 
         let service = build_service(&fixture);
 
