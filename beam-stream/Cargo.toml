@@ -69,3 +69,8 @@ mockall = "0.14.0"
 
 [features]
 test-utils = ["beam-domain/test-utils", "beam-index/test-utils"]
+vendored-ffmpeg = [
+    "ffmpeg-next/build",
+    "beam-domain/vendored-ffmpeg",
+    "beam-index/vendored-ffmpeg",
+]

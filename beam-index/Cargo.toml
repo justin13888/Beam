@@ -46,6 +46,7 @@ tonic-build = { workspace = true }
 
 [features]
 test-utils = ["dep:mockall", "beam-domain/test-utils"]
+vendored-ffmpeg = ["ffmpeg-next/build", "beam-domain/vendored-ffmpeg"]
 
 [dependencies.mockall]
 version = "0.14.0"
