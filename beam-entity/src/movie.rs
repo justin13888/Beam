@@ -22,6 +22,7 @@ pub struct Model {
     pub tmdb_id: Option<i32>,
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<i32>,
+    pub anilist_id: Option<i32>,
 
     pub rating_tmdb: Option<f32>,
     pub rating_imdb: Option<f32>,
@@ -34,11 +35,19 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::movie_entry::Entity")]
     MovieEntries,
+    #[sea_orm(has_one = "super::metadata_enrichment::Entity")]
+    MetadataEnrichment,
 }
 
 impl Related<super::movie_entry::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::MovieEntries.def()
+    }
+}
+
+impl Related<super::metadata_enrichment::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::MetadataEnrichment.def()
     }
 }
 

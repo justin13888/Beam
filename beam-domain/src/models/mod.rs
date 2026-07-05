@@ -1,12 +1,16 @@
 pub mod admin_log;
+pub mod enrichment;
 pub mod file;
+pub mod genre;
 pub mod library;
 pub mod movie;
 pub mod show;
 pub mod stream;
 
 pub use admin_log::*;
+pub use enrichment::*;
 pub use file::*;
+pub use genre::*;
 pub use library::*;
 pub use movie::*;
 pub use show::*;

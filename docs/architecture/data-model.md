@@ -268,22 +268,25 @@ pattern (one enrichment row per movie *or* show, never both, never neither).
 | `id` | UUID | no | PK |
 | `movie_id` | UUID | yes | FK → `movies.id`, cascade — polymorphic target 1 |
 | `show_id` | UUID | yes | FK → `shows.id`, cascade — polymorphic target 2 |
-| `status` | ENUM (`enrichment_status`) | no | `pending` \| `in_progress` \| `succeeded` \| `failed` |
-| `provider` | TEXT | yes | which provider ultimately matched (`"tmdb"` / `"anilist"`), NULL until resolved |
-| `attempts` | INTEGER | no | default `0`; incremented per retry |
-| `last_error` | TEXT | yes | most recent failure detail, for admin triage |
+| `status` | ENUM (`enrichment_status`) | no | `pending` \| `enriched` \| `unmatched` \| `failed`; default `pending` |
+| `attempts` | INTEGER | no | default `0`; incremented on each transient-failure retry |
 | `next_attempt_at` | TIMESTAMPTZ | yes | backoff scheduling; NULL when not awaiting retry |
-| `enqueued_at` | TIMESTAMPTZ | no | |
-| `completed_at` | TIMESTAMPTZ | yes | set on `succeeded` or terminal `failed` |
-| `triggered_by` | TEXT | no | `"scan"` (automatic, post-index) \| `"admin"` (manual re-enrich action) |
+| `enriched_at` | TIMESTAMPTZ | yes | set when `status` becomes `enriched` |
+| `match_confidence` | REAL | yes | matcher score (0.0–1.0) for the accepted match; NULL until matched |
+| `matched_ref` | TEXT | yes | canonical `"provider:id"` string, e.g. `"tmdb:603"`; NULL until matched |
+| `force_refresh` | BOOLEAN | no | default `false`; set by the re-enrich admin action, cleared once processed |
+| `last_error` | TEXT | yes | most recent failure/unmatched-reason detail, for admin triage |
+| `created_at` | TIMESTAMPTZ | no | |
+| `updated_at` | TIMESTAMPTZ | no | |
 
 **CHECK constraint:** exactly one of `movie_id` / `show_id` is set — same shape as the `files` table
 invariant, intentionally, for consistency across the schema's polymorphic-association tables.
 
-Unique index on `(movie_id, show_id)` — practically enforces "at most one active queue row per
-title" together with the CHECK (a title can be re-enqueued by updating its existing row rather than
-inserting a duplicate; the admin re-enrich action upserts). Index on `status` (worker polls
-`pending`/due-for-retry rows); index on `next_attempt_at`.
+Unique index on `movie_id` and a separate unique index on `show_id` (both partial over non-NULL
+values in effect, since only one is ever set per row) — together with the CHECK, this guarantees at
+most one enrichment row per title; a rescan or refresh updates the existing row rather than creating
+a duplicate, and multiple files mapping to the same movie/show share one row. Composite index on
+`(status, next_attempt_at)` for the worker's due-row poll.
 
 ## Admin / log tables
 

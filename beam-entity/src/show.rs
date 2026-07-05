@@ -20,6 +20,7 @@ pub struct Model {
     pub tmdb_id: Option<i32>,
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<i32>,
+    pub anilist_id: Option<i32>,
 
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
@@ -29,11 +30,19 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::season::Entity")]
     Seasons,
+    #[sea_orm(has_one = "super::metadata_enrichment::Entity")]
+    MetadataEnrichment,
 }
 
 impl Related<super::season::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Seasons.def()
+    }
+}
+
+impl Related<super::metadata_enrichment::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::MetadataEnrichment.def()
     }
 }
 

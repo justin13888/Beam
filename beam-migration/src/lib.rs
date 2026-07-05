@@ -8,6 +8,7 @@ mod m20260222_000001_create_admin_log;
 mod m20260522_000001_add_file_mtime;
 mod m20260704_000001_drop_stream_cache;
 mod m20260704_000002_create_sessions;
+mod m20260704_000003_metadata_enrichment;
 
 pub struct Migrator;
 
@@ -22,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260522_000001_add_file_mtime::Migration),
             Box::new(m20260704_000001_drop_stream_cache::Migration),
             Box::new(m20260704_000002_create_sessions::Migration),
+            Box::new(m20260704_000003_metadata_enrichment::Migration),
         ]
     }
 }
