@@ -1,31 +1,18 @@
 ---
 title: Caching
-description: How to efficiently cache terabytes of data on Beam.
+description: How caching works in Beam.
 ---
 
-Caching forms a critical part of Beam's distributed architecture. Streaming large media files, often generated on-the-fly, can lead to significant network and I/O. We prefer multiple layers of caching to catch various scenarios but it is important to agree on strategies to avoid redundant processing and excessive cache usage.
+This page previously described a speculative distributed/Kubernetes-oriented caching design
+(CDN layers, an on-the-fly-transcoding cache, a distributed indexer service). Beam's actual
+architecture is a single modular-monolith server with no on-the-fly media generation to cache in
+the first place -- see [ADR-0001: Modular Monolith](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0001-modular-monolith.md)
+and [ADR-0004: Never Transcode](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0004-never-transcode.md).
 
-We consider the role of caching at various layers below...
+What caching does exist today is ordinary HTTP caching (`Cache-Control`/`ETag`/`Range` on
+streamed/downloaded files) plus standard client-side browser caching; there is no server-side
+media cache, no CDN integration, and no Redis in the stack. For the current, maintained
+architecture, see the engineering docs in the main repository:
 
-## Client
-
-- HTTP requests both small and big have caching headers. This is the cheapest as it does not involve any server-side resources but assumes clients behave correctly.
-- Media files downloaded are used instead of re-downloading from server. Ephemeral IDs to all files are used to avoid accidental reuse of stale files.
-
-## CDN
-
-*Most self-hosted deployments won't have this but this is self-explanatory for those who chose to set it up.*
-
-## Reverse Proxy (at origin)
-
-A reverse proxy (could be different ones for different services) is strongly recommended to sit in front of all Beam services. Each service is written to be lean and avoids bulk caching itself (it simply serves Cache-Control headers).
-
-For Kubernetes deployment specifically, you may choose any ingress controller of your choice for majority of the HTTP traffic but the large files from `beam-stream`, we recommend letting it go through and be handled by the application server's own caching layer (see below).
-
-## Application Server
-
-While all the previous layers cache on the HTTP level, certain optimizations require application-level caching. For example, let's say you want to download a 100GB+ file that is normally generated on-the-fly. Normally, a cold request would have high latency; instead, we may cache the generated file on disk for subsequent requests to be served directly from disk.
-
-## Concluding Remarks
-
-In practice, besides specific scenarios, responses are handled using various caches (e.g., in-memory Redis cache, cached metadata in Postgres). During development, just employ sufficient unit and integration testing while minimizing developer burden.
+- [`docs/architecture/overview.md`](https://github.com/justin13888/beam/blob/master/docs/architecture/overview.md)
+- [`docs/architecture/streaming.md`](https://github.com/justin13888/beam/blob/master/docs/architecture/streaming.md)

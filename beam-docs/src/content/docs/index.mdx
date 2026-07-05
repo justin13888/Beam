@@ -1,42 +1,46 @@
 ---
 title: Beam
-description: Experience a high-performance, scalable media server open to all.
-template: splash # Remove or comment out this line to display the site sidebar on this page.
+description: A media server for streaming your own video library, without on-the-fly transcoding.
+template: splash
 hero:
-  tagline: Congrats on setting up a new Starlight project!
+  tagline: Stream your own media library. No live transcoding -- direct-play from your existing files.
   image:
     file: ../../assets/houston.webp
   actions:
-    - text: Example Guide
-      link: /guides/example/
+    - text: Read the engineering docs
+      link: https://github.com/justin13888/beam/tree/master/docs
       icon: right-arrow
-    - text: Read the Starlight docs
-      link: https://starlight.astro.build
+    - text: View on GitHub
+      link: https://github.com/justin13888/beam
       icon: external
       variant: minimal
 ---
 
-{/* TODO: Replace this */}
-
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-## Next steps
+## About this site
+
+This site covers developer-facing notes that don't fit neatly in the main repository's `docs/`
+tree. The canonical, actively-maintained engineering documentation -- requirements, architecture,
+ADRs, per-component owner docs, testing strategy, and operations runbooks -- lives in
+[`docs/`](https://github.com/justin13888/beam/tree/master/docs) in the main repository. Start
+there for anything architectural.
 
 <CardGrid stagger>
-	<Card title="Update content" icon="pencil">
-		Edit `src/content/docs/index.mdx` to see this page change.
+	<Card title="Architecture" icon="document">
+		[`docs/architecture/overview.md`](https://github.com/justin13888/beam/blob/master/docs/architecture/overview.md) --
+		the ratified system architecture and topology.
 	</Card>
-	<Card title="Change page layout" icon="document">
-		Delete `template: splash` in `src/content/docs/index.mdx` to display a
-		sidebar on this page.
+	<Card title="Requirements" icon="pencil">
+		[`docs/requirements/product.md`](https://github.com/justin13888/beam/blob/master/docs/requirements/product.md) --
+		vision, personas, and functional/non-functional requirements.
 	</Card>
-	<Card title="Add new content" icon="add-document">
-		Add Markdown or MDX files to `src/content/docs` to create new pages.
+	<Card title="Components" icon="puzzle">
+		[`docs/components/`](https://github.com/justin13888/beam/tree/master/docs/components) --
+		one owner doc per crate (`beam-server`, `beam-index`, `beam-domain`, persistence, web).
 	</Card>
-	<Card title="Configure your site" icon="setting">
-		Edit your `sidebar` and other config in `astro.config.mjs`.
-	</Card>
-	<Card title="Read the docs" icon="open-book">
-		Learn more in [the Starlight Docs](https://starlight.astro.build/).
+	<Card title="Operations" icon="setting">
+		[`docs/operations/`](https://github.com/justin13888/beam/tree/master/docs/operations) --
+		dev setup, CI, configuration reference, deployment, and the local e2e runbook.
 	</Card>
 </CardGrid>

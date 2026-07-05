@@ -28,22 +28,23 @@ this file's own directory). That split is intentional and should be preserved:
 
 ## Current state
 
-As of this push, `beam-docs` is mostly still the default Starlight project scaffold:
+The Starlight scaffold placeholders have been cleaned up as part of the G3 config/docs pass:
 
-- `src/content/docs/index.mdx` — the default Starlight splash page, untouched.
-- `src/content/docs/guides/example.md` — the default Starlight placeholder guide, untouched.
-- `src/content/docs/development/caching.md` and `src/content/docs/development/streaming.md` — the
-  only two real content pages in the site today.
+- `src/content/docs/index.mdx` — replaced the default Starlight splash page with a real landing
+  page pointing to root `docs/`.
+- `src/content/docs/guides/example.md` — deleted (was the default Starlight placeholder guide,
+  never customized); its sidebar entry was removed from `astro.config.mjs` along with it.
+- `src/content/docs/development/caching.md` and `src/content/docs/development/streaming.md` — both
+  previously described the **old**, now-removed design (HLS/DASH adaptive-bitrate streaming as "the
+  primary protocol," a server-side transcode/remux cache, a distributed/Kubernetes-oriented
+  architecture). Per [ADR-0004](../architecture/decisions/ADR-0004-never-transcode.md),
+  `beam-server` never transcodes — direct-play byte-serving only, with quality selection pushed to
+  the library (multiple indexed file versions) rather than produced on demand. Both pages have been
+  replaced with short pointers back to root `docs/architecture/` rather than re-deriving the design
+  here, consistent with this document's own guidance below.
 
-Both real pages describe the **old** design this push removes: `streaming.md` describes HLS/DASH
-adaptive-bitrate streaming as "the primary protocol," and both pages assume a server-side transcode/
-remux cache. Per [ADR-0004](../architecture/decisions/ADR-0004-never-transcode.md), `beam-server`
-never transcodes — the target architecture is direct-play byte-serving only, with quality selection
-pushed to the library (multiple indexed file versions) rather than produced on demand. These two
-pages will need to be rewritten or replaced to reflect that; **this is flagged as follow-up work,
-not done as part of this documentation push.** Do not treat `development/caching.md` or
-`development/streaming.md` as accurate descriptions of the target system in the meantime — root
-`docs/architecture/` is the accurate source for that during the transition.
+There is no other real content in the site yet beyond these two pointer pages. Root
+`docs/architecture/` remains the accurate, detailed source for streaming/caching design.
 
 ## Working in this crate
 

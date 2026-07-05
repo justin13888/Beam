@@ -1,39 +1,60 @@
 # Beam Auth
 
-A library crate providing user, session, and authentication logic for `beam-server`. There is no
-standalone `beam-auth` binary or container image -- `beam-server` links this crate and mounts its
-routes in-process. See [`docs/components/server.md`](../docs/components/server.md) and
-[`docs/architecture/security.md`](../docs/architecture/security.md) for the current architecture,
-and run/test `beam-server` per its own README for local development.
-
-> Note: the design described below (username/password, JWT access tokens, Redis-backed sessions,
-> scoped stream tokens) is the pre-OIDC design and is being replaced per
-> [ADR-0003](../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md) and
-> [ADR-0005](../docs/architecture/decisions/ADR-0005-sessions-in-postgres.md). This document will be
-> rewritten once that work lands.
-
-## API Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/v1/health` | Health check — returns 200 OK when the service is running. |
-| `POST` | `/v1/auth/register` | Create a new account. Sets `session_id` cookie and returns a JWT. |
-| `POST` | `/v1/auth/login` | Authenticate with username/email and password. Sets `session_id` cookie and returns a JWT. |
-| `POST` | `/v1/auth/refresh` | Exchange a valid session cookie or `session_id` body field for a new JWT. |
-| `POST` | `/v1/auth/logout` | Invalidate the current session. Clears the `session_id` cookie. |
+A library crate providing OIDC-backed authentication and session management for `beam-server`.
+There is no standalone `beam-auth` binary or container image -- `beam-server` links this crate
+and mounts its routes in-process. See [`docs/components/server.md`](../docs/components/server.md)
+and [`docs/architecture/security.md`](../docs/architecture/security.md) for the current
+architecture, and run/test `beam-server` per its own README for local development.
 
 ## Architecture
 
 `beam-auth` is a library crate with two feature flags:
 
-- **`utils`** — Core domain types, trait abstractions, and concrete implementations for user repositories, session stores, and the auth service.
-- **`server`** (implies `utils`) — Salvo HTTP handlers that wire the auth service into a router.
+- **`utils`** -- Core domain types and trait abstractions: `UserRepository`, `SessionStore`,
+  `PendingAuthStore`, `OidcClient`, plus their sea-orm-backed (`Sql*`) and `InMemory*` fake
+  implementations.
+- **`server`** (implies `utils`) -- Salvo HTTP handlers (`oidc_routes.rs`) that wire the above
+  into a router.
 
 `beam-server` depends on `beam-auth` and mounts its routes directly into its own router; there is
 no network call between them.
 
-### Session & Token Strategy
+## Auth flow
 
-- **Session**: A random 32-byte URL-safe Base64 ID stored in Redis/Valkey with a configurable TTL (default: 7 days).
-- **Access token**: A short-lived JWT (15 minutes) signed with HMAC-SHA256 containing the user ID (`sub`) and session ID (`sid`).
-- **Stream token**: A scoped JWT (6 hours) tied to a specific `stream_id`, used to authorize time-limited media access.
+Beam uses the OIDC Authorization Code + PKCE flow with the browser as a pure BFF (backend-for-
+frontend) client -- the SPA never sees an ID token or access token, only an opaque session cookie.
+See [ADR-0003](../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md) for the full rationale.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/auth/login` | Begins the Authorization Code + PKCE flow: redirects to the IdP. Accepts a `redirect` query param (sanitized to a same-origin-relative path) for where to send the browser after a successful login. |
+| `GET` | `/v1/auth/callback` | IdP redirects back here with `code`/`state`. Verifies state/nonce/PKCE, exchanges the code, JIT-provisions the user, mints a session, and redirects into the web app. |
+| `GET` | `/me` | Returns the current session's user (id, email, display name, avatar, admin status). |
+| `POST` | `/logout` | Revokes the current session. |
+| `POST` | `/logout-all` | Revokes every session for the current user. |
+| `GET` | `/sessions` | Lists the current user's active sessions (id, device hash, IP, timestamps -- never the raw session token). |
+| `DELETE` | `/sessions/{id}` | Revokes one specific session by id. |
+
+### Session strategy
+
+- **Session cookie**: a random, opaque, URL-safe token (`beam_session`), set `HttpOnly`,
+  `SameSite=Lax`, and `Secure` when the deployment is HTTPS. Only its SHA-256 hash is stored in
+  Postgres -- the raw token can't be recovered from a database read.
+  See [ADR-0005](../docs/architecture/decisions/ADR-0005-sessions-in-postgres.md).
+- **Expiry**: a sliding idle timeout (`BEAM_SESSION_IDLE_DAYS`, default 14) that resets on
+  activity, capped by an absolute lifetime (`BEAM_SESSION_MAX_DAYS`, default 60) regardless of
+  activity.
+- **Pending-auth state**: the in-flight state/nonce/PKCE verifier for a login attempt is stored
+  server-side (`PendingAuthStore`, single-use, short TTL) and bound to a `beam_oidc_state` cookie
+  -- no secrets round-trip through the client beyond the opaque `state` value.
+- **Admin status**: recomputed from the `BEAM_ADMIN_EMAILS` allowlist on every login (not stored
+  as a persistent grant); an unverified email is never granted admin regardless of allowlist
+  membership.
+
+## Testing
+
+Zero-dependency: `InMemoryUserRepository`, `InMemorySessionStore`, `InMemoryPendingAuthStore`, and
+`FakeOidcClient` (a programmable fake IdP that verifies the state/nonce/PKCE round-trip the same
+way a real one would, including rejecting a mismatched verifier/nonce) let the full login/
+callback/me/logout/sessions flow be exercised via `salvo::test::TestClient` with no real IdP,
+network, or database. See the `test-utils` feature.

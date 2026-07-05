@@ -17,7 +17,7 @@ To ensure the system remains highly testable, you must apply the following patte
 Unit tests must verify essential services end-to-end without spinning up external dependencies (e.g., Postgres, Docker Compose). 
 
 * **Zero Infrastructure:** All tests must pass immediately using `cargo test --workspace`. They must NEVER require the services in `compose.dependencies.yaml` to be running.
-* **Subcutaneous E2E Testing:** Write tests that exercise complete vertical slices of the application. Instantiate the core application router/service with in-memory implementations and pass it programmatic requests (e.g., using Axum's test helpers) to verify the response and state mutation.
+* **Subcutaneous E2E Testing:** Write tests that exercise complete vertical slices of the application. Instantiate the core application router/service with in-memory implementations and pass it programmatic requests (e.g., using Salvo's `salvo::test::TestClient`) to verify the response and state mutation.
 * **Edge-Case Codification:** Any scenario that would normally require manual verification (e.g., corrupted media streams, missing file paths, database connection drops) MUST be codified as a unit test by configuring the injected traits to return the relevant `Result::Err`.
 * **Test Data Builders:** Implement builder patterns for domain entities in your `#[cfg(test)]` modules to quickly scaffold consistent, valid state across different test suites.
 
@@ -28,13 +28,42 @@ Unit tests must verify essential services end-to-end without spinning up externa
 1. Before modifying database schema, check `beam-migration` and `beam-entity`.
 2. Do not add new external service dependencies to `compose.dependencies.yaml` without explicitly providing an in-memory trait implementation for the test suite first.
 
-## CI Commands to ensure pass before pushing completed to work (e.g. before PR)
+## Where to look first
+
+`docs/` is the canonical, ratified engineering documentation: `docs/requirements/` (product/FRs/
+NFRs), `docs/architecture/` (overview, data model, streaming, security, ADRs), `docs/components/`
+(one doc per crate: server, indexer, domain, persistence, web, docs-site), `docs/testing/`
+(strategy, coverage), `docs/operations/` (dev setup, CI, configuration, deployment,
+e2e-validation). Check the relevant doc there before making an architectural assumption.
+
+## CI Commands to ensure pass before pushing completed work (e.g. before PR)
 
 ```
 # Rust
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
-# Typescript
+cargo test --workspace
+cargo deny check
+
+# Typescript (from repo root; workspaces: beam-web, beam-docs)
 bun install
 bun run check
+bun run typecheck
+cd beam-web && bun run test
 ```
+
+If the host lacks system FFmpeg development libraries (no `.pc` files for `libavutil` etc. --
+common outside CI/containers), `cargo test`/`clippy`/`build` against ffmpeg-linking crates
+(`beam-index`, `beam-server`) will fail to compile. Use the vendored-FFmpeg aliases instead (see
+`.cargo/config.toml`, `docs/operations/dev-setup.md`, and
+[ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md)):
+
+```
+cargo build-local   # cargo build --workspace --features beam-index/vendored-ffmpeg,beam-server/vendored-ffmpeg
+cargo clippy-local   # same, + --all-targets -- -D warnings
+cargo t-local         # same, cargo test
+```
+
+This vendors and statically compiles LGPL-only FFmpeg from source (via `ffmpeg-sys-next`'s
+`build` feature) and requires a `nasm` assembler on `PATH`. CI and container builds keep
+dynamically linking system FFmpeg and do not use these aliases.

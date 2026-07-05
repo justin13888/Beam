@@ -1,32 +1,32 @@
 // @ts-check
-import { defineConfig } from 'astro/config';
-import starlight from '@astrojs/starlight';
-import cloudflare from '@astrojs/cloudflare';
+
+import cloudflare from "@astrojs/cloudflare";
+import starlight from "@astrojs/starlight";
+import { defineConfig } from "astro/config";
 
 // https://astro.build/config
 export default defineConfig({
 	adapter: cloudflare({
 		platformProxy: {
-			enabled: true
+			enabled: true,
 		},
 		imageService: "compile",
 	}),
-	site: 'https://beam.justinchung.net',
+	site: "https://beam.justinchung.net",
 	integrations: [
 		starlight({
-			title: 'Beam',
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/justin13888/beam' }],
-			sidebar: [ // TODO: Restructure as needed
+			title: "Beam",
+			social: [
 				{
-					label: 'Guides',
-					items: [
-						// Each item here is one entry in the navigation menu.
-						{ label: 'Example Guide', slug: 'guides/example' },
-					],
+					icon: "github",
+					label: "GitHub",
+					href: "https://github.com/justin13888/beam",
 				},
+			],
+			sidebar: [
 				{
-					label: 'Development',
-					autogenerate: { directory: 'development' },
+					label: "Development",
+					autogenerate: { directory: "development" },
 				},
 			],
 		}),

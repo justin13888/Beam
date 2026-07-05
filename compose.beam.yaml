@@ -3,26 +3,67 @@ services:
     build:
       context: .
       dockerfile: beam-server/Containerfile
+    # List form (rather than `VAR: ${VAR:-default}` map form) is used
+    # throughout so that an unset host/`.env` variable is genuinely *absent*
+    # inside the container, not merely an empty string. That distinction
+    # matters for beam-server's `Option<...>` config fields (OIDC issuer/
+    # client id/secret, extra allowed origins, admin emails): confique
+    # resolves a truly-unset env var to `None`, but an *explicitly empty*
+    # one only does that for types where empty fails to parse (e.g. bool) --
+    # for `Option<String>` fields an empty string would incorrectly resolve
+    # to `Some("")`, which would make `oidc_configured()` wrongly report
+    # OIDC as configured against an empty issuer URL. Effective defaults
+    # (from beam-server/src/config.rs) are documented below for reference;
+    # override any of these in your shell or a `.env` file at the repo root.
     environment:
-      # Backend server configuration
-      BIND_ADDRESS: ${BIND_ADDRESS:-0.0.0.0:8000}
-      SERVER_URL: ${SERVER_URL:-http://localhost:8000}
+      # BIND_ADDRESS (default 0.0.0.0:8000)
+      - BIND_ADDRESS
+      # SERVER_URL (default http://localhost:8000)
+      - SERVER_URL
+      # DATABASE_URL (default postgres://beam:password@postgres:5432/beam;
+      # the default below points at this compose file's `postgres` service)
+      - DATABASE_URL=${DATABASE_URL:-postgres://beam:password@postgres:5432/beam}
+      - RUST_LOG=${RUST_LOG:-beam_server=info,tower_http=debug,axum=debug}
 
-      # Database connection
-      DATABASE_URL: ${DATABASE_URL:-postgres://beam:password@postgres:5432/beam}
+      # Media directories: VIDEO_DIR is read-only (your media library);
+      # CACHE_DIR is server-writable state.
+      - VIDEO_DIR=${VIDEO_DIR:-/videos}
+      - CACHE_DIR=${CACHE_DIR:-/cache}
 
-      # Logging configuration
-      RUST_LOG: ${RUST_LOG:-beam_server=info,tower_http=debug,axum=debug}
+      - ENABLE_METRICS=${ENABLE_METRICS:-false}
 
-      # Media directories
-      VIDEO_DIR: ${VIDEO_DIR:-/videos}
-      CACHE_DIR: ${CACHE_DIR:-/cache}
+      # Indexing / filesystem watcher (defaults match config.rs)
+      - HASH_UNKNOWN_FILES=${HASH_UNKNOWN_FILES:-true}
+      - SCAN_INTERVAL_SECS=${SCAN_INTERVAL_SECS:-3600}
+      - WATCH_ENABLED=${WATCH_ENABLED:-true}
+      - WATCH_DEBOUNCE_MS=${WATCH_DEBOUNCE_MS:-2000}
 
-      # Optional: Enable metrics
-      ENABLE_METRICS: ${ENABLE_METRICS:-false}
+      # Metadata enrichment (cameo -> TMDB/AniList). TMDB_API_TOKEN absent
+      # means TMDB-eligible titles are left un-enriched; AniList-sourced
+      # titles still enrich without any token.
+      - ENRICH_INTERVAL_SECS=${ENRICH_INTERVAL_SECS:-300}
+      - TMDB_API_TOKEN
+      - ANILIST_ENABLED=${ANILIST_ENABLED:-true}
 
-      # Auth & Session
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is not set or is empty}
+      # OIDC auth (see ADR-0003 / docs/architecture/security.md). Login is
+      # disabled with a clear error -- not a crash -- until issuer,
+      # client_id, and client_secret are all set. The bundled `dex` dev IdP
+      # (compose.dependencies.yaml) is reachable from a browser at
+      # http://localhost:5556/dex, but reaching it from *inside* this
+      # container needs host networking or an equivalent DNS alias -- the
+      # fully-containerized OIDC topology is a documented follow-up, not
+      # solved by this compose file. See docs/operations/e2e-validation.md,
+      # which runs beam-server on the host instead for the OIDC flow.
+      - BEAM_OIDC_ISSUER
+      - BEAM_OIDC_CLIENT_ID
+      - BEAM_OIDC_CLIENT_SECRET
+      - BEAM_OIDC_SCOPES=${BEAM_OIDC_SCOPES:-openid profile email}
+      - BEAM_WEB_URL=${BEAM_WEB_URL:-http://localhost:5173}
+      - BEAM_EXTRA_ALLOWED_ORIGINS
+      - BEAM_ADMIN_EMAILS
+      - BEAM_COOKIE_SECURE
+      - BEAM_SESSION_IDLE_DAYS=${BEAM_SESSION_IDLE_DAYS:-14}
+      - BEAM_SESSION_MAX_DAYS=${BEAM_SESSION_MAX_DAYS:-60}
     ports:
       - "${STREAM_HOST_PORT:-8000}:8000"
     volumes:

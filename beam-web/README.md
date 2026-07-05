@@ -12,7 +12,7 @@ Copy `.env.example` to `.env` and modify any necessary environment variables (ne
 
 ```bash
 bun install
-bun run codegen:full # Builds server schemas and generates client code
+bun run codegen:openapi:full # Exports the server's OpenAPI spec and generates the typed client
 bun dev
 ```
 

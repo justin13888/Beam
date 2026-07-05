@@ -57,9 +57,9 @@ async fn main() -> Result<()> {
         },
     );
 
-    // Start the metadata-enrichment sweep loop. Wired to a no-op provider
-    // until D4 lands the cameo adapter -- every sweep is a fast, harmless
-    // skip until then.
+    // Start the metadata-enrichment sweep loop. `AppServices::new` wires this
+    // to the cameo-backed provider when TMDB/AniList are configured, falling
+    // back to a no-op (fast, harmless skip) otherwise.
     beam_index::runtime::spawn_enrichment_worker(
         enrichment_service,
         std::time::Duration::from_secs(config.enrich_interval_secs),
