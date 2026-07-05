@@ -1,14 +1,20 @@
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, ErrorComponent } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { Download } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { components } from "@/api.gen";
+import { VideoPlayer } from "@/components/VideoPlayer";
 import { env } from "@/env";
+import { usePlaybackBeacon } from "@/hooks/usePlaybackBeacon";
 import { apiClient } from "@/lib/apiClient";
+import { formatDuration } from "@/lib/utils";
 
 type MediaMetadata =
 	components["schemas"]["beam_server.models.media.MediaMetadata"];
 type ShowMetadata =
 	components["schemas"]["beam_server.models.media.show.ShowMetadata"];
+type MediaSource =
+	components["schemas"]["beam_server.models.media.source.MediaSource"];
 
 const mediaQueryOptions = (mediaId: string) =>
 	queryOptions({
@@ -25,6 +31,9 @@ const mediaQueryOptions = (mediaId: string) =>
 	});
 
 export const Route = createFileRoute("/media/$id")({
+	validateSearch: (search: Record<string, unknown>): { fileId?: string } => ({
+		fileId: typeof search.fileId === "string" ? search.fileId : undefined,
+	}),
 	loader: async ({ context: { queryClient }, params: { id } }) => {
 		return queryClient.ensureQueryData(mediaQueryOptions(id));
 	},
@@ -32,27 +41,85 @@ export const Route = createFileRoute("/media/$id")({
 	component: RouteComponent,
 });
 
+/** A short human label for a quality/edition option in the source picker. */
+function sourceLabel(source: MediaSource): string {
+	if (source.video) {
+		return `${source.video.height}p · ${source.video.codec}`;
+	}
+	return "Original";
+}
+
+function absoluteUrl(path: string): string {
+	return path.startsWith("http") ? path : `${env.C_STREAM_SERVER_URL}${path}`;
+}
+
 function RouteComponent() {
 	const metadata = Route.useLoaderData();
+	const { fileId: fileIdParam } = Route.useSearch();
 
 	const movie = metadata && "Movie" in metadata ? metadata.Movie : null;
 	const show = metadata && "Show" in metadata ? metadata.Show : null;
+	const mediaId = movie?.id ?? show?.id ?? null;
 
-	// For a movie the file is its primary file; for a show the user picks an
-	// episode and that drives playback.
-	const initialFileId = movie?.file_id ?? null;
-	const [activeFileId, setActiveFileId] = useState<string | null>(
-		initialFileId,
+	// For a movie the file is (by default) its primary file; for a show the
+	// user picks an episode. A `fileId` search param (set by continue-watching
+	// links) overrides both, deep-linking straight to the in-progress file.
+	const [selectedFileId, setSelectedFileId] = useState<string | null>(
+		fileIdParam ?? movie?.file_id ?? null,
 	);
-	const [error, setError] = useState<string | null>(null);
+	const [playbackError, setPlaybackError] = useState<string | null>(null);
+	const [startOver, setStartOver] = useState(false);
 
-	// `beam_session` is a same-site cookie (see ADR-0003), so a plain <video
-	// src> pointed straight at the streaming endpoint carries it automatically
-	// -- no separate stream-token round trip needed.
-	const streamUrl = useMemo(() => {
-		if (!activeFileId) return null;
-		return `${env.C_STREAM_SERVER_URL}/v1/files/${activeFileId}/stream`;
-	}, [activeFileId]);
+	// Movies can have multiple playable editions/qualities (ADR-0004: never
+	// live-transcode -- pick among pre-existing files instead); episodes
+	// don't support this yet, so they always resolve to a single direct file.
+	const { data: sources } = useQuery({
+		queryKey: ["media", mediaId, "sources"],
+		queryFn: async (): Promise<MediaSource[]> => {
+			if (!mediaId) return [];
+			const { data, error, response } = await apiClient.GET(
+				"/v1/media/{id}/sources",
+				{
+					params: { path: { id: mediaId } },
+					credentials: "include",
+				},
+			);
+			if (response.status === 404 || response.status === 400) return [];
+			if (error) throw new Error("Failed to load media sources");
+			return data ?? [];
+		},
+		enabled: !!movie,
+	});
+
+	useEffect(() => {
+		if (!movie || !sources || sources.length === 0) return;
+		if (selectedFileId && sources.some((s) => s.file_id === selectedFileId)) {
+			return;
+		}
+		setSelectedFileId(sources[0].file_id);
+	}, [movie, sources, selectedFileId]);
+
+	const selectedSource =
+		sources?.find((s) => s.file_id === selectedFileId) ?? null;
+
+	const { data: continueWatching } = useQuery({
+		queryKey: ["continue-watching"],
+		queryFn: async () => {
+			const { data, error } = await apiClient.GET("/v1/continue-watching", {
+				params: { query: { limit: 100 } },
+				credentials: "include",
+			});
+			if (error) throw new Error("Failed to load playback progress");
+			return data ?? [];
+		},
+	});
+
+	const savedProgress =
+		continueWatching?.find((item) => item.file_id === selectedFileId) ?? null;
+	const resumePosition =
+		!startOver && savedProgress ? savedProgress.position_secs : 0;
+
+	const { report, reset: resetBeacon } = usePlaybackBeacon(selectedFileId);
 
 	if (!metadata || (!movie && !show)) {
 		return (
@@ -77,6 +144,24 @@ function RouteComponent() {
 		? movie.poster_url
 		: (show?.seasons[0]?.poster_url ?? null);
 
+	const streamUrl = selectedSource
+		? absoluteUrl(selectedSource.stream_url)
+		: selectedFileId
+			? `${env.C_STREAM_SERVER_URL}/v1/files/${selectedFileId}/stream`
+			: null;
+	const downloadUrl = selectedSource
+		? absoluteUrl(selectedSource.download_url)
+		: selectedFileId
+			? `${env.C_STREAM_SERVER_URL}/v1/files/${selectedFileId}/download`
+			: null;
+
+	function selectFile(fileId: string) {
+		setPlaybackError(null);
+		setStartOver(false);
+		resetBeacon();
+		setSelectedFileId(fileId);
+	}
+
 	return (
 		<div className="container mx-auto p-4">
 			<div className="mb-6 flex gap-6">
@@ -94,19 +179,72 @@ function RouteComponent() {
 				</div>
 			</div>
 
-			{error && <p className="mb-4 text-red-500">{error}</p>}
+			{playbackError && <p className="mb-4 text-red-500">{playbackError}</p>}
+
+			{savedProgress && !startOver && (
+				<div className="mb-4 flex items-center gap-3 rounded-md bg-gray-800 px-4 py-2 text-sm text-gray-300">
+					<span>
+						Resuming from {formatDuration(savedProgress.position_secs)}
+					</span>
+					<button
+						type="button"
+						className="text-cyan-400 hover:underline"
+						onClick={() => {
+							setStartOver(true);
+							resetBeacon();
+						}}
+					>
+						Start over
+					</button>
+				</div>
+			)}
+
 			{streamUrl ? (
-				<video
-					key={streamUrl}
-					controls
-					src={streamUrl}
-					onError={() =>
-						setError(
-							"Failed to load video. Your session may have expired -- try refreshing the page.",
-						)
-					}
-					className="mb-6 w-full max-w-4xl"
-				/>
+				<>
+					<VideoPlayer
+						key={`${streamUrl}-${startOver}`}
+						title={title}
+						src={streamUrl}
+						type={selectedSource?.mime_type ?? undefined}
+						poster={posterUrl}
+						startTime={resumePosition}
+						onProgress={(currentTime, duration) =>
+							report(currentTime, duration)
+						}
+						onEnded={(duration) => report(duration, duration, true)}
+						onError={() =>
+							setPlaybackError(
+								"Failed to load video. Your session may have expired -- try refreshing the page.",
+							)
+						}
+						className="mb-4 w-full max-w-4xl"
+					/>
+
+					<div className="mb-6 flex flex-wrap items-center gap-3">
+						{movie && sources && sources.length > 1 && (
+							<select
+								value={selectedFileId ?? ""}
+								onChange={(e) => selectFile(e.target.value)}
+								className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white"
+							>
+								{sources.map((s) => (
+									<option key={s.file_id} value={s.file_id}>
+										{sourceLabel(s)}
+									</option>
+								))}
+							</select>
+						)}
+						{downloadUrl && (
+							<a
+								href={downloadUrl}
+								className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white"
+							>
+								<Download size={16} />
+								Download
+							</a>
+						)}
+					</div>
+				</>
 			) : (
 				<p className="mb-6 text-gray-500">
 					{show ? "Select an episode to play." : "No streamable file."}
@@ -116,11 +254,8 @@ function RouteComponent() {
 			{show && (
 				<EpisodeList
 					show={show}
-					activeFileId={activeFileId}
-					onSelect={(fileId) => {
-						setError(null);
-						setActiveFileId(fileId);
-					}}
+					activeFileId={selectedFileId}
+					onSelect={selectFile}
 				/>
 			)}
 		</div>

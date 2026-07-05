@@ -8,6 +8,7 @@ import {
 	Scan,
 	Search,
 } from "lucide-react";
+import { ContinueWatchingRow } from "@/components/ContinueWatchingRow";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
@@ -122,6 +123,8 @@ function DashboardPage() {
 						</div>
 					</Link>
 				</div>
+
+				<ContinueWatchingRow />
 
 				{/* Recent Libraries */}
 				{libraries.length > 0 && (
