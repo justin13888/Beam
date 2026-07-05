@@ -8,7 +8,6 @@ publish = false
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
-ffmpeg-next = { workspace = true }
 num = { version = "0.4.3", features = ["serde"] }
 parking_lot = "0.12.5"
 sea-orm = { workspace = true }
@@ -33,10 +32,3 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 [features]
 entity = ["dep:beam-entity"]
 test-utils = ["dep:mockall"]
-# Statically compile a vendored, LGPL-only FFmpeg from source instead of
-# dynamically linking the system installation. For local dev/test only where
-# system FFmpeg dev libraries (.pc files) may be unavailable; container/CI
-# builds keep dynamic linking against a system-provided FFmpeg for licensing
-# reasons (dynamic linking against LGPL FFmpeg avoids embedding it statically
-# in a distributed image).
-vendored-ffmpeg = ["ffmpeg-next/build"]

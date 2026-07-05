@@ -12,12 +12,12 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
 use crate::services::admin_log::AdminLogService;
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use crate::services::watcher::FsEventKind;
-use crate::utils::metadata::{StreamMetadata, VideoFileMetadata};
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
     CreateMediaFile, FileStatus, MediaFile, MediaFileContent, UpdateMediaFile,
@@ -821,25 +821,25 @@ impl IndexService for LocalIndexService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe::color::{
+        ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
+        PixelFormat,
+    };
+    use crate::probe::format::{ChannelLayout, Disposition, SampleFormat};
+    use crate::probe::media::{CodecId, Discard};
+    use crate::probe::metadata::MetadataError;
+    use crate::probe::metadata::StreamMetadata as UtilStreamMetadata;
+    use crate::probe::metadata::{
+        AudioMetadata, AudioStreamMetadata as UtilAudioStream,
+        SubtitleStreamMetadata as UtilSubtitleStream, VideoFileMetadata, VideoMetadata,
+        VideoStreamMetadata as UtilVideoStream,
+    };
     use crate::services::admin_log::LocalAdminLogService;
     use crate::services::admin_log::NoOpAdminLogService;
     use crate::services::hash::MockHashService;
     use crate::services::media_info::MockMediaInfoService;
     use crate::services::notification::EventLevel;
     use crate::services::notification::InMemoryNotificationService;
-    use crate::utils::color::{
-        ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
-        PixelFormat,
-    };
-    use crate::utils::format::{ChannelLayout, Disposition, SampleFormat};
-    use crate::utils::media::{CodecId, Discard};
-    use crate::utils::metadata::MetadataError;
-    use crate::utils::metadata::StreamMetadata as UtilStreamMetadata;
-    use crate::utils::metadata::{
-        AudioMetadata, AudioStreamMetadata as UtilAudioStream,
-        SubtitleStreamMetadata as UtilSubtitleStream, VideoFileMetadata, VideoMetadata,
-        VideoStreamMetadata as UtilVideoStream,
-    };
     use beam_domain::models::{CreateLibrary, Library, MediaFile};
     use beam_domain::repositories::AdminLogRepository;
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;

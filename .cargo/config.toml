@@ -4,6 +4,6 @@
 # FFmpeg development libraries (.pc files). CI and container builds keep
 # dynamically linking system FFmpeg and do not use these aliases.
 [alias]
-t-local = ["test", "--workspace", "--features", "beam-domain/vendored-ffmpeg,beam-index/vendored-ffmpeg,beam-stream/vendored-ffmpeg"]
-clippy-local = ["clippy", "--workspace", "--all-targets", "--features", "beam-domain/vendored-ffmpeg,beam-index/vendored-ffmpeg,beam-stream/vendored-ffmpeg", "--", "-D", "warnings"]
-build-local = ["build", "--workspace", "--features", "beam-domain/vendored-ffmpeg,beam-index/vendored-ffmpeg,beam-stream/vendored-ffmpeg"]
+t-local = ["test", "--workspace", "--features", "beam-index/vendored-ffmpeg,beam-stream/vendored-ffmpeg"]
+clippy-local = ["clippy", "--workspace", "--all-targets", "--features", "beam-index/vendored-ffmpeg,beam-stream/vendored-ffmpeg", "--", "-D", "warnings"]
+build-local = ["build", "--workspace", "--features", "beam-index/vendored-ffmpeg,beam-stream/vendored-ffmpeg"]

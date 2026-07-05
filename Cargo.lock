@@ -556,7 +556,6 @@ dependencies = [
  "async-trait",
  "beam-entity",
  "chrono",
- "ffmpeg-next",
  "mockall",
  "num",
  "parking_lot",

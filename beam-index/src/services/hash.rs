@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::utils::hash::compute_hash;
+use beam_domain::utils::hash::compute_hash;
 
 #[derive(Debug, Clone)]
 pub struct HashConfig {

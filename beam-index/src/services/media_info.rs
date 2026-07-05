@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use crate::utils::metadata::{MetadataError, VideoFileMetadata};
+use crate::probe::metadata::{MetadataError, VideoFileMetadata};
 
 /// Service for extracting media information from files.
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]

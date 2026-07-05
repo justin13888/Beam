@@ -62,7 +62,7 @@ impl From<ffmpeg::media::Type> for MediaType {
     }
 }
 
-#[derive(Eq, PartialEq, Copy, Clone, Hash)]
+#[derive(Eq, PartialEq, Clone, Hash)]
 pub enum CodecId {
     // Video codecs
     H264,
@@ -87,8 +87,10 @@ pub enum CodecId {
     SUBRIP,
     ASS,
     WEBVTT,
-    // Other
-    Other(ffmpeg::ffi::AVCodecID),
+    // Other: codec name string (e.g. from `ffmpeg::codec::Id::name()`), not a
+    // raw FFmpeg FFI type, so this enum never leaks FFI types out of the
+    // probing layer.
+    Other(String),
     None,
 }
 
@@ -207,7 +209,7 @@ impl From<ffmpeg::codec::Id> for CodecId {
             ffmpeg::codec::Id::ASS => CodecId::ASS,
             ffmpeg::codec::Id::WEBVTT => CodecId::WEBVTT,
             ffmpeg::codec::Id::None => CodecId::None,
-            id => CodecId::Other(id.into()),
+            id => CodecId::Other(id.name().to_string()),
         }
     }
 }

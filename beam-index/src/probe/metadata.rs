@@ -8,7 +8,7 @@ use std::{
 use thiserror::Error;
 use tracing::trace;
 
-use crate::utils::{
+use crate::probe::{
     color::{
         ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
         PixelFormat,
