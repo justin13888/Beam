@@ -23,6 +23,30 @@ async fn main() -> Result<()> {
 
     info!("Configuration loaded: {:?}", config);
 
+    // `cookie_secure` defaults to whatever `server_url`'s scheme implies,
+    // but `server_url` is the address *this process* binds/is reached at
+    // internally, which can differ from the externally-visible URL behind a
+    // TLS-terminating reverse proxy (e.g. the Traefik topology in
+    // compose.beam.yaml). If any other configured origin looks like a real
+    // HTTPS deployment while cookie_secure still resolves to false, that's
+    // very likely a misconfiguration -- the session cookie would be issued
+    // without the Secure flag on what's actually a production HTTPS site.
+    if !config.resolved_cookie_secure()
+        && (config.web_url.starts_with("https://")
+            || config
+                .extra_allowed_origins
+                .as_deref()
+                .is_some_and(|origins| origins.contains("https://")))
+    {
+        tracing::warn!(
+            "BEAM_COOKIE_SECURE resolved to false (from SERVER_URL={:?}) while BEAM_WEB_URL/\
+             BEAM_EXTRA_ALLOWED_ORIGINS suggest an HTTPS deployment -- the session cookie will \
+             be issued without the Secure flag. Set SERVER_URL to the externally-visible HTTPS \
+             URL or explicitly set BEAM_COOKIE_SECURE=true if this is intentional.",
+            config.server_url
+        );
+    }
+
     // Ensure cache directory exists (video_dir is validated by config)
     tokio::fs::create_dir_all(&config.cache_dir)
         .await

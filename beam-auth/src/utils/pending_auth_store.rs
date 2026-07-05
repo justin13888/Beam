@@ -7,9 +7,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 use thiserror::Error;
 
 use beam_entity::pending_auth::{
@@ -82,22 +80,20 @@ impl PendingAuthStore for SqlPendingAuthStore {
     }
 
     async fn consume(&self, state: &str) -> Result<Option<PendingAuth>> {
-        // Single-use: look up and delete within one transaction so a state
-        // value can never be raced into being consumed twice.
-        let txn = self.db.begin().await?;
-
-        let Some(model) = PendingAuthEntity::find_by_id(state.to_string())
-            .one(&txn)
-            .await?
-        else {
-            txn.commit().await?;
+        // Single-use: a single atomic `DELETE ... RETURNING` statement, not
+        // a SELECT followed by a separate DELETE. The latter has a TOCTOU
+        // race under Postgres's default READ COMMITTED isolation -- two
+        // concurrent `consume` calls for the same `state` can both have
+        // their SELECT observe the row before either DELETE commits, so
+        // both would return `Some` for what's supposed to be a single-use
+        // value. `exec_with_returning` deletes and returns the row in one
+        // round trip, so at most one caller ever gets `Some` back.
+        let mut deleted = PendingAuthEntity::delete_by_id(state.to_string())
+            .exec_with_returning(&self.db)
+            .await?;
+        let Some(model) = deleted.pop() else {
             return Ok(None);
         };
-
-        PendingAuthEntity::delete_by_id(state.to_string())
-            .exec(&txn)
-            .await?;
-        txn.commit().await?;
 
         if model.expires_at < Utc::now() {
             return Ok(None);
