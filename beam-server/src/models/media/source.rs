@@ -14,8 +14,10 @@ pub struct MediaSource {
     pub duration_secs: Option<f64>,
     pub video: Option<VideoSourceInfo>,
     pub audio_tracks: Vec<AudioSourceInfo>,
-    /// Direct-play stream URL for this file (Range-request capable).
+    /// Direct-play stream URL for this file (Range-request capable, inline).
     pub stream_url: String,
+    /// Download URL for this file (Range-request capable, `Content-Disposition: attachment`).
+    pub download_url: String,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]

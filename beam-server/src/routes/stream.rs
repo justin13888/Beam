@@ -77,6 +77,20 @@ pub(crate) fn parse_byte_range(
     Ok((start, end))
 }
 
+/// Escape a filename for use inside a `Content-Disposition` quoted-string
+/// (RFC 6266 / RFC 2616 §2.2): backslash and double-quote are backslash-escaped,
+/// and any control character (which would otherwise let a maliciously-named
+/// source file inject extra header lines) is stripped outright.
+fn sanitize_disposition_filename(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_control())
+        .flat_map(|c| match c {
+            '"' | '\\' => vec!['\\', c],
+            other => vec![other],
+        })
+        .collect()
+}
+
 // ── Error enums ───────────────────────────────────────────────────────────────
 
 #[derive(ToResponses)]
@@ -112,8 +126,9 @@ impl Writer for GetStreamTokenError {
     }
 }
 
+/// Errors shared by both file-delivery endpoints (`stream_file`, `download_file`).
 #[derive(Debug, ToResponses)]
-pub enum StreamMp4Error {
+pub enum FileDeliveryError {
     /// Unauthorized
     #[salvo(response(status_code = 401))]
     Unauthorized(String),
@@ -132,7 +147,7 @@ pub enum StreamMp4Error {
 }
 
 #[async_trait]
-impl Writer for StreamMp4Error {
+impl Writer for FileDeliveryError {
     async fn write(self, _req: &mut Request, _depot: &mut Depot, res: &mut Response) {
         match self {
             Self::Unauthorized(msg) => {
@@ -161,11 +176,11 @@ impl Writer for StreamMp4Error {
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
 
-/// Get a presigned token for streaming
+/// Get a presigned token for streaming or downloading a file.
 #[endpoint(
     tags("stream"),
     parameters(
-        ("id" = String, description = "Stream ID"),
+        ("file_id" = String, description = "File ID"),
         ("Authorization" = String, Header, description = "Bearer <user JWT>")
     ),
 )]
@@ -174,7 +189,7 @@ pub async fn get_stream_token(
     depot: &mut Depot,
 ) -> Result<Json<StreamTokenResponse>, GetStreamTokenError> {
     let state = depot.obtain::<AppState>().unwrap();
-    let id: String = req.param::<String>("id").unwrap_or_default();
+    let id: String = req.param::<String>("file_id").unwrap_or_default();
 
     // Validate user auth
     let user_id = if let Some(auth_header) = req.headers().get("Authorization")
@@ -217,34 +232,16 @@ pub async fn get_stream_token(
         .map_err(|_| GetStreamTokenError::InternalError("Failed to create stream token".into()))
 }
 
-/// Direct-play stream via HTTP Range. Serves the source file's bytes exactly
-/// as indexed on disk -- Beam never transcodes or remuxes media server-side
-/// (see ADR-0004); the response `Content-Type` reflects the file's actual
-/// detected MIME type rather than assuming MP4.
-///
-/// The route path and stream-token auth scheme here are interim: the
-/// forthcoming REST API pass (direct-play/download endpoints, cookie-based
-/// auth) will replace both.
-#[endpoint(
-    tags("media"),
-    parameters(
-        ("id" = String, description = "Stream ID"),
-        ("Authorization" = String, Header, description = "Bearer <stream token> (alternative to ?token=)"),
-        ("token" = String, Query, description = "Stream token (alternative to the Authorization header, required for <video> playback)"),
-    ),
-)]
-#[tracing::instrument(skip_all)]
-pub async fn stream_mp4(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), StreamMp4Error> {
+/// Resolve `file_id` (path param) + an auth token (Bearer header or `?token=`
+/// query, either form accepted since a `<video>` element can't set custom
+/// headers) to the file's on-disk path and detected content type.
+async fn authorize_and_locate_file(
+    req: &Request,
+    depot: &Depot,
+    id: &str,
+) -> Result<(PathBuf, String), FileDeliveryError> {
     let state = depot.obtain::<AppState>().unwrap();
-    let id: String = req.param::<String>("id").unwrap_or_default();
 
-    // Accept the stream token from either the Authorization header (for
-    // programmatic clients) or the ?token= query param (the <video> element
-    // can't set custom headers).
     let header_token = req
         .headers()
         .get("Authorization")
@@ -253,34 +250,32 @@ pub async fn stream_mp4(
         .map(str::to_owned);
     let token = header_token
         .or_else(|| req.queries().get("token").map(|s| s.to_string()))
-        .ok_or_else(|| StreamMp4Error::Unauthorized("Missing stream token".into()))?;
+        .ok_or_else(|| FileDeliveryError::Unauthorized("Missing stream token".into()))?;
 
-    // Validate stream token
     match state.services.auth.verify_stream_token(&token) {
         Ok(stream_id) => {
             if stream_id != id {
-                return Err(StreamMp4Error::Unauthorized(
+                return Err(FileDeliveryError::Unauthorized(
                     "Token does not match stream ID".into(),
                 ));
             }
         }
         Err(_) => {
-            return Err(StreamMp4Error::Unauthorized(
+            return Err(FileDeliveryError::Unauthorized(
                 "Invalid or expired stream token".into(),
             ));
         }
     }
 
-    debug!("Streaming media with ID: {}", id);
+    debug!("Resolving media file with ID: {}", id);
 
-    // Look up the file by ID to get its actual path
-    let file = match state.services.library.get_file_by_id(id.clone()).await {
+    let file = match state.services.library.get_file_by_id(id.to_string()).await {
         Ok(Some(f)) => f,
         Ok(None) => {
-            return Err(StreamMp4Error::NotFound("File not found".into()));
+            return Err(FileDeliveryError::NotFound("File not found".into()));
         }
         Err(_) => {
-            return Err(StreamMp4Error::InternalError(
+            return Err(FileDeliveryError::InternalError(
                 "Failed to look up file".into(),
             ));
         }
@@ -290,7 +285,7 @@ pub async fn stream_mp4(
 
     if !source_video_path.exists() {
         error!("Source video file not found: {:?}", source_video_path);
-        return Err(StreamMp4Error::NotFound(
+        return Err(FileDeliveryError::NotFound(
             "Source video file not found".into(),
         ));
     }
@@ -300,18 +295,71 @@ pub async fn stream_mp4(
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
-    // Serve the source file directly with range request support -- no
-    // transcoding, no remuxing, no cache copy.
-    serve_file_range(&source_video_path, &content_type, req, res).await
+    Ok((source_video_path, content_type))
+}
+
+/// Direct-play stream via HTTP Range. Serves the source file's bytes exactly
+/// as indexed on disk -- Beam never transcodes or remuxes media server-side
+/// (see ADR-0004); the response `Content-Type` reflects the file's actual
+/// detected MIME type rather than assuming MP4. Rendered inline (no
+/// `Content-Disposition`) so a `<video>` element plays it in place.
+#[endpoint(
+    tags("media"),
+    parameters(
+        ("file_id" = String, description = "File ID"),
+        ("Authorization" = String, Header, description = "Bearer <stream token> (alternative to ?token=)"),
+        ("token" = String, Query, description = "Stream token (alternative to the Authorization header, required for <video> playback)"),
+    ),
+)]
+#[tracing::instrument(skip_all)]
+pub async fn stream_file(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), FileDeliveryError> {
+    let id: String = req.param::<String>("file_id").unwrap_or_default();
+    let (path, content_type) = authorize_and_locate_file(req, depot, &id).await?;
+    serve_file_range(&path, &content_type, None, req, res).await
+}
+
+/// Download the full source file as an attachment. Same auth and Range
+/// support as [`stream_file`] (so a paused/interrupted download can resume),
+/// but sets `Content-Disposition: attachment` with the original filename so
+/// the browser saves it rather than attempting inline playback.
+#[endpoint(
+    tags("media"),
+    parameters(
+        ("file_id" = String, description = "File ID"),
+        ("Authorization" = String, Header, description = "Bearer <stream token> (alternative to ?token=)"),
+        ("token" = String, Query, description = "Stream token (alternative to the Authorization header)"),
+    ),
+)]
+#[tracing::instrument(skip_all)]
+pub async fn download_file(
+    req: &mut Request,
+    depot: &mut Depot,
+    res: &mut Response,
+) -> Result<(), FileDeliveryError> {
+    let id: String = req.param::<String>("file_id").unwrap_or_default();
+    let (path, content_type) = authorize_and_locate_file(req, depot, &id).await?;
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("{id}.bin"));
+    serve_file_range(&path, &content_type, Some(filename), req, res).await
 }
 
 /// Serve a file with HTTP range request support, using the given content type.
+/// `attachment_filename` set to `Some(name)` sends
+/// `Content-Disposition: attachment; filename="name"` (download); `None`
+/// leaves the disposition unset, so browsers render/play the response inline.
 async fn serve_file_range(
     file_path: &PathBuf,
     content_type: &str,
+    attachment_filename: Option<String>,
     req: &Request,
     res: &mut Response,
-) -> Result<(), StreamMp4Error> {
+) -> Result<(), FileDeliveryError> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     // Get file metadata
@@ -319,7 +367,7 @@ async fn serve_file_range(
         Ok(metadata) => metadata,
         Err(err) => {
             error!("Failed to get file metadata: {:?}", err);
-            return Err(StreamMp4Error::InternalError(
+            return Err(FileDeliveryError::InternalError(
                 "Failed to get file metadata".into(),
             ));
         }
@@ -333,19 +381,19 @@ async fn serve_file_range(
         let range_str = match range_header.to_str() {
             Ok(s) => s,
             Err(_) => {
-                return Err(StreamMp4Error::BadRequest("Invalid range header".into()));
+                return Err(FileDeliveryError::BadRequest("Invalid range header".into()));
             }
         };
 
         match parse_byte_range(range_str, file_size) {
             Ok((start, end)) => (start, end, StatusCode::PARTIAL_CONTENT),
             Err(RangeError::RangeNotSatisfiable { .. }) => {
-                return Err(StreamMp4Error::RangeNotSatisfiable(
+                return Err(FileDeliveryError::RangeNotSatisfiable(
                     "Range not satisfiable".into(),
                 ));
             }
             Err(_) => {
-                return Err(StreamMp4Error::BadRequest(
+                return Err(FileDeliveryError::BadRequest(
                     "Invalid range specification".into(),
                 ));
             }
@@ -359,7 +407,9 @@ async fn serve_file_range(
         Ok(f) => f,
         Err(err) => {
             error!("Failed to open file: {:?}", err);
-            return Err(StreamMp4Error::InternalError("Failed to open file".into()));
+            return Err(FileDeliveryError::InternalError(
+                "Failed to open file".into(),
+            ));
         }
     };
 
@@ -368,7 +418,7 @@ async fn serve_file_range(
         && let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await
     {
         error!("Failed to seek in file: {:?}", err);
-        return Err(StreamMp4Error::InternalError(
+        return Err(FileDeliveryError::InternalError(
             "Failed to seek in file".into(),
         ));
     }
@@ -385,6 +435,16 @@ async fn serve_file_range(
     );
     res.headers_mut()
         .insert("Accept-Ranges", "bytes".parse().unwrap());
+
+    if let Some(filename) = &attachment_filename {
+        let escaped = sanitize_disposition_filename(filename);
+        res.headers_mut().insert(
+            "Content-Disposition",
+            format!("attachment; filename=\"{escaped}\"")
+                .parse()
+                .unwrap(),
+        );
+    }
 
     // Add range headers for partial content
     if status_code == StatusCode::PARTIAL_CONTENT {
@@ -456,7 +516,7 @@ mod tests {
             .insert("range", "bytes=0-1023".parse().unwrap());
 
         let mut res = salvo::Response::new();
-        serve_file_range(&file_path, "video/mp4", &req, &mut res)
+        serve_file_range(&file_path, "video/mp4", None, &req, &mut res)
             .await
             .expect("serve_file_range should succeed");
 
@@ -468,6 +528,51 @@ mod tests {
         let body = res.take_bytes(None).await.expect("collect body");
         assert_eq!(body.len(), 1024, "response body must be exactly 1024 bytes");
         assert_eq!(&body[..], &data[..1024], "response body content must match");
+    }
+
+    #[tokio::test]
+    async fn test_serve_file_range_attachment_sets_content_disposition() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+        tmp.write_all(b"hello world").expect("write tempfile");
+        tmp.flush().expect("flush tempfile");
+        let file_path = PathBuf::from(tmp.path());
+
+        let req = salvo::Request::new();
+        let mut res = salvo::Response::new();
+        serve_file_range(
+            &file_path,
+            "video/mp4",
+            Some("My Movie (2024).mkv".to_string()),
+            &req,
+            &mut res,
+        )
+        .await
+        .expect("serve_file_range should succeed");
+
+        assert_eq!(
+            res.headers()
+                .get("Content-Disposition")
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"My Movie (2024).mkv\"")
+        );
+    }
+
+    #[test]
+    fn test_sanitize_disposition_filename_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            sanitize_disposition_filename(r#"weird"name\here.mkv"#),
+            r#"weird\"name\\here.mkv"#
+        );
+    }
+
+    #[test]
+    fn test_sanitize_disposition_filename_strips_control_characters() {
+        assert_eq!(
+            sanitize_disposition_filename("evil\r\nSet-Cookie: pwned=1"),
+            "evilSet-Cookie: pwned=1"
+        );
     }
 
     // ── parse_byte_range unit tests ───────────────────────────────────────
@@ -567,7 +672,7 @@ mod tests {
         );
     }
 
-    // ── stream_mp4 handler tests ──────────────────────────────────────────
+    // ── stream_file / download_file handler tests ─────────────────────────
 
     mod handler_tests {
         use std::path::PathBuf;
@@ -775,7 +880,7 @@ mod tests {
             let state = AppState::new(config, services);
             let router = Router::new()
                 .hoop(salvo::affix_state::inject(state))
-                .push(Router::with_path("stream/mp4/{id}").get(super::super::stream_mp4));
+                .push(Router::with_path("files/{file_id}/stream").get(super::super::stream_file));
 
             TestContext {
                 service: Service::new(router),
@@ -784,7 +889,7 @@ mod tests {
         }
 
         fn stream_url(id: &str) -> String {
-            format!("http://localhost/stream/mp4/{id}")
+            format!("http://localhost/files/{id}/stream")
         }
 
         // ── Tests ─────────────────────────────────────────────────────────

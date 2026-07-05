@@ -703,7 +703,8 @@ impl DbMetadataService {
             duration_secs: file.duration.map(|d| d.as_secs_f64()),
             video,
             audio_tracks,
-            stream_url: format!("/v1/stream/mp4/{}", file.id),
+            stream_url: format!("/v1/files/{}/stream", file.id),
+            download_url: format!("/v1/files/{}/download", file.id),
         })
     }
 }

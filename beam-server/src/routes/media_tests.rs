@@ -281,7 +281,8 @@ mod tests {
             duration_secs: Some(8160.0),
             video: None,
             audio_tracks: vec![],
-            stream_url: format!("/v1/stream/mp4/{file_id}"),
+            stream_url: format!("/v1/files/{file_id}/stream"),
+            download_url: format!("/v1/files/{file_id}/download"),
         }
     }
 
@@ -398,7 +399,11 @@ mod tests {
         assert_eq!(body.len(), 1);
         assert_eq!(
             body[0].stream_url,
-            "/v1/stream/mp4/33333333-3333-3333-3333-333333333333"
+            "/v1/files/33333333-3333-3333-3333-333333333333/stream"
+        );
+        assert_eq!(
+            body[0].download_url,
+            "/v1/files/33333333-3333-3333-3333-333333333333/download"
         );
     }
 

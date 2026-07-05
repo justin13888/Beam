@@ -136,12 +136,15 @@ function RouteComponent() {
 		let cancelled = false;
 		setError(null);
 		(async () => {
-			const tokenRes = await apiClient.POST("/v1/stream/{id}/token", {
-				params: {
-					path: { id: activeFileId },
-					header: { Authorization: `Bearer ${token}` },
+			const tokenRes = await apiClient.POST(
+				"/v1/files/{file_id}/stream-token",
+				{
+					params: {
+						path: { file_id: activeFileId },
+						header: { Authorization: `Bearer ${token}` },
+					},
 				},
-			});
+			);
 			if (cancelled) return;
 			if (tokenRes.error || !tokenRes.data) {
 				setError("Failed to obtain stream token.");
@@ -152,7 +155,7 @@ function RouteComponent() {
 			// rides in the query string; the browser then performs range
 			// requests directly against the streaming endpoint.
 			setStreamUrl(
-				`${env.C_STREAM_SERVER_URL}/v1/stream/mp4/${activeFileId}?token=${encodeURIComponent(streamToken)}`,
+				`${env.C_STREAM_SERVER_URL}/v1/files/${activeFileId}/stream?token=${encodeURIComponent(streamToken)}`,
 			);
 		})().catch((err) => {
 			if (!cancelled) setError(`Error loading video: ${err}`);

@@ -659,7 +659,11 @@ mod tests {
             .unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].file_id, file_id.to_string());
-        assert_eq!(sources[0].stream_url, format!("/v1/stream/mp4/{file_id}"));
+        assert_eq!(sources[0].stream_url, format!("/v1/files/{file_id}/stream"));
+        assert_eq!(
+            sources[0].download_url,
+            format!("/v1/files/{file_id}/download")
+        );
         assert_eq!(sources[0].size_bytes, 1024);
     }
 }

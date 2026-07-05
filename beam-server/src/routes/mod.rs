@@ -25,8 +25,6 @@ use crate::state::AppState;
 fn rest_routes() -> Router {
     Router::new()
         .push(Router::with_path("health").get(health_check))
-        .push(Router::with_path("stream/{id}/token").post(get_stream_token))
-        .push(Router::with_path("stream/mp4/{id}").get(stream_mp4))
         .push(Router::with_path("media").get(browse_media))
         .push(Router::with_path("media/{id}").get(get_media_detail))
         .push(Router::with_path("media/{id}/sources").get(get_media_sources))
@@ -34,6 +32,9 @@ fn rest_routes() -> Router {
         .push(Router::with_path("libraries/{id}").get(get_library))
         .push(Router::with_path("libraries/{id}/files").get(get_library_files))
         .push(Router::with_path("files/{file_id}/progress").put(report_playback_progress))
+        .push(Router::with_path("files/{file_id}/stream-token").post(get_stream_token))
+        .push(Router::with_path("files/{file_id}/stream").get(stream_file))
+        .push(Router::with_path("files/{file_id}/download").get(download_file))
         .push(Router::with_path("continue-watching").get(get_continue_watching))
         .push(
             Router::with_path("admin")

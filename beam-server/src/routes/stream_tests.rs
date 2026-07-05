@@ -18,7 +18,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::models::{FileContentType, FileIndexStatus, LibraryFile};
-    use crate::routes::{get_stream_token, stream_mp4};
+    use crate::routes::{download_file, get_stream_token, stream_file};
     use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
     use crate::services::hash::HashService;
     use crate::services::library::{LibraryError, LibraryService};
@@ -253,9 +253,12 @@ mod tests {
         let router = Router::new()
             .hoop(affix_state::inject(fixture.state.clone()))
             .push(
-                Router::with_path("v1")
-                    .push(Router::with_path("stream/{id}/token").post(get_stream_token))
-                    .push(Router::with_path("stream/mp4/{id}").get(stream_mp4)),
+                Router::with_path("v1").push(
+                    Router::with_path("files/{file_id}")
+                        .push(Router::with_path("stream-token").post(get_stream_token))
+                        .push(Router::with_path("stream").get(stream_file))
+                        .push(Router::with_path("download").get(download_file)),
+                ),
             );
         Service::new(router)
     }
@@ -278,7 +281,7 @@ mod tests {
         }
     }
 
-    // ─── Tests: POST /v1/stream/:id/token ─────────────────────────────────────
+    // ─── Tests: POST /v1/files/:file_id/stream-token ──────────────────────────
 
     /// A valid Bearer JWT should yield 200 and a JSON body containing `"token"`.
     #[tokio::test]
@@ -287,11 +290,13 @@ mod tests {
         let service = build_service(&fixture);
         let (jwt, _user_id) = register_and_get_token(&fixture.auth).await;
 
-        let mut res =
-            TestClient::post(format!("http://localhost/v1/stream/{}/token", TEST_FILE_ID))
-                .bearer_auth(&jwt)
-                .send(&service)
-                .await;
+        let mut res = TestClient::post(format!(
+            "http://localhost/v1/files/{}/stream-token",
+            TEST_FILE_ID
+        ))
+        .bearer_auth(&jwt)
+        .send(&service)
+        .await;
 
         assert_eq!(res.status_code, Some(StatusCode::OK));
         let body: Value = res.take_json().await.expect("valid JSON body");
@@ -307,9 +312,12 @@ mod tests {
         let fixture = make_test_state(vec![make_library_file(TEST_FILE_ID, "/tmp/video.mkv")]);
         let service = build_service(&fixture);
 
-        let res = TestClient::post(format!("http://localhost/v1/stream/{}/token", TEST_FILE_ID))
-            .send(&service)
-            .await;
+        let res = TestClient::post(format!(
+            "http://localhost/v1/files/{}/stream-token",
+            TEST_FILE_ID
+        ))
+        .send(&service)
+        .await;
 
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
@@ -320,10 +328,13 @@ mod tests {
         let fixture = make_test_state(vec![make_library_file(TEST_FILE_ID, "/tmp/video.mkv")]);
         let service = build_service(&fixture);
 
-        let res = TestClient::post(format!("http://localhost/v1/stream/{}/token", TEST_FILE_ID))
-            .add_header("Authorization", "NotBearer some-token", true)
-            .send(&service)
-            .await;
+        let res = TestClient::post(format!(
+            "http://localhost/v1/files/{}/stream-token",
+            TEST_FILE_ID
+        ))
+        .add_header("Authorization", "NotBearer some-token", true)
+        .send(&service)
+        .await;
 
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
@@ -334,21 +345,24 @@ mod tests {
         let fixture = make_test_state(vec![make_library_file(TEST_FILE_ID, "/tmp/video.mkv")]);
         let service = build_service(&fixture);
 
-        let res = TestClient::post(format!("http://localhost/v1/stream/{}/token", TEST_FILE_ID))
-            .bearer_auth("not.a.valid.jwt.token")
-            .send(&service)
-            .await;
+        let res = TestClient::post(format!(
+            "http://localhost/v1/files/{}/stream-token",
+            TEST_FILE_ID
+        ))
+        .bearer_auth("not.a.valid.jwt.token")
+        .send(&service)
+        .await;
 
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
 
-    // ─── Tests: GET /v1/stream/mp4/:id (Authorization: Bearer) ──────────────────
+    // ─── Tests: GET /v1/files/:file_id/stream (Authorization: Bearer) ─────────
 
     /// The handler must serve the source file's bytes directly -- no
     /// transcoding, no remuxing, no cache copy -- and must reflect the
     /// file's actual mime type in the response, not a hardcoded "video/mp4".
     #[tokio::test]
-    async fn test_stream_mp4_serves_source_file_directly() {
+    async fn test_stream_file_serves_source_file_directly() {
         let source_dir = TempDir::new().unwrap();
         let source_file = source_dir.path().join("video.mkv");
         let source_bytes = b"REAL SOURCE FILE BYTES, SERVED AS-IS";
@@ -366,7 +380,7 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let mut res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let mut res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
             .bearer_auth(&stream_token)
             .send(&service)
             .await;
@@ -379,6 +393,10 @@ mod tests {
             Some("video/x-matroska"),
             "Content-Type must reflect the file's actual mime type, not an assumed video/mp4"
         );
+        assert!(
+            res.headers().get("Content-Disposition").is_none(),
+            "stream endpoint must not set Content-Disposition (renders inline)"
+        );
         let body = res.take_bytes(None).await.expect("collect body");
         assert_eq!(
             &body[..],
@@ -390,7 +408,7 @@ mod tests {
     /// When the file has no known mime type, fall back to a generic binary
     /// content type rather than assuming a container format.
     #[tokio::test]
-    async fn test_stream_mp4_falls_back_to_octet_stream_without_mime_type() {
+    async fn test_stream_file_falls_back_to_octet_stream_without_mime_type() {
         let source_dir = TempDir::new().unwrap();
         let source_file = source_dir.path().join("video.unknown");
         std::fs::write(&source_file, b"DATA").unwrap();
@@ -407,7 +425,7 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
             .bearer_auth(&stream_token)
             .send(&service)
             .await;
@@ -423,7 +441,7 @@ mod tests {
     /// When the file is in the library but the source path does not exist on disk,
     /// the handler must return 404.
     #[tokio::test]
-    async fn test_stream_mp4_source_file_not_found() {
+    async fn test_stream_file_source_file_not_found() {
         let fixture = make_test_state(vec![make_library_file(
             TEST_FILE_ID,
             "/tmp/__nonexistent_source_video_xyz_beam_test__.mkv",
@@ -437,7 +455,7 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
             .bearer_auth(&stream_token)
             .send(&service)
             .await;
@@ -447,7 +465,7 @@ mod tests {
 
     /// When the file ID is not present in the library service, return 404.
     #[tokio::test]
-    async fn test_stream_mp4_file_id_not_in_library() {
+    async fn test_stream_file_file_id_not_in_library() {
         let fixture = make_test_state(vec![]); // empty library
         let service = build_service(&fixture);
 
@@ -458,7 +476,7 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
             .bearer_auth(&stream_token)
             .send(&service)
             .await;
@@ -468,11 +486,11 @@ mod tests {
 
     /// An invalid/tampered stream token must return 401.
     #[tokio::test]
-    async fn test_stream_mp4_invalid_stream_token() {
+    async fn test_stream_file_invalid_stream_token() {
         let fixture = make_test_state(vec![]);
         let service = build_service(&fixture);
 
-        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
             .bearer_auth("not.a.valid.token")
             .send(&service)
             .await;
@@ -483,7 +501,7 @@ mod tests {
     /// A stream token issued for a *different* file ID than the path param must
     /// return 401.
     #[tokio::test]
-    async fn test_stream_mp4_token_wrong_file_id() {
+    async fn test_stream_file_token_wrong_file_id() {
         let different_file_id = "22222222-2222-2222-2222-222222222222";
 
         let fixture = make_test_state(vec![]);
@@ -497,7 +515,7 @@ mod tests {
             .create_stream_token("dummy-user", different_file_id)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
             .bearer_auth(&stream_token)
             .send(&service)
             .await;
@@ -508,7 +526,7 @@ mod tests {
     /// A request without a Range header must return 200 and include
     /// `Accept-Ranges: bytes`.
     #[tokio::test]
-    async fn test_stream_mp4_no_range_header_returns_200() {
+    async fn test_stream_file_no_range_header_returns_200() {
         let source_dir = TempDir::new().unwrap();
         let source_file = source_dir.path().join("video.mkv");
         std::fs::write(&source_file, b"FAKE SOURCE DATA FOR RANGE TEST").unwrap();
@@ -526,7 +544,7 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
             .bearer_auth(&stream_token)
             .send(&service)
             .await;
@@ -544,7 +562,7 @@ mod tests {
     /// A `Range: bytes=0-99` request against a 200-byte source file must return
     /// 206 with the correct `Content-Range` and `Content-Length` headers.
     #[tokio::test]
-    async fn test_stream_mp4_range_header_returns_206() {
+    async fn test_stream_file_range_header_returns_206() {
         let source_dir = TempDir::new().unwrap();
         let source_file = source_dir.path().join("video.mkv");
         let data = vec![0u8; 200];
@@ -564,7 +582,7 @@ mod tests {
             .create_stream_token("dummy-user", TEST_FILE_ID)
             .expect("create_stream_token should succeed");
 
-        let res = TestClient::get(format!("http://localhost/v1/stream/mp4/{}", TEST_FILE_ID))
+        let res = TestClient::get(format!("http://localhost/v1/files/{}/stream", TEST_FILE_ID))
             .bearer_auth(&stream_token)
             .add_header("Range", "bytes=0-99", true)
             .send(&service)
@@ -586,5 +604,107 @@ mod tests {
             Some("100"),
             "Expected Content-Length of 100"
         );
+    }
+
+    // ─── Tests: GET /v1/files/:file_id/download ───────────────────────────────
+
+    /// The download endpoint must serve the same untouched source bytes as
+    /// stream, but with a `Content-Disposition: attachment` header carrying
+    /// the file's original on-disk name so browsers save it instead of trying
+    /// to play it inline.
+    #[tokio::test]
+    async fn test_download_file_sets_attachment_disposition_with_filename() {
+        let source_dir = TempDir::new().unwrap();
+        let source_file = source_dir.path().join("My Movie (2024).mkv");
+        let source_bytes = b"REAL SOURCE FILE BYTES";
+        std::fs::write(&source_file, source_bytes).unwrap();
+
+        let fixture = make_test_state(vec![make_library_file(
+            TEST_FILE_ID,
+            source_file.to_str().unwrap(),
+        )]);
+        let service = build_service(&fixture);
+
+        let stream_token = fixture
+            .state
+            .services
+            .auth
+            .create_stream_token("dummy-user", TEST_FILE_ID)
+            .expect("create_stream_token should succeed");
+
+        let mut res = TestClient::get(format!(
+            "http://localhost/v1/files/{}/download",
+            TEST_FILE_ID
+        ))
+        .bearer_auth(&stream_token)
+        .send(&service)
+        .await;
+
+        assert_eq!(res.status_code, Some(StatusCode::OK));
+        assert_eq!(
+            res.headers()
+                .get("Content-Disposition")
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"My Movie (2024).mkv\"")
+        );
+        let body = res.take_bytes(None).await.expect("collect body");
+        assert_eq!(&body[..], &source_bytes[..]);
+    }
+
+    /// Download supports Range requests too, so an interrupted download can
+    /// resume rather than restarting from byte zero.
+    #[tokio::test]
+    async fn test_download_file_supports_range_requests() {
+        let source_dir = TempDir::new().unwrap();
+        let source_file = source_dir.path().join("video.mkv");
+        let data = vec![0u8; 200];
+        std::fs::write(&source_file, &data).unwrap();
+
+        let fixture = make_test_state(vec![make_library_file(
+            TEST_FILE_ID,
+            source_file.to_str().unwrap(),
+        )]);
+        let service = build_service(&fixture);
+
+        let stream_token = fixture
+            .state
+            .services
+            .auth
+            .create_stream_token("dummy-user", TEST_FILE_ID)
+            .expect("create_stream_token should succeed");
+
+        let res = TestClient::get(format!(
+            "http://localhost/v1/files/{}/download",
+            TEST_FILE_ID
+        ))
+        .bearer_auth(&stream_token)
+        .add_header("Range", "bytes=100-199", true)
+        .send(&service)
+        .await;
+
+        assert_eq!(res.status_code, Some(StatusCode::PARTIAL_CONTENT));
+        assert_eq!(
+            res.headers()
+                .get("Content-Range")
+                .and_then(|v| v.to_str().ok()),
+            Some("bytes 100-199/200")
+        );
+    }
+
+    /// An invalid/tampered stream token must return 401 for downloads too.
+    #[tokio::test]
+    async fn test_download_file_invalid_stream_token() {
+        let fixture = make_test_state(vec![]);
+        let service = build_service(&fixture);
+
+        let res = TestClient::get(format!(
+            "http://localhost/v1/files/{}/download",
+            TEST_FILE_ID
+        ))
+        .bearer_auth("not.a.valid.token")
+        .send(&service)
+        .await;
+
+        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
 }
