@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show};
+use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show, ShowSearchQuery};
 use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
@@ -11,6 +11,9 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Show>, DbErr>;
     async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr>;
     async fn find_all(&self) -> Result<Vec<Show>, DbErr>;
+    /// Server-side filtered/ranked search, mirroring
+    /// `MovieRepository::search`.
+    async fn search(&self, query: &ShowSearchQuery) -> Result<Vec<Show>, DbErr>;
     async fn create(&self, create: CreateShow) -> Result<Show, DbErr>;
     async fn ensure_library_association(
         &self,
@@ -74,6 +77,47 @@ pub mod in_memory {
 
         async fn find_all(&self) -> Result<Vec<Show>, DbErr> {
             Ok(self.shows.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn search(&self, query: &ShowSearchQuery) -> Result<Vec<Show>, DbErr> {
+            use crate::models::search::title_match_score;
+
+            let mut scored: Vec<(f64, Show)> = self
+                .shows
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|s| {
+                    if query.year.is_some_and(|y| s.year != Some(y)) {
+                        return false;
+                    }
+                    if query.year_from.is_some_and(|yf| s.year.unwrap_or(0) < yf) {
+                        return false;
+                    }
+                    if query
+                        .year_to
+                        .is_some_and(|yt| s.year.unwrap_or(u32::MAX) > yt)
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .filter_map(|s| {
+                    let score = match &query.query {
+                        Some(q) => title_match_score(&s.title, q),
+                        None => 1.0,
+                    };
+                    (score > 0.0).then(|| (score, s.clone()))
+                })
+                .collect();
+
+            scored.sort_by(|(a_score, a), (b_score, b)| {
+                b_score
+                    .partial_cmp(a_score)
+                    .unwrap()
+                    .then_with(|| a.title.cmp(&b.title))
+            });
+            Ok(scored.into_iter().map(|(_, s)| s).collect())
         }
 
         async fn create(&self, create: CreateShow) -> Result<Show, DbErr> {

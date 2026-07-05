@@ -52,6 +52,16 @@ pub struct CreateShow {
     pub year: Option<u32>,
 }
 
+/// Server-side search/filter parameters for shows. See
+/// [`crate::models::movie::MovieSearchQuery`] for the movie-side equivalent.
+#[derive(Debug, Clone, Default)]
+pub struct ShowSearchQuery {
+    pub query: Option<String>,
+    pub year: Option<u32>,
+    pub year_from: Option<u32>,
+    pub year_to: Option<u32>,
+}
+
 /// Parameters for creating an episode
 #[derive(Debug, Clone)]
 pub struct CreateEpisode {

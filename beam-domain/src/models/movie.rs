@@ -43,6 +43,19 @@ pub struct CreateMovie {
     pub runtime: Option<Duration>,
 }
 
+/// Server-side search/filter parameters for movies. `Sql*Repository` scores
+/// `query` via Postgres `pg_trgm` similarity; `InMemory*Repository` uses
+/// [`crate::models::search::title_match_score`] as an offline stand-in.
+#[derive(Debug, Clone, Default)]
+pub struct MovieSearchQuery {
+    pub query: Option<String>,
+    pub year: Option<u32>,
+    pub year_from: Option<u32>,
+    pub year_to: Option<u32>,
+    /// Minimum rating on the same 0-100 scale as `rating_tmdb * 10`.
+    pub min_rating: Option<u32>,
+}
+
 /// Parameters for creating a movie entry
 #[derive(Debug, Clone)]
 pub struct CreateMovieEntry {

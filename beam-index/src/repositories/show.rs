@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
-use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show};
+use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show, ShowSearchQuery};
 use beam_domain::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 use beam_domain::repositories::ShowRepository;
 
@@ -45,6 +45,50 @@ impl ShowRepository for SqlShowRepository {
         use sea_orm::EntityTrait;
 
         let models = show::Entity::find().all(&self.db).await?;
+        Ok(models.into_iter().map(Show::from).collect())
+    }
+
+    async fn search(&self, query: &ShowSearchQuery) -> Result<Vec<Show>, DbErr> {
+        use beam_entity::show;
+        use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
+
+        let mut conditions: Vec<String> = Vec::new();
+        let mut values: Vec<Value> = Vec::new();
+
+        // Pushed first (when present) so its placeholder index is always $1,
+        // letting ORDER BY reuse it without recomputing the index.
+        if let Some(q) = &query.query {
+            values.push(q.clone().into());
+            conditions
+                .push("(similarity(title, $1) > 0.2 OR title ILIKE '%' || $1 || '%')".to_string());
+        }
+        if let Some(y) = query.year {
+            values.push((y as i32).into());
+            conditions.push(format!("year = ${}", values.len()));
+        }
+        if let Some(yf) = query.year_from {
+            values.push((yf as i32).into());
+            conditions.push(format!("year >= ${}", values.len()));
+        }
+        if let Some(yt) = query.year_to {
+            values.push((yt as i32).into());
+            conditions.push(format!("year <= ${}", values.len()));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+        let order_by = if query.query.is_some() {
+            "ORDER BY similarity(title, $1) DESC, title ASC"
+        } else {
+            "ORDER BY title ASC"
+        };
+
+        let sql = format!("SELECT * FROM shows {where_clause} {order_by}");
+        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
+        let models = show::Model::find_by_statement(stmt).all(&self.db).await?;
         Ok(models.into_iter().map(Show::from).collect())
     }
 

@@ -4,6 +4,7 @@ pub mod file;
 pub mod genre;
 pub mod library;
 pub mod movie;
+pub mod search;
 pub mod show;
 pub mod stream;
 
@@ -13,5 +14,6 @@ pub use file::*;
 pub use genre::*;
 pub use library::*;
 pub use movie::*;
+pub use search::*;
 pub use show::*;
 pub use stream::*;

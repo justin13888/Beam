@@ -423,41 +423,19 @@ impl MetadataService for DbMetadataService {
         let include_shows = filters.media_type != Some(MediaTypeFilter::Movie);
 
         if include_movies {
-            match self.movie_repo.find_all().await {
+            let movie_query = beam_domain::models::MovieSearchQuery {
+                query: filters.query.clone(),
+                year: filters.year,
+                year_from: filters.year_from,
+                year_to: filters.year_to,
+                min_rating: filters.min_rating,
+            };
+            match self.movie_repo.search(&movie_query).await {
                 Ok(movies) => {
                     for movie in movies {
                         let year = movie.year;
                         let title = movie.title.clone();
                         let id = movie.id;
-                        // Apply filters
-                        if filters.year.is_some_and(|y| year != Some(y)) {
-                            continue;
-                        }
-                        if filters
-                            .year_from
-                            .is_some_and(|y_from| year.unwrap_or(0) < y_from)
-                        {
-                            continue;
-                        }
-                        if filters
-                            .year_to
-                            .is_some_and(|y_to| year.unwrap_or(u32::MAX) > y_to)
-                        {
-                            continue;
-                        }
-                        if filters
-                            .query
-                            .as_ref()
-                            .is_some_and(|q| !title.to_lowercase().contains(&q.to_lowercase()))
-                        {
-                            continue;
-                        }
-                        if let Some(min_r) = filters.min_rating {
-                            let rating = movie.rating_tmdb.map(|r| (r * 10.0) as u32).unwrap_or(0);
-                            if rating < min_r {
-                                continue;
-                            }
-                        }
                         // Build lightweight metadata (no deep stream loading for search)
                         let metadata = MediaMetadata::Movie(MovieMetadata {
                             id: id.to_string(),
@@ -505,35 +483,18 @@ impl MetadataService for DbMetadataService {
         }
 
         if include_shows {
-            match self.show_repo.find_all().await {
+            let show_query = beam_domain::models::ShowSearchQuery {
+                query: filters.query.clone(),
+                year: filters.year,
+                year_from: filters.year_from,
+                year_to: filters.year_to,
+            };
+            match self.show_repo.search(&show_query).await {
                 Ok(shows) => {
                     for show in shows {
                         let year = show.year;
                         let title = show.title.clone();
                         let id = show.id;
-                        // Apply filters
-                        if filters.year.is_some_and(|y| year != Some(y)) {
-                            continue;
-                        }
-                        if filters
-                            .year_from
-                            .is_some_and(|y_from| year.unwrap_or(0) < y_from)
-                        {
-                            continue;
-                        }
-                        if filters
-                            .year_to
-                            .is_some_and(|y_to| year.unwrap_or(u32::MAX) > y_to)
-                        {
-                            continue;
-                        }
-                        if filters
-                            .query
-                            .as_ref()
-                            .is_some_and(|q| !title.to_lowercase().contains(&q.to_lowercase()))
-                        {
-                            continue;
-                        }
                         let metadata = MediaMetadata::Show(ShowMetadata {
                             id: id.to_string(),
                             title: Title {
