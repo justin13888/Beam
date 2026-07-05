@@ -1,4 +1,3 @@
-import type { ApolloClient } from "@apollo/client";
 import { TanStackDevtools } from "@tanstack/react-devtools";
 import type { QueryClient } from "@tanstack/react-query";
 import { createRootRouteWithContext, Outlet } from "@tanstack/react-router";
@@ -10,7 +9,6 @@ import TanStackQueryDevtools from "../integrations/tanstack-query/devtools";
 
 interface MyRouterContext {
 	queryClient: QueryClient;
-	apolloClient: ApolloClient;
 	auth: AuthContextType;
 }
 

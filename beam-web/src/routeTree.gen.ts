@@ -18,9 +18,6 @@ import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as MediaIdRouteImport } from './routes/media.$id'
 import { Route as LibrariesIdRouteImport } from './routes/libraries.$id'
-import { Route as DemoTanstackQueryRouteImport } from './routes/demo/tanstack-query'
-import { Route as DemoFormSimpleRouteImport } from './routes/demo/form.simple'
-import { Route as DemoFormAddressRouteImport } from './routes/demo/form.address'
 
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
@@ -67,21 +64,6 @@ const LibrariesIdRoute = LibrariesIdRouteImport.update({
   path: '/$id',
   getParentRoute: () => LibrariesRoute,
 } as any)
-const DemoTanstackQueryRoute = DemoTanstackQueryRouteImport.update({
-  id: '/demo/tanstack-query',
-  path: '/demo/tanstack-query',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DemoFormSimpleRoute = DemoFormSimpleRouteImport.update({
-  id: '/demo/form/simple',
-  path: '/demo/form/simple',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DemoFormAddressRoute = DemoFormAddressRouteImport.update({
-  id: '/demo/form/address',
-  path: '/demo/form/address',
-  getParentRoute: () => rootRouteImport,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -91,11 +73,8 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/register': typeof RegisterRoute
-  '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
-  '/demo/form/address': typeof DemoFormAddressRoute
-  '/demo/form/simple': typeof DemoFormSimpleRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -105,11 +84,8 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/register': typeof RegisterRoute
-  '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
-  '/demo/form/address': typeof DemoFormAddressRoute
-  '/demo/form/simple': typeof DemoFormSimpleRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -120,11 +96,8 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/register': typeof RegisterRoute
-  '/demo/tanstack-query': typeof DemoTanstackQueryRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
-  '/demo/form/address': typeof DemoFormAddressRoute
-  '/demo/form/simple': typeof DemoFormSimpleRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -136,11 +109,8 @@ export interface FileRouteTypes {
     | '/login'
     | '/profile'
     | '/register'
-    | '/demo/tanstack-query'
     | '/libraries/$id'
     | '/media/$id'
-    | '/demo/form/address'
-    | '/demo/form/simple'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -150,11 +120,8 @@ export interface FileRouteTypes {
     | '/login'
     | '/profile'
     | '/register'
-    | '/demo/tanstack-query'
     | '/libraries/$id'
     | '/media/$id'
-    | '/demo/form/address'
-    | '/demo/form/simple'
   id:
     | '__root__'
     | '/'
@@ -164,11 +131,8 @@ export interface FileRouteTypes {
     | '/login'
     | '/profile'
     | '/register'
-    | '/demo/tanstack-query'
     | '/libraries/$id'
     | '/media/$id'
-    | '/demo/form/address'
-    | '/demo/form/simple'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -179,10 +143,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   ProfileRoute: typeof ProfileRoute
   RegisterRoute: typeof RegisterRoute
-  DemoTanstackQueryRoute: typeof DemoTanstackQueryRoute
   MediaIdRoute: typeof MediaIdRoute
-  DemoFormAddressRoute: typeof DemoFormAddressRoute
-  DemoFormSimpleRoute: typeof DemoFormSimpleRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -250,27 +211,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LibrariesIdRouteImport
       parentRoute: typeof LibrariesRoute
     }
-    '/demo/tanstack-query': {
-      id: '/demo/tanstack-query'
-      path: '/demo/tanstack-query'
-      fullPath: '/demo/tanstack-query'
-      preLoaderRoute: typeof DemoTanstackQueryRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/demo/form/simple': {
-      id: '/demo/form/simple'
-      path: '/demo/form/simple'
-      fullPath: '/demo/form/simple'
-      preLoaderRoute: typeof DemoFormSimpleRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/demo/form/address': {
-      id: '/demo/form/address'
-      path: '/demo/form/address'
-      fullPath: '/demo/form/address'
-      preLoaderRoute: typeof DemoFormAddressRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
@@ -294,10 +234,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   ProfileRoute: ProfileRoute,
   RegisterRoute: RegisterRoute,
-  DemoTanstackQueryRoute: DemoTanstackQueryRoute,
   MediaIdRoute: MediaIdRoute,
-  DemoFormAddressRoute: DemoFormAddressRoute,
-  DemoFormSimpleRoute: DemoFormSimpleRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -1,7 +1,6 @@
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
-import { env } from "@/env";
 
 import * as TanStackQueryProvider from "./integrations/tanstack-query/root-provider.tsx";
 
@@ -10,38 +9,7 @@ import { routeTree } from "./routeTree.gen";
 
 import "./styles.css";
 
-import { ApolloClient, HttpLink, InMemoryCache } from "@apollo/client";
-import { setContext } from "@apollo/client/link/context";
-import { ApolloProvider } from "@apollo/client/react";
 import { AuthProvider, useAuth } from "./hooks/auth";
-import reportWebVitals from "./reportWebVitals.ts";
-
-const httpLink = new HttpLink({ uri: `${env.C_STREAM_SERVER_URL}/v1/graphql` });
-
-const authLink = setContext((_, { headers }) => {
-	const token = localStorage.getItem("token");
-	return {
-		headers: {
-			...headers,
-			authorization: token ? `Bearer ${token}` : "",
-		},
-	};
-});
-
-const client = new ApolloClient({
-	link: authLink.concat(httpLink),
-	cache: new InMemoryCache(),
-	defaultOptions: {
-		watchQuery: {
-			fetchPolicy: "cache-and-network",
-			errorPolicy: "none",
-		},
-		query: {
-			fetchPolicy: "network-only",
-			errorPolicy: "none",
-		},
-	},
-});
 
 // Create a new router instance
 const TanStackQueryProviderContext = TanStackQueryProvider.getContext();
@@ -49,7 +17,6 @@ const router = createRouter({
 	routeTree,
 	context: {
 		...TanStackQueryProviderContext,
-		apolloClient: client,
 		// biome-ignore lint/style/noNonNullAssertion: intentional placeholder overwritten by RouterProvider
 		auth: undefined!,
 	},
@@ -78,17 +45,10 @@ if (rootElement && !rootElement.innerHTML) {
 	root.render(
 		<StrictMode>
 			<AuthProvider>
-				<ApolloProvider client={client}>
-					<TanStackQueryProvider.Provider {...TanStackQueryProviderContext}>
-						<App />
-					</TanStackQueryProvider.Provider>
-				</ApolloProvider>
+				<TanStackQueryProvider.Provider {...TanStackQueryProviderContext}>
+					<App />
+				</TanStackQueryProvider.Provider>
 			</AuthProvider>
 		</StrictMode>,
 	);
 }
-
-// If you want to start measuring performance in your app, pass a function
-// to log results (for example: reportWebVitals(console.log))
-// or send to an analytics endpoint. Learn more: https://bit.ly/CRA-vitals
-reportWebVitals();

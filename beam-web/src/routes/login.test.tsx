@@ -151,9 +151,33 @@ describe("LoginPage", () => {
 		await user.type(screen.getByLabelText(/^password$/i), "wrongpassword");
 		await user.click(screen.getByRole("button", { name: /sign in/i }));
 
-		// Error is the stringified apiError object
+		// The error object's `message` field is surfaced, not the useless
+		// "[object Object]" that `String(apiError)` would produce.
 		await waitFor(() => {
-			expect(screen.getByText("[object Object]")).toBeInTheDocument();
+			expect(screen.getByText("Invalid credentials")).toBeInTheDocument();
+		});
+		expect(mockNavigate).not.toHaveBeenCalled();
+	});
+
+	it("on a plain-string error body: shows the string directly", async () => {
+		mockPost.mockResolvedValue({
+			data: undefined,
+			error: "Invalid or expired token",
+			response: { ok: false } as Response,
+		});
+
+		const user = userEvent.setup();
+		renderLoginPage();
+
+		await user.type(
+			screen.getByRole("textbox", { name: /username or email/i }),
+			"testuser",
+		);
+		await user.type(screen.getByLabelText(/^password$/i), "wrongpassword");
+		await user.click(screen.getByRole("button", { name: /sign in/i }));
+
+		await waitFor(() => {
+			expect(screen.getByText("Invalid or expired token")).toBeInTheDocument();
 		});
 		expect(mockNavigate).not.toHaveBeenCalled();
 	});

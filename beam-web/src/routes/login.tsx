@@ -6,6 +6,23 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { useAuth } from "../hooks/auth";
 
+/** Extract a human-readable message from an openapi-fetch error body, which
+ * may be a plain string (the server's `text/plain` error responses) or an
+ * object shaped `{ message: string }`. Never falls back to `String(error)` --
+ * for a plain object that stringifies to the useless literal "[object Object]". */
+function extractErrorMessage(error: unknown, fallback: string): string {
+	if (typeof error === "string" && error.length > 0) return error;
+	if (
+		error &&
+		typeof error === "object" &&
+		"message" in error &&
+		typeof (error as { message: unknown }).message === "string"
+	) {
+		return (error as { message: string }).message;
+	}
+	return fallback;
+}
+
 export const Route = createFileRoute("/login")({
 	component: LoginPage,
 });
@@ -38,7 +55,7 @@ export function LoginPage() {
 			});
 
 			if (!response.ok || !data) {
-				throw new Error(apiError ? String(apiError) : "Login failed");
+				throw new Error(extractErrorMessage(apiError, "Login failed"));
 			}
 
 			login(data);

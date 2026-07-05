@@ -1,127 +1,50 @@
-import type { ApolloClient } from "@apollo/client";
-import { gql, type TypedDocumentNode } from "@apollo/client";
 import { queryOptions } from "@tanstack/react-query";
 import { createFileRoute, ErrorComponent } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import type { components } from "@/api.gen";
 import { env } from "@/env";
-import type {
-	GetMediaMetadataByIdQuery,
-	GetMediaMetadataByIdQueryVariables,
-} from "@/gql";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
 
-const GET_METADATA_BY_ID: TypedDocumentNode<
-	GetMediaMetadataByIdQuery,
-	GetMediaMetadataByIdQueryVariables
-> = gql`
-	query GetMediaMetadataById($mediaId: ID!) {
-		metadata(id: $mediaId) {
-			__typename
-			... on MovieMetadata {
-				id
-				title {
-					original
-					localized
-					alternatives
-				}
-				description
-				year
-				releaseDate
-				runtime
-				duration
-				posterUrl
-				backdropUrl
-				genres
-				ratings {
-					tmdb
-				}
-				identifiers {
-					imdbId
-					tmdbId
-					tvdbId
-				}
-				fileId
-			}
-			... on ShowMetadata {
-				id
-				title {
-					original
-					localized
-					alternatives
-				}
-				description
-				year
-				seasons {
-					seasonNumber
-					dates {
-						firstAired
-						lastAired
-					}
-					episodeRuntime
-					episodes {
-						id
-						episodeNumber
-						title
-						description
-						airDate
-						thumbnailUrl
-						duration
-						fileId
-					}
-					posterUrl
-					genres
-					ratings {
-						tmdb
-					}
-					identifiers {
-						imdbId
-						tmdbId
-						tvdbId
-					}
-				}
-			}
-		}
-	}
-`;
+type MediaMetadata =
+	components["schemas"]["beam_server.models.media.MediaMetadata"];
+type ShowMetadata =
+	components["schemas"]["beam_server.models.media.show.ShowMetadata"];
 
-const mediaQueryOptions = (mediaId: string, apolloClient: ApolloClient) =>
+const mediaQueryOptions = (mediaId: string, token: string) =>
 	queryOptions({
 		queryKey: ["media", mediaId],
-		queryFn: async () => {
-			const result = await apolloClient.query({
-				query: GET_METADATA_BY_ID,
-				variables: { mediaId },
+		queryFn: async (): Promise<MediaMetadata | null> => {
+			const { data, error, response } = await apiClient.GET("/v1/media/{id}", {
+				params: {
+					path: { id: mediaId },
+					header: { Authorization: `Bearer ${token}` },
+				},
 			});
-			return result.data;
+			if (response.status === 404) return null;
+			if (error) throw new Error("Failed to load media metadata");
+			return data ?? null;
 		},
 	});
 
 export const Route = createFileRoute("/media/$id")({
-	loader: async ({
-		context: { queryClient, apolloClient },
-		params: { id },
-	}) => {
-		return queryClient.ensureQueryData(mediaQueryOptions(id, apolloClient));
+	loader: async ({ context: { queryClient, auth }, params: { id } }) => {
+		return queryClient.ensureQueryData(mediaQueryOptions(id, auth.token ?? ""));
 	},
 	errorComponent: ({ error }) => <ErrorComponent error={error} />,
 	component: RouteComponent,
 });
 
-type ShowMeta = Extract<
-	NonNullable<GetMediaMetadataByIdQuery["metadata"]>,
-	{ __typename: "ShowMetadata" }
->;
-
 function RouteComponent() {
-	const data = Route.useLoaderData();
-	const metadata = data?.metadata;
+	const metadata = Route.useLoaderData();
 	const { token } = useAuth();
+
+	const movie = metadata && "Movie" in metadata ? metadata.Movie : null;
+	const show = metadata && "Show" in metadata ? metadata.Show : null;
 
 	// For a movie the file is its primary file; for a show the user picks an
 	// episode and that drives playback.
-	const initialFileId =
-		metadata?.__typename === "MovieMetadata" ? (metadata.fileId ?? null) : null;
+	const initialFileId = movie?.file_id ?? null;
 	const [activeFileId, setActiveFileId] = useState<string | null>(
 		initialFileId,
 	);
@@ -165,7 +88,7 @@ function RouteComponent() {
 		};
 	}, [token, activeFileId]);
 
-	if (!metadata) {
+	if (!metadata || (!movie && !show)) {
 		return (
 			<div className="container mx-auto p-4">
 				<p>Media not found.</p>
@@ -173,13 +96,20 @@ function RouteComponent() {
 		);
 	}
 
-	const title = metadata.title.original;
-	const year = metadata.year;
-	const description = metadata.description ?? null;
-	const posterUrl =
-		metadata.__typename === "MovieMetadata"
-			? metadata.posterUrl
-			: (metadata.seasons[0]?.posterUrl ?? null);
+	const media = movie ?? show;
+	if (!media) {
+		return (
+			<div className="container mx-auto p-4">
+				<p>Media not found.</p>
+			</div>
+		);
+	}
+	const title = media.title.original;
+	const year = media.year;
+	const description = media.description ?? null;
+	const posterUrl = movie
+		? movie.poster_url
+		: (show?.seasons[0]?.poster_url ?? null);
 
 	return (
 		<div className="container mx-auto p-4">
@@ -208,15 +138,13 @@ function RouteComponent() {
 				/>
 			) : (
 				<p className="mb-6 text-gray-500">
-					{metadata.__typename === "ShowMetadata"
-						? "Select an episode to play."
-						: "No streamable file."}
+					{show ? "Select an episode to play." : "No streamable file."}
 				</p>
 			)}
 
-			{metadata.__typename === "ShowMetadata" && (
+			{show && (
 				<EpisodeList
-					show={metadata}
+					show={show}
 					activeFileId={activeFileId}
 					onSelect={setActiveFileId}
 				/>
@@ -230,33 +158,33 @@ function EpisodeList({
 	activeFileId,
 	onSelect,
 }: {
-	show: ShowMeta;
+	show: ShowMetadata;
 	activeFileId: string | null;
 	onSelect: (fileId: string) => void;
 }) {
 	return (
 		<div className="space-y-6">
 			{show.seasons.map((season) => (
-				<section key={season.seasonNumber}>
+				<section key={season.season_number}>
 					<h2 className="mb-3 text-xl font-semibold">
-						Season {season.seasonNumber}
+						Season {season.season_number}
 					</h2>
 					<ul className="divide-y divide-gray-700">
 						{season.episodes.map((episode) => {
 							const isActive =
-								!!episode.fileId && episode.fileId === activeFileId;
+								!!episode.file_id && episode.file_id === activeFileId;
 							return (
 								<li key={episode.id}>
 									<button
 										type="button"
-										disabled={!episode.fileId}
+										disabled={!episode.file_id}
 										onClick={() => {
-											if (episode.fileId) onSelect(episode.fileId);
+											if (episode.file_id) onSelect(episode.file_id);
 										}}
 										className={`w-full px-2 py-3 text-left hover:bg-gray-800 disabled:opacity-50 ${isActive ? "bg-gray-800" : ""}`}
 									>
 										<span className="mr-2 text-gray-400">
-											{episode.episodeNumber}.
+											{episode.episode_number}.
 										</span>
 										<span>{episode.title}</span>
 										{episode.description && (

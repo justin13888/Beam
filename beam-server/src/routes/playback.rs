@@ -37,6 +37,7 @@ fn parse_user_id(user_id: &str) -> Result<Uuid, ApiError> {
         ("file_id" = String, description = "File id (UUID)"),
         ("Authorization" = String, Header, description = "Bearer <user JWT>"),
     ),
+    request_body = ReportProgressRequest,
 )]
 pub async fn report_playback_progress(
     req: &mut Request,

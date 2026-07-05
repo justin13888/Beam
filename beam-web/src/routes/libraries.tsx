@@ -1,5 +1,4 @@
-import { gql } from "@apollo/client";
-import { useMutation, useQuery } from "@apollo/client/react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
 	ChevronRight,
@@ -13,51 +12,15 @@ import {
 	Trash2,
 } from "lucide-react";
 import { useId, useState } from "react";
+import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useAuth } from "@/hooks/auth";
+import { apiClient } from "@/lib/apiClient";
 import { RouteError } from "../components/RouteError";
-import type { Library, MutationRoot, QueryRoot } from "../gql";
 
-const GET_LIBRARIES = gql`
-  query GetLibraries {
-    libraries {
-      id
-      name
-      description
-      size
-      lastScanStartedAt
-      lastScanFinishedAt
-      lastScanFileCount
-    }
-  }
-`;
-
-const CREATE_LIBRARY = gql`
-  mutation CreateLibrary($name: String!, $rootPath: String!) {
-    createLibrary(name: $name, rootPath: $rootPath) {
-      id
-      name
-      description
-      size
-      lastScanStartedAt
-      lastScanFinishedAt
-      lastScanFileCount
-    }
-  }
-`;
-
-const SCAN_LIBRARY = gql`
-  mutation ScanLibrary($id: ID!) {
-    scanLibrary(id: $id)
-  }
-`;
-
-const DELETE_LIBRARY = gql`
-  mutation DeleteLibrary($id: ID!) {
-    deleteLibrary(id: $id)
-  }
-`;
+type Library = components["schemas"]["beam_server.models.library.Library"];
 
 export const Route = createFileRoute("/libraries")({
 	errorComponent: RouteError,
@@ -83,10 +46,10 @@ function formatTimeAgo(dateStr: unknown): string {
 
 function ScanStatusBadge({ library }: { library: Library }) {
 	const isScanning =
-		library.lastScanStartedAt &&
-		(!library.lastScanFinishedAt ||
-			new Date(library.lastScanStartedAt as string) >
-				new Date(library.lastScanFinishedAt as string));
+		library.last_scan_started_at &&
+		(!library.last_scan_finished_at ||
+			new Date(library.last_scan_started_at) >
+				new Date(library.last_scan_finished_at));
 
 	if (isScanning) {
 		return (
@@ -97,11 +60,11 @@ function ScanStatusBadge({ library }: { library: Library }) {
 		);
 	}
 
-	if (library.lastScanFinishedAt) {
+	if (library.last_scan_finished_at) {
 		return (
 			<span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
 				<Clock size={12} />
-				{formatTimeAgo(library.lastScanFinishedAt)}
+				{formatTimeAgo(library.last_scan_finished_at)}
 			</span>
 		);
 	}
@@ -114,15 +77,65 @@ function ScanStatusBadge({ library }: { library: Library }) {
 }
 
 function LibrariesPage() {
-	const { data, loading, error, refetch } = useQuery<QueryRoot>(GET_LIBRARIES);
-	const [createLibrary, { loading: creating, error: createError }] =
-		useMutation<MutationRoot, { name: string; rootPath: string }>(
-			CREATE_LIBRARY,
-		);
-	const [scanLibrary] = useMutation<MutationRoot, { id: string }>(SCAN_LIBRARY);
-	const [deleteLibrary] = useMutation<MutationRoot, { id: string }>(
-		DELETE_LIBRARY,
-	);
+	const { token } = useAuth();
+	const queryClient = useQueryClient();
+	const {
+		data,
+		isLoading: loading,
+		error,
+		refetch,
+	} = useQuery({
+		queryKey: ["libraries"],
+		queryFn: async () => {
+			const { data, error } = await apiClient.GET("/v1/libraries", {
+				params: { header: { Authorization: `Bearer ${token}` } },
+			});
+			if (error) throw new Error("Failed to load libraries");
+			return data;
+		},
+		enabled: !!token,
+	});
+
+	const invalidateLibraries = () =>
+		queryClient.invalidateQueries({ queryKey: ["libraries"] });
+
+	const createLibraryMutation = useMutation({
+		mutationFn: async (vars: { name: string; rootPath: string }) => {
+			const { data, error } = await apiClient.POST("/v1/admin/libraries", {
+				params: { header: { Authorization: `Bearer ${token}` } },
+				body: { name: vars.name, root_path: vars.rootPath },
+			});
+			if (error) throw new Error("Failed to create library");
+			return data;
+		},
+	});
+
+	const scanLibraryMutation = useMutation({
+		mutationFn: async (libraryId: string) => {
+			const { error } = await apiClient.POST("/v1/admin/libraries/{id}/scan", {
+				params: {
+					path: { id: libraryId },
+					header: { Authorization: `Bearer ${token}` },
+				},
+			});
+			if (error) throw new Error("Failed to scan library");
+		},
+	});
+
+	const deleteLibraryMutation = useMutation({
+		mutationFn: async (libraryId: string) => {
+			const { error, response } = await apiClient.DELETE(
+				"/v1/admin/libraries/{id}",
+				{
+					params: {
+						path: { id: libraryId },
+						header: { Authorization: `Bearer ${token}` },
+					},
+				},
+			);
+			if (error || !response.ok) throw new Error("Failed to delete library");
+		},
+	});
 
 	const [name, setName] = useState("");
 	const [rootPath, setRootPath] = useState("");
@@ -136,13 +149,13 @@ function LibrariesPage() {
 	const handleCreate = async (e: React.FormEvent) => {
 		e.preventDefault();
 		try {
-			await createLibrary({ variables: { name, rootPath } });
-			refetch();
+			await createLibraryMutation.mutateAsync({ name, rootPath });
+			invalidateLibraries();
 			setName("");
 			setRootPath("");
 			setShowCreateForm(false);
 		} catch {
-			// createError from the hook surfaces the error in the form
+			// createLibraryMutation.error surfaces the error in the form
 		}
 	};
 
@@ -154,8 +167,8 @@ function LibrariesPage() {
 		});
 		setScanningIds((prev) => new Set(prev).add(libraryId));
 		try {
-			await scanLibrary({ variables: { id: libraryId } });
-			refetch();
+			await scanLibraryMutation.mutateAsync(libraryId);
+			invalidateLibraries();
 		} catch (err) {
 			setScanErrors((prev) => ({
 				...prev,
@@ -184,8 +197,8 @@ function LibrariesPage() {
 			return next;
 		});
 		try {
-			await deleteLibrary({ variables: { id: libraryId } });
-			refetch();
+			await deleteLibraryMutation.mutateAsync(libraryId);
+			invalidateLibraries();
 		} catch (err) {
 			setDeleteErrors((prev) => ({
 				...prev,
@@ -194,7 +207,9 @@ function LibrariesPage() {
 		}
 	};
 
-	const libraries = data?.libraries ?? [];
+	const libraries = data ?? [];
+	const creating = createLibraryMutation.isPending;
+	const createError = createLibraryMutation.error;
 
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950">
@@ -359,10 +374,10 @@ function LibrariesPage() {
 											<FileVideo size={14} className="text-gray-500" />
 											{lib.size} files
 										</span>
-										{lib.lastScanFileCount != null && (
+										{lib.last_scan_file_count != null && (
 											<span className="flex items-center gap-1.5">
 												<Scan size={14} className="text-gray-500" />
-												{lib.lastScanFileCount} scanned
+												{lib.last_scan_file_count} scanned
 											</span>
 										)}
 									</div>

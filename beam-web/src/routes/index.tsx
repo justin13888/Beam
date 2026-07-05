@@ -1,5 +1,4 @@
-import { gql } from "@apollo/client";
-import { useQuery } from "@apollo/client/react";
+import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
 	ChevronRight,
@@ -10,29 +9,27 @@ import {
 	Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { QueryRoot } from "../gql";
-
-const GET_LIBRARIES = gql`
-  query GetLibraries {
-    libraries {
-      id
-      name
-      description
-      size
-      lastScanStartedAt
-      lastScanFinishedAt
-      lastScanFileCount
-    }
-  }
-`;
+import { useAuth } from "@/hooks/auth";
+import { apiClient } from "@/lib/apiClient";
 
 export const Route = createFileRoute("/")({
 	component: DashboardPage,
 });
 
 function DashboardPage() {
-	const { data, loading } = useQuery<QueryRoot>(GET_LIBRARIES);
-	const libraries = data?.libraries ?? [];
+	const { token } = useAuth();
+	const { data, isLoading: loading } = useQuery({
+		queryKey: ["libraries"],
+		queryFn: async () => {
+			const { data, error } = await apiClient.GET("/v1/libraries", {
+				params: { header: { Authorization: `Bearer ${token}` } },
+			});
+			if (error) throw new Error("Failed to load libraries");
+			return data;
+		},
+		enabled: !!token,
+	});
+	const libraries = data ?? [];
 	const totalFiles = libraries.reduce((sum, lib) => sum + lib.size, 0);
 
 	return (
@@ -70,7 +67,7 @@ function DashboardPage() {
 						<div className="rounded-xl bg-gray-800/40 backdrop-blur-sm border border-gray-700/50 p-5 text-center">
 							<Scan className="mx-auto text-emerald-400 mb-2" size={28} />
 							<div className="text-3xl font-bold text-white">
-								{libraries.filter((l) => l.lastScanFinishedAt).length}
+								{libraries.filter((l) => l.last_scan_finished_at).length}
 							</div>
 							<div className="text-sm text-gray-400 mt-1">Scanned</div>
 						</div>

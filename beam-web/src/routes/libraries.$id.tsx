@@ -1,5 +1,4 @@
-import { gql } from "@apollo/client";
-import { useMutation, useQuery } from "@apollo/client/react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
 	AlertTriangle,
@@ -20,44 +19,19 @@ import {
 	Tv,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useAuth } from "@/hooks/auth";
+import { apiClient } from "@/lib/apiClient";
 import { RouteError } from "../components/RouteError";
-import type { LibraryFile, MutationRoot, QueryRoot } from "../gql";
-import { FileContentType, FileIndexStatus } from "../gql";
 
-const GET_LIBRARY_WITH_FILES = gql`
-  query GetLibraryWithFiles($id: ID!, $libraryId: ID!) {
-    libraryById(id: $id) {
-      id
-      name
-      description
-      size
-      lastScanStartedAt
-      lastScanFinishedAt
-      lastScanFileCount
-    }
-    libraryFiles(libraryId: $libraryId) {
-      id
-      libraryId
-      path
-      sizeBytes
-      mimeType
-      durationSecs
-      containerFormat
-      status
-      contentType
-      scannedAt
-      updatedAt
-    }
-  }
-`;
-
-const SCAN_LIBRARY = gql`
-  mutation ScanLibrary($id: ID!) {
-    scanLibrary(id: $id)
-  }
-`;
+type LibraryFile =
+	components["schemas"]["beam_server.models.library.file.LibraryFile"];
+type FileIndexStatus =
+	components["schemas"]["beam_server.models.library.file.FileIndexStatus"];
+type FileContentType =
+	components["schemas"]["beam_server.models.library.file.FileContentType"];
 
 export const Route = createFileRoute("/libraries/$id")({
 	errorComponent: RouteError,
@@ -94,29 +68,26 @@ type SortDirection = "asc" | "desc";
 
 function StatusIcon({ status }: { status: FileIndexStatus }) {
 	switch (status) {
-		case FileIndexStatus.Known:
+		case "Known":
 			return <CheckCircle2 size={16} className="text-emerald-400" />;
-		case FileIndexStatus.Changed:
+		case "Changed":
 			return <AlertTriangle size={16} className="text-amber-400" />;
-		case FileIndexStatus.Unknown:
+		case "Unknown":
 			return <CircleDot size={16} className="text-gray-400" />;
 	}
 }
 
 function StatusBadge({ status }: { status: FileIndexStatus }) {
 	const styles: Record<FileIndexStatus, string> = {
-		[FileIndexStatus.Known]:
-			"bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
-		[FileIndexStatus.Changed]:
-			"bg-amber-500/15 text-amber-400 border-amber-500/20",
-		[FileIndexStatus.Unknown]:
-			"bg-gray-500/15 text-gray-400 border-gray-500/20",
+		Known: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
+		Changed: "bg-amber-500/15 text-amber-400 border-amber-500/20",
+		Unknown: "bg-gray-500/15 text-gray-400 border-gray-500/20",
 	};
 
 	const labels: Record<FileIndexStatus, string> = {
-		[FileIndexStatus.Known]: "Indexed",
-		[FileIndexStatus.Changed]: "Changed",
-		[FileIndexStatus.Unknown]: "Unknown",
+		Known: "Indexed",
+		Changed: "Changed",
+		Unknown: "Unknown",
 	};
 
 	return (
@@ -131,21 +102,21 @@ function StatusBadge({ status }: { status: FileIndexStatus }) {
 
 function ContentTypeBadge({ contentType }: { contentType: FileContentType }) {
 	switch (contentType) {
-		case FileContentType.Movie:
+		case "Movie":
 			return (
 				<span className="inline-flex items-center gap-1 text-xs text-purple-400">
 					<Film size={12} />
 					Movie
 				</span>
 			);
-		case FileContentType.Episode:
+		case "Episode":
 			return (
 				<span className="inline-flex items-center gap-1 text-xs text-blue-400">
 					<Tv size={12} />
 					Episode
 				</span>
 			);
-		case FileContentType.Unclassified:
+		case "Unclassified":
 			return (
 				<span className="inline-flex items-center gap-1 text-xs text-gray-500">
 					<FileQuestion size={12} />
@@ -188,11 +159,70 @@ function SortHeader({
 
 function LibraryDetailPage() {
 	const { id } = Route.useParams();
-	const { data, loading, error, refetch } = useQuery<QueryRoot>(
-		GET_LIBRARY_WITH_FILES,
-		{ variables: { id, libraryId: id } },
-	);
-	const [scanLibrary] = useMutation<MutationRoot, { id: string }>(SCAN_LIBRARY);
+	const { token } = useAuth();
+	const queryClient = useQueryClient();
+
+	const {
+		data: library,
+		isLoading: libraryLoading,
+		error: libraryError,
+		refetch: refetchLibrary,
+	} = useQuery({
+		queryKey: ["library", id],
+		queryFn: async () => {
+			const { data, error } = await apiClient.GET("/v1/libraries/{id}", {
+				params: {
+					path: { id },
+					header: { Authorization: `Bearer ${token}` },
+				},
+			});
+			if (error) throw new Error("Failed to load library");
+			return data;
+		},
+		enabled: !!token,
+	});
+
+	const {
+		data: filesData,
+		isLoading: filesLoading,
+		error: filesError,
+		refetch: refetchFiles,
+	} = useQuery({
+		queryKey: ["library", id, "files"],
+		queryFn: async () => {
+			const { data, error } = await apiClient.GET("/v1/libraries/{id}/files", {
+				params: {
+					path: { id },
+					header: { Authorization: `Bearer ${token}` },
+				},
+			});
+			if (error) throw new Error("Failed to load library files");
+			return data;
+		},
+		enabled: !!token,
+	});
+
+	const loading = libraryLoading || filesLoading;
+	const error = libraryError ?? filesError;
+	const refetch = () => {
+		refetchLibrary();
+		refetchFiles();
+	};
+
+	const scanLibraryMutation = useMutation({
+		mutationFn: async () => {
+			const { error } = await apiClient.POST("/v1/admin/libraries/{id}/scan", {
+				params: {
+					path: { id },
+					header: { Authorization: `Bearer ${token}` },
+				},
+			});
+			if (error) throw new Error("Failed to scan library");
+		},
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["library", id] });
+		},
+	});
 
 	const [scanning, setScanning] = useState(false);
 	const [scanError, setScanError] = useState<string | null>(null);
@@ -207,7 +237,7 @@ function LibraryDetailPage() {
 		setScanError(null);
 		setScanning(true);
 		try {
-			await scanLibrary({ variables: { id } });
+			await scanLibraryMutation.mutateAsync();
 			refetch();
 		} catch (err) {
 			setScanError(err instanceof Error ? err.message : "Scan failed");
@@ -225,8 +255,7 @@ function LibraryDetailPage() {
 		}
 	};
 
-	const files = data?.libraryFiles ?? [];
-	const library = data?.libraryById;
+	const files = filesData ?? [];
 
 	// Filter and sort files
 	const filteredFiles = useMemo(() => {
@@ -238,8 +267,8 @@ function LibraryDetailPage() {
 			result = result.filter(
 				(f) =>
 					f.path.toLowerCase().includes(q) ||
-					f.mimeType?.toLowerCase().includes(q) ||
-					f.containerFormat?.toLowerCase().includes(q),
+					f.mime_type?.toLowerCase().includes(q) ||
+					f.container_format?.toLowerCase().includes(q),
 			);
 		}
 
@@ -256,18 +285,17 @@ function LibraryDetailPage() {
 					cmp = a.path.localeCompare(b.path);
 					break;
 				case "sizeBytes":
-					cmp = a.sizeBytes - b.sizeBytes;
+					cmp = a.size_bytes - b.size_bytes;
 					break;
 				case "status":
 					cmp = a.status.localeCompare(b.status);
 					break;
 				case "contentType":
-					cmp = a.contentType.localeCompare(b.contentType);
+					cmp = a.content_type.localeCompare(b.content_type);
 					break;
 				case "updatedAt":
 					cmp =
-						new Date(a.updatedAt as string).getTime() -
-						new Date(b.updatedAt as string).getTime();
+						new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime();
 					break;
 			}
 			return sortDirection === "asc" ? cmp : -cmp;
@@ -278,16 +306,10 @@ function LibraryDetailPage() {
 
 	// Stats
 	const stats = useMemo(() => {
-		const known = files.filter(
-			(f) => f.status === FileIndexStatus.Known,
-		).length;
-		const changed = files.filter(
-			(f) => f.status === FileIndexStatus.Changed,
-		).length;
-		const unknown = files.filter(
-			(f) => f.status === FileIndexStatus.Unknown,
-		).length;
-		const totalSize = files.reduce((sum, f) => sum + f.sizeBytes, 0);
+		const known = files.filter((f) => f.status === "Known").length;
+		const changed = files.filter((f) => f.status === "Changed").length;
+		const unknown = files.filter((f) => f.status === "Unknown").length;
+		const totalSize = files.reduce((sum, f) => sum + f.size_bytes, 0);
 		return { known, changed, unknown, totalSize };
 	}, [files]);
 
@@ -432,14 +454,14 @@ function LibraryDetailPage() {
 						</div>
 
 						{/* Scan Info */}
-						{library.lastScanFinishedAt && (
+						{library.last_scan_finished_at && (
 							<div className="flex items-center gap-4 text-sm text-gray-400 mb-6 px-1">
 								<span className="flex items-center gap-1.5">
 									<Clock size={14} />
-									Last scanned {formatTimeAgo(library.lastScanFinishedAt)}
+									Last scanned {formatTimeAgo(library.last_scan_finished_at)}
 								</span>
-								{library.lastScanFileCount != null && (
-									<span>• {library.lastScanFileCount} files processed</span>
+								{library.last_scan_file_count != null && (
+									<span>• {library.last_scan_file_count} files processed</span>
 								)}
 							</div>
 						)}
@@ -464,9 +486,9 @@ function LibraryDetailPage() {
 									{(
 										[
 											{ label: "All", value: "all" },
-											{ label: "Indexed", value: FileIndexStatus.Known },
-											{ label: "Changed", value: FileIndexStatus.Changed },
-											{ label: "Unknown", value: FileIndexStatus.Unknown },
+											{ label: "Indexed", value: "Known" },
+											{ label: "Changed", value: "Changed" },
+											{ label: "Unknown", value: "Unknown" },
 										] as const
 									).map((opt) => (
 										<button
@@ -592,7 +614,7 @@ function FileRow({ file }: { file: LibraryFile }) {
 			{/* Size */}
 			<div className="flex items-center">
 				<span className="text-sm text-gray-300">
-					{formatFileSize(file.sizeBytes)}
+					{formatFileSize(file.size_bytes)}
 				</span>
 			</div>
 
@@ -603,13 +625,13 @@ function FileRow({ file }: { file: LibraryFile }) {
 
 			{/* Content Type */}
 			<div className="flex items-center">
-				<ContentTypeBadge contentType={file.contentType} />
+				<ContentTypeBadge contentType={file.content_type} />
 			</div>
 
 			{/* Updated */}
 			<div className="flex items-center">
 				<span className="text-xs text-gray-500">
-					{formatTimeAgo(file.updatedAt)}
+					{formatTimeAgo(file.updated_at)}
 				</span>
 			</div>
 		</div>

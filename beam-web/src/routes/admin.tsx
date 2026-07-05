@@ -1,5 +1,4 @@
-import { gql } from "@apollo/client";
-import { useQuery } from "@apollo/client/react";
+import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import {
 	AlertCircle,
@@ -9,37 +8,14 @@ import {
 	Shield,
 } from "lucide-react";
 import { useState } from "react";
+import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
+import { apiClient } from "@/lib/apiClient";
 import { RouteError } from "../components/RouteError";
 import { useAuth } from "../hooks/auth";
 
-const GET_ADMIN_LOGS = gql`
-  query GetAdminLogs($limit: Int, $offset: Int) {
-    logs(limit: $limit, offset: $offset) {
-      id
-      level
-      category
-      message
-      details
-      createdAt
-    }
-    logCount
-  }
-`;
-
-interface AdminLogEntry {
-	id: string;
-	level: "INFO" | "WARNING" | "ERROR";
-	category: string;
-	message: string;
-	details: string | null;
-	createdAt: string;
-}
-
-interface AdminQueryResult {
-	logs: AdminLogEntry[];
-	logCount: number;
-}
+type AdminLogEntry =
+	components["schemas"]["beam_server.models.admin.AdminLogEntryDto"];
 
 const PAGE_SIZE = 50;
 
@@ -57,7 +33,7 @@ export const Route = createFileRoute("/admin")({
 });
 
 function LevelBadge({ level }: { level: AdminLogEntry["level"] }) {
-	if (level === "ERROR") {
+	if (level === "error") {
 		return (
 			<span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-900/40 text-red-300 border border-red-700/50">
 				<AlertCircle size={12} />
@@ -65,7 +41,7 @@ function LevelBadge({ level }: { level: AdminLogEntry["level"] }) {
 			</span>
 		);
 	}
-	if (level === "WARNING") {
+	if (level === "warning") {
 		return (
 			<span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-yellow-900/40 text-yellow-300 border border-yellow-700/50">
 				<AlertTriangle size={12} />
@@ -103,20 +79,48 @@ function formatTimestamp(iso: string): string {
 }
 
 function AdminPage() {
-	const { user } = useAuth();
+	const { user, token } = useAuth();
 	const [page, setPage] = useState(0);
 	const offset = page * PAGE_SIZE;
 
-	const { data, loading, error, refetch } = useQuery<AdminQueryResult>(
-		GET_ADMIN_LOGS,
-		{
-			variables: { limit: PAGE_SIZE, offset },
-			fetchPolicy: "network-only",
+	const {
+		data: logs,
+		isLoading: loading,
+		error,
+		refetch: refetchLogs,
+	} = useQuery({
+		queryKey: ["admin", "logs", offset],
+		queryFn: async () => {
+			const { data, error } = await apiClient.GET("/v1/admin/logs", {
+				params: {
+					header: { Authorization: `Bearer ${token}` },
+					query: { limit: PAGE_SIZE, offset },
+				},
+			});
+			if (error) throw new Error("Failed to load admin logs");
+			return data;
 		},
-	);
+		enabled: !!token,
+	});
 
-	const logs = data?.logs ?? [];
-	const totalCount = data?.logCount ?? 0;
+	const { data: countData, refetch: refetchCount } = useQuery({
+		queryKey: ["admin", "logs", "count"],
+		queryFn: async () => {
+			const { data, error } = await apiClient.GET("/v1/admin/logs/count", {
+				params: { header: { Authorization: `Bearer ${token}` } },
+			});
+			if (error) throw new Error("Failed to load admin log count");
+			return data;
+		},
+		enabled: !!token,
+	});
+
+	const refetch = () => {
+		refetchLogs();
+		refetchCount();
+	};
+
+	const totalCount = countData?.count ?? 0;
 	const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
 	return (
@@ -163,13 +167,13 @@ function AdminPage() {
 					</div>
 					<div className="rounded-xl bg-gray-800/40 border border-gray-700/50 p-5 text-center">
 						<div className="text-3xl font-bold text-red-400">
-							{logs.filter((l) => l.level === "ERROR").length}
+							{(logs ?? []).filter((l) => l.level === "error").length}
 						</div>
 						<div className="text-sm text-gray-400 mt-1">Errors (this page)</div>
 					</div>
 					<div className="rounded-xl bg-gray-800/40 border border-gray-700/50 p-5 text-center">
 						<div className="text-3xl font-bold text-yellow-400">
-							{logs.filter((l) => l.level === "WARNING").length}
+							{(logs ?? []).filter((l) => l.level === "warning").length}
 						</div>
 						<div className="text-sm text-gray-400 mt-1">
 							Warnings (this page)
@@ -200,7 +204,7 @@ function AdminPage() {
 						</div>
 					)}
 
-					{!loading && !error && logs.length === 0 && (
+					{!loading && !error && (logs ?? []).length === 0 && (
 						<div className="px-6 py-12 text-center">
 							<Info className="mx-auto text-gray-600 mb-3" size={32} />
 							<p className="text-gray-500">No log entries yet.</p>
@@ -210,9 +214,9 @@ function AdminPage() {
 						</div>
 					)}
 
-					{!loading && !error && logs.length > 0 && (
+					{!loading && !error && (logs ?? []).length > 0 && (
 						<div className="divide-y divide-gray-700/30">
-							{logs.map((log) => (
+							{(logs ?? []).map((log) => (
 								<div
 									key={log.id}
 									className="px-6 py-4 hover:bg-gray-700/20 transition-colors"
@@ -223,27 +227,17 @@ function AdminPage() {
 												<LevelBadge level={log.level} />
 												<CategoryBadge category={log.category} />
 												<span className="text-xs text-gray-500 ml-auto">
-													{formatTimestamp(log.createdAt)}
+													{formatTimestamp(log.created_at)}
 												</span>
 											</div>
 											<p className="text-gray-200 text-sm">{log.message}</p>
-											{log.details && (
+											{log.details != null && (
 												<details className="mt-2">
 													<summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-400">
 														Details
 													</summary>
 													<pre className="mt-1 text-xs text-gray-400 bg-gray-900/50 rounded p-2 overflow-x-auto">
-														{(() => {
-															try {
-																return JSON.stringify(
-																	JSON.parse(log.details),
-																	null,
-																	2,
-																);
-															} catch {
-																return log.details;
-															}
-														})()}
+														{JSON.stringify(log.details, null, 2)}
 													</pre>
 												</details>
 											)}

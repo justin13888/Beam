@@ -98,6 +98,7 @@ pub async fn get_library_files(
 #[endpoint(
     tags("admin"),
     parameters(("Authorization" = String, Header, description = "Bearer <admin JWT>")),
+    request_body = CreateLibraryRequest,
 )]
 pub async fn create_library(
     req: &mut Request,

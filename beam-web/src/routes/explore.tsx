@@ -1,103 +1,54 @@
-import type { ApolloClient } from "@apollo/client";
-import { gql, type TypedDocumentNode } from "@apollo/client";
 import { queryOptions } from "@tanstack/react-query";
-import { createFileRoute, ErrorComponent, Link } from "@tanstack/react-router";
 import {
-	MediaSortField,
-	type SearchMediaQuery,
-	type SearchMediaQueryVariables,
-	SortOrder,
-} from "@/gql";
+	createFileRoute,
+	ErrorComponent,
+	Link,
+	redirect,
+} from "@tanstack/react-router";
+import { apiClient } from "@/lib/apiClient";
 
-const SEARCH_MEDIA: TypedDocumentNode<
-	SearchMediaQuery,
-	SearchMediaQueryVariables
-> = gql`
-	query SearchMedia(
-		$first: Int
-		$after: String
-		$last: Int
-		$before: String
-		$sortBy: MediaSortField
-		$sortOrder: SortOrder
-		$mediaType: MediaTypeFilter
-		$genre: String
-		$year: Int
-		$yearFrom: Int
-		$yearTo: Int
-		$query: String
-		$minRating: Int
-	) {
-		search(
-			first: $first
-			after: $after
-			last: $last
-			before: $before
-			sortBy: $sortBy
-			sortOrder: $sortOrder
-			mediaType: $mediaType
-			genre: $genre
-			year: $year
-			yearFrom: $yearFrom
-			yearTo: $yearTo
-			query: $query
-			minRating: $minRating
-		) {
-			edges {
-				cursor
-				node {
-					__typename
-					... on MovieMetadata {
-						id
-						title {
-							original
-						}
-						year
-						posterUrl
-					}
-					... on ShowMetadata {
-						id
-						title {
-							original
-						}
-						year
-					}
-				}
-			}
-			pageInfo {
-				hasNextPage
-				hasPreviousPage
-				startCursor
-				endCursor
-			}
-		}
-	}
-`;
+interface SearchParams {
+	first?: number;
+	sortBy?: "title" | "year" | "rating" | "date_added" | "runtime";
+	sortOrder?: "asc" | "desc";
+}
 
-const searchQueryOptions = (
-	variables: SearchMediaQueryVariables,
-	apolloClient: ApolloClient,
-) =>
+const searchQueryOptions = (params: SearchParams, token: string) =>
 	queryOptions({
-		queryKey: ["media", "search", variables],
+		queryKey: ["media", "search", params],
 		queryFn: async () => {
-			const result = await apolloClient.query({
-				query: SEARCH_MEDIA,
-				variables,
+			const { data, error } = await apiClient.GET("/v1/media", {
+				params: {
+					header: { Authorization: `Bearer ${token}` },
+					query: {
+						first: params.first,
+						sort_by: params.sortBy,
+						sort_order: params.sortOrder,
+					},
+				},
 			});
-			return result.data;
+			if (error) throw new Error("Failed to search media");
+			return data;
 		},
 	});
 
 export const Route = createFileRoute("/explore")({
-	loader: async ({ context: { queryClient, apolloClient } }) => {
-		const variables: SearchMediaQueryVariables = {
+	beforeLoad: ({ context, location }) => {
+		if (!context.auth.isAuthenticated) {
+			throw redirect({
+				to: "/login",
+				search: { redirect: location.href },
+			});
+		}
+	},
+	loader: async ({ context: { queryClient, auth } }) => {
+		const params: SearchParams = {
 			first: 24,
-			sortBy: MediaSortField.Title,
-			sortOrder: SortOrder.Asc,
+			sortBy: "title",
+			sortOrder: "asc",
 		};
 		return queryClient.ensureQueryData(
-			searchQueryOptions(variables, apolloClient),
+			searchQueryOptions(params, auth.token ?? ""),
 		);
 	},
 	errorComponent: ({ error }) => <ErrorComponent error={error} />,
@@ -106,7 +57,7 @@ export const Route = createFileRoute("/explore")({
 
 function RouteComponent() {
 	const data = Route.useLoaderData();
-	const edges = data?.search?.edges ?? [];
+	const edges = data?.edges ?? [];
 
 	if (edges.length === 0) {
 		return (
@@ -126,17 +77,17 @@ function RouteComponent() {
 			<ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
 				{edges.map((edge) => {
 					const node = edge.node;
-					const title = node.title.original;
-					const year = node.year ?? null;
-					const poster =
-						node.__typename === "MovieMetadata" ? node.posterUrl : null;
-					const typeLabel =
-						node.__typename === "MovieMetadata" ? "Movie" : "Show";
+					const isMovie = "Movie" in node;
+					const media = isMovie ? node.Movie : node.Show;
+					const title = media.title.original;
+					const year = media.year ?? null;
+					const poster = isMovie ? node.Movie.poster_url : null;
+					const typeLabel = isMovie ? "Movie" : "Show";
 					return (
-						<li key={node.id}>
+						<li key={media.id}>
 							<Link
 								to="/media/$id"
-								params={{ id: node.id }}
+								params={{ id: media.id }}
 								className="group block"
 							>
 								<div className="aspect-[2/3] w-full overflow-hidden rounded-md bg-gray-800">
