@@ -25,10 +25,37 @@ mod tests {
         MetadataService, PageInfo, SortOrder,
     };
     use crate::services::notification::InMemoryNotificationService;
+    use crate::services::playback::{
+        ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackService,
+    };
     use crate::state::{AppContext, AppServices, AppState, UserContext};
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 
     // ─── Stub implementations for services not exercised during auth tests ───
+
+    #[derive(Debug)]
+    struct StubPlaybackService;
+
+    #[async_trait::async_trait]
+    impl PlaybackService for StubPlaybackService {
+        async fn report_progress(
+            &self,
+            _user_id: uuid::Uuid,
+            _file_id: uuid::Uuid,
+            _position_secs: f64,
+            _duration_secs: Option<f64>,
+        ) -> Result<PlaybackProgressDto, PlaybackError> {
+            unimplemented!("not called in auth guard tests")
+        }
+
+        async fn get_continue_watching(
+            &self,
+            _user_id: uuid::Uuid,
+            _limit: u32,
+        ) -> Result<Vec<ContinueWatchingItem>, PlaybackError> {
+            unimplemented!("not called in auth guard tests")
+        }
+    }
 
     #[derive(Debug)]
     struct StubMetadataService;
@@ -159,6 +186,7 @@ mod tests {
             notification,
             admin_log,
             user_repo: user_repo.clone(),
+            playback: Arc::new(StubPlaybackService),
         };
 
         let config = crate::config::ServerConfig {

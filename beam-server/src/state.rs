@@ -21,6 +21,7 @@ use crate::{
         library::{LibraryService, LocalLibraryService, OsPathValidator},
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
+        playback::{DbPlaybackService, PlaybackService},
     },
 };
 
@@ -81,6 +82,7 @@ pub struct AppServices {
     pub notification: Arc<dyn NotificationService>,
     pub admin_log: Arc<dyn AdminLogService>,
     pub user_repo: Arc<dyn UserRepository>,
+    pub playback: Arc<dyn PlaybackService>,
 }
 
 impl AppServices {
@@ -123,6 +125,8 @@ impl AppServices {
         let genre_repo: Arc<dyn beam_domain::repositories::GenreRepository> = Arc::new(
             beam_index::repositories::SqlGenreRepository::new(db.clone()),
         );
+        let playback_repo: Arc<dyn beam_domain::repositories::PlaybackProgressRepository> =
+            Arc::new(beam_index::repositories::SqlPlaybackProgressRepository::new(db.clone()));
 
         let notification_service = Arc::new(LocalNotificationService::new());
         let hash_service = Arc::new(LocalHashService::new(hash_config));
@@ -182,6 +186,13 @@ impl AppServices {
             Arc::new(RealClock),
         ));
 
+        let playback_service = Arc::new(DbPlaybackService::new(
+            playback_repo,
+            file_repo.clone(),
+            movie_repo.clone(),
+            show_repo.clone(),
+        ));
+
         let services = Self {
             auth: auth_service,
             hash: hash_service.clone() as Arc<dyn HashService>,
@@ -200,6 +211,7 @@ impl AppServices {
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
+            playback: playback_service,
         };
 
         Ok((services, index_service, enrichment_service))

@@ -26,11 +26,38 @@ mod tests {
         MetadataService, PageInfo, SortOrder,
     };
     use crate::services::notification::InMemoryNotificationService;
+    use crate::services::playback::{
+        ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackService,
+    };
     use crate::state::{AppServices, AppState};
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 
     const TEST_JWT_SECRET: &str = "test-jwt-secret-for-media-route-tests";
     const MOVIE_ID: &str = "22222222-2222-2222-2222-222222222222";
+
+    #[derive(Debug)]
+    struct StubPlaybackService;
+
+    #[async_trait::async_trait]
+    impl PlaybackService for StubPlaybackService {
+        async fn report_progress(
+            &self,
+            _user_id: uuid::Uuid,
+            _file_id: uuid::Uuid,
+            _position_secs: f64,
+            _duration_secs: Option<f64>,
+        ) -> Result<PlaybackProgressDto, PlaybackError> {
+            unimplemented!("not called in media route tests")
+        }
+
+        async fn get_continue_watching(
+            &self,
+            _user_id: uuid::Uuid,
+            _limit: u32,
+        ) -> Result<Vec<ContinueWatchingItem>, PlaybackError> {
+            unimplemented!("not called in media route tests")
+        }
+    }
 
     #[derive(Debug)]
     struct StubHashService;
@@ -170,6 +197,7 @@ mod tests {
             notification,
             admin_log,
             user_repo: user_repo.clone(),
+            playback: Arc::new(StubPlaybackService),
         };
 
         let config = crate::config::ServerConfig {

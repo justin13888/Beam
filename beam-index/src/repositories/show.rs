@@ -215,6 +215,24 @@ impl ShowRepository for SqlShowRepository {
         Ok(Episode::from(result))
     }
 
+    async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr> {
+        use beam_entity::episode;
+        use sea_orm::EntityTrait;
+
+        let model = episode::Entity::find_by_id(episode_id)
+            .one(&self.db)
+            .await?;
+        Ok(model.map(Episode::from))
+    }
+
+    async fn find_season_by_id(&self, season_id: Uuid) -> Result<Option<Season>, DbErr> {
+        use beam_entity::season;
+        use sea_orm::EntityTrait;
+
+        let model = season::Entity::find_by_id(season_id).one(&self.db).await?;
+        Ok(model.map(Season::from))
+    }
+
     async fn apply_enrichment(
         &self,
         show_id: Uuid,

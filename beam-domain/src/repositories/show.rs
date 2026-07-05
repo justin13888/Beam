@@ -28,6 +28,13 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr>;
     async fn find_episodes_by_season_id(&self, season_id: Uuid) -> Result<Vec<Episode>, DbErr>;
     async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
+    /// Reverse lookup from a `MediaFileContent::Episode { episode_id }` back
+    /// to the episode -- used together with `find_season_by_id` to resolve a
+    /// file id to its show for continue-watching.
+    async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr>;
+    /// Reverse lookup from `Episode::season_id` to the season (and, via
+    /// `Season::show_id`, the show).
+    async fn find_season_by_id(&self, season_id: Uuid) -> Result<Option<Season>, DbErr>;
     /// Apply enrichment-provider data to an existing show. Overwrites the
     /// current values, same as `MovieRepository::apply_enrichment`.
     async fn apply_enrichment(
@@ -217,6 +224,14 @@ pub mod in_memory {
             };
             self.episodes.lock().unwrap().insert(ep.id, ep.clone());
             Ok(ep)
+        }
+
+        async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr> {
+            Ok(self.episodes.lock().unwrap().get(&episode_id).cloned())
+        }
+
+        async fn find_season_by_id(&self, season_id: Uuid) -> Result<Option<Season>, DbErr> {
+            Ok(self.seasons.lock().unwrap().get(&season_id).cloned())
         }
 
         async fn apply_enrichment(

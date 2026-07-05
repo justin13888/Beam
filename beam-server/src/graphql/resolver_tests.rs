@@ -26,12 +26,14 @@ mod tests {
     use crate::services::library::{InMemoryPathValidator, LocalLibraryService};
     use crate::services::metadata::DbMetadataService;
     use crate::services::notification::{InMemoryNotificationService, NotificationService};
+    use crate::services::playback::DbPlaybackService;
     use crate::state::{AppContext, AppServices, AppState, UserContext};
     use beam_domain::repositories::AdminLogRepository;
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+    use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
     use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
@@ -98,6 +100,13 @@ mod tests {
             Arc::new(InMemoryPathValidator::success(PathBuf::from("/tmp"))),
         ));
 
+        let playback_service = Arc::new(DbPlaybackService::new(
+            Arc::new(InMemoryPlaybackProgressRepository::default()),
+            file_repo.clone(),
+            movie_repo.clone(),
+            show_repo.clone(),
+        ));
+
         let metadata_service = Arc::new(DbMetadataService::new(
             movie_repo.clone(),
             show_repo.clone(),
@@ -116,6 +125,7 @@ mod tests {
             notification: notification.clone(),
             admin_log,
             user_repo: user_repo.clone(),
+            playback: playback_service,
         };
 
         let config = crate::config::ServerConfig {
@@ -407,6 +417,12 @@ mod tests {
         let movie_repo = Arc::new(InMemoryMovieRepository::default());
         let show_repo = Arc::new(InMemoryShowRepository::default());
         let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let playback_service = Arc::new(DbPlaybackService::new(
+            Arc::new(InMemoryPlaybackProgressRepository::default()),
+            file_repo.clone(),
+            movie_repo.clone(),
+            show_repo.clone(),
+        ));
         let metadata_service = Arc::new(DbMetadataService::new(
             movie_repo,
             show_repo,
@@ -422,6 +438,7 @@ mod tests {
             notification,
             admin_log,
             user_repo: user_repo.clone(),
+            playback: playback_service,
         };
 
         let config = crate::config::ServerConfig {

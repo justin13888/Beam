@@ -18,6 +18,10 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     async fn create(&self, create: CreateMovie) -> Result<Movie, DbErr>;
     async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr>;
     async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr>;
+    /// Reverse lookup from a `MediaFileContent::Movie { movie_entry_id }` back
+    /// to the entry (and, via `MovieEntry::movie_id`, the movie) -- used to
+    /// resolve a file id to its movie for continue-watching.
+    async fn find_entry_by_id(&self, entry_id: Uuid) -> Result<Option<MovieEntry>, DbErr>;
     async fn ensure_library_association(
         &self,
         library_id: Uuid,
@@ -159,6 +163,10 @@ pub mod in_memory {
                 .filter(|e| e.movie_id == movie_id)
                 .cloned()
                 .collect())
+        }
+
+        async fn find_entry_by_id(&self, entry_id: Uuid) -> Result<Option<MovieEntry>, DbErr> {
+            Ok(self.entries.lock().unwrap().get(&entry_id).cloned())
         }
 
         async fn ensure_library_association(

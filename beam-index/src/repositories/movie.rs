@@ -150,6 +150,16 @@ impl MovieRepository for SqlMovieRepository {
         Ok(models.into_iter().map(MovieEntry::from).collect())
     }
 
+    async fn find_entry_by_id(&self, entry_id: Uuid) -> Result<Option<MovieEntry>, DbErr> {
+        use beam_entity::movie_entry;
+        use sea_orm::EntityTrait;
+
+        let model = movie_entry::Entity::find_by_id(entry_id)
+            .one(&self.db)
+            .await?;
+        Ok(model.map(MovieEntry::from))
+    }
+
     async fn ensure_library_association(
         &self,
         library_id: Uuid,

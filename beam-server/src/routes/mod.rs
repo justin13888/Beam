@@ -4,6 +4,7 @@ pub mod graphql;
 pub mod graphql_ws;
 pub mod health;
 pub mod media;
+pub mod playback;
 pub mod stream;
 
 use salvo::prelude::*;
@@ -11,6 +12,7 @@ use salvo::prelude::*;
 pub use admin::*;
 pub use health::*;
 pub use media::*;
+pub use playback::*;
 pub use stream::*;
 
 use crate::graphql::AppSchema;
@@ -31,6 +33,8 @@ fn rest_routes() -> Router {
         .push(Router::with_path("libraries").get(list_libraries))
         .push(Router::with_path("libraries/{id}").get(get_library))
         .push(Router::with_path("libraries/{id}/files").get(get_library_files))
+        .push(Router::with_path("files/{file_id}/progress").put(report_playback_progress))
+        .push(Router::with_path("continue-watching").get(get_continue_watching))
         .push(
             Router::with_path("admin")
                 .push(Router::with_path("libraries").post(create_library))

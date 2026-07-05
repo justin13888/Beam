@@ -36,10 +36,37 @@ mod tests {
         MetadataService, PageInfo, SortOrder,
     };
     use crate::services::notification::InMemoryNotificationService;
+    use crate::services::playback::{
+        ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackService,
+    };
     use crate::state::{AppServices, AppState};
 
     const TEST_JWT_SECRET: &str = "test-jwt-secret-for-admin-route-tests";
     const ADMIN_PASSWORD: &str = "admin-password-123";
+
+    #[derive(Debug)]
+    struct StubPlaybackService;
+
+    #[async_trait::async_trait]
+    impl PlaybackService for StubPlaybackService {
+        async fn report_progress(
+            &self,
+            _user_id: uuid::Uuid,
+            _file_id: uuid::Uuid,
+            _position_secs: f64,
+            _duration_secs: Option<f64>,
+        ) -> Result<PlaybackProgressDto, PlaybackError> {
+            unimplemented!("not called in admin route tests")
+        }
+
+        async fn get_continue_watching(
+            &self,
+            _user_id: uuid::Uuid,
+            _limit: u32,
+        ) -> Result<Vec<ContinueWatchingItem>, PlaybackError> {
+            unimplemented!("not called in admin route tests")
+        }
+    }
 
     #[derive(Debug)]
     struct StubHashService;
@@ -147,6 +174,7 @@ mod tests {
             notification,
             admin_log,
             user_repo: user_repo.clone(),
+            playback: Arc::new(StubPlaybackService),
         };
 
         let config = crate::config::ServerConfig {
