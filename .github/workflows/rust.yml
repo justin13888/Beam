@@ -82,9 +82,12 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Generate coverage report
+      # Calibrated against a measured ~67.5% workspace line coverage (see
+      # docs/testing/coverage.md) -- ratchet up over time, don't relax to
+      # make a red PR pass.
+      - name: Generate coverage report and enforce threshold
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 65
           cargo llvm-cov report --summary-only
 
       - name: Upload coverage report
@@ -93,6 +96,3 @@ jobs:
           name: rust-coverage
           path: lcov.info
           retention-days: 7
-
-      # TODO: Enforce 80% threshold once test coverage reaches that level:
-      # run: cargo llvm-cov --workspace --fail-under-lines 80

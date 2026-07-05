@@ -23,13 +23,18 @@ cargo llvm-cov report --summary-only
 On a host with system FFmpeg development libraries (`.pc` files for `libavutil` etc.) installed, this
 runs the same way CI does. On a host without them — see `docs/operations/dev-setup.md` and
 [ADR-0007](../architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md) — build with the
-`vendored-ffmpeg` feature enabled on the three crates that link `ffmpeg-next`:
+`vendored-ffmpeg` feature enabled on the two crates that link `ffmpeg-next` (`beam-domain` dropped its
+ffmpeg dependency entirely; see ADR referenced in `beam-domain`'s crate docs):
 
 ```sh
 cargo llvm-cov --workspace \
-  --features beam-domain/vendored-ffmpeg,beam-index/vendored-ffmpeg,beam-stream/vendored-ffmpeg \
+  --features beam-index/vendored-ffmpeg,beam-server/vendored-ffmpeg \
   --lcov --output-path lcov.info
 ```
+
+This also requires a `nasm` assembler on `PATH` for `ffmpeg-sys-next`'s vendored build (e.g. `brew
+install nasm`); without it, the vendored FFmpeg `configure` step fails with `nasm not found or too
+old`.
 
 There is no `llvm-cov` equivalent of the `t-local`/`clippy-local`/`build-local` `.cargo/config.toml`
 aliases; pass the `--features` flag directly as shown above when running coverage on a vendored-ffmpeg
@@ -50,16 +55,33 @@ This push turns coverage from *measured* into *enforced*:
 
 | Suite | Threshold | Enforced by |
 |---|---|---|
-| Rust workspace (lines) | 70% | `cargo llvm-cov --workspace --fail-under-lines 70` in the `test` job of `.github/workflows/rust.yml` |
-| Web (`beam-web`) | 60% (lines/functions/branches/statements) | `coverage.thresholds` in `beam-web/vitest.config.ts` |
+| Rust workspace (lines) | 65% | `cargo llvm-cov --workspace --fail-under-lines 65` in the `test` job of `.github/workflows/rust.yml` |
+| Web (`beam-web`) | lines 12%, functions 10%, branches 3%, statements 12% | `coverage.thresholds` in `beam-web/vitest.config.ts` |
 
 Previously, both of these existed only as commented-out TODOs (a `--fail-under-lines 80` flag in
 `rust.yml` and a `thresholds` block in `vitest.config.ts`), with coverage measured and uploaded as a
-CI artifact but never gating a PR. This push enables both gates for real, at 70% (Rust) and 60% (web)
-rather than the previously-sketched 80% figures — chosen deliberately as a realistic floor given the
-current baseline test inventory (`docs/testing/strategy.md`), not as an aspirational target. There is
-still no external coverage service (no Codecov/Coveralls integration); the lcov/html reports remain
-CI artifacts (7-day retention) for local inspection, and the threshold flags are the actual gate.
+CI artifact but never gating a PR. This push enables both gates for real, calibrated against an
+actual measurement taken at G1 execution time rather than the previously-sketched 80%/60% figures,
+which turned out not to match reality once measured:
+
+- **Rust: 65%**, a few points under the measured ~67.5% workspace line coverage, as headroom against
+  measurement variance between a local vendored-ffmpeg build and CI's dynamically-linked one.
+- **Web: 12% lines / 10% functions / 3% branches / 12% statements.** The web suite's *pure* modules
+  (`src/hooks`, `src/lib`) sit at ~98%+ line coverage already; almost everything else in `beam-web` is
+  large route components (`routes/admin.tsx`, `routes/libraries.tsx`, `routes/media.$id.tsx`, ...)
+  that have zero test coverage today and need real React Testing Library + TanStack Router/Query
+  harness investment to test meaningfully — a substantially different (and larger) effort than adding
+  a few more unit tests. Crucially, `beam-web/vitest.config.ts`'s `coverage.include` setting counts
+  every matching source file in the denominator, not just files a test happens to import; without an
+  explicit `include`, Vitest silently excludes untested files entirely, which is how an earlier pass
+  at this doc could describe "60%" as a "realistic floor" — that figure was computed against the
+  inflated (~94%) untested-files-excluded number, not the honest one. The 12%/10%/3%/12% figures here
+  are the honest baseline, intentionally low, and exist to be ratcheted up as route-level tests are
+  added — not to be mistaken for "the web app is 12% tested."
+
+There is still no external coverage service (no Codecov/Coveralls integration); the lcov/html reports
+remain CI artifacts (7-day retention) for local inspection, and the threshold flags are the actual
+gate.
 
 **Ratchet, don't relax.** The intent is to raise both thresholds over time as the suites mature and
 genuine coverage grows — not to lower them. If a PR fails the coverage gate, the correct response is
