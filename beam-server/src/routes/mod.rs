@@ -1,24 +1,30 @@
+pub mod api_error;
 pub mod graphql;
 pub mod graphql_ws;
 pub mod health;
+pub mod media;
 pub mod stream;
 
 use salvo::prelude::*;
 
 pub use health::*;
+pub use media::*;
 pub use stream::*;
 
 use crate::graphql::AppSchema;
 use crate::state::AppState;
 
-/// REST-only sub-routes (health, stream, auth). Single source of truth used by
-/// both `create_router` and `create_docs_router` so new endpoints only need to
-/// be registered in one place.
+/// REST-only sub-routes (health, stream, media, auth). Single source of truth
+/// used by both `create_router` and `create_docs_router` so new endpoints
+/// only need to be registered in one place.
 fn rest_routes() -> Router {
     Router::new()
         .push(Router::with_path("health").get(health_check))
         .push(Router::with_path("stream/{id}/token").post(get_stream_token))
         .push(Router::with_path("stream/mp4/{id}").get(stream_mp4))
+        .push(Router::with_path("media").get(browse_media))
+        .push(Router::with_path("media/{id}").get(get_media_detail))
+        .push(Router::with_path("media/{id}/sources").get(get_media_sources))
         .push(Router::with_path("auth").push(beam_auth::server::auth_routes()))
 }
 

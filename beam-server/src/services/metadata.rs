@@ -1,12 +1,14 @@
 use async_graphql::{Enum, SimpleObject};
+use salvo::oapi::ToSchema;
+use serde::Serialize;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::models::{
-    EpisodeMetadata, ExternalIdentifiers, MediaMetadata, MovieMetadata, Ratings, SeasonMetadata,
-    ShowDates, ShowMetadata, Title,
+    AudioSourceInfo, EpisodeMetadata, ExternalIdentifiers, MediaMetadata, MediaSource,
+    MovieMetadata, Ratings, SeasonMetadata, ShowDates, ShowMetadata, Title, VideoSourceInfo,
 };
 use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::repositories::{
@@ -34,6 +36,11 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
 
     /// Refresh metadata for by media filter
     async fn refresh_metadata(&self, filter: MediaFilter) -> Result<(), MetadataError>;
+
+    /// List the playable/downloadable source files for a media item. Only
+    /// movies are supported for now -- shows don't have files at the show
+    /// level (episodes do), and there's no per-episode lookup by id yet.
+    async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError>;
 }
 
 /// Database-backed metadata service
@@ -655,6 +662,89 @@ impl MetadataService for DbMetadataService {
             }
         }
     }
+
+    async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError> {
+        let id = Uuid::parse_str(media_id)
+            .map_err(|_| MetadataError::InternalError("invalid media id".to_string()))?;
+
+        if matches!(self.movie_repo.find_by_id(id).await, Ok(Some(_))) {
+            let entries = self
+                .movie_repo
+                .find_entries_by_movie_id(id)
+                .await
+                .map_err(|e| MetadataError::InternalError(e.to_string()))?;
+
+            let mut sources = Vec::new();
+            for entry in entries {
+                let files = self
+                    .file_repo
+                    .find_by_movie_entry_id(entry.id)
+                    .await
+                    .map_err(|e| MetadataError::InternalError(e.to_string()))?;
+                for file in files {
+                    sources.push(self.build_source(file).await?);
+                }
+            }
+            return Ok(sources);
+        }
+
+        if matches!(self.show_repo.find_by_id(id).await, Ok(Some(_))) {
+            return Err(MetadataError::Unsupported(
+                "sources are not available at the show level; use an episode id".to_string(),
+            ));
+        }
+
+        Err(MetadataError::MediaNotFound)
+    }
+}
+
+impl DbMetadataService {
+    async fn build_source(
+        &self,
+        file: beam_domain::models::MediaFile,
+    ) -> Result<MediaSource, MetadataError> {
+        let streams = self
+            .stream_repo
+            .find_by_file_id(file.id)
+            .await
+            .map_err(|e| MetadataError::InternalError(e.to_string()))?;
+
+        let mut video = None;
+        let mut audio_tracks = Vec::new();
+        for stream in &streams {
+            match &stream.metadata {
+                beam_domain::models::StreamMetadata::Video(v) => {
+                    video = Some(VideoSourceInfo {
+                        codec: stream.codec.clone(),
+                        width: v.width,
+                        height: v.height,
+                        bit_rate: v.bit_rate,
+                        hdr_format: v.hdr_format.clone(),
+                    });
+                }
+                beam_domain::models::StreamMetadata::Audio(a) => {
+                    audio_tracks.push(AudioSourceInfo {
+                        codec: stream.codec.clone(),
+                        language: a.language.clone(),
+                        channels: a.channels,
+                        is_default: a.is_default,
+                    });
+                }
+                beam_domain::models::StreamMetadata::Subtitle(_) => {}
+            }
+        }
+
+        Ok(MediaSource {
+            file_id: file.id.to_string(),
+            size_bytes: file.size_bytes,
+            mime_type: file.mime_type,
+            container_format: file.container_format,
+            duration_secs: file.duration.map(|d| d.as_secs_f64()),
+            video,
+            audio_tracks,
+            stream_url: format!("/v1/stream/mp4/{}", file.id),
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -663,6 +753,10 @@ pub enum MetadataError {
     MediaNotFound,
     #[error("Internal metadata service error: {0}")]
     InternalError(String),
+    /// The request was well-formed and the target exists, but this operation
+    /// doesn't apply to it (e.g. requesting sources for a show id).
+    #[error("unsupported operation: {0}")]
+    Unsupported(String),
 }
 
 #[derive(Debug, Clone)]
@@ -673,7 +767,10 @@ pub enum MediaFilter {
 }
 
 /// Sort field options for media search
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum, Default)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Enum, Default, Serialize, serde::Deserialize, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum MediaSortField {
     /// Sort by title (alphabetical)
     #[default]
@@ -689,7 +786,10 @@ pub enum MediaSortField {
 }
 
 /// Sort order
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum, Default)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Enum, Default, Serialize, serde::Deserialize, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum SortOrder {
     /// Ascending order
     #[default]
@@ -699,7 +799,8 @@ pub enum SortOrder {
 }
 
 /// Media type filter
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum, Serialize, serde::Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum MediaTypeFilter {
     /// Movies only
     Movie,
@@ -720,7 +821,7 @@ pub struct MediaSearchFilters {
 }
 
 /// Relay-style connection for media search results
-#[derive(Clone, Debug, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
 pub struct MediaConnection {
     /// List of edges containing media items and cursors
     pub edges: Vec<MediaEdge>,
@@ -729,7 +830,7 @@ pub struct MediaConnection {
 }
 
 /// Relay-style edge for media
-#[derive(Clone, Debug, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
 pub struct MediaEdge {
     /// Cursor for this edge
     pub cursor: String,
@@ -738,7 +839,7 @@ pub struct MediaEdge {
 }
 
 /// Relay-style page info
-#[derive(Clone, Debug, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
 pub struct PageInfo {
     /// Whether there is a next page
     pub has_next_page: bool,

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use salvo::oapi::ToSchema;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
 pub struct MovieMetadata {
     /// Stable identifier for this movie (UUID).
     pub id: String,

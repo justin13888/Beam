@@ -638,6 +638,13 @@ mod tests {
             async fn refresh_metadata(&self, _: MediaFilter) -> Result<(), MetadataError> {
                 Ok(())
             }
+
+            async fn get_media_sources(
+                &self,
+                _media_id: &str,
+            ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
+                unimplemented!("not called in stream route tests")
+            }
         }
 
         /// Library stub that always returns `Ok(None)` for file lookups so token

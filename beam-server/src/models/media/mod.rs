@@ -6,16 +6,18 @@ mod codec;
 mod format;
 mod movie;
 mod show;
+mod source;
 mod stream;
 
 pub use codec::*;
 pub use format::*;
 pub use movie::*;
 pub use show::*;
+pub use source::*;
 pub use stream::*;
 
 /// Media metadata
-#[derive(Clone, Debug, Serialize, ToSchema, Union)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, Union)]
 pub enum MediaMetadata {
     Show(ShowMetadata),
     Movie(MovieMetadata),
@@ -30,7 +32,7 @@ impl MediaMetadata {
     }
 }
 
-#[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
 pub struct Title {
     /// Original title
     pub original: String,
@@ -40,7 +42,7 @@ pub struct Title {
     pub alternatives: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
 pub struct ExternalIdentifiers {
     /// IMDb ID (e.g., tt1234567)
     pub imdb_id: Option<String>,
@@ -50,7 +52,7 @@ pub struct ExternalIdentifiers {
     pub tvdb_id: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
 pub struct Ratings {
     /// TMDB rating as a percentage (0-100)
     pub tmdb: Option<u32>,

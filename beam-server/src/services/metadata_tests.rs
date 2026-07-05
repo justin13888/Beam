@@ -571,4 +571,95 @@ mod tests {
         assert!(!conn.page_info.has_next_page);
         assert!(!conn.page_info.has_previous_page);
     }
+
+    #[tokio::test]
+    async fn test_get_media_sources_unknown_id_returns_not_found() {
+        use crate::services::metadata::MetadataError;
+
+        let service = make_service();
+        let result = service.get_media_sources(&Uuid::new_v4().to_string()).await;
+        assert!(matches!(result, Err(MetadataError::MediaNotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_get_media_sources_show_id_returns_unsupported() {
+        use crate::services::metadata::MetadataError;
+
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let show = Show {
+            id: Uuid::new_v4(),
+            title: "Test Show".to_string(),
+            title_localized: None,
+            description: None,
+            year: None,
+            poster_url: None,
+            backdrop_url: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            anilist_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let show_id = show.id;
+        show_repo.shows.lock().unwrap().insert(show.id, show);
+
+        let service = DbMetadataService::new(
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let result = service.get_media_sources(&show_id.to_string()).await;
+        assert!(matches!(result, Err(MetadataError::Unsupported(_))));
+    }
+
+    #[tokio::test]
+    async fn test_get_media_sources_returns_movie_files_across_entries() {
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
+
+        let movie = make_movie("Test Movie", Some(2023));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+
+        let library_id = Uuid::new_v4();
+        let entry = MovieEntry {
+            id: Uuid::new_v4(),
+            library_id,
+            movie_id,
+            edition: None,
+            is_primary: true,
+            created_at: chrono::Utc::now(),
+        };
+        let entry_id = entry.id;
+        movie_repo.entries.lock().unwrap().insert(entry.id, entry);
+
+        let file = make_media_file(
+            library_id,
+            MediaFileContent::Movie {
+                movie_entry_id: entry_id,
+            },
+        );
+        let file_id = file.id;
+        file_repo.files.lock().unwrap().insert(file.id, file);
+
+        let service = DbMetadataService::new(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            stream_repo,
+        );
+
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].file_id, file_id.to_string());
+        assert_eq!(sources[0].stream_url, format!("/v1/stream/mp4/{file_id}"));
+        assert_eq!(sources[0].size_bytes, 1024);
+    }
 }

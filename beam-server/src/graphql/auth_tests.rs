@@ -61,6 +61,13 @@ mod tests {
         async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
             Ok(())
         }
+
+        async fn get_media_sources(
+            &self,
+            _media_id: &str,
+        ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
+            unimplemented!("not called in auth guard tests")
+        }
     }
 
     #[derive(Debug)]
