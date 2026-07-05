@@ -175,6 +175,20 @@ pub struct Disposition {
 }
 
 impl Disposition {
+    /// Build a `Disposition` with just the default/forced flags set, for
+    /// tests that don't need a real ffmpeg-probed stream.
+    #[cfg(test)]
+    pub(crate) fn for_test(default: bool, forced: bool) -> Self {
+        let mut flags = 0;
+        if default {
+            flags |= ffmpeg::format::stream::Disposition::DEFAULT.bits();
+        }
+        if forced {
+            flags |= ffmpeg::format::stream::Disposition::FORCED.bits();
+        }
+        Self { flags }
+    }
+
     /// Check if this stream is the default stream
     pub fn is_default(&self) -> bool {
         (self.flags & ffmpeg::format::stream::Disposition::DEFAULT.bits()) != 0

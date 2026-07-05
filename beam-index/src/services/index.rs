@@ -156,9 +156,13 @@ impl LocalIndexService {
                         height: v.video.height,
                         frame_rate: v.frame_rate(),
                         bit_rate: Some(v.video.bit_rate),
-                        color_space: None,
-                        color_range: None,
-                        hdr_format: None,
+                        color_space: Some(v.video.color_space.description().to_string()),
+                        color_range: Some(v.video.color_range.description().to_string()),
+                        hdr_format: v
+                            .video
+                            .color_transfer_characteristic
+                            .hdr_format_name()
+                            .map(|s| s.to_string()),
                     });
                     (metadata, StreamType::Video)
                 }
@@ -170,8 +174,8 @@ impl LocalIndexService {
                         sample_rate: a.audio.rate,
                         channel_layout: Some(a.audio.channel_layout_description().to_string()),
                         bit_rate: Some(a.audio.bit_rate),
-                        is_default: false,
-                        is_forced: false,
+                        is_default: a.disposition.is_default(),
+                        is_forced: a.disposition.is_forced(),
                     });
                     (metadata, StreamType::Audio)
                 }
@@ -179,8 +183,8 @@ impl LocalIndexService {
                     let metadata = DomainStreamMetadata::Subtitle(SubtitleStreamMetadata {
                         language: s.language(),
                         title: s.title(),
-                        is_default: false,
-                        is_forced: false,
+                        is_default: s.disposition.is_default(),
+                        is_forced: s.disposition.is_forced(),
                     });
                     (metadata, StreamType::Subtitle)
                 }
@@ -1059,6 +1063,35 @@ mod tests {
         })
     }
 
+    /// Override a stream's disposition flags after construction, so the
+    /// `make_*_stream` builders above don't need a `disposition` parameter
+    /// threaded through every existing call site.
+    fn with_disposition(
+        mut stream: UtilStreamMetadata,
+        default: bool,
+        forced: bool,
+    ) -> UtilStreamMetadata {
+        let disposition = Disposition::for_test(default, forced);
+        match &mut stream {
+            UtilStreamMetadata::Video(v) => v.disposition = disposition,
+            UtilStreamMetadata::Audio(a) => a.disposition = disposition,
+            UtilStreamMetadata::Subtitle(s) => s.disposition = disposition,
+        }
+        stream
+    }
+
+    /// Override a video stream's color transfer characteristic after
+    /// construction, for HDR-detection tests.
+    fn with_transfer_characteristic(
+        mut stream: UtilStreamMetadata,
+        transfer: ColorTransferCharacteristic,
+    ) -> UtilStreamMetadata {
+        if let UtilStreamMetadata::Video(v) = &mut stream {
+            v.video.color_transfer_characteristic = transfer;
+        }
+        stream
+    }
+
     fn make_stream_file_metadata(streams: Vec<UtilStreamMetadata>) -> VideoFileMetadata {
         VideoFileMetadata {
             file_path: PathBuf::from("test.mp4"),
@@ -1112,6 +1145,77 @@ mod tests {
             assert_eq!(v.height, 1080);
             assert_eq!(v.frame_rate, Some(30.0));
             assert_eq!(v.bit_rate, Some(5_000_000));
+        } else {
+            panic!("expected Video metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_video_stream_persists_sdr_color_metadata() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let metadata = make_stream_file_metadata(vec![make_video_stream(
+            0, 1920, 1080, 5_000_000, "h264", None,
+        )]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        if let beam_domain::models::stream::StreamMetadata::Video(v) = &streams[0].metadata {
+            assert_eq!(v.color_space.as_deref(), Some("BT.709"));
+            assert_eq!(v.color_range.as_deref(), Some("Unspecified"));
+            assert_eq!(v.hdr_format, None);
+        } else {
+            panic!("expected Video metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_video_stream_smpte2084_persists_hdr10() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let stream = make_video_stream(0, 3840, 2160, 20_000_000, "hevc", None);
+        let stream = with_transfer_characteristic(stream, ColorTransferCharacteristic::SMPTE2084);
+        let metadata = make_stream_file_metadata(vec![stream]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        if let beam_domain::models::stream::StreamMetadata::Video(v) = &streams[0].metadata {
+            assert_eq!(v.hdr_format.as_deref(), Some("HDR10"));
+        } else {
+            panic!("expected Video metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_video_stream_arib_std_b67_persists_hlg() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let stream = make_video_stream(0, 3840, 2160, 20_000_000, "hevc", None);
+        let stream = with_transfer_characteristic(stream, ColorTransferCharacteristic::AribStdB67);
+        let metadata = make_stream_file_metadata(vec![stream]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        if let beam_domain::models::stream::StreamMetadata::Video(v) = &streams[0].metadata {
+            assert_eq!(v.hdr_format.as_deref(), Some("HLG"));
         } else {
             panic!("expected Video metadata");
         }
@@ -1223,6 +1327,70 @@ mod tests {
             assert_eq!(a.sample_rate, 48_000);
         } else {
             panic!("expected Audio metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_audio_stream_default_and_forced_flags_persisted() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let default_track = with_disposition(
+            make_audio_stream(0, "eng", "", 2, 48_000, 128_000, "aac"),
+            true,
+            false,
+        );
+        let commentary_track = with_disposition(
+            make_audio_stream(1, "eng", "Commentary", 2, 48_000, 128_000, "aac"),
+            false,
+            false,
+        );
+        let metadata = make_stream_file_metadata(vec![default_track, commentary_track]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        if let beam_domain::models::stream::StreamMetadata::Audio(a) = &streams[0].metadata {
+            assert!(a.is_default);
+            assert!(!a.is_forced);
+        } else {
+            panic!("expected Audio metadata");
+        }
+        if let beam_domain::models::stream::StreamMetadata::Audio(a) = &streams[1].metadata {
+            assert!(!a.is_default);
+        } else {
+            panic!("expected Audio metadata");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_subtitle_stream_default_and_forced_flags_persisted() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let forced_track = with_disposition(
+            make_subtitle_stream(0, Some("eng"), Some("Forced")),
+            false,
+            true,
+        );
+        let metadata = make_stream_file_metadata(vec![forced_track]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        if let beam_domain::models::stream::StreamMetadata::Subtitle(sub) = &streams[0].metadata {
+            assert!(!sub.is_default);
+            assert!(sub.is_forced);
+        } else {
+            panic!("expected Subtitle metadata");
         }
     }
 

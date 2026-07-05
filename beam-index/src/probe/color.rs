@@ -462,6 +462,19 @@ impl ColorTransferCharacteristic {
             ColorTransferCharacteristic::SMPTE2084 | ColorTransferCharacteristic::AribStdB67
         )
     }
+
+    /// The commonly-recognized HDR format name for this transfer
+    /// characteristic (e.g. for display in a UI), or `None` for SDR content.
+    /// Note this identifies the transfer function only -- it cannot
+    /// distinguish plain HDR10 from HDR10+ or Dolby Vision, which layer
+    /// dynamic metadata on top of the same PQ transfer curve.
+    pub fn hdr_format_name(&self) -> Option<&'static str> {
+        match self {
+            ColorTransferCharacteristic::SMPTE2084 => Some("HDR10"),
+            ColorTransferCharacteristic::AribStdB67 => Some("HLG"),
+            _ => None,
+        }
+    }
 }
 
 impl From<ffmpeg::color::TransferCharacteristic> for ColorTransferCharacteristic {
@@ -558,5 +571,34 @@ impl From<ffmpeg::chroma::Location> for ChromaLocation {
             ffmpeg::chroma::Location::Bottom => ChromaLocation::Bottom,
             ffmpeg::chroma::Location::Unspecified => ChromaLocation::Unspecified,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hdr_format_name_smpte2084_is_hdr10() {
+        assert_eq!(
+            ColorTransferCharacteristic::SMPTE2084.hdr_format_name(),
+            Some("HDR10")
+        );
+        assert!(ColorTransferCharacteristic::SMPTE2084.is_hdr());
+    }
+
+    #[test]
+    fn hdr_format_name_arib_std_b67_is_hlg() {
+        assert_eq!(
+            ColorTransferCharacteristic::AribStdB67.hdr_format_name(),
+            Some("HLG")
+        );
+        assert!(ColorTransferCharacteristic::AribStdB67.is_hdr());
+    }
+
+    #[test]
+    fn hdr_format_name_sdr_transfer_is_none() {
+        assert_eq!(ColorTransferCharacteristic::BT709.hdr_format_name(), None);
+        assert!(!ColorTransferCharacteristic::BT709.is_hdr());
     }
 }
