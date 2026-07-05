@@ -48,6 +48,7 @@ tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
+argon2 = { workspace = true }
 futures = "0.3.31"
 beam-auth = { path = "../beam-auth", features = ["test-utils"] }
 beam-domain = { path = "../beam-domain", features = ["test-utils"] }

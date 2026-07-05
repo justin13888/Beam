@@ -541,6 +541,7 @@ dependencies = [
 name = "beam-server"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "async-graphql",
  "async-stream",
  "async-trait",

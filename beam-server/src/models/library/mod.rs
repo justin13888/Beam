@@ -7,7 +7,7 @@ use serde::Serialize;
 
 pub use file::*;
 
-#[derive(Clone, Debug, Serialize, ToSchema, SimpleObject)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema, SimpleObject)]
 pub struct Library {
     pub id: String,
     pub name: String,

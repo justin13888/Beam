@@ -29,6 +29,9 @@ pub enum ApiError {
     /// Unauthorized
     #[salvo(response(status_code = 401))]
     Unauthorized(String),
+    /// Forbidden
+    #[salvo(response(status_code = 403))]
+    Forbidden(String),
     /// Not found
     #[salvo(response(status_code = 404))]
     NotFound(String),
@@ -43,6 +46,7 @@ impl Writer for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
@@ -66,6 +70,28 @@ pub async fn require_auth(req: &Request, state: &AppState) -> Result<Authenticat
         .verify_token(token)
         .await
         .map_err(|_| ApiError::Unauthorized("Invalid or expired token".to_string()))
+}
+
+/// Like [`require_auth`], but additionally requires the caller to be an
+/// admin. Every admin-gated `/v1/admin/*` route uses this.
+pub async fn require_admin(req: &Request, state: &AppState) -> Result<AuthenticatedUser, ApiError> {
+    let user = require_auth(req, state).await?;
+
+    let user_id = uuid::Uuid::parse_str(&user.user_id)
+        .map_err(|_| ApiError::Internal("invalid user id in session".to_string()))?;
+    let db_user = state
+        .services
+        .user_repo
+        .find_by_id(user_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::Unauthorized("user no longer exists".to_string()))?;
+
+    if db_user.is_admin {
+        Ok(user)
+    } else {
+        Err(ApiError::Forbidden("admin access required".to_string()))
+    }
 }
 
 #[cfg(test)]
