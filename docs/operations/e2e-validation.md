@@ -17,10 +17,10 @@ codegen) before starting this runbook.
 podman compose -f compose.dependencies.yaml up
 ```
 
-Brings up Postgres and Dex (target state — see `docs/operations/deployment.md` for the Valkey →
-Dex replacement). Dex is preloaded with static test users for local login: `admin@beam.localhost` and
-`user@beam.localhost`, both with password `password`. Never use these credentials, or Dex itself,
-outside local development.
+Brings up Postgres and Dex (the bundled dev OIDC provider — see
+[ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)). Dex is preloaded with static
+test users for local login: `admin@beam.localhost` and `user@beam.localhost`, both with password
+`password`. Never use these credentials, or Dex itself, outside local development.
 
 ## 2. Run migrations
 
@@ -56,7 +56,7 @@ Using the vendored-ffmpeg local build if your host lacks system FFmpeg dev libra
 `docs/operations/dev-setup.md` step 2):
 
 ```sh
-cargo build-local && ./target/debug/beam-stream   # beam-server once the rename lands
+cargo build-local && ./target/debug/beam-server
 ```
 
 Confirm your `.env`/shell environment has `BEAM_OIDC_ISSUER` and related OIDC variables pointed at the
@@ -90,8 +90,9 @@ Work through the following in order, using a real browser against the running de
 9. Open the admin area's log viewer and confirm recent scan/enrichment/auth events are visible
    (FR-604, FR-605, NFR-403).
 10. Log out, then log back in as `user@beam.localhost` / `password`. Confirm no admin UI is visible
-    (FR-606), and confirm a direct API call to an admin-only endpoint (e.g. the library-CRUD or
-    rescan-trigger endpoint) returns `403` for this non-admin session (FR-607, NFR-105).
+    (FR-606), and confirm a direct API call to an admin-only endpoint (e.g. `POST
+    /v1/admin/libraries` or `POST /v1/admin/libraries/{id}/scan`) returns `403` for this non-admin
+    session (FR-607, NFR-105).
 
 ## 7. curl-based API smoke checks
 
@@ -100,21 +101,21 @@ browser flow doesn't directly surface:
 
 ```sh
 # 1. Unauthenticated request to a protected endpoint returns 401
-curl -i http://localhost:8000/v1/library/entries
+curl -i http://localhost:8000/v1/media
 
 # 2. Range request against the stream endpoint returns 206 with correct headers
 curl -i -H "Range: bytes=0-1023" \
-  --cookie "<session-cookie-from-browser>" \
+  --cookie "beam_session=<session-cookie-from-browser>" \
   http://localhost:8000/v1/files/<file-id>/stream
 
 # 3. Download endpoint sets Content-Disposition: attachment
-curl -i --cookie "<session-cookie-from-browser>" \
+curl -i --cookie "beam_session=<session-cookie-from-browser>" \
   http://localhost:8000/v1/files/<file-id>/download
 
 # 4. Cross-origin POST from a disallowed Origin gets 403 (CSRF defense-in-depth, NFR-104)
 curl -i -X POST -H "Origin: https://evil.example" \
-  --cookie "<session-cookie-from-browser>" \
-  http://localhost:8000/v1/library/scan
+  --cookie "beam_session=<session-cookie-from-browser>" \
+  http://localhost:8000/v1/admin/libraries/<library-id>/scan
 ```
 
 Expected results: (1) `401`; (2) `206 Partial Content` with `Content-Range` and `Accept-Ranges: bytes`
