@@ -42,3 +42,15 @@ pre-push:
       glob: "**/*.{ts,tsx,js,mjs,cjs,astro,json}"
       run: bun run check
       fail_text: "Run `bun run check:fix` to auto-fix"
+
+    ts-typecheck:
+      glob: "**/*.{ts,tsx,json}"
+      root: "beam-web/"
+      run: bun run typecheck
+      fail_text: "Fix TypeScript errors before pushing"
+
+    ts-test:
+      glob: "**/*.{ts,tsx}"
+      root: "beam-web/"
+      run: bun run test
+      fail_text: "Fix failing web tests before pushing"

@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-patch-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      bun-patch-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions-patch-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    open-pull-requests-limit: 10

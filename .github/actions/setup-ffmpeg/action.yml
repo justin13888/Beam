@@ -1,17 +1,18 @@
 name: Setup FFmpeg
 description: >
-  Builds FFmpeg 8.0 from source if not cached, restores from cache if available,
-  and configures PKG_CONFIG_PATH / LD_LIBRARY_PATH / PATH for the job.
+  Builds FFmpeg 8.1 from source if not cached, restores from cache if available,
+  and configures PKG_CONFIG_PATH / LD_LIBRARY_PATH / PATH for the job. Kept in
+  lockstep with the `ffmpeg-next` version pinned in the workspace Cargo.toml.
 
 runs:
   using: composite
   steps:
-    - name: Cache FFmpeg 8.0 build
+    - name: Cache FFmpeg 8.1 build
       id: cache-ffmpeg
       uses: actions/cache@v4
       with:
         path: /opt/ffmpeg
-        key: ffmpeg-8.0-ubuntu-latest-v1
+        key: ffmpeg-8.1-ubuntu-latest-v1
 
     - name: Install FFmpeg build dependencies
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -24,14 +25,14 @@ runs:
           libfribidi-dev libogg-dev libssl-dev
         version: 1.0
 
-    - name: Build FFmpeg 8.0 from source
+    - name: Build FFmpeg 8.1 from source
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
       shell: bash
       run: |
         mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg
-        wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz
-        tar xf ffmpeg-8.0.tar.xz
-        cd ffmpeg-8.0
+        wget -q https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz
+        tar xf ffmpeg-8.1.tar.xz
+        cd ffmpeg-8.1
         ./configure \
           --prefix=/opt/ffmpeg \
           --disable-debug \

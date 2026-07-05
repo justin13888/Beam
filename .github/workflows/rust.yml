@@ -8,6 +8,7 @@ on:
       - "**/Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
+      - "deny.toml"
   pull_request:
     branches: [master]
     paths:
@@ -15,6 +16,7 @@ on:
       - "**/Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
+      - "deny.toml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -96,3 +98,12 @@ jobs:
           name: rust-coverage
           path: lcov.info
           retention-days: 7
+
+  cargo-deny:
+    name: Supply-chain audit (advisories, licenses, bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.91"

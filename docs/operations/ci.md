@@ -99,10 +99,11 @@ install` manually per the README, with no automated enforcement that they have.
 ## Changes this push
 
 - **Coverage thresholds actually enforced, not just measured.** `rust.yml`'s `test` job gains
-  `--fail-under-lines 70` on the `cargo llvm-cov` invocation; `beam-web/vitest.config.ts`'s commented-
-  out `thresholds` block is uncommented and set to 60% (lines/functions/branches/statements). See
-  `docs/testing/coverage.md` for the rationale behind these specific numbers and the ratchet-only
-  policy.
+  `--fail-under-lines 65` on the `cargo llvm-cov` invocation; `beam-web/vitest.config.ts` gains a
+  `coverage.include` list (so untested files count in the denominator) and a `thresholds` block
+  (lines 12% / functions 10% / branches 3% / statements 12%). These are calibrated against an actual
+  measurement taken when the gate was wired, not the `70%`/`60%` figures originally sketched here —
+  see `docs/testing/coverage.md` for the full rationale and the ratchet-only policy.
 - **FFmpeg CI version bumped 8.0 → 8.1**, matching the pinned `ffmpeg-next = "8.1"` in the workspace
   `Cargo.toml`. `setup-ffmpeg`'s source URL, cache key, and `./configure` invocation update
   accordingly; this closes the version-drift gap noted above.
