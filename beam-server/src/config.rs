@@ -68,6 +68,17 @@ pub struct ServerConfig {
     /// for retries and anything the immediate poke missed.
     #[config(env = "ENRICH_INTERVAL_SECS", default = 300)]
     pub enrich_interval_secs: u64,
+
+    /// TMDB API read-access token used by `cameo` for TMDB-sourced
+    /// enrichment. If absent, TMDB-eligible titles are left un-enriched
+    /// rather than failing the scan; AniList-sourced titles still enrich
+    /// without it.
+    #[config(env = "TMDB_API_TOKEN")]
+    pub tmdb_api_token: Option<String>,
+
+    /// Toggles AniList-sourced enrichment via `cameo`.
+    #[config(env = "ANILIST_ENABLED", default = true)]
+    pub anilist_enabled: bool,
 }
 
 impl ServerConfig {

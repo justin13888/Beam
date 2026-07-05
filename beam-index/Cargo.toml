@@ -10,6 +10,12 @@ beam-domain = { path = "../beam-domain", features = ["entity"] }
 beam-entity = { path = "../beam-entity" }
 async-graphql = { version = "7.0.17", features = ["chrono", "uuid"] }
 async-trait = { workspace = true }
+# `cache` (rusqlite, bundled) is deliberately left disabled: it pins
+# libsqlite3-sys to a version range that hard-conflicts with the one
+# sea-orm-migration's CLI tooling (via sqlx-sqlite, always compiled in
+# regardless of our postgres-only sea-orm feature selection) pins. See
+# docs/architecture/decisions/ADR-0006-cameo-enrichment.md.
+cameo = { version = "0.2.0", default-features = false, features = ["tmdb", "anilist"] }
 chrono = { workspace = true, features = ["serde"] }
 ffmpeg-next = { workspace = true }
 notify = "6"

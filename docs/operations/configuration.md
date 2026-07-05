@@ -79,16 +79,21 @@ Sessions are persisted in Postgres this push, not Redis — see "Removed" below 
 
 | Variable | Read by | Required / Default | Purpose |
 |---|---|---|---|
-| `TMDB_API_TOKEN` | `beam-server` | **New this push.** Optional; no default | TMDB API token used by `cameo` for TMDB-sourced enrichment. If absent, TMDB-eligible titles are left un-enriched rather than failing the scan (FR-307); AniList-sourced titles still enrich without it (FR-306). |
-| `ANILIST_ENABLED` | `beam-server` | **New this push.** Optional; default `true` | Toggles AniList-sourced enrichment via `cameo`. |
-| `ENRICH_ENABLED` | `beam-server` | **New this push.** Optional; default `true` | Master toggle for the background enrichment pipeline (FR-301–FR-309). |
-| `ENRICH_INTERVAL_SECS` | `beam-server` | **New this push.** Optional; sensible default | Poll interval for the enrichment background worker. |
-| `ENRICH_BATCH_SIZE` | `beam-server` | **New this push.** Optional; sensible default | Number of pending titles processed per enrichment worker pass. |
-| `ENRICH_MIN_CONFIDENCE` | `beam-server` | **New this push.** Optional; sensible default | Minimum match-confidence threshold below which a `cameo` metadata match is discarded rather than applied. |
-| `METADATA_LANGUAGE` | `beam-server` | **New this push.** Optional; default e.g. `en` | Preferred language for enriched titles/descriptions requested from TMDB/AniList. |
+| `TMDB_API_TOKEN` | `beam-server` | Implemented. Optional; no default | TMDB API token used by `cameo` for TMDB-sourced enrichment. If absent, TMDB-eligible titles are left un-enriched rather than failing the scan (FR-307); AniList-sourced titles still enrich without it (FR-306). |
+| `ANILIST_ENABLED` | `beam-server` | Implemented. Optional; default `true` | Toggles AniList-sourced enrichment via `cameo`. |
+| `ENRICH_INTERVAL_SECS` | `beam-server` | Implemented. Optional; default `300` | Poll interval for the enrichment background worker (new titles are also swept immediately on scan). |
+| `ENRICH_BATCH_SIZE` | `beam-server` | Not yet wired to an env var; hardcoded to 25 (`EnrichmentPolicy::default`) | Number of pending titles processed per enrichment worker pass. |
+| `ENRICH_MIN_CONFIDENCE` | `beam-server` | Not yet wired to an env var; the matcher's accept thresholds (0.70 total / 0.55 title) are compile-time constants | Minimum match-confidence threshold below which a `cameo` metadata match is discarded rather than applied. |
+| `METADATA_LANGUAGE` | `beam-server` | Not yet implemented -- `cameo` requests default-language results | Preferred language for enriched titles/descriptions requested from TMDB/AniList. |
+
+`ENRICH_BATCH_SIZE`/`ENRICH_MIN_CONFIDENCE`/`METADATA_LANGUAGE` are recorded here as the intended
+target shape (making these compile-time constants configurable is a small, low-risk follow-up) rather
+than removed, so this table doesn't silently lose the design intent -- but they are not live env vars
+today; don't set them expecting an effect.
 
 See [ADR-0006](../architecture/decisions/ADR-0006-cameo-enrichment.md) for the `cameo`-based
-enrichment design and FR-301–FR-309 for the associated functional requirements.
+enrichment design (including the cache-feature conflict discovered while wiring the adapter) and
+FR-301–FR-309 for the associated functional requirements.
 
 ## Observability / logging
 

@@ -7,7 +7,8 @@ use beam_auth::utils::{
     service::{AuthService, LocalAuthService},
     session_store::PgSessionStore,
 };
-use beam_domain::providers::enrichment::NoopEnrichmentProvider;
+use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
+use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::services::clock::RealClock;
 use beam_index::services::enrichment::MetadataEnrichmentService;
 use beam_index::services::index::{IndexService, LocalIndexService};
@@ -155,15 +156,28 @@ impl AppServices {
             .with_enrichment_repo(enrichment_repo.clone()),
         );
 
-        // Wired to `NoopEnrichmentProvider` for now: every sweep is a no-op
-        // until D4 replaces this with the cameo-backed adapter. The queue,
-        // matcher, and worker are already fully live and tested against it.
+        // Real cameo client when at least TMDB or AniList is configured;
+        // NoopEnrichmentProvider (every sweep a fast no-op) otherwise -- e.g.
+        // a fresh dev environment with no TMDB_API_TOKEN set.
+        let enrichment_provider: Arc<dyn EnrichmentProvider> =
+            match beam_index::providers::cameo::build_client(CameoWiringConfig {
+                tmdb_api_token: config.tmdb_api_token.clone(),
+                anilist_enabled: config.anilist_enabled,
+            }) {
+                Ok(Some(client)) => Arc::new(CameoEnrichmentProvider::new(client)),
+                Ok(None) => Arc::new(NoopEnrichmentProvider),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to build cameo client; metadata enrichment disabled");
+                    Arc::new(NoopEnrichmentProvider)
+                }
+            };
+
         let enrichment_service = Arc::new(MetadataEnrichmentService::new(
             enrichment_repo.clone(),
             movie_repo.clone(),
             show_repo.clone(),
             genre_repo,
-            Arc::new(NoopEnrichmentProvider),
+            enrichment_provider,
             admin_log_service.clone(),
             Arc::new(RealClock),
         ));

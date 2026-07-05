@@ -188,6 +188,8 @@ mod tests {
             watch_enabled: false,
             watch_debounce_ms: 2000,
             enrich_interval_secs: 300,
+            tmdb_api_token: None,
+            anilist_enabled: false,
         };
 
         let state = AppState::new(config, services);

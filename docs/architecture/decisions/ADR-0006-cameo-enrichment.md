@@ -55,3 +55,13 @@ Re-enrichment of a title is available as a user-triggerable admin action.
 - No server-side image proxy means poster/backdrop rendering depends on TMDB/AniList's CDNs being
   reachable from the end user's browser, and leaks the viewing user's IP to those third parties on
   every poster render — an accepted, documented tradeoff rather than an oversight.
+- `cameo`'s `cache` feature (a bundled-SQLite response cache) is disabled, discovered while wiring
+  the adapter: its `rusqlite` dependency hard-pins `libsqlite3-sys` to a version range that conflicts
+  with the one `sea-orm-migration`'s CLI tooling pulls in transitively via `sqlx-sqlite` (always
+  compiled in, regardless of Beam's postgres-only `sea-orm` feature selection) — two crates cannot
+  link the same native `sqlite3` library at two different versions in one binary. Every enrichment
+  request hits TMDB/AniList directly rather than a local cache; the worker's own attempt/backoff
+  schedule (`EnrichmentPolicy`) plus cameo's built-in per-provider rate limiting (TMDB 40 req/10s,
+  AniList 90/min, with automatic retry) absorb the resulting extra request volume. Revisit if a
+  future cameo release decouples the cache feature's sqlite version, or if sea-orm-migration's CLI
+  dependency stops requiring every sqlx backend.
