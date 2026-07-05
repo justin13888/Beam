@@ -1,10 +1,14 @@
 use async_trait::async_trait;
-use bb8_redis::RedisConnectionManager;
-use bb8_redis::bb8::{Pool, PooledConnection};
-use redis::AsyncCommands;
+use chrono::Utc;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, DeleteResult, EntityTrait,
+    QueryFilter,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
+
+use beam_entity::session::{ActiveModel as SessionActiveModel, Column, Entity as SessionEntity};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SessionData {
@@ -17,20 +21,18 @@ pub struct SessionData {
 
 #[derive(Debug, Error)]
 pub enum SessionError {
-    #[error("Redis error: {0}")]
-    Redis(#[from] redis::RedisError),
-    #[error("Connection pool error: {0}")]
-    Pool(#[from] bb8_redis::bb8::RunError<redis::RedisError>),
-    #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    #[error("Database error: {0}")]
+    Db(#[from] sea_orm::DbErr),
+    #[error("Invalid user ID: {0}")]
+    InvalidUserId(#[from] uuid::Error),
 }
 
 type Result<T> = std::result::Result<T, SessionError>;
 
 /// A thread-safe, asynchronous store for managing user sessions.
 ///
-/// This trait abstracts the underlying storage mechanism (e.g., Redis, PostgreSQL,
-/// or an in-memory map) used to persist session data across requests.
+/// This trait abstracts the underlying storage mechanism (Postgres, or an
+/// in-memory map for tests) used to persist session data across requests.
 #[async_trait]
 pub trait SessionStore: Send + Sync + std::fmt::Debug {
     /// Persists new session data and returns a unique session identifier.
@@ -76,159 +78,135 @@ pub trait SessionStore: Send + Sync + std::fmt::Debug {
     async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>>;
 }
 
-#[derive(Debug)]
-pub struct RedisSessionStore {
-    pool: Pool<RedisConnectionManager>,
+/// Generates an opaque, random 32-byte URL-safe base64 session identifier.
+fn generate_session_id() -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rand::Rng;
+
+    let mut bytes = [0u8; 32];
+    let mut rng = rand::rng();
+    rng.fill_bytes(&mut bytes);
+
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
-impl RedisSessionStore {
-    pub async fn new(redis_url: &str) -> Result<Self> {
-        let manager = RedisConnectionManager::new(redis_url).map_err(SessionError::Redis)?;
-        let pool = Pool::builder()
-            .build(manager)
-            .await
-            .map_err(SessionError::Redis)?;
-        Ok(Self { pool })
+fn to_session_data(model: &beam_entity::session::Model) -> SessionData {
+    SessionData {
+        user_id: model.user_id.to_string(),
+        device_hash: model.device_hash.clone(),
+        ip: model.ip.clone(),
+        created_at: model.created_at.timestamp(),
+        last_active: model.last_active.timestamp(),
     }
+}
 
-    async fn get_conn(&self) -> Result<PooledConnection<'_, RedisConnectionManager>> {
-        self.pool.get().await.map_err(SessionError::Pool)
-    }
+/// Postgres-backed session store.
+///
+/// Sessions carry their own `expires_at`; this store filters expired rows out
+/// of reads rather than deleting them proactively (there is no background
+/// sweep here yet -- unlike Redis, Postgres does not expire rows on its own).
+/// A periodic cleanup task belongs with the broader session-model work
+/// tracked in ADR-0005/ADR-0003, not this storage-backend swap.
+#[derive(Debug, Clone)]
+pub struct PgSessionStore {
+    db: DatabaseConnection,
+}
 
-    fn session_key(session_id: &str) -> String {
-        format!("session:{}", session_id)
-    }
-
-    fn user_sessions_key(user_id: &str) -> String {
-        format!("user_sessions:{}", user_id)
-    }
-
-    fn generate_session_id() -> String {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        use rand::Rng;
-
-        let mut bytes = [0u8; 32];
-        let mut rng = rand::rng();
-        rng.fill_bytes(&mut bytes);
-
-        URL_SAFE_NO_PAD.encode(bytes)
+impl PgSessionStore {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { db }
     }
 }
 
 #[async_trait]
-impl SessionStore for RedisSessionStore {
+impl SessionStore for PgSessionStore {
     async fn create(&self, data: &SessionData, ttl_secs: u64) -> Result<String> {
-        let session_id = Self::generate_session_id();
-        let key = Self::session_key(&session_id);
-        let user_key = Self::user_sessions_key(&data.user_id);
-        let value = serde_json::to_string(data)?;
+        let session_id = generate_session_id();
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
 
-        let mut conn = self.get_conn().await?;
-
-        // Transaction: set session data + add to user set
-        let _: () = redis::pipe()
-            .atomic()
-            .set_ex(&key, &value, ttl_secs)
-            .sadd(&user_key, &session_id)
-            .query_async(&mut *conn)
-            .await?;
+        let active_model = SessionActiveModel {
+            id: Set(session_id.clone()),
+            user_id: Set(data.user_id.parse()?),
+            device_hash: Set(data.device_hash.clone()),
+            ip: Set(data.ip.clone()),
+            created_at: Set(now.into()),
+            last_active: Set(now.into()),
+            expires_at: Set(expires_at.into()),
+        };
+        active_model.insert(&self.db).await?;
 
         debug!("Created session {} for user {}", session_id, data.user_id);
         Ok(session_id)
     }
 
     async fn get(&self, session_id: &str) -> Result<Option<SessionData>> {
-        let key = Self::session_key(session_id);
-        let mut conn = self.get_conn().await?;
+        let Some(model) = SessionEntity::find_by_id(session_id.to_string())
+            .one(&self.db)
+            .await?
+        else {
+            return Ok(None);
+        };
 
-        let value: Option<String> = conn.get(&key).await?;
-
-        match value {
-            Some(v) => Ok(Some(serde_json::from_str(&v)?)),
-            None => Ok(None),
+        if model.expires_at < Utc::now() {
+            return Ok(None);
         }
+
+        Ok(Some(to_session_data(&model)))
     }
 
     async fn touch(&self, session_id: &str, ttl_secs: u64) -> Result<()> {
-        let key = Self::session_key(session_id);
-        let mut conn = self.get_conn().await?;
+        let Some(model) = SessionEntity::find_by_id(session_id.to_string())
+            .one(&self.db)
+            .await?
+        else {
+            return Ok(());
+        };
 
-        let _: bool = conn.expire(&key, ttl_secs as i64).await?;
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+        let mut active_model: SessionActiveModel = model.into();
+        active_model.last_active = Set(now.into());
+        active_model.expires_at = Set(expires_at.into());
+        active_model.update(&self.db).await?;
+
         Ok(())
     }
 
     async fn delete(&self, session_id: &str) -> Result<()> {
-        let key = Self::session_key(session_id);
-        let mut conn = self.get_conn().await?;
-
-        let value: Option<String> = conn.get(&key).await?;
-        if let Some(v) = value {
-            if let Ok(data) = serde_json::from_str::<SessionData>(&v) {
-                let user_key = Self::user_sessions_key(&data.user_id);
-                let _: () = redis::pipe()
-                    .atomic()
-                    .del(&key)
-                    .srem(&user_key, session_id)
-                    .query_async(&mut *conn)
-                    .await?;
-            } else {
-                let _: () = conn.del(&key).await?;
-            }
-        }
-
+        SessionEntity::delete_by_id(session_id.to_string())
+            .exec(&self.db)
+            .await?;
         debug!("Deleted session {}", session_id);
         Ok(())
     }
 
     async fn delete_all_for_user(&self, user_id: &str) -> Result<u64> {
-        let user_key = Self::user_sessions_key(user_id);
-        let mut conn = self.get_conn().await?;
-
-        let session_ids: Vec<String> = conn.smembers(&user_key).await?;
-        if session_ids.is_empty() {
-            return Ok(0);
-        }
-
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-
-        for id in &session_ids {
-            pipe.del(Self::session_key(id));
-        }
-        pipe.del(&user_key);
-
-        let _: () = pipe.query_async(&mut *conn).await?;
+        let user_uuid: uuid::Uuid = user_id.parse()?;
+        let result: DeleteResult = SessionEntity::delete_many()
+            .filter(Column::UserId.eq(user_uuid))
+            .exec(&self.db)
+            .await?;
 
         debug!(
             "Deleted all {} sessions for user {}",
-            session_ids.len(),
-            user_id
+            result.rows_affected, user_id
         );
-        Ok(session_ids.len() as u64)
+        Ok(result.rows_affected)
     }
 
     async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
-        let user_key = Self::user_sessions_key(user_id);
-        let mut conn = self.get_conn().await?;
+        let user_uuid: uuid::Uuid = user_id.parse()?;
+        let models = SessionEntity::find()
+            .filter(Column::UserId.eq(user_uuid))
+            .filter(Column::ExpiresAt.gt(Utc::now()))
+            .all(&self.db)
+            .await?;
 
-        let session_ids: Vec<String> = conn.smembers(&user_key).await?;
-        let mut sessions = Vec::new();
-
-        for id in session_ids {
-            let key = Self::session_key(&id);
-            let value: Option<String> = conn.get(&key).await?;
-
-            if let Some(v) = value {
-                if let Ok(data) = serde_json::from_str::<SessionData>(&v) {
-                    sessions.push((id, data));
-                }
-            } else {
-                // Session expired but still in set - clean it up
-                let _: () = conn.srem(&user_key, &id).await?;
-            }
-        }
-
-        Ok(sessions)
+        Ok(models
+            .iter()
+            .map(|m| (m.id.clone(), to_session_data(m)))
+            .collect())
     }
 }
 

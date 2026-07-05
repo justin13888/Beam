@@ -22,7 +22,6 @@ services:
       ENABLE_METRICS: ${ENABLE_METRICS:-false}
 
       # Auth & Session
-      REDIS_URL: ${REDIS_URL:-redis://valkey:6379}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is not set or is empty}
     ports:
       - "${STREAM_HOST_PORT:-8000}:8000"
@@ -32,8 +31,6 @@ services:
       - ${HOST_CACHE_DIR:-server_cache}:${CACHE_DIR:-/cache}
     depends_on:
       postgres:
-        condition: service_healthy
-      valkey:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

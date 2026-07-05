@@ -42,9 +42,6 @@ pub struct ServerConfig {
     #[config(env = "JWT_SECRET")]
     pub jwt_secret: String,
 
-    #[config(env = "REDIS_URL", default = "redis://localhost:6379")]
-    pub redis_url: String,
-
     /// Whether to hash files with unknown/unsupported extensions during
     /// indexing. Hashing them lets duplicate detection cover every file;
     /// disable to save scan IO.

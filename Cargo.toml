@@ -8,13 +8,11 @@ http = ">=1.4, <2"
 argon2 = { version = "0.5.3", features = ["std"] }
 sha2 = "0.10"
 async-trait = "0.1"
-bb8-redis = "0.26.0"
 chrono = "0.4.43"
 confique = "0.4.0"
 ffmpeg-next = "8.1"
 jsonwebtoken = {version = "10.3.0", features = ["aws_lc_rs"] }
 rand = "0.10.0"
-redis = { version = "1.0.3", features = ["tokio-comp"] }
 regex = "1.12.3"
 salvo = { version = "0.89.1", features = [
     "oapi",

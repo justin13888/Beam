@@ -162,7 +162,6 @@ mod tests {
             cache_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
             jwt_secret: TEST_JWT_SECRET.to_string(),
-            redis_url: "redis://localhost".to_string(),
             hash_unknown_files: true,
             scan_interval_secs: 3600,
             watch_enabled: false,

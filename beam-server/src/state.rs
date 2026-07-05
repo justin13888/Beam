@@ -5,7 +5,7 @@ use std::sync::Arc;
 use beam_auth::utils::{
     repository::{SqlUserRepository, UserRepository},
     service::{AuthService, LocalAuthService},
-    session_store::RedisSessionStore,
+    session_store::PgSessionStore,
 };
 use beam_index::services::index::{IndexService, LocalIndexService};
 
@@ -118,12 +118,7 @@ impl AppServices {
         let media_info_service =
             Arc::new(crate::services::media_info::LocalMediaInfoService::default());
 
-        // Initialize Redis session store
-        let session_store = Arc::new(
-            RedisSessionStore::new(&config.redis_url)
-                .await
-                .expect("Failed to connect to Redis"),
-        );
+        let session_store = Arc::new(PgSessionStore::new(db.clone()));
 
         let auth_service = Arc::new(LocalAuthService::new(
             user_repo.clone(),
