@@ -60,7 +60,7 @@
     "jsdom": "^27.0.0",
     "msw": "^2.12.10",
     "openapi-typescript": "^7.13.0",
-    "typescript": "^5.7.2",
+    "typescript": "^6.0.3",
     "vite": "^7.1.7",
     "vitest": "^4.0.18"
   }
