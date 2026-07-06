@@ -57,7 +57,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "@vitest/coverage-v8": "^4.0.18",
     "baseline-browser-mapping": "^2.9.19",
-    "jsdom": "^27.0.0",
+    "jsdom": "^29.1.1",
     "msw": "^2.12.10",
     "openapi-typescript": "^7.13.0",
     "typescript": "^5.7.2",
