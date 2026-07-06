@@ -62,8 +62,9 @@ This wires up the hooks defined in `lefthook.yml`:
 
 - **pre-commit** (staged files only, fast): `cargo fmt --check` on staged `.rs` files, `biome check`
   on staged TS/JS/Astro files.
-- **pre-push** (CI-equivalent, gated by which file types changed): `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo test --workspace`, `bun run check`, plus (this push) `bun run
+- **pre-push** (CI-equivalent, gated by which file types changed): `cargo clippy-local`, `cargo
+  t-local` (the vendored-FFmpeg aliases from section 2 above, so the hook builds hermetically
+  without a system FFmpeg dev install), `bun run check`, plus (this push) `bun run
   test` and `bun run typecheck` — see `docs/operations/ci.md` for the hook/CI-parity fix this push
   makes and why hooks are a fast local approximation of CI, not a replacement for it.
 

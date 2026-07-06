@@ -26,14 +26,17 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
+    # rust-clippy/rust-test use the vendored-FFmpeg aliases (.cargo/config.toml) so the
+    # hook compiles hermetically without a system FFmpeg dev install (see ADR-0007). CI
+    # is unaffected -- it keeps dynamically linking a system-provided FFmpeg.
     rust-clippy:
       glob: "{**/*.rs,**/Cargo.toml,Cargo.lock,rust-toolchain.toml}"
-      run: cargo clippy --workspace --all-targets -- -D warnings
+      run: cargo clippy-local
       fail_text: "Fix Clippy warnings before pushing"
 
     rust-test:
       glob: "{**/*.rs,**/Cargo.toml,Cargo.lock}"
-      run: cargo test --workspace
+      run: cargo t-local
       fail_text: "Fix failing tests before pushing"
 
     ts-full-check:

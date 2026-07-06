@@ -86,9 +86,11 @@ filters as `typescript.yml`.
 - **pre-commit** (parallel, staged-file-scoped, fast): `cargo fmt --check` (glob: any `.rs` file
   staged), `bun biome check {staged_files}` (glob: staged TS/JS/Astro).
 - **pre-push** (parallel, CI-equivalent checks, gated per file type so a docs-only push doesn't wait
-  on Rust compilation): `cargo clippy --workspace --all-targets -- -D warnings` (glob: Rust/Cargo
-  files), `cargo test --workspace` — **plain `cargo test`, not `cargo llvm-cov`** — (same glob), and
-  `bun run check` (glob: any JS/TS/Astro/JSON file) — Biome only.
+  on Rust compilation): `cargo clippy-local` and `cargo t-local` (glob: Rust/Cargo files) — the
+  vendored-FFmpeg aliases from `.cargo/config.toml`, so the hook compiles hermetically without a
+  system FFmpeg dev install (see [ADR-0007](../architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md));
+  still plain `cargo test` under the hood, not `cargo llvm-cov` — and `bun run check` (glob: any
+  JS/TS/Astro/JSON file) — Biome only.
 
 Notably, pre-push today does **not** run `vitest` or `tsc`/`typecheck`. A web-breaking change (a
 failing test, a type error) can pass all local hooks and only get caught once `typescript.yml` runs in
@@ -127,7 +129,7 @@ install` manually per the README, with no automated enforcement that they have.
   it's present, rather than relying on an undocumented manual install step.
 
 **Hooks remain a fast local approximation of CI, not a replacement for it.** Even after the parity
-fix above, pre-push hooks run a plain `cargo test --workspace` (no coverage instrumentation) and a
+fix above, pre-push hooks run a vendored-FFmpeg `cargo test --workspace` (no coverage instrumentation) and a
 scoped `bun run test`/`typecheck`, while CI additionally runs `cargo fmt --check` unconditionally,
 full `cargo llvm-cov` coverage-gated runs, the OpenAPI codegen pipeline, `cargo-deny`, and Biome across
 the whole repository regardless of what's staged. Passing local hooks is a strong signal a push will
