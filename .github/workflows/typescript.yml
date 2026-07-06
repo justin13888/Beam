@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@1.91
+      - uses: dtolnay/rust-toolchain@1.100
 
       - uses: ./.github/actions/install-rust-build-deps
       - uses: ./.github/actions/setup-ffmpeg
