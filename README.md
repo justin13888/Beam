@@ -16,6 +16,17 @@ encoded versions, lets the client pick among them for constrained-bandwidth play
 
 Beam originally started as a project to surpass the limitations of Jellyfin, a popular open-source media server. Jellyfin is a great project, but we need a more modern, straightforward solution that is as easy to use but more feature-rich and actively developed.
 
+## Clients
+
+*Every client is native and uses the public API contracts as source-of-truth.*
+
+- [ ] Web
+- [ ] Swift (iOS/macOS)
+- [ ] Kotlin (Android)
+- [ ] GTK (Linux)
+
+Not in scope currently: Native Windows client (see [#64](https://github.com/justin13888/Beam/issues/64))
+
 ## Architecture
 
 Beam is a modular monolith: one Rust binary handles the HTTP API, OIDC auth, in-process media
