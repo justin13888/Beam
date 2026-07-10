@@ -63,7 +63,7 @@
     "msw": "^2.12.10",
     "openapi-typescript": "^7.13.0",
     "typescript": "^5.7.2",
-    "vite": "^7.1.7",
+    "vite": "^8.1.4",
     "vitest": "^4.0.18"
   }
 }
