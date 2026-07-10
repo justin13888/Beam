@@ -55,9 +55,9 @@ services:
       # (compose.dependencies.yaml) is reachable from a browser at
       # http://localhost:5556/dex, but reaching it from *inside* this
       # container needs host networking or an equivalent DNS alias -- the
-      # fully-containerized OIDC topology is a documented follow-up, not
-      # solved by this compose file. See docs/operations/e2e-validation.md,
-      # which runs beam-server on the host instead for the OIDC flow.
+      # fully-containerized OIDC topology is a tracked follow-up, not
+      # solved by this compose file; run beam-server on the host to exercise
+      # the OIDC flow in dev (see docs/operations/deployment.md).
       - BEAM_OIDC_ISSUER
       - BEAM_OIDC_CLIENT_ID
       - BEAM_OIDC_CLIENT_SECRET
@@ -78,7 +78,9 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # The health route lives under the versioned API mount (see
+      # beam-server/src/routes/mod.rs).
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
       interval: 30s
       timeout: 3s
       start_period: 10s

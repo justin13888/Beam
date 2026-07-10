@@ -87,7 +87,9 @@ For production deployments, we recommend reviewing all configurations in `.env` 
 2. **Storage**:
    - Set `HOST_VIDEO_DIR` to your media library location
    - Ensure sufficient disk space for `HOST_DATA_DIR`
-   - Consider using external volumes for `HOST_POSTGRES_DATA`
+   - Postgres data lives in the `postgres` named volume declared in
+     `compose.dependencies.yaml`; point it at dependable storage (edit that
+     file to bind-mount a host path if preferred) and back it up
 
 3. **Performance**:
    - Set `BEAM_ENABLE_METRICS=true` for monitoring
