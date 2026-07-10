@@ -227,10 +227,51 @@ fn redact_url_password(url: &str) -> String {
     )
 }
 
+/// Startup assessment of the cookie `Secure`-flag configuration; see
+/// [`ServerConfig::cookie_security_verdict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookieSecurityVerdict {
+    /// Cookies are Secure, or nothing about the configuration implies an
+    /// HTTPS deployment.
+    Ok,
+    /// The operator explicitly set `BEAM_COOKIE_SECURE=false` while other
+    /// origins imply HTTPS -- honored (e.g. TLS terminated in front of a
+    /// plain-HTTP origin during debugging), but worth a loud warning.
+    WarnExplicitInsecure,
+    /// Cookies resolved insecure purely from `server_url`'s scheme while
+    /// `web_url`/`extra_allowed_origins` imply a real HTTPS deployment and
+    /// no explicit override was given. Almost certainly a misconfiguration
+    /// (the session cookie would ship without `Secure` on a production
+    /// HTTPS site), so startup refuses to continue.
+    ErrLikelyMisconfigured,
+}
+
 impl ServerConfig {
     /// `database_url` with any password redacted, safe for logs.
     pub fn redacted_database_url(&self) -> String {
         redact_url_password(&self.database_url)
+    }
+
+    /// Classifies the cookie-`Secure` configuration. `cookie_secure`
+    /// defaults to `server_url`'s scheme, but behind a TLS-terminating
+    /// reverse proxy (e.g. the Traefik topology in compose.beam.yaml) the
+    /// externally-visible scheme can differ -- if any other configured
+    /// origin looks like HTTPS while cookies resolve insecure, that's a
+    /// misconfiguration unless the operator explicitly opted out.
+    pub fn cookie_security_verdict(&self) -> CookieSecurityVerdict {
+        let https_implied = self.web_url.starts_with("https://")
+            || self
+                .extra_allowed_origins
+                .as_deref()
+                .is_some_and(|origins| origins.contains("https://"));
+
+        if self.resolved_cookie_secure() || !https_implied {
+            CookieSecurityVerdict::Ok
+        } else if self.cookie_secure == Some(false) {
+            CookieSecurityVerdict::WarnExplicitInsecure
+        } else {
+            CookieSecurityVerdict::ErrLikelyMisconfigured
+        }
     }
 
     /// Resolves `cookie_secure`, defaulting to whether `server_url` is
@@ -347,6 +388,86 @@ mod tests {
             config.redacted_database_url(),
             "postgres://beam:<redacted>@localhost:5432/beam"
         );
+    }
+
+    #[test]
+    fn cookie_security_verdict_covers_scheme_and_override_combinations() {
+        // (server_url, web_url, extra_origins, explicit override, expected)
+        let cases = [
+            // Plain-HTTP local dev: nothing implies HTTPS.
+            (
+                "http://localhost:8000",
+                "http://localhost:5173",
+                None,
+                None,
+                CookieSecurityVerdict::Ok,
+            ),
+            // Fully-HTTPS deployment: heuristic resolves Secure.
+            (
+                "https://beam.example.com",
+                "https://beam.example.com",
+                None,
+                None,
+                CookieSecurityVerdict::Ok,
+            ),
+            // TLS-terminating proxy in front of a plain-HTTP origin, no
+            // override: the classic footgun -- refuse to start.
+            (
+                "http://localhost:8000",
+                "https://beam.example.com",
+                None,
+                None,
+                CookieSecurityVerdict::ErrLikelyMisconfigured,
+            ),
+            // Same, implied only via an extra allowed origin.
+            (
+                "http://localhost:8000",
+                "http://localhost:5173",
+                Some("https://other.example.com"),
+                None,
+                CookieSecurityVerdict::ErrLikelyMisconfigured,
+            ),
+            // Proxy topology fixed by an explicit opt-in to Secure cookies.
+            (
+                "http://localhost:8000",
+                "https://beam.example.com",
+                None,
+                Some(true),
+                CookieSecurityVerdict::Ok,
+            ),
+            // Explicit opt-out is honored but flagged.
+            (
+                "http://localhost:8000",
+                "https://beam.example.com",
+                None,
+                Some(false),
+                CookieSecurityVerdict::WarnExplicitInsecure,
+            ),
+            // Explicit opt-out with nothing HTTPS-like at all: plain Ok.
+            (
+                "http://localhost:8000",
+                "http://localhost:5173",
+                None,
+                Some(false),
+                CookieSecurityVerdict::Ok,
+            ),
+        ];
+
+        for (server_url, web_url, extra, cookie_secure, expected) in cases {
+            let config = ServerConfig {
+                server_url: server_url.to_string(),
+                web_url: web_url.to_string(),
+                extra_allowed_origins: extra.map(str::to_string),
+                cookie_secure,
+                ..config_with_secrets()
+            };
+            assert_eq!(
+                config.cookie_security_verdict(),
+                expected,
+                "server_url={server_url}, web_url={web_url}, extra={extra:?}, \
+                 override={cookie_secure:?}"
+            );
+        }
     }
 
     #[test]
