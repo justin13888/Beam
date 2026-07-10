@@ -17,5 +17,5 @@ repository, not this site:
   delivery scenarios, cache-friendliness, and the never-transcode rationale.
 - [ADR-0004: Never Transcode](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0004-never-transcode.md) --
   the decision record.
-- [`beam-server` component doc](https://github.com/justin13888/beam/blob/master/docs/components/server.md) --
+- [`beam-server` component doc](https://github.com/justin13888/beam/blob/master/docs/architecture/components.md) --
   how streaming/download endpoints fit into the server.
