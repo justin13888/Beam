@@ -58,7 +58,10 @@ async fn main() -> Result<()> {
     beam_index::probe::init().map_err(|e| eyre!("Failed to initialize ffmpeg: {e}"))?;
 
     // Connect to Database
-    info!("Connecting to database at {}", config.database_url);
+    info!(
+        "Connecting to database at {}",
+        config.redacted_database_url()
+    );
     let db = sea_orm::Database::connect(&config.database_url)
         .await
         .map_err(|e| eyre!("Failed to connect to database: {}", e))?;
