@@ -1,15 +1,16 @@
 # Beam Server
 
 The main Beam server: HTTP API, auth, in-process media indexing, and streaming, built with Rust
-and Salvo. See [`docs/components/server.md`](../docs/components/server.md) for architecture and
-[`docs/operations/dev-setup.md`](../docs/operations/dev-setup.md) for the full local dev setup
-(including the `vendored-ffmpeg` path for hosts without system FFmpeg development libraries).
+and Salvo. See [`docs/architecture/components.md`](../docs/architecture/components.md) for
+architecture and [`docs/operations/configuration.md`](../docs/operations/configuration.md) for
+the full configuration reference.
 
 ## Development
 
-- Install ffmpeg/libav 8+ libraries on your system, or see
-  [`docs/operations/dev-setup.md`](../docs/operations/dev-setup.md) for a vendored-FFmpeg
-  alternative that doesn't require system dev libraries.
+- Install ffmpeg/libav 8+ libraries on your system, or use the vendored-FFmpeg build for hosts
+  without system dev libraries: the `cargo build-local`/`clippy-local`/`t-local` aliases from
+  `.cargo/config.toml`, per
+  [ADR-0007](../docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md).
   - *Tip: Refer to [Containerfile](Containerfile) for ffmpeg build flags used in prod.*
 
 - Copy `.env.example` to `.env` and modify as needed:
@@ -30,7 +31,8 @@ and Salvo. See [`docs/components/server.md`](../docs/components/server.md) for a
     podman compose -f compose.dependencies.yaml up -d
     ```
 
-- Make sure you applied [migrations](../beam-migration/README.md)
+- Migrations apply automatically at startup (`BEAM_AUTO_MIGRATE`, default true); the
+  [`beam-migration`](../beam-migration/README.md) CLI remains for manual `up`/`down`/`status`
 
 - Start development server:
 

@@ -107,8 +107,9 @@ for the full reference).
 
 If your host doesn't have system FFmpeg development libraries installed, `cargo test`/`clippy`/
 `build` against `beam-index`/`beam-server` need the vendored-FFmpeg build instead -- see
-[`docs/operations/dev-setup.md`](docs/operations/dev-setup.md) and use the `cargo t-local`/
-`cargo clippy-local`/`cargo build-local` aliases from `.cargo/config.toml`.
+[ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md) and use the
+`cargo t-local`/`cargo clippy-local`/`cargo build-local` aliases from `.cargo/config.toml`
+(requires a `nasm` assembler on `PATH`).
 
 ### Start up
 
@@ -121,8 +122,9 @@ provider, fronted by Traefik) with Docker/Podman Compose for local development o
 podman compose -f compose.dependencies.yaml up
 ```
 
-See [`docs/operations/e2e-validation.md`](docs/operations/e2e-validation.md) for the full local
-end-to-end runbook (scan a library, sign in via Dex, browse, play, search, admin).
+The bundled Dex ships static test users for local development (see `dex/config.yaml`); run
+`beam-server` on the host to exercise the OIDC login flow against it (the fully containerized
+Dex topology is tracked in [#73](https://github.com/justin13888/beam/issues/73)).
 
 ## License
 

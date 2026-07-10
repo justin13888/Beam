@@ -30,4 +30,4 @@ Every repository trait ships with a hand-written `InMemory*` fake (real stateful
 insert/find/update/delete against an in-memory map -- not a mock), so services that depend on
 `Arc<dyn Trait>` can be tested with zero infrastructure. The `test-utils` feature additionally
 generates `mockall::automock` mocks for strict contract verification where that's the more
-appropriate tool. See [`docs/testing/strategy.md`](../docs/testing/strategy.md).
+appropriate tool. See [`docs/testing.md`](../docs/testing.md).

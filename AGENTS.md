@@ -31,10 +31,9 @@ Unit tests must verify essential services end-to-end without spinning up externa
 ## Where to look first
 
 `docs/` is the canonical, ratified engineering documentation: `docs/requirements/` (product/FRs/
-NFRs), `docs/architecture/` (overview, data model, streaming, security, ADRs), `docs/components/`
-(one doc per crate: server, indexer, domain, persistence, web, docs-site), `docs/testing/`
-(strategy, coverage), `docs/operations/` (dev setup, CI, configuration, deployment,
-e2e-validation). Check the relevant doc there before making an architectural assumption.
+NFRs), `docs/architecture/` (overview, api, data model, streaming, security, components, ADRs),
+`docs/testing.md` (strategy and coverage gates), `docs/operations/` (configuration, deployment).
+Check the relevant doc there before making an architectural assumption.
 
 ## CI Commands to ensure pass before pushing completed work (e.g. before PR)
 
@@ -55,7 +54,7 @@ cd beam-web && bun run test
 If the host lacks system FFmpeg development libraries (no `.pc` files for `libavutil` etc. --
 common outside CI/containers), `cargo test`/`clippy`/`build` against ffmpeg-linking crates
 (`beam-index`, `beam-server`) will fail to compile. Use the vendored-FFmpeg aliases instead (see
-`.cargo/config.toml`, `docs/operations/dev-setup.md`, and
+`.cargo/config.toml` and
 [ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md)):
 
 ```
