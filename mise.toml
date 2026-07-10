@@ -1,0 +1,238 @@
+#:schema https://mise.jdx.dev/schema/mise.json
+#
+# mise is the single source of truth for beam's developer tooling and for every
+# command that CI, the git hooks, and humans run. Workflows in .github/workflows
+# and the hooks in hk.pkl must invoke `mise run <task>` rather than restating a
+# command inline -- that duplication is what let CI and the hooks drift apart.
+
+min_version = "2025.1.0"
+
+[tools]
+bun = "1.3.14"
+hk = "1.50.0"
+"github:convco/convco" = "0.7.0"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+"github:taiki-e/cargo-llvm-cov" = "0.8.7"
+# Rust is deliberately absent: rust-toolchain.toml pins 1.91.0 and is honored by
+# rustup, rust-analyzer, and CI's setup-rust-toolchain action. Duplicating the
+# pin here would create a second source of truth for the same thing.
+
+[env]
+# Wrap the git hooks in `mise x` so contributors who have not activated mise in
+# their shell still get the pinned tools on PATH. See hk.pkl.
+HK_MISE = "1"
+CARGO_TERM_COLOR = "always"
+RUST_BACKTRACE = "1"
+# Local dev statically vendors an LGPL-only FFmpeg (ADR-0007) so the workspace
+# builds on hosts without FFmpeg development libraries. CI sets this to "" in
+# the job environment because .github/actions/setup-ffmpeg provides a system
+# FFmpeg to link against; hosts with system FFmpeg dev libs can do the same.
+#
+# The template is load-bearing: a plain assignment here takes precedence over
+# the ambient environment, so an exported BEAM_CARGO_FEATURES="" would be
+# silently ignored and CI would build a vendored FFmpeg anyway. Reading through
+# `env.` lets the caller win, and `default` only fires when it is unset -- an
+# explicitly empty value stays empty.
+BEAM_CARGO_FEATURES = "{{ env.BEAM_CARGO_FEATURES | default(value='beam-index/vendored-ffmpeg,beam-server/vendored-ffmpeg') }}"
+
+[hooks]
+# Installs .git/hooks/{pre-commit,commit-msg,pre-push} pointing at hk. Safe to
+# run repeatedly, and a no-op for anyone who has run `hk install --global`.
+postinstall = "hk install --mise"
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
+[tasks.setup]
+description = "Install tools, JS dependencies, and git hooks"
+run = ["bun install --frozen-lockfile", "hk install --mise"]
+
+# ---------------------------------------------------------------------------
+# Rust
+#
+# $BEAM_CARGO_FEATURES expands to nothing when empty, so the same task line
+# serves both the vendored-FFmpeg local build and CI's system-FFmpeg build.
+# ---------------------------------------------------------------------------
+
+[tasks."rust:fmt"]
+description = "Check Rust formatting"
+run = "cargo fmt --check"
+
+[tasks."rust:fmt:fix"]
+description = "Format Rust code"
+run = "cargo fmt"
+
+[tasks."rust:build"]
+description = "Build the Rust workspace"
+run = 'cargo build --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"}'
+
+[tasks."rust:clippy"]
+description = "Lint Rust with clippy, warnings denied"
+run = 'cargo clippy --workspace --all-targets ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} -- -D warnings'
+
+[tasks."rust:test"]
+description = "Run the Rust test suite"
+run = 'cargo test --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"}'
+
+[tasks."rust:coverage"]
+description = "Run Rust tests with coverage and enforce the line threshold"
+run = [
+    'cargo llvm-cov --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} --lcov --output-path lcov.info --fail-under-lines 65',
+    "cargo llvm-cov report --summary-only",
+]
+
+[tasks."rust:deny"]
+description = "Audit dependencies for advisories, licenses, bans, and sources"
+run = "cargo deny check"
+
+[tasks."rust:lockfile"]
+description = "Fail if Cargo.lock is out of date with the manifests"
+run = "cargo metadata --locked --format-version 1 > /dev/null"
+
+# ---------------------------------------------------------------------------
+# TypeScript / web
+# ---------------------------------------------------------------------------
+
+[tasks."ts:check"]
+description = "Lint and format-check JS/TS with biome"
+run = "bun run check"
+
+[tasks."ts:check:fix"]
+description = "Apply biome lint and format fixes"
+run = "bun run check:fix"
+
+[tasks."ts:typecheck"]
+description = "Type-check the beam-web SPA"
+# Scoped to beam-web, not `bun run typecheck` (which fans out to every
+# workspace): beam-docs is type-checked by docs:build instead. Overlapping the
+# two runs two Astro processes over beam-docs/node_modules/.vite, which race and
+# fail with ENOTEMPTY. Keeping them disjoint also means a docs-only change,
+# which the `ts` path filter in ci.yml does not match, is still type-checked.
+run = "bun run --filter beam-web typecheck"
+
+[tasks."ts:test"]
+description = "Run the beam-web test suite"
+run = "bun run --filter beam-web test"
+
+[tasks."ts:coverage"]
+description = "Run JS/TS tests with coverage thresholds"
+run = "bun run test:coverage"
+
+[tasks."ts:build"]
+description = "Build every JS/TS workspace"
+run = "bun run build"
+
+[tasks."ts:build:web"]
+description = "Build only the beam-web SPA (release asset)"
+run = "bun run --filter beam-web build"
+
+[tasks."docs:build"]
+description = "Type-check and build the beam-docs site"
+run = [
+    "bun run --filter beam-docs typecheck",
+    "bun run --filter beam-docs build",
+]
+
+# ---------------------------------------------------------------------------
+# Codegen
+# ---------------------------------------------------------------------------
+
+[tasks."codegen:openapi"]
+description = "Export openapi.json from the Rust types and regenerate api.gen.ts"
+run = [
+    'cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > beam-web/openapi.json',
+    "bun run --filter beam-web codegen:openapi",
+]
+
+# ---------------------------------------------------------------------------
+# Commit hygiene
+# ---------------------------------------------------------------------------
+
+[tasks."commits:check"]
+description = "Validate that commits on this branch are Conventional Commits"
+# convco reads the revision range from $CONVCO_REV. CI sets it explicitly from
+# the pull request's base and head SHAs, because a fetch-depth:0 checkout does
+# not necessarily create an origin/master ref to compute a merge base against.
+run = '''
+set -eu
+if [ -z "${CONVCO_REV:-}" ]; then
+    base=$(git merge-base HEAD origin/master 2>/dev/null || true)
+    if [ -z "$base" ]; then
+        echo "origin/master not available and CONVCO_REV unset; skipping"
+        exit 0
+    fi
+    CONVCO_REV="$base..HEAD"
+    export CONVCO_REV
+fi
+convco check
+'''
+
+[tasks."commits:check-title"]
+description = "Validate $PR_TITLE as a Conventional Commit"
+# A squash merge lands the pull request title as the commit message that
+# release-please parses, so the title must satisfy the same grammar the
+# commit-msg hook enforces.
+run = '''
+set -eu
+if [ -z "${PR_TITLE:-}" ]; then
+    echo "PR_TITLE is not set" >&2
+    exit 1
+fi
+printf '%s' "$PR_TITLE" | convco check --from-stdin --strip
+'''
+
+# ---------------------------------------------------------------------------
+# Consistency guards
+# ---------------------------------------------------------------------------
+
+[tasks."check:ffmpeg-version"]
+description = "Assert FFmpeg is pinned to the same version everywhere it is built"
+run = '''
+set -eu
+want=$(sed -n 's/^ffmpeg-next = "\([0-9]*\.[0-9]*\)".*/\1/p' Cargo.toml)
+if [ -z "$want" ]; then
+    echo "could not read the ffmpeg-next version from Cargo.toml" >&2
+    exit 1
+fi
+
+status=0
+for file in .github/actions/setup-ffmpeg/action.yml beam-server/Containerfile; do
+    found=$(grep -oE 'ffmpeg-[0-9]+\.[0-9]+' "$file" | sed 's/^ffmpeg-//' | sort -u)
+    if [ -z "$found" ]; then
+        echo "$file: no ffmpeg-<version> reference found" >&2
+        status=1
+        continue
+    fi
+    for version in $found; do
+        if [ "$version" != "$want" ]; then
+            echo "$file: builds FFmpeg $version but Cargo.toml pins ffmpeg-next $want" >&2
+            status=1
+        fi
+    done
+done
+
+if [ "$status" -eq 0 ]; then
+    echo "FFmpeg $want is pinned consistently"
+fi
+exit "$status"
+'''
+
+# ---------------------------------------------------------------------------
+# Aggregate
+# ---------------------------------------------------------------------------
+
+[tasks.ci]
+description = "Run every check that CI enforces, except coverage and image builds"
+depends = [
+    "rust:fmt",
+    "rust:clippy",
+    "rust:test",
+    "rust:deny",
+    "rust:lockfile",
+    "check:ffmpeg-version",
+    "ts:check",
+    "ts:typecheck",
+    "ts:test",
+    "docs:build",
+]

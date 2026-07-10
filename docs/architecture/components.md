@@ -151,9 +151,9 @@ repository implementations and the in-memory fakes that stand in for them.
 The reference client: a Vite + React 19 + TanStack Router single-page app styled with Tailwind 4
 and shadcn/ui, talking exclusively to `beam-server`'s REST API. The typed client is generated from
 the server's OpenAPI spec via `openapi-typescript` into `src/api.gen.ts` and wrapped by
-`openapi-fetch` in `src/lib/apiClient.ts`; TanStack Query handles caching/loading state. The
-Containerfile regenerates the OpenAPI types during the image build, mirroring CI's
-`generate-openapi` job.
+`openapi-fetch` in `src/lib/apiClient.ts`; TanStack Query handles caching/loading state. Both CI and
+the Containerfile regenerate the typed client from `beam-web/openapi.json`, which `mise run
+codegen:openapi` exports from the Rust types.
 
 - **Routes** (`src/routes/`, file-based via `createFileRoute`): `index.tsx` (home /
   continue-watching), `libraries.tsx` / `libraries.$id.tsx`, `media.$id.tsx` (detail + player),

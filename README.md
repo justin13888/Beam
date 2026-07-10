@@ -112,15 +112,20 @@ for the full reference).
 
 ## Development
 
-0. Install toolchain: [`rustup`](https://rustup.rs/), [`bun`](https://bun.sh/)
+0. Install [`rustup`](https://rustup.rs/) and [`mise`](https://mise.jdx.dev/) (mise supplies Bun and
+   the rest of the tooling; rustup reads the pin in `rust-toolchain.toml`)
 1. Clone repository
-2. `bun install` -- also installs git hooks via `lefthook` (a declared devDependency)
+2. `mise install && mise run setup` -- installs tools, JS dependencies, and the git hooks
 
-If your host doesn't have system FFmpeg development libraries installed, `cargo test`/`clippy`/
-`build` against `beam-index`/`beam-server` need the vendored-FFmpeg build instead -- see
-[ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md) and use the
-`cargo t-local`/`cargo clippy-local`/`cargo build-local` aliases from `.cargo/config.toml`
-(requires a `nasm` assembler on `PATH`).
+`mise.toml` is the single source of truth for every command CI and the git hooks run. `mise tasks`
+lists them; `mise run ci` runs everything CI does except coverage and image builds. See
+[ADR-0009](docs/architecture/decisions/ADR-0009-release-engineering.md).
+
+On hosts without system FFmpeg development libraries, the Rust tasks statically vendor an LGPL-only
+FFmpeg (requires a `nasm` assembler on `PATH`) -- see
+[ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md). If you do have the
+system libraries, set `BEAM_CARGO_FEATURES = ""` in a `mise.local.toml` to link against them
+instead.
 
 ### Start up
 

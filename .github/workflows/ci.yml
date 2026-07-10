@@ -1,0 +1,341 @@
+name: CI
+
+# Every job body is a `mise run <task>`. The commands themselves live in
+# mise.toml, which the git hooks (hk.pkl) invoke too, so CI and the hooks
+# cannot drift apart. Add a check by adding a task, not by adding a `run:`.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Path filters gate the expensive jobs. Jobs skipped this way report as
+  # "skipped", which the ci-ok aggregator treats as success -- that is what
+  # makes a single required status check safe with conditional jobs.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      ts: ${{ steps.filter.outputs.ts }}
+      docs: ${{ steps.filter.outputs.docs }}
+      ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            tooling: &tooling
+              - 'mise.toml'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/**'
+            rust:
+              - *tooling
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'deny.toml'
+            ts:
+              - *tooling
+              - '**/*.ts'
+              - '**/*.tsx'
+              - '**/*.js'
+              - '**/*.mjs'
+              - '**/*.cjs'
+              - '**/*.astro'
+              - '**/tsconfig*.json'
+              - 'biome.json'
+              - '**/package.json'
+              - 'bun.lock'
+              # The typed client is generated from the server's OpenAPI spec, so
+              # changes to the API surface can break the TypeScript build.
+              - 'beam-auth/src/**/*.rs'
+              - 'beam-server/src/**/*.rs'
+            docs:
+              - *tooling
+              - 'beam-docs/**'
+            ffmpeg:
+              - *tooling
+              - 'Cargo.toml'
+              - 'beam-server/Containerfile'
+              - '.github/actions/setup-ffmpeg/action.yml'
+
+  commits:
+    name: Conventional commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v4
+
+      - name: Check commit messages
+        env:
+          CONVCO_REV: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        run: mise run commits:check
+
+      # A squash merge lands the PR title as the commit release-please parses.
+      - name: Check pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: mise run commits:check-title
+
+  # Warms the shared /opt/ffmpeg cache so clippy, test, and openapi restore it
+  # rather than each building FFmpeg from source.
+  ffmpeg:
+    name: Build FFmpeg
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-ffmpeg
+
+  rust-fmt:
+    name: Rust formatting
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: mise run rust:fmt
+
+  rust-lockfile:
+    name: Cargo.lock is current
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: mise run rust:lockfile
+
+  ffmpeg-version:
+    name: FFmpeg pinned consistently
+    needs: [changes]
+    if: needs.changes.outputs.ffmpeg == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - run: mise run check:ffmpeg-version
+
+  rust-deny:
+    name: Supply-chain audit
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: mise run rust:deny
+
+  rust-clippy:
+    name: Rust lint
+    needs: [changes, ffmpeg]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Link the system FFmpeg that setup-ffmpeg provides, rather than vendoring
+      # and statically compiling one (which is the local-dev default).
+      BEAM_CARGO_FEATURES: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+      - run: mise run rust:clippy
+
+  rust-test:
+    name: Rust tests and coverage
+    needs: [changes, ffmpeg]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BEAM_CARGO_FEATURES: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+
+      # The 65% line gate is calibrated against a measured ~67.5% (see
+      # docs/testing.md). Ratchet it up over time; do not relax it to make a
+      # red pull request pass.
+      - run: mise run rust:coverage
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: lcov.info
+          retention-days: 7
+
+  openapi:
+    name: Generate OpenAPI artifacts
+    needs: [changes, ffmpeg]
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BEAM_CARGO_FEATURES: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+      - uses: ./.github/actions/bun-install
+
+      - run: mise run codegen:openapi
+
+      - name: Upload OpenAPI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-artifacts
+          path: |
+            beam-web/openapi.json
+            beam-web/src/api.gen.ts
+          retention-days: 7
+
+  ts-check:
+    name: Biome check
+    needs: [changes]
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/bun-install
+      # biome.json excludes the generated api.gen.ts, so this needs no OpenAPI.
+      - run: mise run ts:check
+
+  ts-typecheck:
+    name: TypeScript type check
+    needs: [changes, openapi]
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/bun-install
+      - uses: actions/download-artifact@v4
+        with:
+          name: openapi-artifacts
+          path: beam-web
+      - run: mise run ts:typecheck
+
+  ts-test:
+    name: Web tests
+    needs: [changes, openapi]
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/bun-install
+      - uses: actions/download-artifact@v4
+        with:
+          name: openapi-artifacts
+          path: beam-web
+      - run: mise run ts:coverage
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-coverage
+          path: "**/coverage"
+          if-no-files-found: ignore
+          retention-days: 7
+
+  ts-build:
+    name: Web build
+    needs: [changes, openapi]
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/bun-install
+      - uses: actions/download-artifact@v4
+        with:
+          name: openapi-artifacts
+          path: beam-web
+      # beam-docs is built by the docs-build job, under its own path filter.
+      - run: mise run ts:build:web
+
+  docs-build:
+    name: Docs site build
+    needs: [changes]
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/bun-install
+      - run: mise run docs:build
+
+  # The single required status check. Branch protection should require this job
+  # and nothing else: it is the only one that always runs, and it distinguishes
+  # "skipped by a path filter" (fine) from "failed" (not fine).
+  ci-ok:
+    name: CI
+    if: always()
+    needs:
+      - changes
+      - commits
+      - ffmpeg
+      - rust-fmt
+      - rust-lockfile
+      - ffmpeg-version
+      - rust-deny
+      - rust-clippy
+      - rust-test
+      - openapi
+      - ts-check
+      - ts-typecheck
+      - ts-test
+      - ts-build
+      - docs-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every job succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' | sort
+          echo "$RESULTS" | jq -e '
+            to_entries
+            | map(select(.value.result != "success" and .value.result != "skipped"))
+            | length == 0
+          ' > /dev/null
