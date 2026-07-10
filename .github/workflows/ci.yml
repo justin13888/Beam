@@ -31,7 +31,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -77,7 +77,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: jdx/mise-action@v4
@@ -101,7 +101,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-ffmpeg
 
   rust-fmt:
@@ -110,7 +110,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -123,7 +123,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -136,7 +136,7 @@ jobs:
     if: needs.changes.outputs.ffmpeg == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - run: mise run check:ffmpeg-version
 
@@ -146,7 +146,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -163,7 +163,7 @@ jobs:
       # and statically compiling one (which is the local-dev default).
       BEAM_CARGO_FEATURES: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -180,7 +180,7 @@ jobs:
     env:
       BEAM_CARGO_FEATURES: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -208,7 +208,7 @@ jobs:
     env:
       BEAM_CARGO_FEATURES: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -234,7 +234,7 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
       # biome.json excludes the generated api.gen.ts, so this needs no OpenAPI.
@@ -246,7 +246,7 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
       - uses: actions/download-artifact@v4
@@ -261,7 +261,7 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
       - uses: actions/download-artifact@v4
@@ -284,7 +284,7 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
       - uses: actions/download-artifact@v4
@@ -300,7 +300,7 @@ jobs:
     if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
       - run: mise run docs:build
