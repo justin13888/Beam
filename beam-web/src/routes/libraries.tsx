@@ -12,6 +12,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import { useId, useState } from "react";
+import { toast } from "sonner";
 import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -76,7 +77,7 @@ function ScanStatusBadge({ library }: { library: Library }) {
 	);
 }
 
-function LibrariesPage() {
+export function LibrariesPage() {
 	const { isAuthenticated } = useAuth();
 	const queryClient = useQueryClient();
 	const {
@@ -139,8 +140,6 @@ function LibrariesPage() {
 	const libNameId = useId();
 	const libRootPathId = useId();
 	const [scanningIds, setScanningIds] = useState<Set<string>>(new Set());
-	const [scanErrors, setScanErrors] = useState<Record<string, string>>({});
-	const [deleteErrors, setDeleteErrors] = useState<Record<string, string>>({});
 
 	const handleCreate = async (e: React.FormEvent) => {
 		e.preventDefault();
@@ -150,26 +149,22 @@ function LibrariesPage() {
 			setName("");
 			setRootPath("");
 			setShowCreateForm(false);
+			toast.success(`Library "${name}" created`);
 		} catch {
 			// createLibraryMutation.error surfaces the error in the form
 		}
 	};
 
-	const handleScan = async (libraryId: string) => {
-		setScanErrors((prev) => {
-			const next = { ...prev };
-			delete next[libraryId];
-			return next;
-		});
+	const handleScan = async (libraryId: string, libraryName: string) => {
 		setScanningIds((prev) => new Set(prev).add(libraryId));
 		try {
 			await scanLibraryMutation.mutateAsync(libraryId);
 			invalidateLibraries();
+			toast.info(`Scan started for "${libraryName}"`);
 		} catch (err) {
-			setScanErrors((prev) => ({
-				...prev,
-				[libraryId]: err instanceof Error ? err.message : "Scan failed",
-			}));
+			toast.error(
+				`Failed to scan "${libraryName}": ${err instanceof Error ? err.message : "unknown error"}`,
+			);
 		} finally {
 			setScanningIds((prev) => {
 				const next = new Set(prev);
@@ -187,19 +182,14 @@ function LibrariesPage() {
 		) {
 			return;
 		}
-		setDeleteErrors((prev) => {
-			const next = { ...prev };
-			delete next[libraryId];
-			return next;
-		});
 		try {
 			await deleteLibraryMutation.mutateAsync(libraryId);
 			invalidateLibraries();
+			toast.success(`Library "${libraryName}" deleted`);
 		} catch (err) {
-			setDeleteErrors((prev) => ({
-				...prev,
-				[libraryId]: err instanceof Error ? err.message : "Delete failed",
-			}));
+			toast.error(
+				`Failed to delete "${libraryName}": ${err instanceof Error ? err.message : "unknown error"}`,
+			);
 		}
 	};
 
@@ -397,7 +387,7 @@ function LibrariesPage() {
 									<Button
 										variant="outline"
 										className="border-gray-600 text-gray-300 hover:bg-cyan-600/20 hover:text-cyan-400 hover:border-cyan-500/40"
-										onClick={() => handleScan(lib.id)}
+										onClick={() => handleScan(lib.id, lib.name)}
 										disabled={scanningIds.has(lib.id)}
 										title="Scan library"
 									>
@@ -416,18 +406,6 @@ function LibrariesPage() {
 										<Trash2 size={16} />
 									</Button>
 								</div>
-
-								{/* Inline mutation errors */}
-								{scanErrors[lib.id] && (
-									<p className="px-5 pb-3 text-red-400 text-xs">
-										Scan failed: {scanErrors[lib.id]}
-									</p>
-								)}
-								{deleteErrors[lib.id] && (
-									<p className="px-5 pb-3 text-red-400 text-xs">
-										Delete failed: {deleteErrors[lib.id]}
-									</p>
-								)}
 							</div>
 						))}
 					</div>
