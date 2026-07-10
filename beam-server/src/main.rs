@@ -61,9 +61,9 @@ async fn main() -> Result<()> {
         "Connecting to database at {}",
         config.redacted_database_url()
     );
-    let db = sea_orm::Database::connect(&config.database_url)
+    let db = beam_server::db::connect(&config)
         .await
-        .map_err(|e| eyre!("Failed to connect to database: {}", e))?;
+        .map_err(|e| eyre!("Failed to connect to database after retries: {}", e))?;
     info!("Connected to database");
 
     // Apply pending migrations. The supported topology is a single server

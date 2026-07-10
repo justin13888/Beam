@@ -191,6 +191,8 @@ mod tests {
             data_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
             auto_migrate: true,
+            db_max_connections: 20,
+            db_min_connections: 5,
             hash_unknown_files: true,
             scan_interval_secs: 3600,
             watch_enabled: false,

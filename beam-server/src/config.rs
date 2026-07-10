@@ -53,6 +53,14 @@ pub struct ServerConfig {
     #[config(env = "BEAM_AUTO_MIGRATE", default = true)]
     pub auto_migrate: bool,
 
+    /// Maximum size of the Postgres connection pool.
+    #[config(env = "BEAM_DB_MAX_CONNECTIONS", default = 20)]
+    pub db_max_connections: u32,
+
+    /// Connections the pool keeps open even when idle.
+    #[config(env = "BEAM_DB_MIN_CONNECTIONS", default = 5)]
+    pub db_min_connections: u32,
+
     /// Whether to hash files with unknown/unsupported extensions during
     /// indexing. Hashing them lets duplicate detection cover every file;
     /// disable to save scan IO.
@@ -158,6 +166,8 @@ impl fmt::Debug for ServerConfig {
             data_dir,
             database_url,
             auto_migrate,
+            db_max_connections,
+            db_min_connections,
             hash_unknown_files,
             scan_interval_secs,
             watch_enabled,
@@ -185,6 +195,8 @@ impl fmt::Debug for ServerConfig {
             .field("data_dir", data_dir)
             .field("database_url", &redact_url_password(database_url))
             .field("auto_migrate", auto_migrate)
+            .field("db_max_connections", db_max_connections)
+            .field("db_min_connections", db_min_connections)
             .field("hash_unknown_files", hash_unknown_files)
             .field("scan_interval_secs", scan_interval_secs)
             .field("watch_enabled", watch_enabled)
@@ -356,6 +368,8 @@ mod tests {
             data_dir: PathBuf::from("/cache"),
             database_url: "postgres://beam:db-secret-pw@localhost:5432/beam".to_string(),
             auto_migrate: true,
+            db_max_connections: 20,
+            db_min_connections: 5,
             hash_unknown_files: true,
             scan_interval_secs: 3600,
             watch_enabled: true,

@@ -20,6 +20,8 @@ optional variables unset/commented rather than blank.
 | `BEAM_SERVER_URL` | `http://localhost:8000` | Externally-visible base URL of the server. Drives the OIDC redirect URL (`<BEAM_SERVER_URL>/v1/auth/callback`) and the cookie-`Secure` heuristic. Use the public HTTPS URL in production. |
 | `BEAM_DATABASE_URL` | `postgres://beam:password@localhost:5432/beam` | Postgres connection string. |
 | `BEAM_AUTO_MIGRATE` | `true` | Apply pending schema migrations at startup. Set `false` for operator-managed migrations via the `beam-migration` CLI. |
+| `BEAM_DB_MAX_CONNECTIONS` | `20` | Maximum size of the Postgres connection pool. |
+| `BEAM_DB_MIN_CONNECTIONS` | `5` | Connections the pool keeps open even when idle. |
 | `BEAM_VIDEO_DIR` | `./videos` | Read-only root of the media library. Must exist at startup; libraries are created at paths under it. |
 | `BEAM_DATA_DIR` | `./data` | Server-writable state directory (created if missing). Treat as data worth backing up, not a disposable cache. |
 | `BEAM_ENABLE_METRICS` | `false` | Expose Prometheus metrics. |
