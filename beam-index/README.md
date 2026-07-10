@@ -3,7 +3,7 @@
 In-process media indexing: filesystem scanning, live filesystem watching, FFmpeg-based technical
 probing, and metadata-enrichment sweeps. This runs as a set of background tasks inside the
 `beam-server` binary -- there is no separate indexer process or `beam-index` binary. See
-[`docs/components/indexer.md`](../docs/components/indexer.md) for the current architecture.
+[`docs/architecture/components.md`](../docs/architecture/components.md) for the current architecture.
 
 ## Structure
 

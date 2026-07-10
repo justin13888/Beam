@@ -6,26 +6,26 @@ Accepted.
 
 ## Context
 
-Today's sessions are backed by Redis/Valkey, adding a second stateful datastore to the deployment
-(alongside Postgres) purely to hold session records — a small, low-throughput, relational-shaped
-piece of state (a row per session, looked up by key, with an expiry). Running a second datastore
-means a second thing to provision, back up, monitor, and reason about for failure modes, for a
-workload that doesn't need Redis's specific strengths (sub-millisecond in-memory access at very high
+Sessions were previously backed by Redis/Valkey, adding a second stateful datastore to the
+deployment (alongside Postgres) purely to hold session records — a small, low-throughput,
+relational-shaped piece of state (a row per session, looked up by key, with an expiry). Running a
+second datastore means a second thing to provision, back up, monitor, and reason about for failure
+modes, for a workload that doesn't need Redis's specific strengths (sub-millisecond in-memory access at very high
 throughput, pub/sub, specialized data structures). At Beam's target deployment scale — a single
 self-hosted instance serving a household or small organization — session lookup volume is nowhere
 near the point where Postgres's latency profile would matter.
 
 ## Decision
 
-Move sessions into Postgres, in a new `sessions` table (see `data-model.md`), accessed through a
+We moved sessions into Postgres, in a `sessions` table (see `data-model.md`), accessed through a
 `SessionStore` trait with a Postgres-backed production implementation and an in-memory fake for
-tests. Drop Redis/Valkey from the stack entirely — it is not used for anything else in the target
-architecture, so removing sessions from it removes the only reason it was present.
+tests. Redis/Valkey was dropped from the stack entirely — it was not used for anything else, so
+removing sessions from it removed the only reason it was present.
 
 ## Consequences
 
 **Positive:**
-- One fewer stateful service to deploy, back up, and operate; `compose.dependencies.yaml` shrinks by
+- One fewer stateful service to deploy, back up, and operate; `compose.dependencies.yaml` shrank by
   one entry.
 - Sessions get transactional consistency with the rest of the application's state for free (e.g. a
   user deletion cascading to their sessions is a normal FK cascade, not a manual two-store

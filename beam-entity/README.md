@@ -4,7 +4,7 @@
 a thin, mechanical layer -- one entity module per table, no business logic -- consumed by
 `beam-index`/`beam-server`'s repository implementations and by `beam-domain`'s optional `entity`
 feature (row ↔ domain-model conversions). See
-[`docs/components/persistence.md`](../docs/components/persistence.md) and
+[`docs/architecture/components.md`](../docs/architecture/components.md) and
 [`docs/architecture/data-model.md`](../docs/architecture/data-model.md) for the schema itself.
 
 ## Structure

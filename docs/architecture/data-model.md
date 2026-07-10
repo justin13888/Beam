@@ -1,64 +1,69 @@
 # Data Model
 
-Status: target schema for this push. All tables below reflect `beam-entity`/`beam-migration` as they
-will exist once this push's migrations land. Tables and columns marked **(new)** do not exist in the
-codebase today; `stream_cache` is marked **(removed)**. Everything else described here matches the
-current schema exactly (verified against `beam-entity/src/*.rs` and
-`beam-migration/src/m2026*.rs`) and is not itself changing shape — only gaining neighbors.
+The schema below reflects `beam-entity/src/*.rs` and the migration history in
+`beam-migration/src/`. Migrations apply automatically at startup when `BEAM_AUTO_MIGRATE` is set
+(the default); the `beam-migration` CLI (`up`/`down`/`status`) is available for operator-managed
+migration instead.
 
-Conventions used throughout: primary keys are `UUID` (application-generated v4, not
-`gen_random_uuid()`, except where noted), timestamps are `TIMESTAMPTZ`, and foreign keys cascade on
-delete unless noted otherwise.
+Conventions: primary keys are `UUID` (application-generated v4, except where noted), timestamps are
+`TIMESTAMPTZ`, and foreign keys cascade on delete unless noted otherwise.
 
 ## Identity / session tables
 
 ### `users`
-The account record. **Destructively migrated this push** — `username` and `password_hash` are
-dropped in favor of OIDC identity columns, since this is pre-alpha software with no real user data
-to preserve. See [ADR-0003](decisions/ADR-0003-oidc-bff-auth.md).
+The account record. Identity is OIDC-only; no password or other end-user credential is stored. See
+[ADR-0003](decisions/ADR-0003-oidc-bff-auth.md).
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
 | `id` | UUID | no | PK |
-| `oidc_issuer` | TEXT | no | **(new)** OIDC `iss` claim |
-| `oidc_subject` | TEXT | no | **(new)** OIDC `sub` claim |
-| `email` | TEXT | yes | **(new)** not all IdPs release an email claim; not unique — the same email can legitimately appear under more than one issuer |
-| `display_name` | TEXT | no | **(new)** OIDC `name` claim, falling back to `preferred_username` |
-| `avatar_url` | TEXT | yes | **(new)** OIDC `picture` claim |
-| `is_admin` | BOOLEAN | no | default `false`; recomputed from the admin email allowlist at every login, never trusted as durable state alone — see `security.md` |
+| `oidc_issuer` | TEXT | no | OIDC `iss` claim |
+| `oidc_subject` | TEXT | no | OIDC `sub` claim |
+| `email` | TEXT | yes | OIDC `email` claim; drives admin-allowlist matching only, never identity |
+| `display_name` | TEXT | no | OIDC `name` claim, falling back to `preferred_username`; refreshed on login |
+| `avatar_url` | TEXT | yes | OIDC `picture` claim; refreshed on login |
+| `is_admin` | BOOLEAN | no | default `false`; recomputed from the `BEAM_ADMIN_EMAILS` allowlist at every login, never trusted as durable state alone — see `security.md` |
 | `created_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 
-*Removed columns:* `username` (was unique TEXT), `password_hash` (was TEXT).
+Unique constraint: `(oidc_issuer, oidc_subject)` — the JIT-provisioning lookup key.
 
-Unique constraint: `(oidc_issuer, oidc_subject)` — this is the JIT-provisioning lookup key.
-Deliberately **no** unique constraint on `email`: it is nullable (absent from some IdPs' claims) and
-the same email can appear under more than one issuer, so it drives admin-allowlist matching only, not
-identity.
-
-### `sessions` **(new table)**
-Replaces Redis/Valkey-backed sessions entirely. See
+### `sessions`
+Cookie-backed sessions with hash-at-rest credentials and two-tier expiry. See
 [ADR-0005](decisions/ADR-0005-sessions-in-postgres.md).
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
-| `id` | UUID | no | PK |
+| `id` | UUID | no | PK; stable internal identifier for listing/revoking a session without re-exposing its credential |
 | `user_id` | UUID | no | FK → `users.id`, `ON DELETE CASCADE` |
-| `token_hash` | TEXT | no | unique; SHA-256 of the opaque session token — the raw token is never stored, only ever held by the browser in the session cookie |
+| `token_hash` | TEXT | no | unique; SHA-256 of the opaque session token — the raw token is never stored, only ever held by the browser in the `beam_session` cookie |
+| `device_hash` | TEXT | no | best-effort device fingerprint for the session list |
+| `ip` | TEXT | no | best-effort, for user/admin visibility only, not an auth decision input |
 | `created_at` | TIMESTAMPTZ | no | |
-| `last_seen_at` | TIMESTAMPTZ | no | updated on each authenticated request, up to a coalescing granularity (e.g. once/minute) to avoid a write per request; drives sliding-TTL expiry |
-| `expires_at` | TIMESTAMPTZ | no | absolute expiry, extended on activity up to a maximum session lifetime |
-| `ip_address` | INET | yes | best-effort, for admin visibility/audit only, not an auth decision input |
-| `user_agent` | TEXT | yes | best-effort, admin visibility only |
+| `last_active` | TIMESTAMPTZ | no | updated as activity slides the idle expiry forward |
+| `idle_expires_at` | TIMESTAMPTZ | no | sliding idle expiry; extended on activity (`BEAM_SESSION_IDLE_DAYS`) |
+| `absolute_expires_at` | TIMESTAMPTZ | no | hard ceiling the slide never extends past (`BEAM_SESSION_MAX_DAYS`) |
 
-Indexes: unique on `token_hash` (session lookup is by hash of the presented cookie value, never by
-raw token); index on `user_id` (list/revoke all sessions for a user); index on `expires_at` (cheap
-sweep of expired rows).
+Indexes: unique on `token_hash` (lookup is always by hash of the presented cookie value); `user_id`
+(list/revoke all sessions for a user); `idle_expires_at` (cheap sweep of expired rows).
+
+### `pending_auths`
+A single-use OIDC authorization round-trip record, created when the login redirect is issued and
+consumed atomically (a `state` value can be exchanged at most once) when the callback arrives.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `state` | TEXT | no | PK; the OIDC `state` value |
+| `nonce` | TEXT | no | |
+| `pkce_verifier` | TEXT | no | |
+| `redirect_path` | TEXT | yes | post-login destination; sanitized to same-origin-relative before storage |
+| `created_at` | TIMESTAMPTZ | no | |
+| `expires_at` | TIMESTAMPTZ | no | indexed, for sweeping abandoned logins |
 
 ## Library / catalog tables
 
 ### `libraries`
-A configured library root. Unchanged this push.
+A configured library root.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -74,36 +79,8 @@ A configured library root. Unchanged this push.
 
 ### `movies`
 Canonical movie title record — one row per distinct film, independent of how many library entries or
-files represent it.
-
-| Column | Type | Nullable | Notes |
-|---|---|---|---|
-| `id` | UUID | no | PK |
-| `title` | TEXT | no | |
-| `title_localized` | TEXT | yes | |
-| `description` | TEXT | yes | populated by enrichment; NULL until enriched |
-| `year` | INTEGER | yes | populated by enrichment |
-| `release_date` | DATE | yes | populated by enrichment |
-| `runtime_mins` | INTEGER | yes | populated by enrichment |
-| `poster_url` | TEXT | yes | direct CDN URL (TMDB/AniList), not proxied — see [ADR-0006](decisions/ADR-0006-cameo-enrichment.md) |
-| `backdrop_url` | TEXT | yes | direct CDN URL |
-| `tmdb_id` | INTEGER | yes | unique; indexed |
-| `imdb_id` | TEXT | yes | unique; indexed |
-| `tvdb_id` | INTEGER | yes | unique |
-| `anilist_id` | INTEGER | yes | **(new)** unique; indexed — AniList's numeric media ID |
-| `rating_tmdb` | FLOAT | yes | |
-| `rating_imdb` | FLOAT | yes | |
-| `created_at` | TIMESTAMPTZ | no | |
-| `updated_at` | TIMESTAMPTZ | no | |
-
-**Changed from today:** all nullable metadata columns above (`description`, `year`, `release_date`,
-`runtime_mins`, `poster_url`, `backdrop_url`, ratings, and the various external IDs) exist in the
-schema today but are always NULL in practice, because nothing populates them — the indexer creates
-title-only rows and the `MetadataProvider` trait is dead scaffolding. This push wires the enrichment
-pipeline so these columns are actually populated post-scan.
-
-### `shows`
-Canonical show/series record, analogous to `movies`.
+files represent it. Nullable metadata columns are populated by the enrichment worker post-scan
+([ADR-0006](decisions/ADR-0006-cameo-enrichment.md)); NULL until enriched.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -112,18 +89,30 @@ Canonical show/series record, analogous to `movies`.
 | `title_localized` | TEXT | yes | |
 | `description` | TEXT | yes | |
 | `year` | INTEGER | yes | |
-| `poster_url` | TEXT | yes | |
-| `backdrop_url` | TEXT | yes | |
-| `tmdb_id` | INTEGER | yes | unique; indexed |
-| `imdb_id` | TEXT | yes | unique; indexed |
+| `release_date` | DATE | yes | |
+| `runtime_mins` | INTEGER | yes | |
+| `poster_url` | TEXT | yes | direct CDN URL (TMDB/AniList), not proxied — see [ADR-0008](decisions/ADR-0008-image-cdn-direct.md) |
+| `backdrop_url` | TEXT | yes | direct CDN URL |
+| `tmdb_id` | INTEGER | yes | unique |
+| `imdb_id` | TEXT | yes | unique |
 | `tvdb_id` | INTEGER | yes | unique |
-| `anilist_id` | INTEGER | yes | **(new)** unique; indexed |
+| `anilist_id` | INTEGER | yes | unique — AniList's numeric media ID |
+| `rating_tmdb` | FLOAT | yes | |
+| `rating_imdb` | FLOAT | yes | |
 | `created_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 
+A trigram GIN index on `title` (via the `pg_trgm` extension) backs catalog search; `shows.title`
+has the same.
+
+### `shows`
+Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `title_localized`,
+`description`, `year`, `poster_url`, `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id`
+(each unique, nullable), `created_at`, `updated_at`.
+
 ### `library_movies` / `library_shows`
 Many-to-many junctions linking a `libraries` row to the `movies`/`shows` rows discovered within it
-(a title can in principle appear across more than one configured library root).
+(a title can appear across more than one configured library root).
 
 | Table | Columns (composite PK) | FKs |
 |---|---|---|
@@ -133,8 +122,8 @@ Many-to-many junctions linking a `libraries` row to the `movies`/`shows` rows di
 Each has a secondary index on the non-library side (`movie_id` / `show_id`) for reverse lookups.
 
 ### `movie_entries`
-A specific *edition* of a movie within a library — e.g. a theatrical cut vs. a director's cut of the
-same film, each potentially backed by its own file(s).
+A specific *edition* of a movie within a library — e.g. a theatrical cut vs. a director's cut, each
+potentially backed by its own file(s).
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -145,11 +134,11 @@ same film, each potentially backed by its own file(s).
 | `is_primary` | BOOLEAN | no | default `false` |
 | `created_at` | TIMESTAMPTZ | no | |
 
-Unique index on `(library_id, movie_id, edition)` — encodes "at most one entry per edition label per
-library, per movie." Indexes on `library_id` and `movie_id` individually for lookups.
+Unique index on `(library_id, movie_id, edition)` — at most one entry per edition label per library,
+per movie. Indexes on `library_id` and `movie_id` individually.
 
 ### `seasons` / `episodes`
-Standard show hierarchy: a show has seasons, a season has episodes.
+Standard show hierarchy.
 
 `seasons`: `id` (PK), `show_id` (FK → `shows.id`, cascade), `season_number` (INTEGER, not null),
 `poster_url` (TEXT, nullable), `first_aired` (DATE, nullable), `last_aired` (DATE, nullable). Unique
@@ -157,16 +146,16 @@ index on `(show_id, season_number)`; index on `show_id`.
 
 `episodes`: `id` (PK), `season_id` (FK → `seasons.id`, cascade), `episode_number` (INTEGER, not
 null), `title` (TEXT, not null — filled from the scene-filename parser at index time, refined by
-enrichment later), `description` (TEXT, nullable), `air_date` (DATE, nullable), `runtime_mins`
-(INTEGER, nullable), `thumbnail_url` (TEXT, nullable), `created_at` (TIMESTAMPTZ, not null). Unique
-index on `(season_id, episode_number)`; index on `season_id`.
+enrichment), `description` (TEXT, nullable), `air_date` (DATE, nullable), `runtime_mins` (INTEGER,
+nullable), `thumbnail_url` (TEXT, nullable), `created_at` (TIMESTAMPTZ, not null). Unique index on
+`(season_id, episode_number)`; index on `season_id`.
 
 ## Media-file tables
 
 ### `files`
-One physical file on disk. This is the table that makes multi-version delivery (delivery scenario
-(c) — see `streaming.md`) possible: a single logical title can have many `files` rows, each a
-distinct quality/edition/language rip.
+One physical file on disk. This is what makes multi-version delivery (scenario (c) in
+`streaming.md`) possible: a single logical title can have many `files` rows, each a distinct
+quality/edition/language rip.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -181,28 +170,24 @@ distinct quality/edition/language rip.
 | `duration_secs` | DOUBLE PRECISION | yes | |
 | `container_format` | TEXT | yes | |
 | `language` | TEXT | yes | primary audio/release language tag |
-| `quality` | TEXT | yes | e.g. `"1080p"`, `"480p"` — the human label the client's source-quality picker displays |
+| `quality` | TEXT | yes | e.g. `"1080p"` — the human label the client's source picker displays |
 | `release_group` | TEXT | yes | |
 | `is_primary` | BOOLEAN | no | default `false` — which file plays by default for the parent entry/episode |
 | `scanned_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 | `file_status` | ENUM (`file_status`) | no | `known` \| `changed` \| `unknown`; default `known` |
-| `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash; NULL on rows scanned before this column existed, treated as "suspected changed" |
+| `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash; NULL rows are treated as "suspected changed" |
 
-**CHECK constraint** (`idx`-less, table-level): exactly one of `movie_entry_id` / `episode_id` is set
-— *unless* `file_status = 'unknown'`, in which case both must be NULL (a file the indexer found but
-could not classify at all). This is the load-bearing polymorphic-association invariant for the whole
-media graph; see "Invariants" below.
+**CHECK constraint** (table-level): exactly one of `movie_entry_id` / `episode_id` is set — *unless*
+`file_status = 'unknown'`, in which case both must be NULL (a file the indexer found but could not
+classify). This is the load-bearing polymorphic-association invariant for the media graph.
 
-**Unique index** on `(hash_xxh3, file_path)` — the same content hash can legitimately appear at more
-than one path (e.g. a hardlinked or duplicated file), and the same path is obviously unique per hash,
-but the *pair* must be unique: this is what the indexer's dedup logic keys off.
-
-Other indexes: `movie_entry_id`, `episode_id`, `library_id`, `hash_xxh3` (each individually, for
-lookups and joins).
+**Unique index** on `(hash_xxh3, file_path)`: the same content hash can legitimately appear at more
+than one path (hardlinks, duplicates), but the *pair* must be unique — this is what the indexer's
+dedup logic keys off. Other indexes: `movie_entry_id`, `episode_id`, `library_id`, `hash_xxh3`.
 
 ### `media_streams`
-One row per elementary stream (video/audio/subtitle track) within a `files` row, populated from
+One row per elementary stream (video/audio/subtitle track) within a `files` row, populated by
 `beam-index`'s ffmpeg-based probing at index time.
 
 | Column | Type | Nullable | Notes |
@@ -211,25 +196,22 @@ One row per elementary stream (video/audio/subtitle track) within a `files` row,
 | `file_id` | UUID | no | FK → `files.id`, cascade |
 | `stream_index` | INTEGER | no | container stream index |
 | `stream_type` | ENUM (`stream_type`) | no | `video` \| `audio` \| `subtitle` |
-| `codec` | TEXT | no | plain codec name string (e.g. `"h264"`, `"aac"`) — never an FFI type; see [ADR-0004](decisions/ADR-0004-never-transcode.md) |
+| `codec` | TEXT | no | plain probed codec name (e.g. `"h264"`, `"hevc"`, `"aac"`) — never an FFI type; see [ADR-0004](decisions/ADR-0004-never-transcode.md) |
 | `language` | TEXT | yes | |
 | `title` | TEXT | yes | |
 | `is_default` | BOOLEAN | no | default `false` |
 | `is_forced` | BOOLEAN | no | default `false` |
-| `width` | INTEGER | yes | video only |
-| `height` | INTEGER | yes | video only |
+| `width` / `height` | INTEGER | yes | video only |
 | `frame_rate` | DOUBLE PRECISION | yes | video only |
 | `bit_rate` | BIGINT | yes | |
-| `color_space` | TEXT | yes | video only |
-| `color_range` | TEXT | yes | video only |
-| `hdr_format` | TEXT | yes | video only |
+| `color_space` / `color_range` / `hdr_format` | TEXT | yes | video only |
 | `channels` | INTEGER | yes | audio only |
 | `sample_rate` | INTEGER | yes | audio only |
 | `channel_layout` | TEXT | yes | audio only |
 
 Unique index on `(file_id, stream_index)`. Indexes on `file_id`, `stream_type`, `language`.
 
-### `playback_progress` **(new table)**
+### `playback_progress`
 Resume/continue-watching state, one row per (user, file) the user has started.
 
 | Column | Type | Nullable | Notes |
@@ -238,20 +220,18 @@ Resume/continue-watching state, one row per (user, file) the user has started.
 | `user_id` | UUID | no | FK → `users.id`, cascade |
 | `file_id` | UUID | no | FK → `files.id`, cascade |
 | `position_secs` | DOUBLE PRECISION | no | last reported playback position |
-| `duration_secs` | DOUBLE PRECISION | yes | denormalized snapshot of the file's duration at time of last update, so "percent complete" can be computed without a join for the continue-watching row |
-| `completed` | BOOLEAN | no | default `false`; set once position crosses a near-end threshold, drives removal from continue-watching |
+| `duration_secs` | DOUBLE PRECISION | yes | denormalized snapshot of the file's duration, so percent-complete needs no join |
+| `completed` | BOOLEAN | no | default `false`; set once position crosses a near-end threshold, removes the row from continue-watching |
 | `updated_at` | TIMESTAMPTZ | no | |
 
-Unique index on `(user_id, file_id)` — one progress row per user per file; a user resuming a
-different quality/edition of the same title tracks progress per concrete file, not per abstract
-title (deliberately simple for this push; cross-file progress carryover is not attempted).
+Unique index on `(user_id, file_id)`; index on `(user_id, updated_at)` for the continue-watching
+query. Progress is tracked per concrete file, not per abstract title — cross-file progress
+carryover is deliberately not attempted.
 
 ## Enrichment tables
 
 ### `genres` / `movie_genres` / `show_genres`
-Schema unchanged from today — these tables exist already but are populated by nothing, since no
-enrichment pipeline runs. This push wires the `cameo`-backed enrichment worker to actually populate
-them.
+Populated by the enrichment worker.
 
 `genres`: `id` (PK), `name` (TEXT, unique, not null), `slug` (TEXT, unique, not null).
 
@@ -259,9 +239,9 @@ them.
 
 `show_genres`: composite PK `(show_id, genre_id)`, both FKs cascade; index on `genre_id`.
 
-### `metadata_enrichment` **(new table)**
-Per-title enrichment queue and status, mirroring the `files` table's dual-nullable-FK polymorphism
-pattern (one enrichment row per movie *or* show, never both, never neither).
+### `metadata_enrichment`
+Per-title enrichment queue and status, mirroring `files`' dual-nullable-FK polymorphism (one row per
+movie *or* show, never both, never neither).
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -272,74 +252,51 @@ pattern (one enrichment row per movie *or* show, never both, never neither).
 | `attempts` | INTEGER | no | default `0`; incremented on each transient-failure retry |
 | `next_attempt_at` | TIMESTAMPTZ | yes | backoff scheduling; NULL when not awaiting retry |
 | `enriched_at` | TIMESTAMPTZ | yes | set when `status` becomes `enriched` |
-| `match_confidence` | REAL | yes | matcher score (0.0–1.0) for the accepted match; NULL until matched |
-| `matched_ref` | TEXT | yes | canonical `"provider:id"` string, e.g. `"tmdb:603"`; NULL until matched |
+| `match_confidence` | REAL | yes | matcher score (0.0–1.0) for the accepted match |
+| `matched_ref` | TEXT | yes | canonical `"provider:id"` string, e.g. `"tmdb:603"` |
 | `force_refresh` | BOOLEAN | no | default `false`; set by the re-enrich admin action, cleared once processed |
-| `last_error` | TEXT | yes | most recent failure/unmatched-reason detail, for admin triage |
+| `last_error` | TEXT | yes | most recent failure/unmatched detail, for admin triage |
 | `created_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 
-**CHECK constraint:** exactly one of `movie_id` / `show_id` is set — same shape as the `files` table
-invariant, intentionally, for consistency across the schema's polymorphic-association tables.
-
-Unique index on `movie_id` and a separate unique index on `show_id` (both partial over non-NULL
-values in effect, since only one is ever set per row) — together with the CHECK, this guarantees at
-most one enrichment row per title; a rescan or refresh updates the existing row rather than creating
-a duplicate, and multiple files mapping to the same movie/show share one row. Composite index on
+**CHECK constraint:** exactly one of `movie_id` / `show_id` is set. Unique indexes on `movie_id` and
+on `show_id` guarantee at most one enrichment row per title — a rescan or refresh updates the
+existing row, and multiple files mapping to the same title share one row. Composite index on
 `(status, next_attempt_at)` for the worker's due-row poll.
 
 ## Admin / log tables
 
 ### `admin_logs`
-Operational event log surfaced in the admin area. Unchanged this push.
+Operational event log surfaced in the admin area.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
 | `id` | UUID | no | PK, default `gen_random_uuid()` |
 | `level` | ENUM (`admin_log_level`) | no | `info` \| `warning` \| `error` |
-| `category` | ENUM (`admin_log_category`) | no | `library_scan` \| `system` \| `auth` |
+| `category` | ENUM (`admin_log_category`) | no | `library_scan` \| `system` \| `auth` \| `enrichment` |
 | `message` | TEXT | no | |
 | `details` | JSONB | yes | |
 | `created_at` | TIMESTAMPTZ | no | default `now()` |
 
 Indexes: `created_at DESC` (recent-first admin log view), `level`.
 
-**Changed from today:** `category`'s enum will gain an `enrichment` value this push so enrichment
-worker events (retries, permanent failures) are distinguishable from `library_scan` events in the
-admin log view.
-
-## Removed: `stream_cache`
-
-The `stream_cache` table (`id`, `file_id` → `files.id` cascade, `target_codec`, `target_container`,
-`target_resolution`, `target_bitrate`, `hls_playlist_path`, `cache_path`, `created_at`) is **dropped**
-by migration this push. It existed to back an HLS/fMP4 remux-on-request cache that was never fully
-wired up — nothing in the current codebase writes to it. Since Beam never transcodes or remuxes at
-request time in the target architecture, there is no server-side derived-artifact cache to track. See
-[ADR-0004](decisions/ADR-0004-never-transcode.md).
-
 ## Invariants
 
 - **Files dual-FK CHECK:** a `files` row has `movie_entry_id` XOR `episode_id` set, unless
-  `file_status = 'unknown'`, in which case both are NULL. This is what lets one table serve both
-  movie files and episode files without a separate table per media type, and it is enforced at the
-  database level, not just in application code.
+  `file_status = 'unknown'`, in which case both are NULL — enforced at the database level, not just
+  in application code.
 - **Enrichment dual-FK CHECK:** `metadata_enrichment` has `movie_id` XOR `show_id` set, always (no
-  "unknown" escape hatch here — a queue row is only ever created for a title that already exists).
-- **One file per `(hash_xxh3, file_path)`:** encodes "the indexer will not create two rows for the
-  same content at the same path," while still tolerating the same content hash legitimately
-  appearing at multiple paths (hardlinks, intentional duplicates across libraries).
-- **One entry per `(library_id, movie_id, edition)`:** encodes "editions are a per-library,
-  per-movie namespace" — the same edition label can exist in two different libraries without
-  conflict, but not twice in one.
+  "unknown" escape hatch — a queue row is only ever created for a title that already exists).
+- **One file per `(hash_xxh3, file_path)`:** the indexer never creates two rows for the same content
+  at the same path, while tolerating the same hash at multiple paths.
+- **One entry per `(library_id, movie_id, edition)`:** editions are a per-library, per-movie
+  namespace.
 - **One season per `(show_id, season_number)`, one episode per `(season_id, episode_number)`:**
-  standard hierarchical uniqueness; prevents the indexer from creating duplicate season/episode rows
-  on rescans.
-- **`users` identity is `(oidc_issuer, oidc_subject)`, not a password:** there is no credential
-  stored in Postgres for end users at all in the target state; `beam-server` never sees or stores a
-  password.
-- **`sessions.token_hash` is the only session-lookup key,** and it is a hash — the plaintext session
-  token that the browser holds in its cookie is never persisted, so a Postgres dump or backup leak
-  does not by itself expose valid sessions.
-- **Read-only media filesystem:** not a table-level constraint, but a whole-system invariant worth
-  repeating here since it bounds what the `files.file_path` column can ever be used for by
-  `beam-server` — read access only, never write. See `security.md`.
+  prevents duplicate rows on rescans.
+- **`users` identity is `(oidc_issuer, oidc_subject)`, not a password:** no end-user credential is
+  stored in Postgres at all; `beam-server` never sees or stores a password.
+- **`sessions.token_hash` is the only session-lookup key,** and it is a hash — a Postgres dump or
+  backup leak does not by itself expose valid sessions.
+- **Read-only media filesystem:** not a table-level constraint, but a whole-system invariant that
+  bounds what `files.file_path` can ever be used for — read access only, never write. See
+  `security.md`.
