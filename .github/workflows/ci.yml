@@ -194,7 +194,7 @@ jobs:
       - run: mise run rust:coverage
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-coverage
           path: lcov.info
@@ -220,7 +220,7 @@ jobs:
       - run: mise run codegen:openapi
 
       - name: Upload OpenAPI artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openapi-artifacts
           path: |
@@ -271,7 +271,7 @@ jobs:
       - run: mise run ts:coverage
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: web-coverage
           path: "**/coverage"
