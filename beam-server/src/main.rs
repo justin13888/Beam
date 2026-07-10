@@ -67,6 +67,25 @@ async fn main() -> Result<()> {
         .map_err(|e| eyre!("Failed to connect to database: {}", e))?;
     info!("Connected to database");
 
+    // Apply pending migrations. The supported topology is a single server
+    // process against one Postgres (see docs/operations/deployment.md), so
+    // there is no concurrent-migrator race to coordinate.
+    if config.auto_migrate {
+        use beam_migration::MigratorTrait;
+        let pending = beam_migration::Migrator::get_pending_migrations(&db)
+            .await
+            .map_err(|e| eyre!("Failed to check pending migrations: {e}"))?
+            .len();
+        beam_migration::Migrator::up(&db, None)
+            .await
+            .map_err(|e| eyre!("Failed to apply database migrations: {e}"))?;
+        info!("Database migrations up to date ({pending} applied at startup)");
+    } else {
+        info!(
+            "BEAM_AUTO_MIGRATE=false -- migrations are operator-managed via the beam-migration CLI"
+        );
+    }
+
     // Initialize App Services and State
     let (services, index_service, enrichment_service) =
         beam_server::state::AppServices::new(&config, db)

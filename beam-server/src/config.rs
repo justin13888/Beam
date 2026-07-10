@@ -40,6 +40,13 @@ pub struct ServerConfig {
     )]
     pub database_url: String,
 
+    /// Whether to apply pending database migrations at startup. On by
+    /// default so a container-only deployment needs no separate migration
+    /// step; disable for operator-managed migrations via the
+    /// `beam-migration` CLI (`up`/`down`/`status`).
+    #[config(env = "BEAM_AUTO_MIGRATE", default = true)]
+    pub auto_migrate: bool,
+
     /// Whether to hash files with unknown/unsupported extensions during
     /// indexing. Hashing them lets duplicate detection cover every file;
     /// disable to save scan IO.
@@ -143,6 +150,7 @@ impl fmt::Debug for ServerConfig {
             video_dir,
             cache_dir,
             database_url,
+            auto_migrate,
             hash_unknown_files,
             scan_interval_secs,
             watch_enabled,
@@ -168,6 +176,7 @@ impl fmt::Debug for ServerConfig {
             .field("video_dir", video_dir)
             .field("cache_dir", cache_dir)
             .field("database_url", &redact_url_password(database_url))
+            .field("auto_migrate", auto_migrate)
             .field("hash_unknown_files", hash_unknown_files)
             .field("scan_interval_secs", scan_interval_secs)
             .field("watch_enabled", watch_enabled)
@@ -296,6 +305,7 @@ mod tests {
             video_dir: PathBuf::from("/videos"),
             cache_dir: PathBuf::from("/cache"),
             database_url: "postgres://beam:db-secret-pw@localhost:5432/beam".to_string(),
+            auto_migrate: true,
             hash_unknown_files: true,
             scan_interval_secs: 3600,
             watch_enabled: true,
@@ -337,6 +347,16 @@ mod tests {
             config.redacted_database_url(),
             "postgres://beam:<redacted>@localhost:5432/beam"
         );
+    }
+
+    #[test]
+    fn auto_migrate_defaults_to_enabled() {
+        // Container-only deployments rely on this default for schema setup;
+        // see docs/operations/deployment.md.
+        let config = ServerConfig::builder()
+            .load()
+            .expect("defaults-only config should load");
+        assert!(config.auto_migrate);
     }
 
     #[test]
