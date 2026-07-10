@@ -23,6 +23,7 @@ optional variables unset/commented rather than blank.
 | `BEAM_VIDEO_DIR` | `./videos` | Read-only root of the media library. Must exist at startup; libraries are created at paths under it. |
 | `BEAM_DATA_DIR` | `./data` | Server-writable state directory (created if missing). Treat as data worth backing up, not a disposable cache. |
 | `BEAM_ENABLE_METRICS` | `false` | Expose Prometheus metrics. |
+| `BEAM_SHUTDOWN_TIMEOUT_SECS` | `30` | How long a graceful shutdown (ctrl-c/SIGTERM) waits for in-flight requests to drain before exiting anyway. |
 | `BEAM_HASH_UNKNOWN_FILES` | `true` | Hash files with unknown extensions during indexing so duplicate detection covers every file; disable to save scan IO. |
 | `BEAM_SCAN_INTERVAL_SECS` | `3600` | Interval between periodic full library rescans (backstop for anything the watcher missed). |
 | `BEAM_WATCH_ENABLED` | `true` | Run the inotify filesystem watcher for near-real-time index updates. |

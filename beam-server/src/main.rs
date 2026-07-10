@@ -154,7 +154,55 @@ async fn main() -> Result<()> {
         config.bind_address
     );
 
-    Server::new(acceptor).serve(service).await;
+    let server = Server::new(acceptor);
+    let handle = server.handle();
+    let shutdown_timeout = std::time::Duration::from_secs(config.shutdown_timeout_secs);
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        info!(
+            "Shutdown signal received -- draining connections for up to {}s",
+            shutdown_timeout.as_secs()
+        );
+        handle.stop_graceful(shutdown_timeout);
+    });
+
+    server.serve(service).await;
+    info!("Server stopped");
 
     Ok(())
+}
+
+/// Resolves when the process is asked to stop: ctrl-c anywhere, or SIGTERM
+/// on unix (what container orchestrators send before a hard kill).
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to listen for ctrl-c; that shutdown path is disabled: {e}");
+            std::future::pending::<()>().await
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        let sigterm = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut stream) => {
+                    stream.recv().await;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to listen for SIGTERM; that shutdown path is disabled: {e}"
+                    );
+                    std::future::pending::<()>().await
+                }
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
 }

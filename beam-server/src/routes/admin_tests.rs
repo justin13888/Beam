@@ -174,6 +174,7 @@ mod tests {
             bind_address: "0.0.0.0:8000".to_string(),
             server_url: "http://localhost:8000".to_string(),
             enable_metrics: false,
+            shutdown_timeout_secs: 30,
             video_dir: PathBuf::from("/tmp"),
             data_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),

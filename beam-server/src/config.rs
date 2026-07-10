@@ -28,6 +28,12 @@ pub struct ServerConfig {
     #[config(env = "BEAM_ENABLE_METRICS", default = false)]
     pub enable_metrics: bool,
 
+    /// How long a graceful shutdown (ctrl-c or SIGTERM, what container
+    /// orchestrators send before a hard kill) waits for in-flight requests
+    /// to drain before the process exits anyway, in seconds.
+    #[config(env = "BEAM_SHUTDOWN_TIMEOUT_SECS", default = 30)]
+    pub shutdown_timeout_secs: u64,
+
     #[config(env = "BEAM_VIDEO_DIR", default = "./videos")]
     pub video_dir: PathBuf,
 
@@ -147,6 +153,7 @@ impl fmt::Debug for ServerConfig {
             bind_address,
             server_url,
             enable_metrics,
+            shutdown_timeout_secs,
             video_dir,
             data_dir,
             database_url,
@@ -173,6 +180,7 @@ impl fmt::Debug for ServerConfig {
             .field("bind_address", bind_address)
             .field("server_url", server_url)
             .field("enable_metrics", enable_metrics)
+            .field("shutdown_timeout_secs", shutdown_timeout_secs)
             .field("video_dir", video_dir)
             .field("data_dir", data_dir)
             .field("database_url", &redact_url_password(database_url))
@@ -343,6 +351,7 @@ mod tests {
             bind_address: "0.0.0.0:8000".to_string(),
             server_url: "https://beam.example.com".to_string(),
             enable_metrics: false,
+            shutdown_timeout_secs: 30,
             video_dir: PathBuf::from("/videos"),
             data_dir: PathBuf::from("/cache"),
             database_url: "postgres://beam:db-secret-pw@localhost:5432/beam".to_string(),
