@@ -1,94 +1,13 @@
 # ----------------------------------------------------
-# Stage 1: Build FFmpeg 8.0 from source
-# ----------------------------------------------------
-FROM docker.io/debian:trixie-slim AS ffmpeg-builder
-
-# Install all build dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential pkg-config yasm nasm wget ca-certificates \
-    libx264-dev libx265-dev libvpx-dev \
-    libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
-    libfribidi-dev libogg-dev libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /tmp/ffmpeg
-
-RUN wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz && \
-    tar xf ffmpeg-8.0.tar.xz && \
-    cd ffmpeg-8.0 && \
-    ./configure \
-    --prefix=/opt/ffmpeg \
-    --disable-debug \
-    --disable-doc \
-    --disable-ffplay \
-    --enable-shared \
-    --disable-static \
-    --enable-gpl \
-    --enable-version3 \
-    --enable-fontconfig \
-    --enable-libass \
-    --enable-libfontconfig \
-    --enable-libfreetype \
-    --enable-libfribidi \
-    --enable-libopus \
-    --enable-libvpx \
-    --enable-libx264 \
-    --enable-libx265 \
-    --enable-openssl \
-    --enable-small \
-    --extra-cflags="-I/opt/ffmpeg/include" \
-    --extra-ldflags="-L/opt/ffmpeg/lib" \
-    --extra-libs=-lpthread \
-    --extra-libs=-lm && \
-    make -j$(nproc) && \
-    make install
-
-# ----------------------------------------------------
-# Chef: Setup chef image
-# ----------------------------------------------------
-FROM docker.io/rust:1.91-slim-trixie AS chef
-RUN cargo install cargo-chef --locked
-WORKDIR /app
-
-# ----------------------------------------------------
-# Planner: Create dependency recipe
-# ----------------------------------------------------
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-# ----------------------------------------------------
-# OpenAPI: Export the API spec from the Rust types (mirrors the
-# generate-openapi job in .github/workflows/typescript.yml)
-# ----------------------------------------------------
-FROM chef AS openapi-builder
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    clang libclang-dev pkg-config \
-    libx264-dev libx265-dev libvpx-dev \
-    libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
-    libfribidi-dev libogg-dev libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
-
-ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
-ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib:/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu
-ENV PATH=/opt/ffmpeg/bin:$PATH
-
-# Cook dependencies for the OpenAPI export
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --recipe-path recipe.json --package beam-server
-
-COPY . .
-RUN cargo run --example export_openapi -p beam-server > /app/openapi.json
-
-# ----------------------------------------------------
 # Build: Build the application using Bun
+#
+# beam-web/openapi.json must exist in the build context. It is gitignored and
+# generated from the Rust types by `mise run codegen:openapi`; CI and the
+# release workflow run that task before building this image. Generating it
+# inside the image would mean compiling FFmpeg and the entire Rust workspace
+# just to emit a JSON file.
 # ----------------------------------------------------
-FROM docker.io/oven/bun:1.3-debian AS builder
+FROM docker.io/oven/bun:1.3.14-debian AS builder
 
 # Accept build arguments for environment variables
 ARG C_APP_TITLE=Beam
@@ -104,13 +23,16 @@ COPY beam-docs/package.json ./beam-docs/
 # Install dependencies from workspace root
 RUN bun install --frozen-lockfile
 
-# Copy beam-web source and the exported OpenAPI spec (openapi.json and the
-# generated src/api.gen.ts are gitignored, so the image generates them)
+# Copy beam-web source, including the pre-generated OpenAPI spec
 COPY beam-web ./beam-web
-COPY --from=openapi-builder /app/openapi.json ./beam-web/openapi.json
 
-# Generate TypeScript types from the OpenAPI spec
 WORKDIR /app/beam-web
+RUN test -f openapi.json || { \
+    echo "beam-web/openapi.json is missing; run 'mise run codegen:openapi' first" >&2; \
+    exit 1; \
+    }
+
+# Generate TypeScript types from the OpenAPI spec (src/api.gen.ts is gitignored)
 RUN bun run codegen:openapi
 
 # Build the application with environment variables
@@ -119,7 +41,7 @@ ENV C_STREAM_SERVER_URL=${C_STREAM_SERVER_URL}
 RUN bun run build
 
 # ----------------------------------------------------
-# Stage 2: Serve statically-built web app with HTTP (caching handled externally)
+# Serve statically-built web app with HTTP (caching handled externally)
 # ----------------------------------------------------
 FROM docker.io/caddy:2-alpine
 

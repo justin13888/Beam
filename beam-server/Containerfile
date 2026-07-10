@@ -1,5 +1,9 @@
 # ----------------------------------------------------
-# Stage 1: Build FFmpeg 8.0 from source
+# Stage 1: Build FFmpeg 8.1 from source
+#
+# Must stay in lockstep with the `ffmpeg-next` pin in the workspace
+# Cargo.toml and with .github/actions/setup-ffmpeg. `mise run
+# check:ffmpeg-version` enforces this.
 # ----------------------------------------------------
 FROM docker.io/debian:trixie-slim AS ffmpeg-builder
 
@@ -14,9 +18,9 @@ RUN apt-get update && \
 
 WORKDIR /tmp/ffmpeg
 
-RUN wget -q https://ffmpeg.org/releases/ffmpeg-8.0.tar.xz && \
-    tar xf ffmpeg-8.0.tar.xz && \
-    cd ffmpeg-8.0 && \
+RUN wget -q https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz && \
+    tar xf ffmpeg-8.1.tar.xz && \
+    cd ffmpeg-8.1 && \
     ./configure \
     --prefix=/opt/ffmpeg \
     --disable-debug \
