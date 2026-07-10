@@ -21,6 +21,13 @@ target
 .env
 .todos/
 
+# Per-developer mise overrides (e.g. BEAM_CARGO_FEATURES="" on hosts that have
+# system FFmpeg development libraries installed)
+mise.local.toml
+
+# cargo-llvm-cov output
+lcov.info
+
 # Sidecar worktree state files
 .sidecar/
 .sidecar-agent
