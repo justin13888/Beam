@@ -85,7 +85,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       # Calibrated against a measured ~67.5% workspace line coverage (see
-      # docs/testing/coverage.md) -- ratchet up over time, don't relax to
+      # docs/testing.md) -- ratchet up over time, don't relax to
       # make a red PR pass.
       - name: Generate coverage report and enforce threshold
         run: |

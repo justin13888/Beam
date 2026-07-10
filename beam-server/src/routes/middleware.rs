@@ -70,7 +70,14 @@ pub async fn enforce_same_origin(req: &mut Request, depot: &mut Depot, res: &mut
         return;
     };
 
-    let state = depot.obtain::<AppState>().unwrap();
+    let Ok(state) = depot.obtain::<AppState>() else {
+        // Wired in by `create_router`; a miss is a router wiring bug. Fail
+        // closed (this hoop guards state-changing requests) without panicking.
+        tracing::error!("AppState missing from depot -- router wiring bug");
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Text::Plain("Server state unavailable"));
+        return;
+    };
     if !allowed_origins(state)
         .iter()
         .any(|allowed| allowed == &origin)

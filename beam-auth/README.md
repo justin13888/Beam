@@ -2,7 +2,7 @@
 
 A library crate providing OIDC-backed authentication and session management for `beam-server`.
 There is no standalone `beam-auth` binary or container image -- `beam-server` links this crate
-and mounts its routes in-process. See [`docs/components/server.md`](../docs/components/server.md)
+and mounts its routes in-process. See [`docs/architecture/components.md`](../docs/architecture/components.md)
 and [`docs/architecture/security.md`](../docs/architecture/security.md) for the current
 architecture, and run/test `beam-server` per its own README for local development.
 

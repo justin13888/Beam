@@ -59,14 +59,14 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ----------------------------------------------------
-# Schema: Generate GraphQL schema from Rust types
+# OpenAPI: Export the API spec from the Rust types (mirrors the
+# generate-openapi job in .github/workflows/typescript.yml)
 # ----------------------------------------------------
-FROM chef AS schema-builder
+FROM chef AS openapi-builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     clang libclang-dev pkg-config \
-    protobuf-compiler \
     libx264-dev libx265-dev libvpx-dev \
     libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
     libfribidi-dev libogg-dev libssl-dev \
@@ -78,13 +78,12 @@ ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
 ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib:/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu
 ENV PATH=/opt/ffmpeg/bin:$PATH
 
-# Cook dependencies for the schema export binary
+# Cook dependencies for the OpenAPI export
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --recipe-path recipe.json --bin export_schema
+RUN cargo chef cook --recipe-path recipe.json --package beam-server
 
 COPY . .
-RUN cargo build --bin export_schema
-RUN cd beam-server && ../target/debug/export_schema
+RUN cargo run --example export_openapi -p beam-server > /app/openapi.json
 
 # ----------------------------------------------------
 # Build: Build the application using Bun
@@ -105,13 +104,14 @@ COPY beam-docs/package.json ./beam-docs/
 # Install dependencies from workspace root
 RUN bun install --frozen-lockfile
 
-# Copy beam-web source and the generated schema from schema-builder
+# Copy beam-web source and the exported OpenAPI spec (openapi.json and the
+# generated src/api.gen.ts are gitignored, so the image generates them)
 COPY beam-web ./beam-web
-COPY --from=schema-builder /app/beam-server/schema.graphql ./beam-server/schema.graphql
+COPY --from=openapi-builder /app/openapi.json ./beam-web/openapi.json
 
-# Generate TypeScript types from the schema
+# Generate TypeScript types from the OpenAPI spec
 WORKDIR /app/beam-web
-RUN bun run codegen
+RUN bun run codegen:openapi
 
 # Build the application with environment variables
 ENV C_APP_TITLE=${C_APP_TITLE}

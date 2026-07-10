@@ -6,25 +6,26 @@ Accepted.
 
 ## Context
 
-Today, Beam authenticates users with username/password credentials hashed via Argon2, issues HS256
-JWTs signed with a shared `JWT_SECRET` environment variable, and backs sessions with Redis/Valkey.
-Video playback additionally rides on a separate 6-hour "stream token" JWT passed via a `?token=`
-query parameter, because the primary auth JWT isn't naturally available to a `<video>` tag's plain
-GET request. This design means Beam owns password storage and verification (a liability and a
-compliance/UX burden — password reset, credential-stuffing exposure, no SSO story for organizations
-that already have an identity provider), a shared-secret JWT scheme (a single leaked `JWT_SECRET`
-compromises every session and forged tokens are hard to detect), and a token-in-URL pattern that is a
-well-known credential-leakage vector via logs, browser history, and `Referer` headers.
+Beam previously authenticated users with username/password credentials hashed via Argon2, issued
+HS256 JWTs signed with a shared `JWT_SECRET` environment variable, and backed sessions with
+Redis/Valkey. Video playback additionally rode on a separate 6-hour "stream token" JWT passed via a
+`?token=` query parameter, because the primary auth JWT wasn't naturally available to a `<video>`
+tag's plain GET request. That design meant Beam owned password storage and verification (a
+liability and a compliance/UX burden — password reset, credential-stuffing exposure, no SSO story
+for organizations that already have an identity provider), a shared-secret JWT scheme (a single
+leaked `JWT_SECRET` compromises every session and forged tokens are hard to detect), and a
+token-in-URL pattern that is a well-known credential-leakage vector via logs, browser history, and
+`Referer` headers.
 
 ## Decision
 
-Replace username/password entirely with OIDC: `beam-server` performs Authorization Code + PKCE
+We replaced username/password entirely with OIDC: `beam-server` performs Authorization Code + PKCE
 against a configured OIDC issuer (via the `openidconnect` crate), acting as a confidential client in
 the backend-for-frontend pattern — the browser never handles IdP tokens directly. On successful
-login, `beam-server` creates a session (opaque token, hashed at rest, stored in a new Postgres
+login, `beam-server` creates a session (opaque token, hashed at rest, stored in a Postgres
 `sessions` table — see ADR-0005) and sets a single httpOnly, `SameSite=Lax` cookie as the browser's
 only credential, used for every subsequent request including video playback. The `?token=`
-query-parameter stream-token scheme is deleted outright. Users are JIT-provisioned keyed by
+query-parameter stream-token scheme was deleted outright. Users are JIT-provisioned keyed by
 `(oidc_issuer, oidc_subject)`; admin status is resolved from an email allowlist checked at every
 login, not read from a stored flag. Dev environments run Dex (a lightweight IdP with static users)
 via `compose.dependencies.yaml`.
@@ -50,6 +51,6 @@ via `compose.dependencies.yaml`.
   same-origin (prod) deployment topology; a deployment that serves the web client and API from
   genuinely cross-site origins would need a different mechanism (this is treated as an unsupported
   topology, not an oversight — see `security.md`).
-- Redis/Valkey is fully removed from the stack as a consequence (see ADR-0005), which is a net
+- Redis/Valkey was fully removed from the stack as a consequence (see ADR-0005), which is a net
   simplification but does remove one component some operators may already have tuned for other
   purposes in their deployment.

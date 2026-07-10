@@ -93,15 +93,17 @@ For production deployments, we recommend reviewing all configurations in `.env` 
 1. **Security**:
    - Change `POSTGRES_PASSWORD` to a strong, unique password
    - Use HTTPS with a reverse proxy (nginx, Caddy, Traefik)
-   - Set `SERVER_URL` and `C_STREAM_SERVER_URL` to your public domain
+   - Set `BEAM_SERVER_URL` and `C_STREAM_SERVER_URL` to your public domain
 
 2. **Storage**:
    - Set `HOST_VIDEO_DIR` to your media library location
-   - Ensure sufficient disk space for `HOST_CACHE_DIR`
-   - Consider using external volumes for `HOST_POSTGRES_DATA`
+   - Ensure sufficient disk space for `HOST_DATA_DIR`
+   - Postgres data lives in the `postgres` named volume declared in
+     `compose.dependencies.yaml`; point it at dependable storage (edit that
+     file to bind-mount a host path if preferred) and back it up
 
 3. **Performance**:
-   - Set `ENABLE_METRICS=true` for monitoring
+   - Set `BEAM_ENABLE_METRICS=true` for monitoring
    - Adjust `RUST_LOG` to `info` or `warn` in production
 
 Run [`verify-config.sh`](verify-config.sh) after editing `.env` to sanity-check the required
@@ -116,8 +118,9 @@ for the full reference).
 
 If your host doesn't have system FFmpeg development libraries installed, `cargo test`/`clippy`/
 `build` against `beam-index`/`beam-server` need the vendored-FFmpeg build instead -- see
-[`docs/operations/dev-setup.md`](docs/operations/dev-setup.md) and use the `cargo t-local`/
-`cargo clippy-local`/`cargo build-local` aliases from `.cargo/config.toml`.
+[ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md) and use the
+`cargo t-local`/`cargo clippy-local`/`cargo build-local` aliases from `.cargo/config.toml`
+(requires a `nasm` assembler on `PATH`).
 
 ### Start up
 
@@ -130,8 +133,9 @@ provider, fronted by Traefik) with Docker/Podman Compose for local development o
 podman compose -f compose.dependencies.yaml up
 ```
 
-See [`docs/operations/e2e-validation.md`](docs/operations/e2e-validation.md) for the full local
-end-to-end runbook (scan a library, sign in via Dex, browse, play, search, admin).
+The bundled Dex ships static test users for local development (see `dex/config.yaml`); run
+`beam-server` on the host to exercise the OIDC login flow against it (the fully containerized
+Dex topology is tracked in [#73](https://github.com/justin13888/beam/issues/73)).
 
 ## License
 

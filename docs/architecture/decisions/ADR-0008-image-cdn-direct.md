@@ -13,13 +13,13 @@ request through the server (fetching from the provider once, then serving/cachin
 Building a correct image proxy means handling upstream fetch failures, caching/eviction policy for a
 potentially large volume of poster/backdrop art, cache-busting when a title's artwork changes on the
 provider side, and an additional request path through `beam-server` for every image render in the
-UI — a non-trivial amount of new surface area for a concern (image delivery) that isn't core to what
-this push is trying to land.
+UI — a non-trivial amount of new surface area for a concern (image delivery) that isn't core to
+Beam's value.
 
 ## Decision
 
-Store `poster_url`/`backdrop_url` as direct CDN URLs from TMDB/AniList and let the browser fetch them
-directly — no server-side image proxy or cache this push. This is recorded as a deliberate, documented
+We store `poster_url`/`backdrop_url` as direct CDN URLs from TMDB/AniList and let the browser fetch
+them directly — no server-side image proxy or cache. This is recorded as a deliberate, documented
 tradeoff, not an oversight, precisely so it isn't quietly rediscovered as a "gap" later without
 context on why it was skipped.
 
@@ -28,7 +28,6 @@ context on why it was skipped.
 **Positive:**
 - Zero additional server-side code, storage, or cache-invalidation logic for image delivery — the
   entire image pipeline is "store the URL the provider gave us."
-  Meaningfully smaller scope for this push.
 - Image loading performance benefits from the provider's own CDN (likely faster and more geographically
   distributed than anything `beam-server` would implement itself for a self-hosted deployment).
 - No image-proxying failure mode for `beam-server` to handle (a dead image link degrades gracefully
@@ -45,6 +44,6 @@ context on why it was skipped.
 - Self-hosting purists who prefer a fully "phones-home to nothing but configured providers at
   enrichment time" model will notice that browsing the library still generates ongoing third-party
   network traffic for images, which is a different privacy posture than an image proxy would provide.
-- A server-side image proxy remains a legitimate future addition (tracked as out-of-scope in
-  `docs/requirements/product.md`, not rejected outright) if this tradeoff proves unacceptable to
-  operators in practice.
+- A server-side image proxy remains a legitimate future addition, not rejected outright, if this
+  tradeoff proves unacceptable to operators in practice — tracked in
+  [#70](https://github.com/justin13888/beam/issues/70).

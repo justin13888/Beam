@@ -1,5 +1,4 @@
-use crate::routes::api_error::{ApiError, require_auth};
-use crate::state::AppState;
+use crate::routes::api_error::{ApiError, obtain_state, require_auth};
 use salvo::oapi::ToResponses;
 use salvo::prelude::*;
 use std::path::PathBuf;
@@ -147,7 +146,8 @@ async fn authorize_and_locate_file(
     depot: &Depot,
     id: &str,
 ) -> Result<(PathBuf, String), FileDeliveryError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)
+        .map_err(|_| FileDeliveryError::InternalError("Server state unavailable".into()))?;
 
     require_auth(req, state).await.map_err(|e| match e {
         ApiError::Unauthorized(msg) => FileDeliveryError::Unauthorized(msg),
@@ -751,9 +751,13 @@ mod tests {
                 bind_address: "0.0.0.0:8000".to_string(),
                 server_url: "http://localhost:8000".to_string(),
                 enable_metrics: false,
+                shutdown_timeout_secs: 30,
                 video_dir: PathBuf::from("/tmp"),
-                cache_dir: PathBuf::from("/tmp"),
+                data_dir: PathBuf::from("/tmp"),
                 database_url: "postgres://unused:unused@localhost/unused".to_string(),
+                auto_migrate: true,
+                db_max_connections: 20,
+                db_min_connections: 5,
                 hash_unknown_files: true,
                 scan_interval_secs: 3600,
                 watch_enabled: false,

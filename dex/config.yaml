@@ -1,4 +1,4 @@
-# Dev-only Dex config (see ADR-0003 and docs/operations/dev-setup.md).
+# Dev-only Dex config (see ADR-0003 and docs/operations/deployment.md).
 # Static users + a single static client -- no real user data, safe to commit.
 
 issuer: http://localhost:5556/dex

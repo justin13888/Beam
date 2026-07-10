@@ -1,4 +1,5 @@
 use confique::Config;
+use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -16,65 +17,86 @@ pub enum ConfigError {
 }
 
 /// Application configuration
-#[derive(Debug, Clone, Config)]
+#[derive(Clone, Config)]
 pub struct ServerConfig {
-    #[config(env = "BIND_ADDRESS", default = "0.0.0.0:8000")]
+    #[config(env = "BEAM_BIND_ADDRESS", default = "0.0.0.0:8000")]
     pub bind_address: String,
 
-    #[config(env = "SERVER_URL", default = "http://localhost:8000")]
+    #[config(env = "BEAM_SERVER_URL", default = "http://localhost:8000")]
     pub server_url: String,
 
-    #[config(env = "ENABLE_METRICS", default = false)]
+    #[config(env = "BEAM_ENABLE_METRICS", default = false)]
     pub enable_metrics: bool,
 
-    #[config(env = "VIDEO_DIR", default = "./videos")]
+    /// How long a graceful shutdown (ctrl-c or SIGTERM, what container
+    /// orchestrators send before a hard kill) waits for in-flight requests
+    /// to drain before the process exits anyway, in seconds.
+    #[config(env = "BEAM_SHUTDOWN_TIMEOUT_SECS", default = 30)]
+    pub shutdown_timeout_secs: u64,
+
+    #[config(env = "BEAM_VIDEO_DIR", default = "./videos")]
     pub video_dir: PathBuf,
 
-    #[config(env = "CACHE_DIR", default = "./cache")]
-    pub cache_dir: PathBuf,
+    #[config(env = "BEAM_DATA_DIR", default = "./data")]
+    pub data_dir: PathBuf,
 
     #[config(
-        env = "DATABASE_URL",
+        env = "BEAM_DATABASE_URL",
         default = "postgres://beam:password@localhost:5432/beam"
     )]
     pub database_url: String,
 
+    /// Whether to apply pending database migrations at startup. On by
+    /// default so a container-only deployment needs no separate migration
+    /// step; disable for operator-managed migrations via the
+    /// `beam-migration` CLI (`up`/`down`/`status`).
+    #[config(env = "BEAM_AUTO_MIGRATE", default = true)]
+    pub auto_migrate: bool,
+
+    /// Maximum size of the Postgres connection pool.
+    #[config(env = "BEAM_DB_MAX_CONNECTIONS", default = 20)]
+    pub db_max_connections: u32,
+
+    /// Connections the pool keeps open even when idle.
+    #[config(env = "BEAM_DB_MIN_CONNECTIONS", default = 5)]
+    pub db_min_connections: u32,
+
     /// Whether to hash files with unknown/unsupported extensions during
     /// indexing. Hashing them lets duplicate detection cover every file;
     /// disable to save scan IO.
-    #[config(env = "HASH_UNKNOWN_FILES", default = true)]
+    #[config(env = "BEAM_HASH_UNKNOWN_FILES", default = true)]
     pub hash_unknown_files: bool,
 
     /// Interval between periodic full rescans of every library, in seconds.
     /// Acts as the backstop that catches changes the filesystem watcher missed.
-    #[config(env = "SCAN_INTERVAL_SECS", default = 3600)]
+    #[config(env = "BEAM_SCAN_INTERVAL_SECS", default = 3600)]
     pub scan_interval_secs: u64,
 
     /// Whether to run the inotify-based filesystem watcher for near-real-time
     /// index updates. When false, only the startup scan and periodic rescans run.
-    #[config(env = "WATCH_ENABLED", default = true)]
+    #[config(env = "BEAM_WATCH_ENABLED", default = true)]
     pub watch_enabled: bool,
 
     /// Debounce window for filesystem-watcher events, in milliseconds. Bursts
     /// of events for the same path within this window collapse into one.
-    #[config(env = "WATCH_DEBOUNCE_MS", default = 2000)]
+    #[config(env = "BEAM_WATCH_DEBOUNCE_MS", default = 2000)]
     pub watch_debounce_ms: u64,
 
     /// Interval between metadata-enrichment sweeps, in seconds. New titles
     /// are also swept immediately when queued by a scan; this is the backstop
     /// for retries and anything the immediate poke missed.
-    #[config(env = "ENRICH_INTERVAL_SECS", default = 300)]
+    #[config(env = "BEAM_ENRICH_INTERVAL_SECS", default = 300)]
     pub enrich_interval_secs: u64,
 
     /// TMDB API read-access token used by `cameo` for TMDB-sourced
     /// enrichment. If absent, TMDB-eligible titles are left un-enriched
     /// rather than failing the scan; AniList-sourced titles still enrich
     /// without it.
-    #[config(env = "TMDB_API_TOKEN")]
+    #[config(env = "BEAM_TMDB_API_TOKEN")]
     pub tmdb_api_token: Option<String>,
 
     /// Toggles AniList-sourced enrichment via `cameo`.
-    #[config(env = "ANILIST_ENABLED", default = true)]
+    #[config(env = "BEAM_ANILIST_ENABLED", default = true)]
     pub anilist_enabled: bool,
 
     /// OIDC issuer URL (e.g. Dex in dev: `http://localhost:5556/dex`). OIDC
@@ -129,7 +151,149 @@ pub struct ServerConfig {
     pub session_max_days: u64,
 }
 
+/// Hand-written so the startup "Configuration loaded" log line can never
+/// leak credentials: secrets are redacted here rather than at each log site.
+/// All fields are destructured (no `..`) so adding a config field without
+/// deciding whether it is a secret is a compile error.
+impl fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            bind_address,
+            server_url,
+            enable_metrics,
+            shutdown_timeout_secs,
+            video_dir,
+            data_dir,
+            database_url,
+            auto_migrate,
+            db_max_connections,
+            db_min_connections,
+            hash_unknown_files,
+            scan_interval_secs,
+            watch_enabled,
+            watch_debounce_ms,
+            enrich_interval_secs,
+            tmdb_api_token,
+            anilist_enabled,
+            oidc_issuer,
+            oidc_client_id,
+            oidc_client_secret,
+            oidc_scopes,
+            web_url,
+            extra_allowed_origins,
+            admin_emails,
+            cookie_secure,
+            session_idle_days,
+            session_max_days,
+        } = self;
+        f.debug_struct("ServerConfig")
+            .field("bind_address", bind_address)
+            .field("server_url", server_url)
+            .field("enable_metrics", enable_metrics)
+            .field("shutdown_timeout_secs", shutdown_timeout_secs)
+            .field("video_dir", video_dir)
+            .field("data_dir", data_dir)
+            .field("database_url", &redact_url_password(database_url))
+            .field("auto_migrate", auto_migrate)
+            .field("db_max_connections", db_max_connections)
+            .field("db_min_connections", db_min_connections)
+            .field("hash_unknown_files", hash_unknown_files)
+            .field("scan_interval_secs", scan_interval_secs)
+            .field("watch_enabled", watch_enabled)
+            .field("watch_debounce_ms", watch_debounce_ms)
+            .field("enrich_interval_secs", enrich_interval_secs)
+            .field("tmdb_api_token", &redact_option(tmdb_api_token))
+            .field("anilist_enabled", anilist_enabled)
+            .field("oidc_issuer", oidc_issuer)
+            .field("oidc_client_id", oidc_client_id)
+            .field("oidc_client_secret", &redact_option(oidc_client_secret))
+            .field("oidc_scopes", oidc_scopes)
+            .field("web_url", web_url)
+            .field("extra_allowed_origins", extra_allowed_origins)
+            .field("admin_emails", admin_emails)
+            .field("cookie_secure", cookie_secure)
+            .field("session_idle_days", session_idle_days)
+            .field("session_max_days", session_max_days)
+            .finish()
+    }
+}
+
+/// Renders an `Option` secret without its value.
+fn redact_option(secret: &Option<String>) -> Option<&'static str> {
+    secret.as_ref().map(|_| "<redacted>")
+}
+
+/// Replaces the password component of a `scheme://user:password@host/...`
+/// URL with `<redacted>`. URLs without a `user:password@` userinfo section
+/// are returned unchanged.
+fn redact_url_password(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let rest = &url[scheme_end + 3..];
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return url.to_string();
+    };
+    let userinfo = &rest[..at];
+    let Some(colon) = userinfo.find(':') else {
+        return url.to_string();
+    };
+    format!(
+        "{}{}:<redacted>{}",
+        &url[..scheme_end + 3],
+        &userinfo[..colon],
+        &rest[at..]
+    )
+}
+
+/// Startup assessment of the cookie `Secure`-flag configuration; see
+/// [`ServerConfig::cookie_security_verdict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookieSecurityVerdict {
+    /// Cookies are Secure, or nothing about the configuration implies an
+    /// HTTPS deployment.
+    Ok,
+    /// The operator explicitly set `BEAM_COOKIE_SECURE=false` while other
+    /// origins imply HTTPS -- honored (e.g. TLS terminated in front of a
+    /// plain-HTTP origin during debugging), but worth a loud warning.
+    WarnExplicitInsecure,
+    /// Cookies resolved insecure purely from `server_url`'s scheme while
+    /// `web_url`/`extra_allowed_origins` imply a real HTTPS deployment and
+    /// no explicit override was given. Almost certainly a misconfiguration
+    /// (the session cookie would ship without `Secure` on a production
+    /// HTTPS site), so startup refuses to continue.
+    ErrLikelyMisconfigured,
+}
+
 impl ServerConfig {
+    /// `database_url` with any password redacted, safe for logs.
+    pub fn redacted_database_url(&self) -> String {
+        redact_url_password(&self.database_url)
+    }
+
+    /// Classifies the cookie-`Secure` configuration. `cookie_secure`
+    /// defaults to `server_url`'s scheme, but behind a TLS-terminating
+    /// reverse proxy (e.g. the Traefik topology in compose.beam.yaml) the
+    /// externally-visible scheme can differ -- if any other configured
+    /// origin looks like HTTPS while cookies resolve insecure, that's a
+    /// misconfiguration unless the operator explicitly opted out.
+    pub fn cookie_security_verdict(&self) -> CookieSecurityVerdict {
+        let https_implied = self.web_url.starts_with("https://")
+            || self
+                .extra_allowed_origins
+                .as_deref()
+                .is_some_and(|origins| origins.contains("https://"));
+
+        if self.resolved_cookie_secure() || !https_implied {
+            CookieSecurityVerdict::Ok
+        } else if self.cookie_secure == Some(false) {
+            CookieSecurityVerdict::WarnExplicitInsecure
+        } else {
+            CookieSecurityVerdict::ErrLikelyMisconfigured
+        }
+    }
+
     /// Resolves `cookie_secure`, defaulting to whether `server_url` is
     /// `https://...` when not explicitly overridden.
     pub fn resolved_cookie_secure(&self) -> bool {
@@ -171,19 +335,192 @@ impl ServerConfig {
             ));
         }
 
-        // CACHE_DIR can be created, so just ensure parent exists
-        if let Some(parent) = self.cache_dir.parent()
+        // BEAM_DATA_DIR can be created, so just ensure parent exists
+        if let Some(parent) = self.data_dir.parent()
             && !parent.exists()
         {
             std::fs::create_dir_all(parent).map_err(|e| {
                 ConfigError::DirCreationError(
-                    "CACHE_DIR".to_string(),
-                    self.cache_dir.display().to_string(),
+                    "BEAM_DATA_DIR".to_string(),
+                    self.data_dir.display().to_string(),
                     e,
                 )
             })?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fully-populated config with known secret values, for asserting that
+    /// none of them survive into `Debug` output.
+    fn config_with_secrets() -> ServerConfig {
+        ServerConfig {
+            bind_address: "0.0.0.0:8000".to_string(),
+            server_url: "https://beam.example.com".to_string(),
+            enable_metrics: false,
+            shutdown_timeout_secs: 30,
+            video_dir: PathBuf::from("/videos"),
+            data_dir: PathBuf::from("/cache"),
+            database_url: "postgres://beam:db-secret-pw@localhost:5432/beam".to_string(),
+            auto_migrate: true,
+            db_max_connections: 20,
+            db_min_connections: 5,
+            hash_unknown_files: true,
+            scan_interval_secs: 3600,
+            watch_enabled: true,
+            watch_debounce_ms: 2000,
+            enrich_interval_secs: 300,
+            tmdb_api_token: Some("tmdb-secret-token".to_string()),
+            anilist_enabled: true,
+            oidc_issuer: Some("https://idp.example.com".to_string()),
+            oidc_client_id: Some("beam-client".to_string()),
+            oidc_client_secret: Some("oidc-secret-value".to_string()),
+            oidc_scopes: "openid profile email".to_string(),
+            web_url: "https://beam.example.com".to_string(),
+            extra_allowed_origins: None,
+            admin_emails: Some("admin@example.com".to_string()),
+            cookie_secure: None,
+            session_idle_days: 14,
+            session_max_days: 60,
+        }
+    }
+
+    #[test]
+    fn debug_output_redacts_every_secret() {
+        let config = config_with_secrets();
+        let output = format!("{config:?}");
+
+        assert!(!output.contains("db-secret-pw"), "output: {output}");
+        assert!(!output.contains("tmdb-secret-token"), "output: {output}");
+        assert!(!output.contains("oidc-secret-value"), "output: {output}");
+        assert!(output.contains("<redacted>"), "output: {output}");
+        // Non-secret fields stay visible for operator debugging.
+        assert!(output.contains("beam.example.com"), "output: {output}");
+        assert!(output.contains("beam-client"), "output: {output}");
+    }
+
+    #[test]
+    fn redacted_database_url_hides_password_only() {
+        let config = config_with_secrets();
+        assert_eq!(
+            config.redacted_database_url(),
+            "postgres://beam:<redacted>@localhost:5432/beam"
+        );
+    }
+
+    #[test]
+    fn cookie_security_verdict_covers_scheme_and_override_combinations() {
+        // (server_url, web_url, extra_origins, explicit override, expected)
+        let cases = [
+            // Plain-HTTP local dev: nothing implies HTTPS.
+            (
+                "http://localhost:8000",
+                "http://localhost:5173",
+                None,
+                None,
+                CookieSecurityVerdict::Ok,
+            ),
+            // Fully-HTTPS deployment: heuristic resolves Secure.
+            (
+                "https://beam.example.com",
+                "https://beam.example.com",
+                None,
+                None,
+                CookieSecurityVerdict::Ok,
+            ),
+            // TLS-terminating proxy in front of a plain-HTTP origin, no
+            // override: the classic footgun -- refuse to start.
+            (
+                "http://localhost:8000",
+                "https://beam.example.com",
+                None,
+                None,
+                CookieSecurityVerdict::ErrLikelyMisconfigured,
+            ),
+            // Same, implied only via an extra allowed origin.
+            (
+                "http://localhost:8000",
+                "http://localhost:5173",
+                Some("https://other.example.com"),
+                None,
+                CookieSecurityVerdict::ErrLikelyMisconfigured,
+            ),
+            // Proxy topology fixed by an explicit opt-in to Secure cookies.
+            (
+                "http://localhost:8000",
+                "https://beam.example.com",
+                None,
+                Some(true),
+                CookieSecurityVerdict::Ok,
+            ),
+            // Explicit opt-out is honored but flagged.
+            (
+                "http://localhost:8000",
+                "https://beam.example.com",
+                None,
+                Some(false),
+                CookieSecurityVerdict::WarnExplicitInsecure,
+            ),
+            // Explicit opt-out with nothing HTTPS-like at all: plain Ok.
+            (
+                "http://localhost:8000",
+                "http://localhost:5173",
+                None,
+                Some(false),
+                CookieSecurityVerdict::Ok,
+            ),
+        ];
+
+        for (server_url, web_url, extra, cookie_secure, expected) in cases {
+            let config = ServerConfig {
+                server_url: server_url.to_string(),
+                web_url: web_url.to_string(),
+                extra_allowed_origins: extra.map(str::to_string),
+                cookie_secure,
+                ..config_with_secrets()
+            };
+            assert_eq!(
+                config.cookie_security_verdict(),
+                expected,
+                "server_url={server_url}, web_url={web_url}, extra={extra:?}, \
+                 override={cookie_secure:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_migrate_defaults_to_enabled() {
+        // Container-only deployments rely on this default for schema setup;
+        // see docs/operations/deployment.md.
+        let config = ServerConfig::builder()
+            .load()
+            .expect("defaults-only config should load");
+        assert!(config.auto_migrate);
+    }
+
+    #[test]
+    fn redact_url_password_handles_urls_without_credentials() {
+        // No userinfo at all.
+        assert_eq!(
+            redact_url_password("postgres://localhost:5432/beam"),
+            "postgres://localhost:5432/beam"
+        );
+        // User without password.
+        assert_eq!(
+            redact_url_password("postgres://beam@localhost/beam"),
+            "postgres://beam@localhost/beam"
+        );
+        // Not a URL: returned unchanged rather than panicking.
+        assert_eq!(redact_url_password("not a url"), "not a url");
+        // An `@` in the path must not be mistaken for userinfo.
+        assert_eq!(
+            redact_url_password("postgres://localhost/db@name"),
+            "postgres://localhost/db@name"
+        );
     }
 }

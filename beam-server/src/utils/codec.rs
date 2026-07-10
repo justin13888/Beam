@@ -1,3 +1,7 @@
+//! Labels for what a client receives when playing a source file. Beam never
+//! transcodes or remuxes server-side (ADR-0004): these enums only *describe*
+//! the source stream's codec for direct play; no encoder consumes them.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

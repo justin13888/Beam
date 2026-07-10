@@ -7,11 +7,10 @@
 use salvo::prelude::*;
 
 use crate::models::{MediaMetadata, MediaSource};
-use crate::routes::api_error::{ApiError, require_auth};
+use crate::routes::api_error::{ApiError, obtain_state, require_auth};
 use crate::services::metadata::{
     MediaSearchFilters, MediaSortField, MediaTypeFilter, MetadataError, SortOrder,
 };
-use crate::state::AppState;
 
 /// Browse/search the media library with cursor-based pagination, sorting, and
 /// filtering.
@@ -37,7 +36,7 @@ pub async fn browse_media(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<crate::services::metadata::MediaConnection>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_auth(req, state).await?;
 
     let filters = MediaSearchFilters {
@@ -76,7 +75,7 @@ pub async fn get_media_detail(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<MediaMetadata>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_auth(req, state).await?;
 
     let id: String = req.param::<String>("id").unwrap_or_default();
@@ -95,7 +94,7 @@ pub async fn get_media_sources(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<Vec<MediaSource>>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_auth(req, state).await?;
 
     let id: String = req.param::<String>("id").unwrap_or_default();

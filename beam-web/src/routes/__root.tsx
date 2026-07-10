@@ -2,6 +2,7 @@ import { TanStackDevtools } from "@tanstack/react-devtools";
 import type { QueryClient } from "@tanstack/react-query";
 import { createRootRouteWithContext, Outlet } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
+import { Toaster } from "sonner";
 import Header from "../components/Header";
 import { RouteError } from "../components/RouteError";
 import type { AuthContextType } from "../hooks/auth";
@@ -18,6 +19,7 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 		<>
 			<Header />
 			<Outlet />
+			<Toaster theme="dark" position="top-right" richColors />
 			<TanStackDevtools
 				config={{
 					position: "bottom-right",

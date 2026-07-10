@@ -3,7 +3,7 @@
 Core domain models and trait abstractions shared by `beam-index` and `beam-server`. This crate
 is deliberately framework- and infrastructure-agnostic: no `salvo`, no `sea-orm` (the optional
 `entity` feature bridges to `beam-entity` for conversions, but the models themselves don't depend
-on it), no `ffmpeg`. See [`docs/components/domain.md`](../docs/components/domain.md) for the
+on it), no `ffmpeg`. See [`docs/architecture/components.md`](../docs/architecture/components.md) for the
 current architecture.
 
 ## Structure
@@ -30,4 +30,4 @@ Every repository trait ships with a hand-written `InMemory*` fake (real stateful
 insert/find/update/delete against an in-memory map -- not a mock), so services that depend on
 `Arc<dyn Trait>` can be tested with zero infrastructure. The `test-utils` feature additionally
 generates `mockall::automock` mocks for strict contract verification where that's the more
-appropriate tool. See [`docs/testing/strategy.md`](../docs/testing/strategy.md).
+appropriate tool. See [`docs/testing.md`](../docs/testing.md).

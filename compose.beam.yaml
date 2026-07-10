@@ -16,34 +16,38 @@ services:
     # (from beam-server/src/config.rs) are documented below for reference;
     # override any of these in your shell or a `.env` file at the repo root.
     environment:
-      # BIND_ADDRESS (default 0.0.0.0:8000)
-      - BIND_ADDRESS
-      # SERVER_URL (default http://localhost:8000)
-      - SERVER_URL
-      # DATABASE_URL (default postgres://beam:password@postgres:5432/beam;
+      # BEAM_BIND_ADDRESS (default 0.0.0.0:8000)
+      - BEAM_BIND_ADDRESS
+      # BEAM_SERVER_URL (default http://localhost:8000)
+      - BEAM_SERVER_URL
+      # BEAM_DATABASE_URL (default postgres://beam:password@postgres:5432/beam;
       # the default below points at this compose file's `postgres` service)
-      - DATABASE_URL=${DATABASE_URL:-postgres://beam:password@postgres:5432/beam}
+      - BEAM_DATABASE_URL=${BEAM_DATABASE_URL:-postgres://beam:password@postgres:5432/beam}
       - RUST_LOG=${RUST_LOG:-beam_server=info,tower_http=debug,axum=debug}
 
-      # Media directories: VIDEO_DIR is read-only (your media library);
-      # CACHE_DIR is server-writable state.
-      - VIDEO_DIR=${VIDEO_DIR:-/videos}
-      - CACHE_DIR=${CACHE_DIR:-/cache}
+      # Media directories: BEAM_VIDEO_DIR is read-only (your media library);
+      # BEAM_DATA_DIR is server-writable state.
+      - BEAM_VIDEO_DIR=${BEAM_VIDEO_DIR:-/videos}
+      - BEAM_DATA_DIR=${BEAM_DATA_DIR:-/data}
 
-      - ENABLE_METRICS=${ENABLE_METRICS:-false}
+      - BEAM_ENABLE_METRICS=${BEAM_ENABLE_METRICS:-false}
+
+      # Schema migrations apply automatically at startup; set to false for
+      # operator-managed migrations via the beam-migration CLI.
+      - BEAM_AUTO_MIGRATE=${BEAM_AUTO_MIGRATE:-true}
 
       # Indexing / filesystem watcher (defaults match config.rs)
-      - HASH_UNKNOWN_FILES=${HASH_UNKNOWN_FILES:-true}
-      - SCAN_INTERVAL_SECS=${SCAN_INTERVAL_SECS:-3600}
-      - WATCH_ENABLED=${WATCH_ENABLED:-true}
-      - WATCH_DEBOUNCE_MS=${WATCH_DEBOUNCE_MS:-2000}
+      - BEAM_HASH_UNKNOWN_FILES=${BEAM_HASH_UNKNOWN_FILES:-true}
+      - BEAM_SCAN_INTERVAL_SECS=${BEAM_SCAN_INTERVAL_SECS:-3600}
+      - BEAM_WATCH_ENABLED=${BEAM_WATCH_ENABLED:-true}
+      - BEAM_WATCH_DEBOUNCE_MS=${BEAM_WATCH_DEBOUNCE_MS:-2000}
 
-      # Metadata enrichment (cameo -> TMDB/AniList). TMDB_API_TOKEN absent
-      # means TMDB-eligible titles are left un-enriched; AniList-sourced
-      # titles still enrich without any token.
-      - ENRICH_INTERVAL_SECS=${ENRICH_INTERVAL_SECS:-300}
-      - TMDB_API_TOKEN
-      - ANILIST_ENABLED=${ANILIST_ENABLED:-true}
+      # Metadata enrichment (cameo -> TMDB/AniList). BEAM_TMDB_API_TOKEN
+      # absent means TMDB-eligible titles are left un-enriched;
+      # AniList-sourced titles still enrich without any token.
+      - BEAM_ENRICH_INTERVAL_SECS=${BEAM_ENRICH_INTERVAL_SECS:-300}
+      - BEAM_TMDB_API_TOKEN
+      - BEAM_ANILIST_ENABLED=${BEAM_ANILIST_ENABLED:-true}
 
       # OIDC auth (see ADR-0003 / docs/architecture/security.md). Login is
       # disabled with a clear error -- not a crash -- until issuer,
@@ -51,9 +55,9 @@ services:
       # (compose.dependencies.yaml) is reachable from a browser at
       # http://localhost:5556/dex, but reaching it from *inside* this
       # container needs host networking or an equivalent DNS alias -- the
-      # fully-containerized OIDC topology is a documented follow-up, not
-      # solved by this compose file. See docs/operations/e2e-validation.md,
-      # which runs beam-server on the host instead for the OIDC flow.
+      # fully-containerized OIDC topology is a tracked follow-up, not
+      # solved by this compose file; run beam-server on the host to exercise
+      # the OIDC flow in dev (see docs/operations/deployment.md).
       - BEAM_OIDC_ISSUER
       - BEAM_OIDC_CLIENT_ID
       - BEAM_OIDC_CLIENT_SECRET
@@ -65,16 +69,18 @@ services:
       - BEAM_SESSION_IDLE_DAYS=${BEAM_SESSION_IDLE_DAYS:-14}
       - BEAM_SESSION_MAX_DAYS=${BEAM_SESSION_MAX_DAYS:-60}
     ports:
-      - "${STREAM_HOST_PORT:-8000}:8000"
+      - "${BEAM_SERVER_HOST_PORT:-8000}:8000"
     volumes:
       # Use named volumes by default, or custom host paths if specified
-      - ${HOST_VIDEO_DIR:-server_videos}:${VIDEO_DIR:-/videos}
-      - ${HOST_CACHE_DIR:-server_cache}:${CACHE_DIR:-/cache}
+      - ${HOST_VIDEO_DIR:-server_videos}:${BEAM_VIDEO_DIR:-/videos}
+      - ${HOST_DATA_DIR:-server_data}:${BEAM_DATA_DIR:-/data}
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # The health route lives under the versioned API mount (see
+      # beam-server/src/routes/mod.rs).
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
       interval: 30s
       timeout: 3s
       start_period: 10s
@@ -120,10 +126,10 @@ services:
       traefik.http.routers.web.tls: "true"
       traefik.http.services.web.loadbalancer.server.port: "80"
 
-# Named volumes for video and cache (used when HOST_*_DIR is not set)
+# Named volumes for video and server data (used when HOST_*_DIR is not set)
 volumes:
   server_videos:
-  server_cache:
+  server_data:
 
 networks:
   beam_proxy:

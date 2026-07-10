@@ -23,34 +23,33 @@ async fn main() -> Result<()> {
 
     info!("Configuration loaded: {:?}", config);
 
-    // `cookie_secure` defaults to whatever `server_url`'s scheme implies,
-    // but `server_url` is the address *this process* binds/is reached at
-    // internally, which can differ from the externally-visible URL behind a
-    // TLS-terminating reverse proxy (e.g. the Traefik topology in
-    // compose.beam.yaml). If any other configured origin looks like a real
-    // HTTPS deployment while cookie_secure still resolves to false, that's
-    // very likely a misconfiguration -- the session cookie would be issued
-    // without the Secure flag on what's actually a production HTTPS site.
-    if !config.resolved_cookie_secure()
-        && (config.web_url.starts_with("https://")
-            || config
-                .extra_allowed_origins
-                .as_deref()
-                .is_some_and(|origins| origins.contains("https://")))
-    {
-        tracing::warn!(
-            "BEAM_COOKIE_SECURE resolved to false (from SERVER_URL={:?}) while BEAM_WEB_URL/\
-             BEAM_EXTRA_ALLOWED_ORIGINS suggest an HTTPS deployment -- the session cookie will \
-             be issued without the Secure flag. Set SERVER_URL to the externally-visible HTTPS \
-             URL or explicitly set BEAM_COOKIE_SECURE=true if this is intentional.",
-            config.server_url
-        );
+    match config.cookie_security_verdict() {
+        beam_server::config::CookieSecurityVerdict::Ok => {}
+        beam_server::config::CookieSecurityVerdict::WarnExplicitInsecure => {
+            tracing::warn!(
+                "BEAM_COOKIE_SECURE=false was set explicitly while BEAM_WEB_URL/\
+                 BEAM_EXTRA_ALLOWED_ORIGINS suggest an HTTPS deployment -- the session \
+                 cookie will be issued without the Secure flag. Only keep this override \
+                 if you understand why your topology needs it."
+            );
+        }
+        beam_server::config::CookieSecurityVerdict::ErrLikelyMisconfigured => {
+            return Err(eyre!(
+                "cookie security misconfiguration: cookies resolved to Secure=false (from \
+                 BEAM_SERVER_URL={:?}) while BEAM_WEB_URL/BEAM_EXTRA_ALLOWED_ORIGINS suggest an \
+                 HTTPS deployment. The session cookie would ship without the Secure flag on \
+                 what looks like a production HTTPS site. Set BEAM_SERVER_URL to the \
+                 externally-visible HTTPS URL, or set BEAM_COOKIE_SECURE=true (or =false to \
+                 explicitly accept insecure cookies).",
+                config.server_url
+            ));
+        }
     }
 
-    // Ensure cache directory exists (video_dir is validated by config)
-    tokio::fs::create_dir_all(&config.cache_dir)
+    // Ensure the data directory exists (video_dir is validated by config)
+    tokio::fs::create_dir_all(&config.data_dir)
         .await
-        .map_err(|e| eyre!("Failed to create cache directory: {e}"))?;
+        .map_err(|e| eyre!("Failed to create data directory: {e}"))?;
 
     // Initialize ffmpeg bindings (beam-index's probing at index time is the
     // only thing in this process that needs them -- beam-server itself
@@ -58,11 +57,33 @@ async fn main() -> Result<()> {
     beam_index::probe::init().map_err(|e| eyre!("Failed to initialize ffmpeg: {e}"))?;
 
     // Connect to Database
-    info!("Connecting to database at {}", config.database_url);
-    let db = sea_orm::Database::connect(&config.database_url)
+    info!(
+        "Connecting to database at {}",
+        config.redacted_database_url()
+    );
+    let db = beam_server::db::connect(&config)
         .await
-        .map_err(|e| eyre!("Failed to connect to database: {}", e))?;
+        .map_err(|e| eyre!("Failed to connect to database after retries: {}", e))?;
     info!("Connected to database");
+
+    // Apply pending migrations. The supported topology is a single server
+    // process against one Postgres (see docs/operations/deployment.md), so
+    // there is no concurrent-migrator race to coordinate.
+    if config.auto_migrate {
+        use beam_migration::MigratorTrait;
+        let pending = beam_migration::Migrator::get_pending_migrations(&db)
+            .await
+            .map_err(|e| eyre!("Failed to check pending migrations: {e}"))?
+            .len();
+        beam_migration::Migrator::up(&db, None)
+            .await
+            .map_err(|e| eyre!("Failed to apply database migrations: {e}"))?;
+        info!("Database migrations up to date ({pending} applied at startup)");
+    } else {
+        info!(
+            "BEAM_AUTO_MIGRATE=false -- migrations are operator-managed via the beam-migration CLI"
+        );
+    }
 
     // Initialize App Services and State
     let (services, index_service, enrichment_service) =
@@ -133,7 +154,55 @@ async fn main() -> Result<()> {
         config.bind_address
     );
 
-    Server::new(acceptor).serve(service).await;
+    let server = Server::new(acceptor);
+    let handle = server.handle();
+    let shutdown_timeout = std::time::Duration::from_secs(config.shutdown_timeout_secs);
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        info!(
+            "Shutdown signal received -- draining connections for up to {}s",
+            shutdown_timeout.as_secs()
+        );
+        handle.stop_graceful(shutdown_timeout);
+    });
+
+    server.serve(service).await;
+    info!("Server stopped");
 
     Ok(())
+}
+
+/// Resolves when the process is asked to stop: ctrl-c anywhere, or SIGTERM
+/// on unix (what container orchestrators send before a hard kill).
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to listen for ctrl-c; that shutdown path is disabled: {e}");
+            std::future::pending::<()>().await
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        let sigterm = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut stream) => {
+                    stream.recv().await;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to listen for SIGTERM; that shutdown path is disabled: {e}"
+                    );
+                    std::future::pending::<()>().await
+                }
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
 }

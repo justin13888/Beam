@@ -2,7 +2,7 @@
 
 `sea-orm-migration`-based schema migrations for beam's Postgres database. Migrations run in
 order and are additive by file name (`m<timestamp>_<description>.rs`); see
-[`docs/components/persistence.md`](../docs/components/persistence.md) and
+[`docs/architecture/components.md`](../docs/architecture/components.md) and
 [`docs/architecture/data-model.md`](../docs/architecture/data-model.md) for the current schema
 and its invariants.
 

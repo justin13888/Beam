@@ -24,7 +24,7 @@ export default defineConfig({
 			// `include` alone makes every matching source file count in the
 			// denominator, not just ones a test happens to import -- without
 			// it the number silently only reflects the files under test,
-			// which is meaningless as a gate (see docs/testing/coverage.md).
+			// which is meaningless as a gate (see docs/testing.md).
 			include: ["src/**/*.{ts,tsx}"],
 			exclude: [
 				"src/**/*.test.{ts,tsx}",

@@ -10,22 +10,22 @@ Accepted.
 (the `.pc` pkg-config files and headers) to build against — not just the FFmpeg runtime. Many hosts,
 particularly immutable-OS setups like Fedora Silverblue, don't ship these development packages by
 default even when the FFmpeg runtime itself is present, which means a plain `git clone && cargo test`
-fails on a meaningful fraction of contributor machines. CI works around this today by compiling
-FFmpeg 8.0 from source on every run and exporting `PKG_CONFIG_PATH` — which works, but is slow and
-does nothing for a developer's local machine, where the same friction remains. This push confines
-`ffmpeg-next` usage to `beam-index` alone (see ADR-0004), which narrows the problem but doesn't
+fails on a meaningful fraction of contributor machines. CI works around this by compiling
+FFmpeg 8.0 from source and exporting `PKG_CONFIG_PATH` — which works, but is slow and
+does nothing for a developer's local machine, where the same friction remains. ADR-0004 confined
+`ffmpeg-next` usage to `beam-index` alone, which narrowed the problem but didn't
 remove it: `beam-index`'s tests (and any workspace-wide `cargo test`) still need something to link
 against.
 
 ## Decision
 
-Add a `vendored-ffmpeg` Cargo feature to `beam-index`, using `ffmpeg-sys-next`'s `build` + `static`
-features to statically compile a plain FFmpeg from source as part of the build. This vendored build
-is deliberately non-GPL, LGPL-only — no `libx264`, `libx265`, or other proprietary/copyleft-triggering
-codec libraries — since it only needs to back the *probing* path (reading container/stream metadata),
-which relies on FFmpeg's native decoders, not its encoders or GPL-licensed codec libraries. This
-feature is strictly a local-dev/test convenience: container images and CI continue to dynamically
-link a system-provided FFmpeg, unchanged from today's approach.
+We added a `vendored-ffmpeg` Cargo feature to `beam-index`, using `ffmpeg-sys-next`'s `build` +
+`static` features to statically compile a plain FFmpeg from source as part of the build. This
+vendored build is deliberately non-GPL, LGPL-only — no `libx264`, `libx265`, or other
+proprietary/copyleft-triggering codec libraries — since it only needs to back the *probing* path
+(reading container/stream metadata), which relies on FFmpeg's native decoders, not its encoders or
+GPL-licensed codec libraries. This feature is strictly a local-dev/test convenience: container
+images and CI continue to dynamically link a system-provided FFmpeg.
 
 ## Consequences
 

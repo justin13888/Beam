@@ -3,7 +3,7 @@
 In-process media indexing: filesystem scanning, live filesystem watching, FFmpeg-based technical
 probing, and metadata-enrichment sweeps. This runs as a set of background tasks inside the
 `beam-server` binary -- there is no separate indexer process or `beam-index` binary. See
-[`docs/components/indexer.md`](../docs/components/indexer.md) for the current architecture.
+[`docs/architecture/components.md`](../docs/architecture/components.md) for the current architecture.
 
 ## Structure
 
@@ -29,4 +29,4 @@ fakes with no real filesystem or FFmpeg; the filesystem watcher has its own `InM
 (synthetic events) alongside the real `notify`-backed one, and `Clock`/`TestClock` let
 enrichment-worker backoff/retry timing be tested without real sleeps. `MockIndexService`
 (`mockall`, under `test-utils`) is what `beam-server`'s route tests use to fake a scan without
-touching a filesystem. See [`docs/testing/strategy.md`](../docs/testing/strategy.md).
+touching a filesystem. See [`docs/testing.md`](../docs/testing.md).

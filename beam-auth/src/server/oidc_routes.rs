@@ -193,14 +193,43 @@ impl Writer for OidcAuthError {
     }
 }
 
+/// Marker for a dependency the router wiring failed to inject; converts
+/// into a 500 for whichever error type the handler returns.
+struct MissingDependency;
+
+impl From<MissingDependency> for OidcAuthError {
+    fn from(_: MissingDependency) -> Self {
+        Self::InternalError("Server state unavailable".to_string())
+    }
+}
+
+impl From<MissingDependency> for OidcCallbackError {
+    fn from(_: MissingDependency) -> Self {
+        Self::InternalError("Server state unavailable".to_string())
+    }
+}
+
+/// Fetches an injected dependency from the depot. Every `T` used here is
+/// wired in by the host's router setup, so a miss is a router wiring bug --
+/// surfaced as a 500 rather than a handler panic.
+fn obtain_dep<T: Send + Sync + 'static>(depot: &Depot) -> Result<&T, MissingDependency> {
+    depot.obtain::<T>().map_err(|_| {
+        tracing::error!(
+            dependency = std::any::type_name::<T>(),
+            "dependency missing from depot -- router wiring bug"
+        );
+        MissingDependency
+    })
+}
+
 /// Resolves the current user from the `beam_session` cookie, sliding the
 /// idle expiry forward (throttled via [`get_and_touch`]).
 async fn require_web_session(
     req: &Request,
     depot: &Depot,
 ) -> Result<(String, String), OidcAuthError> {
-    let session_store = depot.obtain::<Arc<dyn SessionStore>>().unwrap();
-    let config = depot.obtain::<OidcRuntimeConfig>().unwrap();
+    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?;
+    let config = obtain_dep::<OidcRuntimeConfig>(depot)?;
 
     let token = req
         .cookie(SESSION_COOKIE)
@@ -224,9 +253,21 @@ async fn require_web_session(
     parameters(("redirect" = Option<String>, Query, description = "Path to return to after login")),
 )]
 pub async fn oidc_login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let oidc_client = depot.obtain::<Arc<dyn OidcClient>>().unwrap().clone();
-    let pending_auth_store = depot.obtain::<Arc<dyn PendingAuthStore>>().unwrap().clone();
-    let config = depot.obtain::<OidcRuntimeConfig>().unwrap().clone();
+    let deps = (
+        obtain_dep::<Arc<dyn OidcClient>>(depot),
+        obtain_dep::<Arc<dyn PendingAuthStore>>(depot),
+        obtain_dep::<OidcRuntimeConfig>(depot),
+    );
+    let (Ok(oidc_client), Ok(pending_auth_store), Ok(config)) = deps else {
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Text::Plain("Server state unavailable"));
+        return;
+    };
+    let (oidc_client, pending_auth_store, config) = (
+        oidc_client.clone(),
+        pending_auth_store.clone(),
+        config.clone(),
+    );
 
     let redirect_path = sanitize_redirect_path(req.query::<String>("redirect").as_deref());
     let begin = match oidc_client.begin_auth() {
@@ -263,9 +304,15 @@ pub async fn oidc_login(req: &mut Request, depot: &mut Depot, res: &mut Response
         CookieDuration::seconds(STATE_TTL_SECS as i64),
     ));
 
+    let Ok(location) = begin.auth_url.parse() else {
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Text::Plain(
+            "OIDC provider returned an invalid authorization URL",
+        ));
+        return;
+    };
     res.status_code(StatusCode::FOUND);
-    res.headers_mut()
-        .insert("Location", begin.auth_url.parse().unwrap());
+    res.headers_mut().insert("Location", location);
 }
 
 /// Completes the Authorization Code + PKCE exchange, JIT-provisions or
@@ -284,11 +331,11 @@ pub async fn oidc_callback(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), OidcCallbackError> {
-    let oidc_client = depot.obtain::<Arc<dyn OidcClient>>().unwrap().clone();
-    let pending_auth_store = depot.obtain::<Arc<dyn PendingAuthStore>>().unwrap().clone();
-    let session_store = depot.obtain::<Arc<dyn SessionStore>>().unwrap().clone();
-    let user_repo = depot.obtain::<Arc<dyn UserRepository>>().unwrap().clone();
-    let config = depot.obtain::<OidcRuntimeConfig>().unwrap().clone();
+    let oidc_client = obtain_dep::<Arc<dyn OidcClient>>(depot)?.clone();
+    let pending_auth_store = obtain_dep::<Arc<dyn PendingAuthStore>>(depot)?.clone();
+    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?.clone();
+    let user_repo = obtain_dep::<Arc<dyn UserRepository>>(depot)?.clone();
+    let config = obtain_dep::<OidcRuntimeConfig>(depot)?.clone();
 
     if let Some(error) = req.query::<String>("error") {
         let description = req.query::<String>("error_description").unwrap_or_default();
@@ -425,7 +472,7 @@ pub async fn oidc_me(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<MeResponse>, OidcAuthError> {
-    let user_repo = depot.obtain::<Arc<dyn UserRepository>>().unwrap().clone();
+    let user_repo = obtain_dep::<Arc<dyn UserRepository>>(depot)?.clone();
     let (user_id, _token) = require_web_session(req, depot).await?;
 
     let user_uuid =
@@ -448,8 +495,9 @@ pub async fn oidc_me(
 /// Logs out the current session (deletes it and clears the cookie).
 #[endpoint(tags("auth"))]
 pub async fn oidc_logout(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    if let Some(token) = req.cookie(SESSION_COOKIE).map(|c| c.value().to_string()) {
-        let session_store = depot.obtain::<Arc<dyn SessionStore>>().unwrap();
+    if let Some(token) = req.cookie(SESSION_COOKIE).map(|c| c.value().to_string())
+        && let Ok(session_store) = obtain_dep::<Arc<dyn SessionStore>>(depot)
+    {
         let _ = session_store.delete(&token).await;
     }
     res.remove_cookie(SESSION_COOKIE);
@@ -463,7 +511,7 @@ pub async fn oidc_logout_all(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), OidcAuthError> {
-    let session_store = depot.obtain::<Arc<dyn SessionStore>>().unwrap().clone();
+    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?.clone();
     let (user_id, _token) = require_web_session(req, depot).await?;
 
     session_store
@@ -482,7 +530,7 @@ pub async fn oidc_list_sessions(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<Vec<SessionSummary>>, OidcAuthError> {
-    let session_store = depot.obtain::<Arc<dyn SessionStore>>().unwrap().clone();
+    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?.clone();
     let (user_id, _token) = require_web_session(req, depot).await?;
 
     let sessions = session_store
@@ -516,7 +564,7 @@ pub async fn oidc_delete_session(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), OidcAuthError> {
-    let session_store = depot.obtain::<Arc<dyn SessionStore>>().unwrap().clone();
+    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?.clone();
     let (user_id, current_token) = require_web_session(req, depot).await?;
 
     let id: String = req.param::<String>("id").unwrap_or_default();

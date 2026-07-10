@@ -6,26 +6,26 @@ Accepted.
 
 ## Context
 
-Today, the indexer creates movies/shows title-only, parsed from filenames via a bare `SxxEyy` regex
-plus a parent-directory-name heuristic. A `MetadataProvider` trait exists in `beam-domain`, but it is
-pure dead scaffolding: zero production implementation, never wired into any service. Every metadata
-column (`year`, `description`, `poster_url`, ratings, `tmdb_id`, etc.) stays NULL forever, and the
-`genres`/`movie_genres`/`show_genres` tables are never populated, because nothing ever writes to
-them. This leaves Beam's catalog looking like a flat file listing rather than a real media library,
-which is a core product gap, not a cosmetic one.
+The indexer previously created movies/shows title-only, parsed from filenames via a bare `SxxEyy`
+regex plus a parent-directory-name heuristic. A `MetadataProvider` trait existed in `beam-domain`,
+but it was pure dead scaffolding: zero production implementations, never wired into any service.
+Every metadata column (`year`, `description`, `poster_url`, ratings, `tmdb_id`, etc.) stayed NULL
+forever, and the `genres`/`movie_genres`/`show_genres` tables were never populated, because nothing
+ever wrote to them. This left Beam's catalog looking like a flat file listing rather than a real
+media library, which was a core product gap, not a cosmetic one.
 
 ## Decision
 
-Add a hand-rolled scene-filename parser (title + year extraction, stripping resolution/codec/
-release-group noise) to replace the bare `SxxEyy` regex, feeding a background enrichment pipeline that
+We added a hand-rolled scene-filename parser (title + year extraction, stripping resolution/codec/
+release-group noise) replacing the bare `SxxEyy` regex, feeding a background enrichment pipeline that
 runs strictly after scan/classify completes (never blocking indexing). The pipeline queries TMDB
 (optional API key) and AniList (keyless, always available) through the `cameo` crate — a unified Rust
-SDK for both providers, from the same author as Beam — behind a new, provider-agnostic
-`EnrichmentProvider` trait that replaces the dead `MetadataProvider` scaffold. Tests never touch the
+SDK for both providers, from the same author as Beam — behind a provider-agnostic
+`EnrichmentProvider` trait that replaced the dead `MetadataProvider` scaffold. Tests never touch the
 network: an in-memory fake `EnrichmentProvider` drives all pipeline tests. Enrichment attempts are
-tracked per-title in a new `metadata_enrichment` queue/status table with retry/backoff, and the
-previously-dead genre tables get populated as a direct result. Poster/backdrop URLs are stored as
-direct CDN links — no server-side image proxy this push, a documented tradeoff (see `security.md`).
+tracked per-title in the `metadata_enrichment` queue/status table with retry/backoff, and the
+previously-dead genre tables are populated as a direct result. Poster/backdrop URLs are stored as
+direct CDN links — no server-side image proxy, a documented tradeoff (see ADR-0008).
 Re-enrichment of a title is available as a user-triggerable admin action.
 
 ## Consequences

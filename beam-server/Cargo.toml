@@ -11,6 +11,7 @@ beam-auth = { path = "../beam-auth", features = ["utils"] }
 beam-domain = { path = "../beam-domain" }
 beam-entity = { path = "../beam-entity" }
 beam-index = { path = "../beam-index" }
+beam-migration = { path = "../beam-migration" }
 http = { workspace = true }
 async-stream = "0.3"
 async-trait = { workspace = true }
@@ -38,7 +39,6 @@ uuid = { workspace = true }
 futures = "0.3.31"
 beam-auth = { path = "../beam-auth", features = ["test-utils"] }
 beam-domain = { path = "../beam-domain", features = ["test-utils"] }
-beam-migration = { path = "../beam-migration" }
 beam-index = { path = "../beam-index", features = ["test-utils"] }
 mockall = "0.14.0"
 

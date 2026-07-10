@@ -14,10 +14,9 @@ use crate::models::{
     AdminEventDto, AdminLogCountResponse, AdminLogEntryDto, CreateLibraryRequest, Library,
     LibraryFile, ScanLibraryResponse,
 };
-use crate::routes::api_error::{ApiError, require_admin, require_auth};
+use crate::routes::api_error::{ApiError, obtain_state, require_admin, require_auth};
 use crate::services::library::LibraryError;
 use crate::services::metadata::{MediaFilter, MetadataError};
-use crate::state::AppState;
 
 impl From<MetadataError> for ApiError {
     fn from(err: MetadataError) -> Self {
@@ -49,7 +48,7 @@ pub async fn list_libraries(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<Vec<Library>>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     let user = require_auth(req, state).await?;
     let libraries = state.services.library.get_libraries(user.user_id).await?;
     Ok(Json(libraries))
@@ -62,7 +61,7 @@ pub async fn list_libraries(
     ),
 )]
 pub async fn get_library(req: &mut Request, depot: &mut Depot) -> Result<Json<Library>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_auth(req, state).await?;
     let id: String = req.param::<String>("id").unwrap_or_default();
     match state.services.library.get_library_by_id(id.clone()).await? {
@@ -81,7 +80,7 @@ pub async fn get_library_files(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<Vec<LibraryFile>>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_auth(req, state).await?;
     let id: String = req.param::<String>("id").unwrap_or_default();
     let files = state.services.library.get_library_files(id).await?;
@@ -98,7 +97,7 @@ pub async fn create_library(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<Library>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_admin(req, state).await?;
     let body: CreateLibraryRequest = req
         .parse_json()
@@ -122,7 +121,7 @@ pub async fn scan_library(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<ScanLibraryResponse>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_admin(req, state).await?;
     let id: String = req.param::<String>("id").unwrap_or_default();
     let added = state.services.library.scan_library(id).await?;
@@ -144,7 +143,7 @@ pub async fn refresh_media_metadata(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_admin(req, state).await?;
     let id: String = req.param::<String>("id").unwrap_or_default();
     state
@@ -167,7 +166,7 @@ pub async fn delete_library(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_admin(req, state).await?;
     let id: String = req.param::<String>("id").unwrap_or_default();
     let deleted = state.services.library.delete_library(id.clone()).await?;
@@ -192,7 +191,7 @@ pub async fn get_admin_logs(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<Vec<AdminLogEntryDto>>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_admin(req, state).await?;
     let limit = req.query::<u32>("limit").unwrap_or(50);
     let offset = req.query::<u32>("offset").unwrap_or(0);
@@ -210,7 +209,7 @@ pub async fn get_admin_log_count(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<AdminLogCountResponse>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_admin(req, state).await?;
     let count = state
         .services
@@ -233,7 +232,7 @@ pub async fn get_admin_events(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<Vec<AdminEventDto>>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_admin(req, state).await?;
     let limit = (req.query::<u32>("limit").unwrap_or(100) as usize).min(1000);
     let events = state.services.notification.recent_events(limit);
@@ -249,7 +248,7 @@ pub async fn stream_admin_events(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     require_admin(req, state).await?;
 
     let mut receiver = state.services.notification.subscribe();

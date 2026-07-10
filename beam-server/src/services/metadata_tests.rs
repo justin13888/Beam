@@ -666,4 +666,62 @@ mod tests {
         );
         assert_eq!(sources[0].size_bytes, 1024);
     }
+
+    #[test]
+    fn test_stream_metadata_builder_reports_probed_codecs() {
+        use crate::models::{OutputAudioCodec, OutputVideoCodec};
+        use crate::services::metadata::build_media_stream_metadata_from_domain_streams;
+        use beam_domain::models::stream::{
+            AudioStreamMetadata, MediaStream, StreamMetadata, StreamType, VideoStreamMetadata,
+        };
+
+        let file_id = Uuid::new_v4();
+        let video_stream = |codec: &str| MediaStream {
+            id: Uuid::new_v4(),
+            file_id,
+            index: 0,
+            stream_type: StreamType::Video,
+            codec: codec.to_string(),
+            metadata: StreamMetadata::Video(VideoStreamMetadata {
+                width: 1920,
+                height: 1080,
+                frame_rate: Some(23.976),
+                bit_rate: Some(8_000_000),
+                color_space: None,
+                color_range: None,
+                hdr_format: None,
+            }),
+        };
+        let audio_stream = |codec: &str| MediaStream {
+            id: Uuid::new_v4(),
+            file_id,
+            index: 1,
+            stream_type: StreamType::Audio,
+            codec: codec.to_string(),
+            metadata: StreamMetadata::Audio(AudioStreamMetadata {
+                language: Some("eng".to_string()),
+                title: None,
+                channels: 6,
+                sample_rate: 48_000,
+                channel_layout: Some("5.1".to_string()),
+                bit_rate: Some(640_000),
+                is_default: true,
+                is_forced: false,
+            }),
+        };
+
+        let metadata = build_media_stream_metadata_from_domain_streams(&[
+            video_stream("hevc"),
+            video_stream("mpeg2video"),
+            audio_stream("opus"),
+            audio_stream("ac3"),
+        ]);
+
+        assert_eq!(metadata.video_tracks.len(), 2);
+        assert_eq!(metadata.video_tracks[0].codec, OutputVideoCodec::H265);
+        assert_eq!(metadata.video_tracks[1].codec, OutputVideoCodec::UNKNOWN);
+        assert_eq!(metadata.audio_tracks.len(), 2);
+        assert_eq!(metadata.audio_tracks[0].codec, OutputAudioCodec::Opus);
+        assert_eq!(metadata.audio_tracks[1].codec, OutputAudioCodec::Unknown);
+    }
 }

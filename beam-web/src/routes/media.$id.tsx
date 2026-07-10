@@ -2,6 +2,7 @@ import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute, ErrorComponent } from "@tanstack/react-router";
 import { Download, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import type { components } from "@/api.gen";
 import { VideoPlayer } from "@/components/VideoPlayer";
 import { env } from "@/env";
@@ -79,6 +80,14 @@ function RouteComponent() {
 			if (error || !response.ok) {
 				throw new Error("Failed to request a metadata refresh");
 			}
+		},
+		onSuccess: () => {
+			toast.success(
+				"Metadata refresh queued -- it will be re-fetched on the next enrichment sweep",
+			);
+		},
+		onError: () => {
+			toast.error("Failed to request a metadata refresh");
 		},
 	});
 
@@ -218,11 +227,6 @@ function RouteComponent() {
 					</div>
 					{year && <p className="mt-1 text-gray-400">{year}</p>}
 					{description && <p className="mt-4">{description}</p>}
-					{refreshMetadataMutation.isError && (
-						<p className="mt-2 text-sm text-red-400">
-							Failed to request a metadata refresh.
-						</p>
-					)}
 				</div>
 			</div>
 
