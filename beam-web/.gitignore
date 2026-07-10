@@ -13,8 +13,6 @@ count.txt
 coverage/
 
 # Generated type artifacts — regenerate locally with:
-#   GraphQL:  cd beam-web && bun run codegen
-#   OpenAPI:  cd beam-web && bun run codegen:openapi:full
+#   cd beam-web && bun run codegen:openapi:full
 openapi.json
 src/api.gen.ts
-src/gql.ts
