@@ -112,12 +112,13 @@ ENV LD_LIBRARY_PATH=/opt/ffmpeg/lib
 ENV PATH=/opt/ffmpeg/bin:$PATH
 RUN echo "/opt/ffmpeg/lib" > /etc/ld.so.conf.d/ffmpeg.conf && ldconfig
 
-# Create video and cache directory
-RUN mkdir -p /app /videos /cache
+# Create video and data directories; /data must be writable by the runtime
+# user (uid 1000, created below) since beam-server keeps its state there.
+RUN mkdir -p /app /videos /data && chown 1000:1000 /data
 
 # Set environment variables
-ENV VIDEO_DIR=/videos
-ENV CACHE_DIR=/cache
+ENV BEAM_VIDEO_DIR=/videos
+ENV BEAM_DATA_DIR=/data
 
 # Copy the binary from builder
 COPY --from=builder /app/target/release/beam-server /usr/local/bin/beam-server

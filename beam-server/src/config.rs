@@ -19,23 +19,23 @@ pub enum ConfigError {
 /// Application configuration
 #[derive(Clone, Config)]
 pub struct ServerConfig {
-    #[config(env = "BIND_ADDRESS", default = "0.0.0.0:8000")]
+    #[config(env = "BEAM_BIND_ADDRESS", default = "0.0.0.0:8000")]
     pub bind_address: String,
 
-    #[config(env = "SERVER_URL", default = "http://localhost:8000")]
+    #[config(env = "BEAM_SERVER_URL", default = "http://localhost:8000")]
     pub server_url: String,
 
-    #[config(env = "ENABLE_METRICS", default = false)]
+    #[config(env = "BEAM_ENABLE_METRICS", default = false)]
     pub enable_metrics: bool,
 
-    #[config(env = "VIDEO_DIR", default = "./videos")]
+    #[config(env = "BEAM_VIDEO_DIR", default = "./videos")]
     pub video_dir: PathBuf,
 
-    #[config(env = "CACHE_DIR", default = "./cache")]
-    pub cache_dir: PathBuf,
+    #[config(env = "BEAM_DATA_DIR", default = "./data")]
+    pub data_dir: PathBuf,
 
     #[config(
-        env = "DATABASE_URL",
+        env = "BEAM_DATABASE_URL",
         default = "postgres://beam:password@localhost:5432/beam"
     )]
     pub database_url: String,
@@ -50,39 +50,39 @@ pub struct ServerConfig {
     /// Whether to hash files with unknown/unsupported extensions during
     /// indexing. Hashing them lets duplicate detection cover every file;
     /// disable to save scan IO.
-    #[config(env = "HASH_UNKNOWN_FILES", default = true)]
+    #[config(env = "BEAM_HASH_UNKNOWN_FILES", default = true)]
     pub hash_unknown_files: bool,
 
     /// Interval between periodic full rescans of every library, in seconds.
     /// Acts as the backstop that catches changes the filesystem watcher missed.
-    #[config(env = "SCAN_INTERVAL_SECS", default = 3600)]
+    #[config(env = "BEAM_SCAN_INTERVAL_SECS", default = 3600)]
     pub scan_interval_secs: u64,
 
     /// Whether to run the inotify-based filesystem watcher for near-real-time
     /// index updates. When false, only the startup scan and periodic rescans run.
-    #[config(env = "WATCH_ENABLED", default = true)]
+    #[config(env = "BEAM_WATCH_ENABLED", default = true)]
     pub watch_enabled: bool,
 
     /// Debounce window for filesystem-watcher events, in milliseconds. Bursts
     /// of events for the same path within this window collapse into one.
-    #[config(env = "WATCH_DEBOUNCE_MS", default = 2000)]
+    #[config(env = "BEAM_WATCH_DEBOUNCE_MS", default = 2000)]
     pub watch_debounce_ms: u64,
 
     /// Interval between metadata-enrichment sweeps, in seconds. New titles
     /// are also swept immediately when queued by a scan; this is the backstop
     /// for retries and anything the immediate poke missed.
-    #[config(env = "ENRICH_INTERVAL_SECS", default = 300)]
+    #[config(env = "BEAM_ENRICH_INTERVAL_SECS", default = 300)]
     pub enrich_interval_secs: u64,
 
     /// TMDB API read-access token used by `cameo` for TMDB-sourced
     /// enrichment. If absent, TMDB-eligible titles are left un-enriched
     /// rather than failing the scan; AniList-sourced titles still enrich
     /// without it.
-    #[config(env = "TMDB_API_TOKEN")]
+    #[config(env = "BEAM_TMDB_API_TOKEN")]
     pub tmdb_api_token: Option<String>,
 
     /// Toggles AniList-sourced enrichment via `cameo`.
-    #[config(env = "ANILIST_ENABLED", default = true)]
+    #[config(env = "BEAM_ANILIST_ENABLED", default = true)]
     pub anilist_enabled: bool,
 
     /// OIDC issuer URL (e.g. Dex in dev: `http://localhost:5556/dex`). OIDC
@@ -148,7 +148,7 @@ impl fmt::Debug for ServerConfig {
             server_url,
             enable_metrics,
             video_dir,
-            cache_dir,
+            data_dir,
             database_url,
             auto_migrate,
             hash_unknown_files,
@@ -174,7 +174,7 @@ impl fmt::Debug for ServerConfig {
             .field("server_url", server_url)
             .field("enable_metrics", enable_metrics)
             .field("video_dir", video_dir)
-            .field("cache_dir", cache_dir)
+            .field("data_dir", data_dir)
             .field("database_url", &redact_url_password(database_url))
             .field("auto_migrate", auto_migrate)
             .field("hash_unknown_files", hash_unknown_files)
@@ -315,14 +315,14 @@ impl ServerConfig {
             ));
         }
 
-        // CACHE_DIR can be created, so just ensure parent exists
-        if let Some(parent) = self.cache_dir.parent()
+        // BEAM_DATA_DIR can be created, so just ensure parent exists
+        if let Some(parent) = self.data_dir.parent()
             && !parent.exists()
         {
             std::fs::create_dir_all(parent).map_err(|e| {
                 ConfigError::DirCreationError(
-                    "CACHE_DIR".to_string(),
-                    self.cache_dir.display().to_string(),
+                    "BEAM_DATA_DIR".to_string(),
+                    self.data_dir.display().to_string(),
                     e,
                 )
             })?;
@@ -344,7 +344,7 @@ mod tests {
             server_url: "https://beam.example.com".to_string(),
             enable_metrics: false,
             video_dir: PathBuf::from("/videos"),
-            cache_dir: PathBuf::from("/cache"),
+            data_dir: PathBuf::from("/cache"),
             database_url: "postgres://beam:db-secret-pw@localhost:5432/beam".to_string(),
             auto_migrate: true,
             hash_unknown_files: true,

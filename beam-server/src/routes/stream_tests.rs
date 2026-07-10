@@ -221,7 +221,7 @@ mod tests {
             server_url: "http://localhost:8000".to_string(),
             enable_metrics: false,
             video_dir: PathBuf::from("/tmp"),
-            cache_dir: PathBuf::from("/tmp"),
+            data_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
             auto_migrate: true,
             hash_unknown_files: true,

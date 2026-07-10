@@ -36,9 +36,9 @@ async fn main() -> Result<()> {
         beam_server::config::CookieSecurityVerdict::ErrLikelyMisconfigured => {
             return Err(eyre!(
                 "cookie security misconfiguration: cookies resolved to Secure=false (from \
-                 SERVER_URL={:?}) while BEAM_WEB_URL/BEAM_EXTRA_ALLOWED_ORIGINS suggest an \
+                 BEAM_SERVER_URL={:?}) while BEAM_WEB_URL/BEAM_EXTRA_ALLOWED_ORIGINS suggest an \
                  HTTPS deployment. The session cookie would ship without the Secure flag on \
-                 what looks like a production HTTPS site. Set SERVER_URL to the \
+                 what looks like a production HTTPS site. Set BEAM_SERVER_URL to the \
                  externally-visible HTTPS URL, or set BEAM_COOKIE_SECURE=true (or =false to \
                  explicitly accept insecure cookies).",
                 config.server_url
@@ -46,10 +46,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Ensure cache directory exists (video_dir is validated by config)
-    tokio::fs::create_dir_all(&config.cache_dir)
+    // Ensure the data directory exists (video_dir is validated by config)
+    tokio::fs::create_dir_all(&config.data_dir)
         .await
-        .map_err(|e| eyre!("Failed to create cache directory: {e}"))?;
+        .map_err(|e| eyre!("Failed to create data directory: {e}"))?;
 
     // Initialize ffmpeg bindings (beam-index's probing at index time is the
     // only thing in this process that needs them -- beam-server itself

@@ -82,15 +82,15 @@ For production deployments, we recommend reviewing all configurations in `.env` 
 1. **Security**:
    - Change `POSTGRES_PASSWORD` to a strong, unique password
    - Use HTTPS with a reverse proxy (nginx, Caddy, Traefik)
-   - Set `SERVER_URL` and `C_STREAM_SERVER_URL` to your public domain
+   - Set `BEAM_SERVER_URL` and `C_STREAM_SERVER_URL` to your public domain
 
 2. **Storage**:
    - Set `HOST_VIDEO_DIR` to your media library location
-   - Ensure sufficient disk space for `HOST_CACHE_DIR`
+   - Ensure sufficient disk space for `HOST_DATA_DIR`
    - Consider using external volumes for `HOST_POSTGRES_DATA`
 
 3. **Performance**:
-   - Set `ENABLE_METRICS=true` for monitoring
+   - Set `BEAM_ENABLE_METRICS=true` for monitoring
    - Adjust `RUST_LOG` to `info` or `warn` in production
 
 Run [`verify-config.sh`](verify-config.sh) after editing `.env` to sanity-check the required
