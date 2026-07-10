@@ -26,7 +26,7 @@ responsibility.
    - [`components.md`](architecture/components.md) — per-crate/app ownership, module layout,
      boundaries, and testing approach.
    - [`decisions/`](architecture/decisions/) — ADRs recording the settled, non-obvious calls
-     (see its [README](architecture/decisions/README.md); ADR-0001 through ADR-0008).
+     (see its [README](architecture/decisions/README.md); ADR-0001 through ADR-0009).
 3. **[`testing.md`](testing.md)** — zero-dependency unit testing, fakes over mocks, subcutaneous
    e2e, coverage tooling.
 4. **[`operations/`](operations/)** — how to run the system.

@@ -6,10 +6,16 @@ Kubernetes-native topologies are out of scope — tracked in
 ([ADR-0001](../architecture/decisions/ADR-0001-modular-monolith.md)) keeps a future split
 possible without a rewrite.
 
-There are no published container images yet: `compose.beam.yaml` builds both application images
-from the in-repo Containerfiles (including compiling FFmpeg from source), so the first
-`compose up` is slow. Registry-published images and a release pipeline are tracked in
-[#72](https://github.com/justin13888/beam/issues/72).
+Each release publishes multi-arch (`linux/amd64`, `linux/arm64`) images to
+`ghcr.io/justin13888/beam-server` and `ghcr.io/justin13888/beam-web`, tagged `vX.Y.Z`, `X.Y`, and
+`latest` — prefer these over building locally. `compose.beam.yaml` still builds both images from the
+in-repo Containerfiles, and `beam-server/Containerfile` compiles FFmpeg from source, so a local
+`compose build` is slow. See
+[ADR-0009](../architecture/decisions/ADR-0009-release-engineering.md) for how a release is cut.
+
+Building the `web` image locally requires `mise run codegen:openapi` first: it takes
+`beam-web/openapi.json` from the build context rather than compiling the Rust workspace to generate
+it. The build fails with an explicit message if the spec is absent.
 
 ## Compose topology
 
@@ -36,7 +42,7 @@ include:
 | Service | Role |
 |---|---|
 | `server` | The `beam-server` binary (built from `beam-server/Containerfile`): HTTP API, OIDC auth, in-process indexing/enrichment, direct-play streaming. Mounts the media library read-only at `BEAM_VIDEO_DIR` and server-writable state at `BEAM_DATA_DIR` (host paths via `HOST_VIDEO_DIR`/`HOST_DATA_DIR`, or the `server_videos`/`server_data` named volumes by default). Healthchecked via `GET /v1/health`. Depends only on `postgres`. |
-| `web` | The `beam-web` SPA (built from `beam-web/Containerfile`, which exports the OpenAPI spec from the Rust types and generates the typed client during the image build), served as static files by Caddy. Depends on a healthy `server`. |
+| `web` | The `beam-web` SPA (built from `beam-web/Containerfile`, which generates the typed client from the `beam-web/openapi.json` supplied in the build context), served as static files by Caddy. Depends on a healthy `server`. |
 
 ## Database migrations
 

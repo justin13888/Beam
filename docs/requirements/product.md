@@ -78,7 +78,6 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
 - Rate limiting on auth endpoints — [#69](https://github.com/justin13888/beam/issues/69).
 - Enrichment tuning knobs (batch size, min confidence, metadata language) —
   [#71](https://github.com/justin13888/beam/issues/71).
-- Published container images and release CI — [#72](https://github.com/justin13888/beam/issues/72).
 - Automated browser e2e tests (Playwright) — [#74](https://github.com/justin13888/beam/issues/74).
 - Kubernetes/Helm deployment — [#76](https://github.com/justin13888/beam/issues/76).
 

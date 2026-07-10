@@ -37,32 +37,26 @@ Check the relevant doc there before making an architectural assumption.
 
 ## CI Commands to ensure pass before pushing completed work (e.g. before PR)
 
-```
-# Rust
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo deny check
-
-# Typescript (from repo root; workspaces: beam-web, beam-docs)
-bun install
-bun run check
-bun run typecheck
-cd beam-web && bun run test
-```
-
-If the host lacks system FFmpeg development libraries (no `.pc` files for `libavutil` etc. --
-common outside CI/containers), `cargo test`/`clippy`/`build` against ffmpeg-linking crates
-(`beam-index`, `beam-server`) will fail to compile. Use the vendored-FFmpeg aliases instead (see
-`.cargo/config.toml` and
-[ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md)):
+`mise.toml` is the single source of truth for every command CI and the git hooks run
+([ADR-0009](docs/architecture/decisions/ADR-0009-release-engineering.md)). Do not add a check by
+writing a command into a workflow or a hook -- add a mise task and call it from both.
 
 ```
-cargo build-local   # cargo build --workspace --features beam-index/vendored-ffmpeg,beam-server/vendored-ffmpeg
-cargo clippy-local   # same, + --all-targets -- -D warnings
-cargo t-local         # same, cargo test
+mise run ci        # everything CI enforces, except coverage and image builds
+mise tasks         # list every task
 ```
 
-This vendors and statically compiles LGPL-only FFmpeg from source (via `ffmpeg-sys-next`'s
-`build` feature) and requires a `nasm` assembler on `PATH`. CI and container builds keep
-dynamically linking system FFmpeg and do not use these aliases.
+Individual tasks, if you need them: `rust:fmt`, `rust:clippy`, `rust:test`, `rust:deny`,
+`rust:lockfile`, `rust:coverage`, `ts:check`, `ts:typecheck`, `ts:test`, `docs:build`,
+`codegen:openapi`, `check:ffmpeg-version`. The `:fix` variants (`rust:fmt:fix`, `ts:check:fix`)
+write their fixes.
+
+Commits must be [Conventional Commits](https://www.conventionalcommits.org/); `convco` enforces this
+in the `commit-msg` hook, and release-please derives the version and `CHANGELOG.md` from them.
+
+The Rust tasks statically vendor an LGPL-only FFmpeg by default (via `ffmpeg-sys-next`'s `build`
+feature), so they compile on hosts without system FFmpeg development libraries -- no `.pc` files for
+`libavutil` etc., which is common outside CI/containers. This requires a `nasm` assembler on `PATH`.
+See [ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md). CI and container
+builds dynamically link a system FFmpeg instead, by setting `BEAM_CARGO_FEATURES=""`; do the same in
+a gitignored `mise.local.toml` if your host has the development libraries.
