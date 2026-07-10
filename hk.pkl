@@ -1,0 +1,103 @@
+amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
+
+// Git hooks for beam. Every non-trivial step shells out to a `mise run <task>`
+// so the hooks, the GitHub Actions workflows, and a human at a terminal all run
+// the exact same command. See mise.toml for the task definitions.
+//
+// Hooks are installed by `mise run setup` (or mise's postinstall hook), which
+// runs `hk install --mise`. HK_MISE=1 in mise.toml wraps hook execution in
+// `mise x`, so contributors without mise activated still get the pinned tools.
+
+min_hk_version = "1.50.0"
+
+default_branch = "master"
+
+hooks {
+    // Fast, staged-file-scoped, auto-fixing. Should finish in seconds: anything
+    // that needs to compile Rust belongs in pre-push, not here.
+    ["pre-commit"] {
+        fix = true
+        stage = true
+        stash = "git"
+        steps {
+            ["rustfmt"] {
+                glob = List("*.rs")
+                check = "rustfmt --edition 2024 --check {{files}}"
+                fix = "rustfmt --edition 2024 {{files}}"
+            }
+            ["biome"] {
+                // Generated files (api.gen.ts, routeTree.gen.ts) are gitignored
+                // and so never appear in the staged set.
+                //
+                // --no-errors-on-unmatched: biome.json scopes `files.includes`
+                // to a subset of the JS/TS tree, and biome exits non-zero when
+                // handed a path it is configured to ignore. Without this,
+                // staging e.g. beam-web/tsconfig.json alone fails the commit.
+                glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro")
+                check = "bun biome check --no-errors-on-unmatched {{files}}"
+                fix = "bun biome check --write --no-errors-on-unmatched {{files}}"
+            }
+        }
+    }
+
+    // Reject non-Conventional Commit messages at the point of authorship, so
+    // release-please can derive versions and the changelog from git history.
+    // Merge commits and `git commit --fixup/--squash` markers are exempt:
+    // convco cannot parse them, and rebase resolves them before they land.
+    ["commit-msg"] {
+        steps {
+            ["convco"] {
+                check = "git rev-parse --verify --quiet MERGE_HEAD > /dev/null || grep -qE '^(fixup|squash)!' {{commit_msg_file}} || convco check --from-stdin --strip < {{commit_msg_file}}"
+            }
+        }
+    }
+
+    // A local approximation of .github/workflows/ci.yml. Deliberately excludes
+    // the two slow gates CI still enforces -- llvm-cov coverage thresholds and
+    // container image builds. Globs gate each step so a docs-only push does not
+    // wait on a Rust compile.
+    ["pre-push"] {
+        steps {
+            ["commits"] {
+                check = "mise run commits:check"
+                exclusive = true
+            }
+            ["rust-fmt"] {
+                glob = List("*.rs")
+                check = "mise run rust:fmt"
+            }
+            ["rust-clippy"] {
+                glob = List("*.rs", "Cargo.toml", "*/Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+                check = "mise run rust:clippy"
+            }
+            ["rust-test"] {
+                glob = List("*.rs", "Cargo.toml", "*/Cargo.toml", "Cargo.lock")
+                check = "mise run rust:test"
+            }
+            ["rust-deny"] {
+                glob = List("Cargo.toml", "*/Cargo.toml", "Cargo.lock", "deny.toml")
+                check = "mise run rust:deny"
+            }
+            ["rust-lockfile"] {
+                glob = List("Cargo.toml", "*/Cargo.toml", "Cargo.lock")
+                check = "mise run rust:lockfile"
+            }
+            ["ffmpeg-version"] {
+                glob = List("Cargo.toml", "beam-server/Containerfile", ".github/actions/setup-ffmpeg/action.yml")
+                check = "mise run check:ffmpeg-version"
+            }
+            ["ts-check"] {
+                glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json")
+                check = "mise run ts:check"
+            }
+            ["ts-typecheck"] {
+                glob = List("*.ts", "*.tsx", "*.json")
+                check = "mise run ts:typecheck"
+            }
+            ["ts-test"] {
+                glob = List("*.ts", "*.tsx")
+                check = "mise run ts:test"
+            }
+        }
+    }
+}
