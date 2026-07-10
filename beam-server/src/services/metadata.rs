@@ -284,7 +284,7 @@ fn build_media_stream_metadata_from_domain_streams(
         match &stream.metadata {
             StreamMetadata::Video(v) => {
                 video_tracks.push(VideoTrack {
-                    codec: OutputVideoCodec::H264, // Simplified: map from codec string
+                    codec: OutputVideoCodec::from_probe_str(&stream.codec),
                     max_rate: v.bit_rate.unwrap_or(0),
                     bit_rate: v.bit_rate.unwrap_or(0),
                     resolution: Resolution {
@@ -299,7 +299,7 @@ fn build_media_stream_metadata_from_domain_streams(
             }
             StreamMetadata::Audio(a) => {
                 audio_tracks.push(AudioTrack {
-                    codec: OutputAudioCodec::Aac, // Simplified: map from codec string
+                    codec: OutputAudioCodec::from_probe_str(&stream.codec),
                     language: a.language.clone(),
                     title: a.title.clone().unwrap_or_else(|| "Unknown".to_string()),
                     channel_layout: a.channel_layout.clone(),
@@ -309,7 +309,11 @@ fn build_media_stream_metadata_from_domain_streams(
             }
             StreamMetadata::Subtitle(s) => {
                 subtitle_tracks.push(SubtitleTrack {
-                    codec: OutputSubtitleCodec::WebVTT, // Simplified
+                    // The API subtitle-codec enum has a single variant;
+                    // representing source subtitle formats faithfully is
+                    // tracked with the transcode-era codec scaffolding
+                    // removal (see docs/architecture/decisions/ADR-0004).
+                    codec: OutputSubtitleCodec::WebVTT,
                     language: s.language.clone(),
                     title: s.title.clone(),
                     is_default: s.is_default,
