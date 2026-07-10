@@ -1,0 +1,24 @@
+name: Install JS dependencies
+description: >
+  Restores the Bun dependency cache and installs the workspace packages. Bun
+  itself is provided by mise (see mise.toml), so this action deliberately does
+  not install a Bun toolchain of its own -- that would be a second version pin.
+
+runs:
+  using: composite
+  steps:
+    - name: Cache Bun dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.bun/install/cache
+          node_modules
+          beam-web/node_modules
+          beam-docs/node_modules
+        key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-bun-
+
+    - name: Install dependencies
+      shell: bash
+      run: bun install --frozen-lockfile
