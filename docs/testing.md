@@ -52,8 +52,9 @@ reached by making a fake return `Err` instead of `Ok`, it belongs in the test su
 fixture helpers in `#[cfg(test)]` modules (NFR-207), rather than ad hoc struct literals duplicated
 across test files.
 
-All Rust tests are inline `#[cfg(test)]` modules or sibling `*_tests.rs` files, run via plain
-`cargo test --workspace` (or `cargo t-local` on hosts without system FFmpeg — see
+All Rust tests are inline `#[cfg(test)]` modules or sibling `*_tests.rs` files, run via `mise run
+rust:test`, which wraps `cargo test --workspace` and vendors FFmpeg on hosts without the system
+development libraries (see
 [ADR-0007](architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md)). `beam-entity` and
 `beam-migration` have no unit tests by design: they are pure data-shape/DDL layers with no
 business logic.
@@ -101,13 +102,14 @@ behaves the way our fakes assume."
 
 | Suite | Tool | Threshold | Enforced by |
 |---|---|---|---|
-| Rust workspace (lines) | `cargo-llvm-cov` | 65% | `cargo llvm-cov --workspace --fail-under-lines 65` in `.github/workflows/rust.yml` |
+| Rust workspace (lines) | `cargo-llvm-cov` | 65% | the `rust:coverage` task in `mise.toml`, run by the `rust-test` job in `.github/workflows/ci.yml` |
 | Web (`beam-web`) | `@vitest/coverage-v8` | lines 12%, functions 10%, branches 3%, statements 12% | `coverage.thresholds` in `beam-web/vitest.config.ts` |
 
-Run locally with `cargo llvm-cov --workspace --lcov --output-path lcov.info` (add
-`--features beam-index/vendored-ffmpeg,beam-server/vendored-ffmpeg` on hosts without system
-FFmpeg) and `bun run test:coverage` in `beam-web`. Reports are CI artifacts; the threshold flags
-are the actual gate — there is no external coverage service.
+Run locally with `mise run rust:coverage` and `mise run ts:coverage`. Both use the same commands CI
+does, and the Rust one vendors FFmpeg by default on hosts without the system development libraries
+(see `BEAM_CARGO_FEATURES` in `mise.toml` and
+[ADR-0007](architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md)). Reports are CI artifacts;
+the threshold flags are the actual gate — there is no external coverage service.
 
 The web thresholds are an honest, intentionally low baseline: `coverage.include` counts every
 matching source file in the denominator (not just files a test imports), and the untested route

@@ -7,10 +7,10 @@ the full configuration reference.
 
 ## Development
 
-- Install ffmpeg/libav 8+ libraries on your system, or use the vendored-FFmpeg build for hosts
-  without system dev libraries: the `cargo build-local`/`clippy-local`/`t-local` aliases from
-  `.cargo/config.toml`, per
-  [ADR-0007](../docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md).
+- Install ffmpeg/libav 8+ libraries on your system, or rely on the vendored-FFmpeg build that the
+  `mise run rust:*` tasks use by default on hosts without the system dev libraries, per
+  [ADR-0007](../docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md). With system
+  libraries installed, set `BEAM_CARGO_FEATURES = ""` in a `mise.local.toml` to link against them.
   - *Tip: Refer to [Containerfile](Containerfile) for ffmpeg build flags used in prod.*
 
 - Copy `.env.example` to `.env` and modify as needed:

@@ -63,6 +63,10 @@ run = "cargo fmt --check"
 description = "Format Rust code"
 run = "cargo fmt"
 
+[tasks."rust:build"]
+description = "Build the Rust workspace"
+run = 'cargo build --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"}'
+
 [tasks."rust:clippy"]
 description = "Lint Rust with clippy, warnings denied"
 run = 'cargo clippy --workspace --all-targets ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} -- -D warnings'
