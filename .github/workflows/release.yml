@@ -1,0 +1,274 @@
+name: Release
+
+# release-please watches conventional commits on master and keeps a
+# `chore: release vX.Y.Z` pull request open. Merging that pull request tags the
+# commit and creates the GitHub Release, which in turn triggers the image,
+# artifact, and docs jobs below.
+#
+# Two prerequisites, documented in docs/architecture/decisions/ADR-0009:
+#   - RELEASE_PLEASE_TOKEN, a fine-grained PAT with contents:write and
+#     pull-requests:write. Without it the release pull request is created by
+#     GITHUB_TOKEN, which by design does not trigger workflows, so ci.yml never
+#     runs on it and branch protection blocks the merge.
+#   - A bootstrap tag matching .release-please-manifest.json, so release-please
+#     has a baseline instead of walking the entire history.
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  release-please:
+    name: Release pull request
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      pr: ${{ steps.release.outputs.pr }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Bumping [workspace.package].version invalidates the six beam-* entries in
+  # Cargo.lock, and release-please's `simple` strategy has no Cargo updater.
+  # Refresh the lockfile on the release branch so `cargo metadata --locked`
+  # (the rust-lockfile job in ci.yml) passes on the release pull request.
+  lockfile-sync:
+    name: Sync Cargo.lock on the release pull request
+    needs: [release-please]
+    if: needs.release-please.outputs.prs_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+
+      - name: Refresh workspace entries in Cargo.lock
+        run: cargo update --workspace --offline
+
+      - name: Commit and push if the lockfile changed
+        run: |
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already matches the bumped manifests"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: sync Cargo.lock for the release"
+          git push
+
+  # Generated once and shared: beam-web's image and the release assets both need
+  # the spec, and producing it means compiling FFmpeg and the Rust workspace.
+  openapi:
+    name: Export OpenAPI spec
+    needs: [release-please]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BEAM_CARGO_FEATURES: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+      - uses: ./.github/actions/bun-install
+
+      - run: mise run codegen:openapi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi-spec
+          path: beam-web/openapi.json
+          retention-days: 1
+
+  # Built on native runners rather than under QEMU: beam-server compiles FFmpeg
+  # from source, and emulated arm64 would take hours. Each build pushes by
+  # digest; image-manifest then joins the digests under the human-facing tags.
+  images:
+    name: Build ${{ matrix.image }} (${{ matrix.platform.arch }})
+    needs: [release-please, openapi]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [beam-server, beam-web]
+        platform:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      # beam-web/Containerfile expects the spec in the build context.
+      - uses: actions/download-artifact@v4
+        with:
+          name: openapi-spec
+          path: beam-web
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.image }}/Containerfile
+          platforms: linux/${{ matrix.platform.arch }}
+          provenance: false
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
+
+      - name: Export the digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  image-manifest:
+    name: Publish ${{ matrix.image }} manifest
+    needs: [release-please, images]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [beam-server, beam-web]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern=v{{version}},value=${{ needs.release-please.outputs.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-please.outputs.tag_name }}
+            type=raw,value=latest
+
+      - name: Create the multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          image="${REGISTRY}/${{ github.repository_owner }}/${{ matrix.image }}"
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          digests=$(for f in "${{ matrix.image }}"@*; do printf '%s@%s ' "$image" "${f##*@}"; done)
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags $digests
+
+      - name: Inspect the published manifest
+        run: |
+          docker buildx imagetools inspect \
+            "${REGISTRY}/${{ github.repository_owner }}/${{ matrix.image }}:${{ needs.release-please.outputs.tag_name }}"
+
+  release-assets:
+    name: Attach release assets
+    needs: [release-please, openapi]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/bun-install
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: openapi-spec
+          path: beam-web
+
+      - run: mise run ts:build:web
+
+      - name: Package the assets
+        run: |
+          tar -czf beam-web-dist.tar.gz -C beam-web dist
+          cp beam-web/openapi.json openapi.json
+          sha256sum openapi.json beam-web-dist.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload to the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
+            openapi.json beam-web-dist.tar.gz SHA256SUMS --clobber
+
+  # Cloudflare Pages' Git integration only triggers on branch pushes, never on
+  # tags or releases, so the released docs must be pushed with wrangler. Skips
+  # silently until the two Cloudflare secrets are configured.
+  docs-deploy:
+    name: Deploy docs site
+    needs: [release-please]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/bun-install
+
+      - run: mise run docs:build
+
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
+        working-directory: beam-docs
+        run: bunx wrangler pages deploy dist --project-name=beam-docs --commit-dirty=true
