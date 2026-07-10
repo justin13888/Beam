@@ -321,6 +321,18 @@ pub mod in_memory {
         sessions: Mutex<HashMap<String, StoredSession>>,
     }
 
+    impl InMemorySessionStore {
+        /// Locks the session map, recovering from a poisoned lock rather
+        /// than panicking -- one panicked holder must not permanently take
+        /// down every session operation. The map is consistent after every
+        /// individual mutation, so recovered data is safe to reuse.
+        fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, StoredSession>> {
+            self.sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
     #[async_trait]
     impl SessionStore for InMemorySessionStore {
         async fn create(
@@ -331,7 +343,7 @@ pub mod in_memory {
         ) -> Result<String> {
             let token = generate_session_token();
             let now = Utc::now();
-            self.sessions.lock().unwrap().insert(
+            self.lock_sessions().insert(
                 hash_token(&token),
                 StoredSession {
                     id: Uuid::new_v4().to_string(),
@@ -356,7 +368,7 @@ pub mod in_memory {
 
         async fn touch(&self, token: &str, idle_ttl_secs: u64) -> Result<()> {
             let now = Utc::now();
-            if let Some(session) = self.sessions.lock().unwrap().get_mut(&hash_token(token)) {
+            if let Some(session) = self.lock_sessions().get_mut(&hash_token(token)) {
                 session.data.last_active = now.timestamp();
                 session.idle_expires_at = (now + chrono::Duration::seconds(idle_ttl_secs as i64))
                     .min(session.absolute_expires_at);
@@ -365,12 +377,12 @@ pub mod in_memory {
         }
 
         async fn delete(&self, token: &str) -> Result<()> {
-            self.sessions.lock().unwrap().remove(&hash_token(token));
+            self.lock_sessions().remove(&hash_token(token));
             Ok(())
         }
 
         async fn delete_all_for_user(&self, user_id: &str) -> Result<u64> {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self.lock_sessions();
             let to_remove: Vec<String> = sessions
                 .iter()
                 .filter(|(_, v)| v.data.user_id == user_id)
@@ -384,7 +396,7 @@ pub mod in_memory {
         }
 
         async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
-            let sessions = self.sessions.lock().unwrap();
+            let sessions = self.lock_sessions();
             Ok(sessions
                 .values()
                 .filter(|s| s.data.user_id == user_id)
@@ -393,7 +405,7 @@ pub mod in_memory {
         }
 
         async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool> {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self.lock_sessions();
             let key = sessions
                 .iter()
                 .find(|(_, s)| s.id == id && s.data.user_id == user_id)

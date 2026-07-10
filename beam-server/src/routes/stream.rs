@@ -1,5 +1,4 @@
-use crate::routes::api_error::{ApiError, require_auth};
-use crate::state::AppState;
+use crate::routes::api_error::{ApiError, obtain_state, require_auth};
 use salvo::oapi::ToResponses;
 use salvo::prelude::*;
 use std::path::PathBuf;
@@ -147,7 +146,8 @@ async fn authorize_and_locate_file(
     depot: &Depot,
     id: &str,
 ) -> Result<(PathBuf, String), FileDeliveryError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)
+        .map_err(|_| FileDeliveryError::InternalError("Server state unavailable".into()))?;
 
     require_auth(req, state).await.map_err(|e| match e {
         ApiError::Unauthorized(msg) => FileDeliveryError::Unauthorized(msg),

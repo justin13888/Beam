@@ -493,4 +493,44 @@ mod tests {
 
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
+
+    /// If the `affix_state` hoop is ever missing from the router wiring,
+    /// handlers must degrade to a 500 -- not panic and drop the connection.
+    #[tokio::test]
+    async fn test_missing_state_injection_returns_500_not_panic() {
+        let router = Router::new()
+            .push(Router::with_path("v1").push(Router::with_path("media").get(browse_media)));
+        let service = Service::new(router);
+
+        let mut res = TestClient::get("http://localhost/v1/media")
+            .send(&service)
+            .await;
+
+        assert_eq!(res.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+        let body: crate::routes::api_error::ApiErrorBody = res.take_json().await.unwrap();
+        assert_eq!(body.error, "Server state unavailable");
+    }
+
+    /// Same wiring-bug scenario for the CSRF middleware: it must fail closed
+    /// (500), not panic, when `AppState` is absent for a state-changing
+    /// request carrying an Origin header.
+    #[tokio::test]
+    async fn test_csrf_middleware_missing_state_fails_closed() {
+        #[handler]
+        async fn ok_handler() -> &'static str {
+            "ok"
+        }
+
+        let router = Router::new()
+            .hoop(crate::routes::middleware::enforce_same_origin)
+            .push(Router::with_path("thing").post(ok_handler));
+        let service = Service::new(router);
+
+        let res = TestClient::post("http://localhost/thing")
+            .add_header("Origin", "http://localhost:5173", true)
+            .send(&service)
+            .await;
+
+        assert_eq!(res.status_code, Some(StatusCode::INTERNAL_SERVER_ERROR));
+    }
 }

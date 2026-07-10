@@ -63,6 +63,16 @@ pub struct AuthenticatedUser {
     pub user_id: String,
 }
 
+/// Fetches the injected [`AppState`] from the depot. The state is wired in
+/// by `create_router`'s `affix_state` hoop, so a miss is a router wiring
+/// bug -- surfaced as a 500 rather than a handler panic.
+pub fn obtain_state(depot: &Depot) -> Result<&AppState, ApiError> {
+    depot.obtain::<AppState>().map_err(|_| {
+        tracing::error!("AppState missing from depot -- router wiring bug");
+        ApiError::Internal("Server state unavailable".to_string())
+    })
+}
+
 /// Extract the caller's identity from the `beam_session` cookie.
 pub async fn require_auth(req: &Request, state: &AppState) -> Result<AuthenticatedUser, ApiError> {
     let token = req

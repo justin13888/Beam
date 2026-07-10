@@ -8,9 +8,8 @@ use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::routes::api_error::{ApiError, require_auth};
+use crate::routes::api_error::{ApiError, obtain_state, require_auth};
 use crate::services::playback::{ContinueWatchingItem, PlaybackError, PlaybackProgressDto};
-use crate::state::AppState;
 
 impl From<PlaybackError> for ApiError {
     fn from(err: PlaybackError) -> Self {
@@ -41,7 +40,7 @@ pub async fn report_playback_progress(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<PlaybackProgressDto>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     let user = require_auth(req, state).await?;
     let user_id = parse_user_id(&user.user_id)?;
 
@@ -71,7 +70,7 @@ pub async fn get_continue_watching(
     req: &mut Request,
     depot: &mut Depot,
 ) -> Result<Json<Vec<ContinueWatchingItem>>, ApiError> {
-    let state = depot.obtain::<AppState>().unwrap();
+    let state = obtain_state(depot)?;
     let user = require_auth(req, state).await?;
     let user_id = parse_user_id(&user.user_id)?;
 
