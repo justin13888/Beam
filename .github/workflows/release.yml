@@ -134,7 +134,7 @@ jobs:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
       # beam-web/Containerfile expects the spec in the build context.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: openapi-spec
           path: beam-web
@@ -178,7 +178,7 @@ jobs:
       matrix:
         image: [beam-server, beam-web]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: digests-${{ matrix.image }}-*
           path: /tmp/digests
@@ -227,7 +227,7 @@ jobs:
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: openapi-spec
           path: beam-web
