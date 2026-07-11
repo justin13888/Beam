@@ -11,6 +11,9 @@ pub mod format;
 pub mod media;
 pub mod metadata;
 
+#[cfg(test)]
+mod real_media_tests;
+
 /// Initialize the FFmpeg bindings. Must be called once, before any probing
 /// happens. Exposed here (rather than requiring callers to depend on
 /// `ffmpeg-next` directly) since this crate is the sole place in the

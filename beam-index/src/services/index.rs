@@ -2765,6 +2765,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scan_library_real_prober_marks_corrupt_file_unknown() {
+        // Same Unknown-on-unprobeable behaviour as above, but exercised through
+        // the REAL FFmpeg prober (LocalMediaInfoService) rather than a stub:
+        // a corrupt .mp4 makes `from_path` return Err, and the scan must
+        // absorb it (file inserted as Unknown, scan still Ok) rather than abort.
+        let _ = crate::probe::init();
+
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("corrupt.mp4");
+        std::fs::write(&file_path, b"not a real mp4 container at all").unwrap();
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            // Extraction fails before hashing, so the hash service is never hit.
+            Arc::new(MockHashService::new()),
+            Arc::new(crate::services::media_info::LocalMediaInfoService::default()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let result = service.scan_library(library.id.to_string()).await;
+        assert_eq!(result.unwrap(), 1, "scan must succeed despite corrupt file");
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Unknown);
+    }
+
+    #[tokio::test]
     async fn test_scan_library_process_failure_sends_warning() {
         // When process_new_file returns Err (e.g. hash fails), scan_library
         // publishes a warning notification and continues rather than aborting.
