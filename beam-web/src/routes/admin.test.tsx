@@ -339,4 +339,43 @@ describe("AdminPage logs tab", () => {
 		expect(await screen.findByText("System Logs")).toBeInTheDocument();
 		expect(await screen.findByText("Server started")).toBeInTheDocument();
 	});
+
+	it("pages the log list, requesting offset 50 on Next and disabling it on the last page", async () => {
+		// 60 entries at PAGE_SIZE 50 => two pages, so the pager renders.
+		mockApi({
+			logs: [
+				{
+					id: "log-1",
+					level: "info",
+					category: "system",
+					message: "Server started",
+					created_at: "2024-06-01T00:00:00Z",
+					details: null,
+				},
+			],
+			logCount: 60,
+		});
+		const user = userEvent.setup();
+		renderPage("logs");
+
+		await screen.findByText("Server started");
+		// First page: Previous is disabled, Next is available.
+		expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+
+		await user.click(screen.getByRole("button", { name: "Next" }));
+
+		// Advancing re-queries with the next page's offset.
+		await waitFor(() =>
+			expect(mockGet).toHaveBeenLastCalledWith(
+				"/v1/admin/logs",
+				expect.objectContaining({
+					params: { query: { limit: 50, offset: 50 } },
+				}),
+			),
+		);
+		// Page 2 of 2 is the last page: Next disables (count-driven).
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "Next" })).toBeDisabled(),
+		);
+	});
 });

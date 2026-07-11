@@ -35,8 +35,13 @@ type FileContentType =
 
 export const Route = createFileRoute("/libraries/$id")({
 	errorComponent: RouteError,
-	component: LibraryDetailPage,
+	component: RouteComponent,
 });
+
+function RouteComponent() {
+	const { id } = Route.useParams();
+	return <LibraryDetailPage libraryId={id} />;
+}
 
 function formatFileSize(bytes: number): string {
 	if (bytes === 0) return "0 B";
@@ -157,8 +162,9 @@ function SortHeader({
 	);
 }
 
-function LibraryDetailPage() {
-	const { id } = Route.useParams();
+/** Exported for component tests (see `libraries.$id.test.tsx`). The route
+ * supplies the `$id` path param; the page itself is framework-agnostic. */
+export function LibraryDetailPage({ libraryId: id }: { libraryId: string }) {
 	const { isAuthenticated } = useAuth();
 	const queryClient = useQueryClient();
 

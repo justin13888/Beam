@@ -61,7 +61,19 @@ function absoluteUrl(path: string): string {
 function RouteComponent() {
 	const metadata = Route.useLoaderData();
 	const { fileId: fileIdParam } = Route.useSearch();
+	return <MediaDetailPage metadata={metadata} fileIdParam={fileIdParam} />;
+}
 
+/** Exported for component tests (see `media.$id.test.tsx`). The route reads
+ * the loader data and the `?fileId=` deep-link search param and hands them in;
+ * the page itself is framework-agnostic. */
+export function MediaDetailPage({
+	metadata,
+	fileIdParam,
+}: {
+	metadata: MediaMetadata | null;
+	fileIdParam: string | undefined;
+}) {
 	const { user } = useAuth();
 	const movie = metadata && "Movie" in metadata ? metadata.Movie : null;
 	const show = metadata && "Show" in metadata ? metadata.Show : null;
