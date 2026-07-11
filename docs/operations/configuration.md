@@ -24,7 +24,7 @@ optional variables unset/commented rather than blank.
 | `BEAM_DB_MIN_CONNECTIONS` | `5` | Connections the pool keeps open even when idle. |
 | `BEAM_VIDEO_DIR` | `./videos` | Read-only root of the media library. Must exist at startup; libraries are created at paths under it. |
 | `BEAM_DATA_DIR` | `./data` | Server-writable state directory (created if missing). Treat as data worth backing up, not a disposable cache. |
-| `BEAM_ENABLE_METRICS` | `false` | Expose Prometheus metrics. |
+| `BEAM_ENABLE_METRICS` | `false` | Install the Prometheus metrics recorder and expose `GET /metrics` (top-level, outside `/v1`) in the Prometheus text format: HTTP request counts and durations per route class, plus indexing/enrichment counters. The endpoint is **unauthenticated** — it is only as reachable as `BEAM_BIND_ADDRESS`, so keep that internal (the supported reverse-proxy topology does not forward `/metrics`). When `false`, neither the endpoint nor the request-metrics middleware is mounted. |
 | `BEAM_SHUTDOWN_TIMEOUT_SECS` | `30` | How long a graceful shutdown (ctrl-c/SIGTERM) waits for in-flight requests to drain before exiting anyway. |
 | `BEAM_HASH_UNKNOWN_FILES` | `true` | Hash files with unknown extensions during indexing so duplicate detection covers every file; disable to save scan IO. |
 | `BEAM_SCAN_INTERVAL_SECS` | `3600` | Interval between periodic full library rescans (backstop for anything the watcher missed). |

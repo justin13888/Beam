@@ -22,6 +22,15 @@ chrono = "0.4.43"
 confique = "0.4.0"
 ffmpeg-next = "8.1"
 jsonwebtoken = {version = "10.3.0", features = ["aws_lc_rs"] }
+# The `metrics` facade is a no-op unless a recorder is installed
+# (BEAM_ENABLE_METRICS=true), so domain crates can emit counters freely.
+# The Prometheus exporter renders through beam-server's own /metrics route;
+# its default features (bundled hyper listener + push gateway) stay off.
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+metrics-util = { version = "0.20.4", default-features = false, features = [
+    "debugging",
+] }
 rand = "0.10.0"
 regex = "1.12.3"
 salvo = { version = "0.89.1", features = [

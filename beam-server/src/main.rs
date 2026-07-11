@@ -118,6 +118,21 @@ async fn main() -> Result<()> {
 
     let state = beam_server::state::AppState::new(config.clone(), services, probe);
 
+    // Install the global Prometheus recorder when metrics are enabled. Done
+    // once at startup: every `metrics::counter!`/`histogram!` call anywhere in
+    // the process (HTTP middleware, beam-index domain counters) records into
+    // it, and `create_router` mounts `GET /metrics` to render it. When
+    // disabled, no recorder exists and every facade call is a no-op.
+    let metrics_handle = if config.enable_metrics {
+        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .map_err(|e| eyre!("Failed to install Prometheus metrics recorder: {e}"))?;
+        info!("Metrics enabled -- Prometheus exposition at /metrics");
+        Some(handle)
+    } else {
+        None
+    };
+
     // Build CORS handler
     let cors = Cors::new()
         .allow_origin(salvo::cors::AllowOrigin::mirror_request())
@@ -141,9 +156,11 @@ async fn main() -> Result<()> {
         .into_handler();
 
     // Build API router
-    let router = create_router(state.clone());
+    let router = create_router(state.clone(), metrics_handle);
 
-    // Generate OpenAPI documentation
+    // Generate OpenAPI documentation. `/metrics` (when mounted) is a plain
+    // Handler, not an `#[endpoint]`, so `merge_router` never picks it up and
+    // the served spec matches the exported one.
     let doc = OpenApi::new("Beam Server API", "1.0.0").merge_router(&router);
     let router = router
         .push(doc.into_router("/api-doc/openapi.json"))
