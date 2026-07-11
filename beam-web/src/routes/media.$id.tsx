@@ -9,12 +9,15 @@ import { env } from "@/env";
 import { useAuth } from "@/hooks/auth";
 import { usePlaybackBeacon } from "@/hooks/usePlaybackBeacon";
 import { apiClient } from "@/lib/apiClient";
+import { nextPlayableEpisode } from "@/lib/upNext";
 import { formatDuration } from "@/lib/utils";
 
 type MediaMetadata =
 	components["schemas"]["beam_server.models.media.MediaMetadata"];
 type ShowMetadata =
 	components["schemas"]["beam_server.models.media.show.ShowMetadata"];
+type EpisodeMetadata =
+	components["schemas"]["beam_server.models.media.show.EpisodeMetadata"];
 type MediaSource =
 	components["schemas"]["beam_server.models.media.source.MediaSource"];
 
@@ -97,20 +100,28 @@ function RouteComponent() {
 	const [selectedFileId, setSelectedFileId] = useState<string | null>(
 		fileIdParam ?? movie?.file_id ?? null,
 	);
+	const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(
+		null,
+	);
 	const [playbackError, setPlaybackError] = useState<string | null>(null);
 	const [startOver, setStartOver] = useState(false);
+	// Set only by up-next auto-advance, so the next episode starts playing
+	// without a click; any manual selection clears it again.
+	const [autoPlayNext, setAutoPlayNext] = useState(false);
 
-	// Movies can have multiple playable editions/qualities (ADR-0004: never
-	// live-transcode -- pick among pre-existing files instead); episodes
-	// don't support this yet, so they always resolve to a single direct file.
+	// Any playable id -- the movie itself, or the selected episode (episode
+	// ids are playable ids on `/v1/media/{id}/sources`, same as movie ids).
+	// Media can have multiple playable editions/qualities (ADR-0004: never
+	// live-transcode -- pick among pre-existing files instead).
+	const playableId = movie ? mediaId : selectedEpisodeId;
 	const { data: sources } = useQuery({
-		queryKey: ["media", mediaId, "sources"],
+		queryKey: ["media", playableId, "sources"],
 		queryFn: async (): Promise<MediaSource[]> => {
-			if (!mediaId) return [];
+			if (!playableId) return [];
 			const { data, error, response } = await apiClient.GET(
 				"/v1/media/{id}/sources",
 				{
-					params: { path: { id: mediaId } },
+					params: { path: { id: playableId } },
 					credentials: "include",
 				},
 			);
@@ -118,16 +129,16 @@ function RouteComponent() {
 			if (error) throw new Error("Failed to load media sources");
 			return data ?? [];
 		},
-		enabled: !!movie,
+		enabled: !!playableId,
 	});
 
 	useEffect(() => {
-		if (!movie || !sources || sources.length === 0) return;
+		if (!sources || sources.length === 0) return;
 		if (selectedFileId && sources.some((s) => s.file_id === selectedFileId)) {
 			return;
 		}
 		setSelectedFileId(sources[0].file_id);
-	}, [movie, sources, selectedFileId]);
+	}, [sources, selectedFileId]);
 
 	const selectedSource =
 		sources?.find((s) => s.file_id === selectedFileId) ?? null;
@@ -185,11 +196,42 @@ function RouteComponent() {
 			? `${env.C_STREAM_SERVER_URL}/v1/files/${selectedFileId}/download`
 			: null;
 
+	// The episode to auto-advance to when the current one ends (null for
+	// movies, for the last playable episode, and before an episode is picked).
+	const upNextEpisode = show
+		? nextPlayableEpisode(show.seasons, selectedEpisodeId)
+		: null;
+
 	function selectFile(fileId: string) {
+		setAutoPlayNext(false);
 		setPlaybackError(null);
 		setStartOver(false);
 		resetBeacon();
 		setSelectedFileId(fileId);
+	}
+
+	function selectEpisode(episode: EpisodeMetadata) {
+		if (!episode.file_id) return;
+		setAutoPlayNext(false);
+		setPlaybackError(null);
+		setStartOver(false);
+		resetBeacon();
+		setSelectedEpisodeId(episode.id);
+		setSelectedFileId(episode.file_id);
+	}
+
+	function handleEnded(duration: number) {
+		report(duration, duration, true);
+		// Up-next auto-advance: keep playing the next playable episode
+		// instead of stopping at the end of the current one.
+		if (upNextEpisode?.file_id) {
+			setAutoPlayNext(true);
+			setPlaybackError(null);
+			setStartOver(false);
+			resetBeacon();
+			setSelectedEpisodeId(upNextEpisode.id);
+			setSelectedFileId(upNextEpisode.file_id);
+		}
 	}
 
 	return (
@@ -259,10 +301,11 @@ function RouteComponent() {
 						type={selectedSource?.mime_type ?? undefined}
 						poster={posterUrl}
 						startTime={resumePosition}
+						autoPlay={autoPlayNext}
 						onProgress={(currentTime, duration) =>
 							report(currentTime, duration)
 						}
-						onEnded={(duration) => report(duration, duration, true)}
+						onEnded={handleEnded}
 						onError={() =>
 							setPlaybackError(
 								"Failed to load video. Your session may have expired -- try refreshing the page.",
@@ -272,7 +315,7 @@ function RouteComponent() {
 					/>
 
 					<div className="mb-6 flex flex-wrap items-center gap-3">
-						{movie && sources && sources.length > 1 && (
+						{sources && sources.length > 1 && (
 							<select
 								value={selectedFileId ?? ""}
 								onChange={(e) => selectFile(e.target.value)}
@@ -284,6 +327,11 @@ function RouteComponent() {
 									</option>
 								))}
 							</select>
+						)}
+						{upNextEpisode && (
+							<span className="text-sm text-gray-500">
+								Up next: {upNextEpisode.episode_number}. {upNextEpisode.title}
+							</span>
 						)}
 						{downloadUrl && (
 							<a
@@ -305,22 +353,29 @@ function RouteComponent() {
 			{show && (
 				<EpisodeList
 					show={show}
+					activeEpisodeId={selectedEpisodeId}
 					activeFileId={selectedFileId}
-					onSelect={selectFile}
+					onSelect={selectEpisode}
 				/>
 			)}
 		</div>
 	);
 }
 
-function EpisodeList({
+/** Exported for component tests (see `media.$id.test.tsx`); rendered only by
+ * this route. */
+export function EpisodeList({
 	show,
+	activeEpisodeId,
 	activeFileId,
 	onSelect,
 }: {
 	show: ShowMetadata;
+	activeEpisodeId: string | null;
+	/** Fallback highlight for `?fileId=` deep links, where the episode the
+	 * file belongs to was never explicitly selected. */
 	activeFileId: string | null;
-	onSelect: (fileId: string) => void;
+	onSelect: (episode: EpisodeMetadata) => void;
 }) {
 	return (
 		<div className="space-y-6">
@@ -332,21 +387,25 @@ function EpisodeList({
 					<ul className="divide-y divide-gray-700">
 						{season.episodes.map((episode) => {
 							const isActive =
-								!!episode.file_id && episode.file_id === activeFileId;
+								episode.id === activeEpisodeId ||
+								(!!episode.file_id && episode.file_id === activeFileId);
 							return (
 								<li key={episode.id}>
 									<button
 										type="button"
 										disabled={!episode.file_id}
-										onClick={() => {
-											if (episode.file_id) onSelect(episode.file_id);
-										}}
+										onClick={() => onSelect(episode)}
 										className={`w-full px-2 py-3 text-left hover:bg-gray-800 disabled:opacity-50 ${isActive ? "bg-gray-800" : ""}`}
 									>
 										<span className="mr-2 text-gray-400">
 											{episode.episode_number}.
 										</span>
 										<span>{episode.title}</span>
+										{!episode.file_id && (
+											<span className="ml-2 text-xs text-gray-500">
+												No file
+											</span>
+										)}
 										{episode.description && (
 											<p className="mt-1 text-sm text-gray-500">
 												{episode.description}

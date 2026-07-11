@@ -22,6 +22,9 @@ export interface VideoPlayerProps {
 	/** Playback position (seconds) to seek to once the player can play --
 	 * used to resume a previously in-progress file. */
 	startTime?: number;
+	/** Start playback as soon as the source can play -- used by up-next
+	 * auto-advance so the next episode keeps playing without a click. */
+	autoPlay?: boolean;
 	/** Fired on every `timeupdate` with the player's current position and
 	 * (once known) total duration -- used to drive progress beacons. */
 	onProgress?: (currentTime: number, duration: number) => void;
@@ -42,6 +45,7 @@ export function VideoPlayer({
 	type = "video/mp4",
 	poster,
 	startTime = 0,
+	autoPlay = false,
 	onProgress,
 	onEnded,
 	onError,
@@ -59,6 +63,7 @@ export function VideoPlayer({
 			// Vidstack's known mime-type literals -- it's only a provider-
 			// selection hint, so a mismatch just falls back gracefully.
 			src={{ src, type } as PlayerSrc}
+			autoPlay={autoPlay}
 			playsInline
 			className={className}
 			onCanPlay={() => {
