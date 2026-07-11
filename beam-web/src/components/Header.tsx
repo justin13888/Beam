@@ -139,6 +139,7 @@ export default function Header() {
 					{isAuthenticated && user?.is_admin && (
 						<Link
 							to="/admin"
+							search={{ tab: "logs" }}
 							onClick={() => setIsOpen(false)}
 							className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-800 transition-colors mb-2"
 							activeProps={{
