@@ -1,6 +1,7 @@
 use sea_orm::DatabaseConnection;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Instant;
 
 use beam_auth::server::OidcRuntimeConfig;
 use beam_auth::utils::{
@@ -20,6 +21,7 @@ use crate::{
     services::{
         admin_log::{AdminLogService, LocalAdminLogService},
         hash::{HashConfig, HashService, LocalHashService},
+        health::DependencyProbe,
         library::{LibraryService, LocalLibraryService, OsPathValidator},
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
@@ -36,13 +38,33 @@ pub struct AppState {
 pub struct AppStateInner {
     pub config: ServerConfig,
     pub services: AppServices,
+    /// Deep-health dependency probe backing `GET /v1/health`.
+    pub probe: Arc<dyn DependencyProbe>,
+    /// Monotonic process-start instant, captured when the state is built.
+    /// Surfaced as `uptime_secs` by the health endpoint and reused by a later
+    /// admin status endpoint.
+    pub start_instant: Instant,
 }
 
 impl AppState {
-    pub fn new(config: ServerConfig, services: AppServices) -> Self {
+    pub fn new(
+        config: ServerConfig,
+        services: AppServices,
+        probe: Arc<dyn DependencyProbe>,
+    ) -> Self {
         Self {
-            inner: Arc::new(AppStateInner { config, services }),
+            inner: Arc::new(AppStateInner {
+                config,
+                services,
+                probe,
+                start_instant: Instant::now(),
+            }),
         }
+    }
+
+    /// Whole seconds elapsed since the process built its state.
+    pub fn uptime_secs(&self) -> u64 {
+        self.inner.start_instant.elapsed().as_secs()
     }
 }
 

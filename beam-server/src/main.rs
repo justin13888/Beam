@@ -85,6 +85,12 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Deep-health probe over the same pool, built before the connection is
+    // moved into the services (sea-orm's `DatabaseConnection` is a cheap
+    // `Arc`-backed clone).
+    let probe: std::sync::Arc<dyn beam_server::services::health::DependencyProbe> =
+        std::sync::Arc::new(beam_server::services::health::DbProbe::new(db.clone()));
+
     // Initialize App Services and State
     let (services, index_service, enrichment_service) =
         beam_server::state::AppServices::new(&config, db)
@@ -110,7 +116,7 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(config.enrich_interval_secs),
     );
 
-    let state = beam_server::state::AppState::new(config.clone(), services);
+    let state = beam_server::state::AppState::new(config.clone(), services, probe);
 
     // Build CORS handler
     let cors = Cors::new()

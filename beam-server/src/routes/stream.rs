@@ -784,7 +784,11 @@ mod tests {
                 rate_limit_trust_forwarded_for: false,
             };
 
-            let state = AppState::new(config, services);
+            let state = AppState::new(
+                config,
+                services,
+                Arc::new(crate::services::health::InMemoryDependencyProbe::healthy()),
+            );
             let router = Router::new()
                 .hoop(salvo::affix_state::inject(state))
                 .push(Router::with_path("files/{file_id}/stream").get(super::super::stream_file));

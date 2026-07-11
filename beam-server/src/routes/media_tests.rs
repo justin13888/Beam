@@ -244,7 +244,11 @@ mod tests {
             rate_limit_trust_forwarded_for: false,
         };
 
-        let state = AppState::new(config, services);
+        let state = AppState::new(
+            config,
+            services,
+            Arc::new(crate::services::health::InMemoryDependencyProbe::healthy()),
+        );
         TestFixture {
             state,
             session_store,
