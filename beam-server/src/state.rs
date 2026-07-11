@@ -85,6 +85,9 @@ pub struct AppServices {
     pub admin_log: Arc<dyn AdminLogService>,
     pub user_repo: Arc<dyn UserRepository>,
     pub playback: Arc<dyn PlaybackService>,
+    /// Distinct genre catalog, backing `GET /v1/genres`. Shared with the
+    /// enrichment service, which populates it as titles are enriched.
+    pub genre_repo: Arc<dyn beam_domain::repositories::GenreRepository>,
     /// Backs the `beam_session` cookie -- the only credential the server
     /// issues (see ADR-0003/ADR-0005).
     pub session_store: Arc<dyn SessionStore>,
@@ -238,7 +241,7 @@ impl AppServices {
                 enrichment_repo.clone(),
                 movie_repo.clone(),
                 show_repo.clone(),
-                genre_repo,
+                genre_repo.clone(),
                 enrichment_provider,
                 admin_log_service.clone(),
                 Arc::new(RealClock),
@@ -275,6 +278,7 @@ impl AppServices {
             admin_log: admin_log_service,
             user_repo,
             playback: playback_service,
+            genre_repo,
             session_store,
             oidc_client,
             pending_auth_store,

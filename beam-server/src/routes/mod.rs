@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod api_error;
+pub mod genres;
 pub mod health;
 pub mod media;
 pub mod metrics_mw;
@@ -14,6 +15,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use salvo::prelude::*;
 
 pub use admin::*;
+pub use genres::*;
 pub use health::*;
 pub use media::*;
 pub use playback::*;
@@ -71,6 +73,7 @@ fn rest_routes(rate_limiters: Option<RateLimiters>) -> Router {
         .push(media_browse)
         .push(Router::with_path("media/{id}").get(get_media_detail))
         .push(Router::with_path("media/{id}/sources").get(get_media_sources))
+        .push(Router::with_path("genres").get(list_genres))
         .push(Router::with_path("libraries").get(list_libraries))
         .push(Router::with_path("libraries/{id}").get(get_library))
         .push(Router::with_path("libraries/{id}/files").get(get_library_files))

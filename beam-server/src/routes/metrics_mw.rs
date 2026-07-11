@@ -48,6 +48,7 @@ pub fn classify_route(_method: &Method, path: &str) -> &'static str {
         (Some("media"), None, None) => "media_browse",
         (Some("media"), Some(_), None) => "media_detail",
         (Some("media"), Some(_), Some("sources")) => "media_sources",
+        (Some("genres"), None, None) => "genres",
         (Some("files"), Some(_), Some("stream")) => "stream",
         (Some("files"), Some(_), Some("download")) => "download",
         (Some("files"), Some(_), Some("progress")) => "progress",

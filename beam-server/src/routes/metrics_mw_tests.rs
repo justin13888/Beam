@@ -42,6 +42,7 @@ fn classify_route_covers_every_class_and_falls_back_to_other() {
             "/v1/media/22222222-2222-2222-2222-222222222222/sources",
             "media_sources",
         ),
+        ("/v1/genres", "genres"),
         ("/v1/files/abc/stream", "stream"),
         ("/v1/files/abc/download", "download"),
         ("/v1/files/abc/progress", "progress"),

@@ -1,9 +1,7 @@
-//! Subcutaneous tests for the dependency-aware `/v1/health` endpoint.
+//! Subcutaneous HTTP tests for the `/v1/genres` REST route.
 //!
-//! The endpoint only touches [`AppState::probe`] and [`AppState::uptime_secs`],
-//! so these build a full [`AppState`] with cheap stub services and drive the
-//! handler through `salvo::test::TestClient`. No Postgres, no Docker.
-
+//! Spins up the full Salvo service with in-memory implementations for all
+//! external dependencies -- no Redis, no PostgreSQL required.
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -11,24 +9,26 @@ mod tests {
 
     use beam_auth::server::OidcRuntimeConfig;
     use beam_auth::utils::{
-        oidc::NotConfiguredOidcClient, pending_auth_store::in_memory::InMemoryPendingAuthStore,
-        repository::in_memory::InMemoryUserRepository,
-        session_store::in_memory::InMemorySessionStore,
+        models::CreateUser,
+        oidc::NotConfiguredOidcClient,
+        pending_auth_store::in_memory::InMemoryPendingAuthStore,
+        repository::{UserRepository, in_memory::InMemoryUserRepository},
+        session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
     };
+    use beam_domain::repositories::GenreRepository;
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+    use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
     use salvo::prelude::*;
     use salvo::test::{ResponseExt, TestClient};
-    use serde_json::Value;
 
-    use crate::routes::health_check;
+    use crate::routes::genres::{GenreListResponse, list_genres};
     use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
     use crate::services::hash::HashService;
-    use crate::services::health::{DependencyProbe, InMemoryDependencyProbe};
-    use crate::services::library::LibraryError;
+    use crate::services::library::{LibraryError, LibraryService};
     use crate::services::metadata::{
         MediaConnection, MediaFilter, MediaSearchFilters, MediaSortField, MetadataError,
         MetadataService, PageInfo, SortOrder,
@@ -43,10 +43,10 @@ mod tests {
     #[async_trait::async_trait]
     impl HashService for StubHashService {
         fn hash_sync(&self, _path: &std::path::Path) -> std::io::Result<u64> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
         async fn hash_async(&self, _path: PathBuf) -> std::io::Result<u64> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
     }
 
@@ -54,43 +54,43 @@ mod tests {
     struct StubLibraryService;
 
     #[async_trait::async_trait]
-    impl crate::services::library::LibraryService for StubLibraryService {
+    impl LibraryService for StubLibraryService {
         async fn get_libraries(
             &self,
             _user_id: String,
         ) -> Result<Vec<crate::models::Library>, LibraryError> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
         async fn get_library_by_id(
             &self,
             _library_id: String,
         ) -> Result<Option<crate::models::Library>, LibraryError> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
         async fn get_library_files(
             &self,
             _library_id: String,
         ) -> Result<Vec<crate::models::LibraryFile>, LibraryError> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
         async fn get_file_by_id(
             &self,
             _file_id: String,
         ) -> Result<Option<crate::models::LibraryFile>, LibraryError> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
         async fn create_library(
             &self,
             _name: String,
             _path: String,
         ) -> Result<crate::models::Library, LibraryError> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
         async fn scan_library(&self, _library_id: String) -> Result<u32, LibraryError> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
         async fn delete_library(&self, _library_id: String) -> Result<bool, LibraryError> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
     }
 
@@ -132,26 +132,32 @@ mod tests {
             &self,
             _media_id: &str,
         ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
-            unimplemented!("not called in health tests")
+            unimplemented!("not called in genres route tests")
         }
     }
 
-    fn make_state(probe: Arc<dyn DependencyProbe>) -> AppState {
+    struct TestFixture {
+        state: AppState,
+        session_store: Arc<InMemorySessionStore>,
+        user_repo: Arc<InMemoryUserRepository>,
+        genre_repo: Arc<InMemoryGenreRepository>,
+    }
+
+    fn make_test_state() -> TestFixture {
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let user_repo = Arc::new(InMemoryUserRepository::default());
+        let genre_repo = Arc::new(InMemoryGenreRepository::default());
+
         let notification = Arc::new(InMemoryNotificationService::new());
         let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
             InMemoryAdminLogRepository::default(),
         )));
-
-        let file_repo = Arc::new(InMemoryFileRepository::default());
-        let movie_repo = Arc::new(InMemoryMovieRepository::default());
-        let show_repo = Arc::new(InMemoryShowRepository::default());
-        let playback: Arc<dyn crate::services::playback::PlaybackService> =
-            Arc::new(DbPlaybackService::new(
-                Arc::new(InMemoryPlaybackProgressRepository::default()),
-                file_repo,
-                movie_repo,
-                show_repo,
-            ));
+        let playback = Arc::new(DbPlaybackService::new(
+            Arc::new(InMemoryPlaybackProgressRepository::default()),
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+        ));
 
         let services = AppServices {
             hash: Arc::new(StubHashService),
@@ -159,13 +165,11 @@ mod tests {
             metadata: Arc::new(StubMetadataService),
             notification,
             admin_log,
-            user_repo: Arc::new(InMemoryUserRepository::default()),
+            user_repo: user_repo.clone(),
             playback,
-            genre_repo: Arc::new(
-                beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
-            ),
-            session_store: Arc::new(InMemorySessionStore::default()),
-            oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in health tests")),
+            genre_repo: genre_repo.clone(),
+            session_store: session_store.clone(),
+            oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
             oidc_config: OidcRuntimeConfig {
                 web_url: "http://localhost:5173".to_string(),
@@ -213,47 +217,115 @@ mod tests {
             rate_limit_trust_forwarded_for: false,
         };
 
-        AppState::new(config, services, probe)
+        let state = AppState::new(
+            config,
+            services,
+            Arc::new(crate::services::health::InMemoryDependencyProbe::healthy()),
+        );
+        TestFixture {
+            state,
+            session_store,
+            user_repo,
+            genre_repo,
+        }
     }
 
-    fn service(probe: Arc<dyn DependencyProbe>) -> Service {
+    /// Seeds a user + session directly and returns a `Cookie` header value.
+    async fn seed_session_cookie(fixture: &TestFixture) -> String {
+        let user = fixture
+            .user_repo
+            .create(CreateUser {
+                oidc_issuer: "https://test.example".to_string(),
+                oidc_subject: "subj-1".to_string(),
+                email: Some("test@example.com".to_string()),
+                display_name: "Test User".to_string(),
+                avatar_url: None,
+                is_admin: false,
+            })
+            .await
+            .expect("seed user should succeed");
+
+        let token = fixture
+            .session_store
+            .create(
+                &SessionData {
+                    user_id: user.id.to_string(),
+                    device_hash: "test-device".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    last_active: chrono::Utc::now().timestamp(),
+                },
+                86400,
+                86400,
+            )
+            .await
+            .expect("seed session should succeed");
+
+        format!("beam_session={token}")
+    }
+
+    fn build_service(fixture: &TestFixture) -> Service {
         let router = Router::new()
-            .hoop(affix_state::inject(make_state(probe)))
-            .push(Router::with_path("v1").push(Router::with_path("health").get(health_check)));
+            .hoop(affix_state::inject(fixture.state.clone()))
+            .push(Router::with_path("v1").push(Router::with_path("genres").get(list_genres)));
         Service::new(router)
     }
 
     #[tokio::test]
-    async fn healthy_database_yields_200_with_ok_check_and_uptime() {
-        let service = service(Arc::new(InMemoryDependencyProbe::healthy()));
+    async fn test_list_genres_requires_auth() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
 
-        let mut res = TestClient::get("http://localhost/v1/health")
+        let res = TestClient::get("http://localhost/v1/genres")
             .send(&service)
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::OK));
-
-        let body: Value = res.take_json().await.unwrap();
-        assert_eq!(body["status"], "healthy");
-        assert_eq!(body["checks"]["database"], "ok");
-        assert!(body["uptime_secs"].is_u64(), "uptime_secs must be present");
-        assert!(body["version"].is_string());
-        assert!(body["timestamp"].is_string());
+        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
     }
 
     #[tokio::test]
-    async fn failing_database_yields_503_degraded_with_error_surfaced() {
-        let service = service(Arc::new(InMemoryDependencyProbe::failing(
-            "connection refused",
-        )));
+    async fn test_list_genres_returns_sorted_distinct_names() {
+        let fixture = make_test_state();
+        // Seed genres out of order and with a duplicate across two titles; the
+        // repo dedupes by slug and the endpoint sorts case-insensitively.
+        fixture
+            .genre_repo
+            .set_movie_genres(
+                uuid::Uuid::new_v4(),
+                &[
+                    "Science Fiction".to_string(),
+                    "Action".to_string(),
+                    "Drama".to_string(),
+                ],
+            )
+            .await
+            .unwrap();
+        fixture
+            .genre_repo
+            .set_show_genres(
+                uuid::Uuid::new_v4(),
+                &["Comedy".to_string(), "action".to_string()],
+            )
+            .await
+            .unwrap();
 
-        let mut res = TestClient::get("http://localhost/v1/health")
+        let service = build_service(&fixture);
+        let cookie = seed_session_cookie(&fixture).await;
+
+        let mut res = TestClient::get("http://localhost/v1/genres")
+            .add_header("Cookie", cookie, true)
             .send(&service)
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::SERVICE_UNAVAILABLE));
 
-        let body: Value = res.take_json().await.unwrap();
-        assert_eq!(body["status"], "degraded");
-        assert_eq!(body["checks"]["database"], "error: connection refused");
-        assert!(body["uptime_secs"].is_u64());
+        assert_eq!(res.status_code, Some(StatusCode::OK));
+        let body: GenreListResponse = res.take_json().await.unwrap();
+        assert_eq!(
+            body.genres,
+            vec![
+                "Action".to_string(),
+                "Comedy".to_string(),
+                "Drama".to_string(),
+                "Science Fiction".to_string(),
+            ]
+        );
     }
 }
