@@ -1,5 +1,3 @@
-pub mod codec;
-
 // `beam-domain` stays framework/FFI-agnostic and only exposes plain,
 // ffmpeg-free utilities (file, hash). FFmpeg-dependent probing types
 // (metadata, media, color, format) now live in beam-index's `probe` module,
