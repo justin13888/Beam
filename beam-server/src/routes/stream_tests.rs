@@ -247,6 +247,10 @@ mod tests {
             cookie_secure: Some(false),
             session_idle_days: 14,
             session_max_days: 60,
+            rate_limit_enabled: true,
+            rate_limit_auth_per_minute: 10,
+            rate_limit_search_per_minute: 60,
+            rate_limit_trust_forwarded_for: false,
         };
 
         let state = AppState::new(config, services);

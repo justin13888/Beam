@@ -115,6 +115,10 @@ mod tests {
             cookie_secure: None,
             session_idle_days: 14,
             session_max_days: 60,
+            rate_limit_enabled: true,
+            rate_limit_auth_per_minute: 10,
+            rate_limit_search_per_minute: 60,
+            rate_limit_trust_forwarded_for: false,
         };
         let options = connect_options(&config);
         assert_eq!(options.get_max_connections(), Some(42));
