@@ -36,9 +36,10 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     /// Refresh metadata for by media filter
     async fn refresh_metadata(&self, filter: MediaFilter) -> Result<(), MetadataError>;
 
-    /// List the playable/downloadable source files for a media item. Only
-    /// movies are supported for now -- shows don't have files at the show
-    /// level (episodes do), and there's no per-episode lookup by id yet.
+    /// List the playable/downloadable source files for a playable media id.
+    /// Movie ids and episode ids are both accepted (a show id is not -- it has
+    /// no files of its own; callers use its episode ids instead). An episode
+    /// with no files yet resolves to an empty list rather than an error.
     async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError>;
 }
 
@@ -648,6 +649,25 @@ impl MetadataService for DbMetadataService {
                 for file in files {
                     sources.push(self.build_source(file).await?);
                 }
+            }
+            return Ok(sources);
+        }
+
+        // Episodes are playable ids too: an episode id resolves to its own
+        // files, giving series content the same multi-rendition selection as
+        // movies. An episode with no files yet is a well-formed empty list
+        // (the client treats an empty `sources` array as "unplayable"), which
+        // is distinct from a genuinely unknown id (`MediaNotFound` below).
+        if matches!(self.show_repo.find_episode_by_id(id).await, Ok(Some(_))) {
+            let files = self
+                .file_repo
+                .find_by_episode_id(id)
+                .await
+                .map_err(|e| MetadataError::InternalError(e.to_string()))?;
+
+            let mut sources = Vec::new();
+            for file in files {
+                sources.push(self.build_source(file).await?);
             }
             return Ok(sources);
         }

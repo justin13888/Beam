@@ -667,6 +667,116 @@ mod tests {
         assert_eq!(sources[0].size_bytes, 1024);
     }
 
+    /// Seeds a show/season/episode and returns the episode id, so the sources
+    /// tests can drive the episode branch of `get_media_sources`.
+    fn seed_episode(show_repo: &InMemoryShowRepository) -> Uuid {
+        let show = Show {
+            id: Uuid::new_v4(),
+            title: "Test Show".to_string(),
+            title_localized: None,
+            description: None,
+            year: None,
+            poster_url: None,
+            backdrop_url: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            anilist_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let show_id = show.id;
+        show_repo.shows.lock().unwrap().insert(show.id, show);
+
+        let season = Season {
+            id: Uuid::new_v4(),
+            show_id,
+            season_number: 1,
+            poster_url: None,
+            first_aired: None,
+            last_aired: None,
+        };
+        let season_id = season.id;
+        show_repo.seasons.lock().unwrap().insert(season.id, season);
+
+        let ep = Episode {
+            id: Uuid::new_v4(),
+            season_id,
+            episode_number: 1,
+            title: "Pilot".to_string(),
+            description: None,
+            air_date: None,
+            runtime: None,
+            thumbnail_url: None,
+            created_at: chrono::Utc::now(),
+        };
+        let episode_id = ep.id;
+        show_repo.episodes.lock().unwrap().insert(ep.id, ep);
+        episode_id
+    }
+
+    #[tokio::test]
+    async fn test_get_media_sources_returns_files_for_episode() {
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+
+        let episode_id = seed_episode(&show_repo);
+
+        // Two renditions for the same episode.
+        let library_id = Uuid::new_v4();
+        let file_a = make_media_file(library_id, MediaFileContent::Episode { episode_id });
+        let file_b = make_media_file(library_id, MediaFileContent::Episode { episode_id });
+        let file_a_id = file_a.id;
+        let file_b_id = file_b.id;
+        file_repo.files.lock().unwrap().insert(file_a.id, file_a);
+        file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+
+        let service = DbMetadataService::new(
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let mut sources = service
+            .get_media_sources(&episode_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(sources.len(), 2);
+
+        // Order is not guaranteed by the in-memory HashMap; sort by file id so
+        // the mapping assertions are deterministic.
+        sources.sort_by(|a, b| a.file_id.cmp(&b.file_id));
+        let mut expected = [file_a_id, file_b_id];
+        expected.sort();
+
+        for (source, id) in sources.iter().zip(expected.iter()) {
+            assert_eq!(source.file_id, id.to_string());
+            assert_eq!(source.stream_url, format!("/v1/files/{id}/stream"));
+            assert_eq!(source.download_url, format!("/v1/files/{id}/download"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_media_sources_episode_without_files_returns_empty() {
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let episode_id = seed_episode(&show_repo);
+
+        let service = DbMetadataService::new(
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        // A known episode with no files is playable-but-empty, not a 404.
+        let sources = service
+            .get_media_sources(&episode_id.to_string())
+            .await
+            .unwrap();
+        assert!(sources.is_empty());
+    }
+
     #[test]
     fn test_stream_metadata_builder_reports_probed_codecs() {
         use crate::models::{OutputAudioCodec, OutputVideoCodec};
