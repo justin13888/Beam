@@ -202,6 +202,7 @@ mod tests {
             enrich_min_confidence: 0.7,
             tmdb_api_token: None,
             anilist_enabled: false,
+            metadata_language: None,
             oidc_issuer: None,
             oidc_client_id: None,
             oidc_client_secret: None,

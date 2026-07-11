@@ -114,6 +114,15 @@ pub struct ServerConfig {
     #[config(env = "BEAM_ANILIST_ENABLED", default = true)]
     pub anilist_enabled: bool,
 
+    /// Preferred language for provider metadata, as a BCP-47 tag like `en`
+    /// or `en-US` (lowercase language, uppercase region). Applied to the
+    /// TMDB client only -- AniList has no language concept. Unset -> the
+    /// provider's own default. An empty or whitespace-only value is
+    /// normalized to unset (confique parses a set-but-empty env var as
+    /// `Some("")`).
+    #[config(env = "BEAM_METADATA_LANGUAGE")]
+    pub metadata_language: Option<String>,
+
     /// OIDC issuer URL (e.g. Dex in dev: `http://localhost:5556/dex`). OIDC
     /// login is disabled -- returning a clear error rather than panicking --
     /// unless this, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are all set
@@ -192,6 +201,7 @@ impl fmt::Debug for ServerConfig {
             enrich_min_confidence,
             tmdb_api_token,
             anilist_enabled,
+            metadata_language,
             oidc_issuer,
             oidc_client_id,
             oidc_client_secret,
@@ -223,6 +233,7 @@ impl fmt::Debug for ServerConfig {
             .field("enrich_min_confidence", enrich_min_confidence)
             .field("tmdb_api_token", &redact_option(tmdb_api_token))
             .field("anilist_enabled", anilist_enabled)
+            .field("metadata_language", metadata_language)
             .field("oidc_issuer", oidc_issuer)
             .field("oidc_client_id", oidc_client_id)
             .field("oidc_client_secret", &redact_option(oidc_client_secret))
@@ -337,16 +348,33 @@ impl ServerConfig {
     /// Load configuration from environment variables and validate paths
     pub fn load_and_validate() -> Result<Self, ConfigError> {
         // 1. Load the configuration purely from environment variables
-        let config = Self::builder().env().load()?;
+        let mut config = Self::builder().env().load()?;
 
-        // 2. Validate scalar values (ranges, non-empty) before touching the
+        // 2. Normalize before validating: a set-but-empty optional env var
+        // arrives as `Some("")` (confique parses presence, not content) and
+        // must mean the same thing as unset.
+        config.normalize_values();
+
+        // 3. Validate scalar values (ranges, non-empty) before touching the
         // filesystem: a bad number should fail fast without side effects.
         config.validate_values()?;
 
-        // 3. Validate paths and ensure writeable directories exist
+        // 4. Validate paths and ensure writeable directories exist
         config.validate_paths()?;
 
         Ok(config)
+    }
+
+    /// Canonicalizes values whose raw env form is ambiguous. Currently:
+    /// `metadata_language` is trimmed, and an empty result becomes `None`
+    /// (an operator commenting a var out and setting it to `""` must be
+    /// equivalent).
+    fn normalize_values(&mut self) {
+        self.metadata_language = self
+            .metadata_language
+            .take()
+            .map(|lang| lang.trim().to_string())
+            .filter(|lang| !lang.is_empty());
     }
 
     /// Validates scalar configuration values that confique's type-level
@@ -426,6 +454,7 @@ mod tests {
             enrich_min_confidence: 0.7,
             tmdb_api_token: Some("tmdb-secret-token".to_string()),
             anilist_enabled: true,
+            metadata_language: None,
             oidc_issuer: Some("https://idp.example.com".to_string()),
             oidc_client_id: Some("beam-client".to_string()),
             oidc_client_secret: Some("oidc-secret-value".to_string()),
@@ -606,6 +635,34 @@ mod tests {
             config.validate_values().is_ok(),
             "1.0 is a valid upper bound"
         );
+    }
+
+    #[test]
+    fn metadata_language_normalization_maps_empty_and_whitespace_to_none() {
+        // (raw value as loaded, expected after normalization)
+        let cases: [(Option<&str>, Option<&str>); 5] = [
+            // Set-but-empty env var: confique yields Some("") -- must mean unset.
+            (Some(""), None),
+            (Some("   "), None),
+            // Surrounding whitespace is trimmed off a real value.
+            (Some("  en-US  "), Some("en-US")),
+            // A clean value survives untouched.
+            (Some("ja"), Some("ja")),
+            (None, None),
+        ];
+
+        for (raw, expected) in cases {
+            let mut config = ServerConfig {
+                metadata_language: raw.map(str::to_string),
+                ..config_with_secrets()
+            };
+            config.normalize_values();
+            assert_eq!(
+                config.metadata_language.as_deref(),
+                expected,
+                "raw value {raw:?} normalized incorrectly"
+            );
+        }
     }
 
     #[test]

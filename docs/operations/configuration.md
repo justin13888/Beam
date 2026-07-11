@@ -35,6 +35,7 @@ optional variables unset/commented rather than blank.
 | `BEAM_ENRICH_MIN_CONFIDENCE` | `0.7` | Minimum overall match confidence, in `(0.0, 1.0]`, a candidate must reach before its metadata is applied. Higher is stricter (fewer false matches, more titles left un-enriched). |
 | `BEAM_TMDB_API_TOKEN` | unset | TMDB read-access token for `cameo` enrichment. Absent → TMDB-eligible titles are left un-enriched (never fails a scan). |
 | `BEAM_ANILIST_ENABLED` | `true` | Toggle AniList-sourced enrichment (needs no token). |
+| `BEAM_METADATA_LANGUAGE` | unset | Preferred metadata language as a BCP-47 tag, e.g. `en` or `en-US` (lowercase language, uppercase region). Affects TMDB only — AniList has no language concept. Unset or empty → the provider's default. An invalid tag **fails startup** with an error naming the bad tag (an explicitly-set knob is never silently ignored; leaving it unset keeps the graceful warn-and-disable behavior for other cameo build failures). |
 | `BEAM_OIDC_ISSUER` | unset | OIDC issuer URL. All three `BEAM_OIDC_*` values are required together; until then login is disabled with a clear error (not a crash). |
 | `BEAM_OIDC_CLIENT_ID` | unset | OIDC client id registered with the IdP. |
 | `BEAM_OIDC_CLIENT_SECRET` | unset | OIDC client secret. Secret — never logged (startup config logging redacts it). |
@@ -46,9 +47,6 @@ optional variables unset/commented rather than blank.
 | `BEAM_SESSION_IDLE_DAYS` | `14` | Session idle timeout (slides forward on activity, capped by the absolute lifetime). |
 | `BEAM_SESSION_MAX_DAYS` | `60` | Absolute session lifetime. |
 | `RUST_LOG` | (tracing default) | Standard `tracing` filter, e.g. `beam_server=info`. |
-
-A metadata-language knob (to request provider results in a preferred language) is still tracked in
-[#71](https://github.com/justin13888/beam/issues/71).
 
 ## beam-web (build-time)
 
