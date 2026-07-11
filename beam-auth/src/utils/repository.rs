@@ -23,8 +23,8 @@ pub trait UserRepository: Send + Sync + std::fmt::Debug {
     async fn create(&self, user: CreateUser) -> Result<User, DbErr>;
 
     /// Updates a user's admin flag. OIDC login recomputes this from the
-    /// admin-email allowlist on every login rather than trusting a stored
-    /// value indefinitely.
+    /// IdP-asserted admin claim on every login (granting and revoking) rather
+    /// than trusting a stored value indefinitely (see issue #85).
     async fn set_admin(&self, id: Uuid, is_admin: bool) -> Result<(), DbErr>;
 
     /// Refreshes the OIDC-sourced profile fields (`display_name`,

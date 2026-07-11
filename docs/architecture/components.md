@@ -91,7 +91,7 @@ Feature-gated so consumers pull only what they need: `utils` (stores, models, re
 `oidc` (real discovery/token exchange via `openidconnect` + `reqwest`), `server` (Salvo routes and
 session middleware, mounted by `beam-server`), `test-utils` (`FakeOidcClient` and fakes, no HTTP
 client). Layout mirrors the features: `src/utils/` (`oidc.rs`, `session_store.rs`,
-`pending_auth_store.rs`, `admin_allowlist.rs`, `models.rs`, `repository.rs`) and `src/server/`
+`pending_auth_store.rs`, `admin_claim.rs`, `models.rs`, `repository.rs`) and `src/server/`
 (`oidc_routes.rs`).
 
 **Testing:** route-level tests drive the full login/callback/logout flow against `FakeOidcClient`

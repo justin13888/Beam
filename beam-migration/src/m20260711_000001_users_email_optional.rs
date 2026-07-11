@@ -5,8 +5,9 @@ use sea_orm_migration::prelude::*;
 /// (`m20260210_000001_create_users`); after the OIDC cutover (ADR-0003) the
 /// entity and JIT-provisioning path treat email as optional and non-unique
 /// per `docs/architecture/data-model.md`: the same email may legitimately
-/// appear under more than one issuer, and it drives admin-allowlist matching
-/// only, never identity. An IdP that releases no `email` claim must not break
+/// appear under more than one issuer, and it is informational only, never
+/// identity (admin is derived from a configured ID-token claim, not email;
+/// see issue #85). An IdP that releases no `email` claim must not break
 /// JIT provisioning, but the leftover constraint would reject the `NULL`
 /// insert at the database. Drops the constraint auto-named `users_email_key`
 /// by sea-query's `.unique_key()`.

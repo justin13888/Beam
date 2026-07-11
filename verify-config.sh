@@ -96,7 +96,8 @@ check_secret "BEAM_OIDC_CLIENT_SECRET"
 check_var "BEAM_OIDC_SCOPES"
 check_var "BEAM_WEB_URL"
 check_var "BEAM_EXTRA_ALLOWED_ORIGINS"
-check_var "BEAM_ADMIN_EMAILS"
+check_var "BEAM_OIDC_ADMIN_CLAIM"
+check_var "BEAM_OIDC_ADMIN_VALUE"
 check_var "BEAM_COOKIE_SECURE"
 check_var "BEAM_SESSION_IDLE_DAYS"
 check_var "BEAM_SESSION_MAX_DAYS"
@@ -111,6 +112,14 @@ if [ "$OIDC_SET" -eq 0 ]; then
 elif [ "$OIDC_SET" -lt 3 ]; then
     echo "❌ OIDC is partially configured ($OIDC_SET of 3): issuer, client_id, and client_secret must all be set -- login will be disabled"
     ERRORS=$((ERRORS + 1))
+fi
+# Admin is derived solely from an IdP-asserted claim (issue #85). A value with
+# no claim to read it from is a startup error; no claim at all means no admins.
+if [ -n "$BEAM_OIDC_ADMIN_VALUE" ] && [ -z "$BEAM_OIDC_ADMIN_CLAIM" ]; then
+    echo "❌ BEAM_OIDC_ADMIN_VALUE is set but BEAM_OIDC_ADMIN_CLAIM is not -- the server refuses to start"
+    ERRORS=$((ERRORS + 1))
+elif [ -z "$BEAM_OIDC_ADMIN_CLAIM" ]; then
+    echo "⚠️  BEAM_OIDC_ADMIN_CLAIM is unset -- no user will be granted admin (existing admins are demoted at next login)"
 fi
 echo ""
 

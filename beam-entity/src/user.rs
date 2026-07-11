@@ -12,16 +12,18 @@ pub struct Model {
     /// OIDC `sub` claim.
     pub oidc_subject: String,
     /// OIDC `email` claim, if the IdP released one. Not unique: the same
-    /// email can legitimately appear under more than one issuer, and it
-    /// drives admin-allowlist matching only, never identity.
+    /// email can legitimately appear under more than one issuer. Informational
+    /// and for display only -- never identity, and no longer used for admin
+    /// (admin is derived from a configured claim; see issue #85).
     pub email: Option<String>,
     /// OIDC `name` claim (or `preferred_username` fallback), refreshed on
     /// every login.
     pub display_name: String,
     /// OIDC `picture` claim, refreshed on every login.
     pub avatar_url: Option<String>,
-    /// Recomputed from the admin-email allowlist on every login; never
-    /// trusted as durable state alone (see `docs/architecture/security.md`).
+    /// Recomputed from the IdP-asserted admin claim (`BEAM_OIDC_ADMIN_CLAIM`)
+    /// on every login -- granting and revoking; never trusted as durable state
+    /// alone (see `docs/architecture/security.md` and issue #85).
     pub is_admin: bool,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,

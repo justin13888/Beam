@@ -66,11 +66,18 @@ Two deliberate layers protect cookie-authenticated state changes:
 
 ## Admin gating
 
-`is_admin` is resolved from the `BEAM_ADMIN_EMAILS` allowlist (comma-separated, case-insensitive),
-recomputed and written to the `users` row at every login — never treated as durable state that can
-drift from the allowlist. An email the IdP has not marked verified is **never** granted admin,
-regardless of allowlist membership. All admin mutations (library management, re-enrichment, log
-viewing, the admin event stream) route through one shared admin-gating check.
+`is_admin` is derived **solely** from a claim the IdP asserts in the verified ID token — the IdP is
+the single, auditable authority (issue #85). An env-var email allowlist was deliberately removed:
+trusting the IdP alone keeps the admin attack surface minimal to audit, with no server-side
+side-channel grant to reconcile. `BEAM_OIDC_ADMIN_CLAIM` names the claim (e.g. `groups`) and
+`BEAM_OIDC_ADMIN_VALUE` the expected value (boolean `true` when unset; otherwise a string equality
+or array-contains match — see `../operations/configuration.md`).
+
+Admin is recomputed and written to the `users` row at **every** login, so it both grants and
+revokes: removing the claim at the IdP demotes the user at their next login, and with
+`BEAM_OIDC_ADMIN_CLAIM` unset nobody is admin at all. There is intentionally no manual admin toggle —
+a later admin UI displays the flag read-only. All admin mutations (library management, re-enrichment,
+log viewing, the admin event stream) route through one shared admin-gating check.
 
 ## Read-only media filesystem as a security boundary
 

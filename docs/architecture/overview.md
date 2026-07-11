@@ -94,8 +94,9 @@ or manually via its CLI. See `data-model.md`.
 
 **beam-auth** (library crate)
 Implements the OIDC Authorization Code + PKCE flow (via the `openidconnect` crate), JIT user
-provisioning keyed by `(issuer, subject)`, admin-role resolution via the `BEAM_ADMIN_EMAILS`
-allowlist, and the `SessionStore` trait with its Postgres-backed implementation. See
+provisioning keyed by `(issuer, subject)`, admin-role resolution from a configured ID-token claim
+(`BEAM_OIDC_ADMIN_CLAIM`, issue #85), and the `SessionStore` trait with its Postgres-backed
+implementation. See
 [ADR-0003](decisions/ADR-0003-oidc-bff-auth.md) and
 [ADR-0005](decisions/ADR-0005-sessions-in-postgres.md).
 

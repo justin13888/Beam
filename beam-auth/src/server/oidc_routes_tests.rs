@@ -4,7 +4,7 @@ mod tests {
 
     use salvo::prelude::*;
     use salvo::test::{ResponseExt, TestClient};
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use crate::server::oidc_routes::{OidcRuntimeConfig, oidc_routes};
     use crate::utils::oidc::fake::FakeOidcClient;
@@ -16,11 +16,14 @@ mod tests {
     use crate::utils::session_store::SessionStore;
     use crate::utils::session_store::in_memory::InMemorySessionStore;
 
+    /// Default runtime config for the harness: admin is bound to a `groups`
+    /// claim containing `beam-admin`, mirroring a typical Dex/Keycloak setup.
     fn test_config() -> OidcRuntimeConfig {
         OidcRuntimeConfig {
             web_url: "http://localhost:5173".to_string(),
             cookie_secure: false,
-            admin_emails_csv: "admin@beam.localhost".to_string(),
+            admin_claim: Some("groups".to_string()),
+            admin_value: Some("beam-admin".to_string()),
             session_idle_days: 14,
             session_max_days: 60,
         }
@@ -34,6 +37,17 @@ mod tests {
             email_verified: verified,
             name: Some("Test User".to_string()),
             picture: Some("https://dex.test/avatar.png".to_string()),
+            // No admin-granting claim by default.
+            claims: json!({}),
+        }
+    }
+
+    /// A `(issuer, subject)` = `(https://dex.test, subj-1)` identity whose
+    /// released claim set is fully caller-supplied, for admin-evaluation tests.
+    fn identity_with_claims(claims: Value) -> OidcIdentity {
+        OidcIdentity {
+            claims,
+            ..identity("user@example.com", true)
         }
     }
 
@@ -53,6 +67,7 @@ mod tests {
             email_verified: email.is_some(),
             name: name.map(str::to_string),
             picture: None,
+            claims: json!({}),
         }
     }
 
@@ -74,6 +89,16 @@ mod tests {
         oidc_client: FakeOidcClient,
         user_repo: Arc<InMemoryUserRepository>,
     ) -> Harness {
+        make_harness_full(oidc_client, user_repo, test_config())
+    }
+
+    /// As [`make_harness_with_repo`], but with a caller-supplied runtime config
+    /// -- for exercising different admin-claim configurations.
+    fn make_harness_full(
+        oidc_client: FakeOidcClient,
+        user_repo: Arc<InMemoryUserRepository>,
+        config: OidcRuntimeConfig,
+    ) -> Harness {
         let oidc_client = Arc::new(oidc_client);
         let oidc_dyn: Arc<dyn OidcClient> = oidc_client.clone();
         let pending_auth_store: Arc<dyn PendingAuthStore> =
@@ -87,7 +112,7 @@ mod tests {
             .hoop(affix_state::inject(pending_auth_store))
             .hoop(affix_state::inject(session_dyn))
             .hoop(affix_state::inject(user_repo_dyn))
-            .hoop(affix_state::inject(test_config()))
+            .hoop(affix_state::inject(config))
             .push(oidc_routes());
 
         Harness {
@@ -180,7 +205,7 @@ mod tests {
         assert_eq!(user.oidc_subject, "subj-1");
         assert!(
             !user.is_admin,
-            "newuser@example.com is not in the admin allowlist"
+            "newuser@example.com released no admin-granting claim"
         );
 
         let _ = res.take_string().await;
@@ -255,7 +280,7 @@ mod tests {
         );
         assert!(
             !user.is_admin,
-            "no email claim can never match the allowlist"
+            "an identity with no admin claim is never admin"
         );
     }
 
@@ -314,27 +339,133 @@ mod tests {
         assert_eq!(user_b.email.as_deref(), Some("shared@example.com"));
     }
 
+    /// Drives a login for the default `(https://dex.test, subj-1)` identity
+    /// with the given claim set, into the supplied shared repo, and returns the
+    /// provisioned user's `is_admin`.
+    async fn login_admin_status(user_repo: Arc<InMemoryUserRepository>, claims: Value) -> bool {
+        let harness = make_harness_with_repo(
+            FakeOidcClient::with_identity(identity_with_claims(claims)),
+            user_repo.clone(),
+        );
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+        do_callback(&harness, &state_cookie, &begin.state).await;
+        user_repo
+            .find_by_oidc_identity("https://dex.test", "subj-1")
+            .await
+            .unwrap()
+            .expect("user should be provisioned")
+            .is_admin
+    }
+
     #[tokio::test]
-    async fn callback_unverified_email_never_grants_admin() {
-        let harness = make_harness(FakeOidcClient::with_identity(identity(
-            "admin@beam.localhost",
-            false,
-        )));
+    async fn callback_matching_group_claim_grants_admin() {
+        // Config binds admin to `groups` containing `beam-admin`.
+        let is_admin = login_admin_status(
+            Arc::new(InMemoryUserRepository::default()),
+            json!({ "groups": ["users", "beam-admin"] }),
+        )
+        .await;
+        assert!(is_admin, "an array claim containing the value grants admin");
+    }
+
+    #[tokio::test]
+    async fn callback_absent_claim_does_not_grant_admin() {
+        let is_admin = login_admin_status(
+            Arc::new(InMemoryUserRepository::default()),
+            json!({ "groups": ["users"] }),
+        )
+        .await;
+        assert!(!is_admin, "the value is not in the released groups claim");
+    }
+
+    #[tokio::test]
+    async fn callback_recompute_demotes_admin_when_claim_disappears() {
+        // The IdP is the single authority: a user who was admin loses it at the
+        // next login once the granting claim is gone (issue #85).
+        let repo = Arc::new(InMemoryUserRepository::default());
+
+        let granted = login_admin_status(repo.clone(), json!({ "groups": ["beam-admin"] })).await;
+        assert!(granted, "first login with the claim grants admin");
+
+        let after = login_admin_status(repo.clone(), json!({ "groups": ["users"] })).await;
+        assert!(
+            !after,
+            "second login without the claim must demote the same user"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_recompute_promotes_user_when_claim_appears() {
+        // The reverse: a non-admin gains admin once the IdP starts releasing
+        // the claim, without any server-side toggle.
+        let repo = Arc::new(InMemoryUserRepository::default());
+
+        let before = login_admin_status(repo.clone(), json!({ "groups": ["users"] })).await;
+        assert!(!before, "first login without the claim is not admin");
+
+        let after = login_admin_status(repo.clone(), json!({ "groups": ["beam-admin"] })).await;
+        assert!(after, "second login with the claim promotes the same user");
+    }
+
+    #[tokio::test]
+    async fn callback_no_admin_claim_configured_never_grants_admin() {
+        // With BEAM_OIDC_ADMIN_CLAIM unset, nobody is admin -- even an identity
+        // that carries a plausible admin-looking claim.
+        let config = OidcRuntimeConfig {
+            admin_claim: None,
+            admin_value: None,
+            ..test_config()
+        };
+        let repo = Arc::new(InMemoryUserRepository::default());
+        let harness = make_harness_full(
+            FakeOidcClient::with_identity(identity_with_claims(
+                json!({ "groups": ["beam-admin"], "is_admin": true }),
+            )),
+            repo.clone(),
+            config,
+        );
 
         let (state_cookie, _) = do_login(&harness, None).await;
         let begin = harness.oidc_client.last_begin().unwrap();
         do_callback(&harness, &state_cookie, &begin.state).await;
 
-        let user = harness
-            .user_repo
+        let user = repo
             .find_by_oidc_identity("https://dex.test", "subj-1")
             .await
             .unwrap()
             .expect("user should still be provisioned");
         assert!(
             !user.is_admin,
-            "unverified email must never grant admin, even if allowlisted"
+            "no configured admin claim means nobody is admin"
         );
+    }
+
+    #[tokio::test]
+    async fn callback_boolean_claim_grants_admin_when_no_value_expected() {
+        // A config with ADMIN_CLAIM but no ADMIN_VALUE requires a boolean-true claim.
+        let config = OidcRuntimeConfig {
+            admin_claim: Some("is_admin".to_string()),
+            admin_value: None,
+            ..test_config()
+        };
+        let repo = Arc::new(InMemoryUserRepository::default());
+        let harness = make_harness_full(
+            FakeOidcClient::with_identity(identity_with_claims(json!({ "is_admin": true }))),
+            repo.clone(),
+            config,
+        );
+
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+        do_callback(&harness, &state_cookie, &begin.state).await;
+
+        let user = repo
+            .find_by_oidc_identity("https://dex.test", "subj-1")
+            .await
+            .unwrap()
+            .expect("user should be provisioned");
+        assert!(user.is_admin, "a boolean-true claim grants admin");
     }
 
     #[tokio::test]

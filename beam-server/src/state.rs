@@ -183,7 +183,8 @@ impl AppServices {
         let oidc_config = OidcRuntimeConfig {
             web_url: config.web_url.clone(),
             cookie_secure: config.resolved_cookie_secure(),
-            admin_emails_csv: config.admin_emails.clone().unwrap_or_default(),
+            admin_claim: config.oidc_admin_claim.clone(),
+            admin_value: config.oidc_admin_value.clone(),
             session_idle_days: config.session_idle_days,
             session_max_days: config.session_max_days,
         };
