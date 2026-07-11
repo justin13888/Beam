@@ -168,6 +168,13 @@ mod tests {
             user_repo: user_repo.clone(),
             playback,
             genre_repo: genre_repo.clone(),
+            library_repo: Arc::new(
+                beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
+            ),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            enrichment_repo: Arc::new(
+                beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
+            ),
             session_store: session_store.clone(),
             oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),

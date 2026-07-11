@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
 use uuid::Uuid;
 
-use beam_domain::models::enrichment::{EnrichmentState, EnrichmentTargetId};
+use beam_domain::models::enrichment::{
+    EnrichmentState, EnrichmentStatusCounts, EnrichmentTargetId,
+};
 use beam_domain::repositories::EnrichmentStateRepository;
 
 /// SQL-based implementation of the EnrichmentStateRepository trait.
@@ -259,5 +261,26 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             active.update(&self.db).await?;
         }
         Ok(count)
+    }
+
+    async fn count_by_status(&self) -> Result<EnrichmentStatusCounts, DbErr> {
+        use beam_entity::metadata_enrichment;
+        use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+        // Four filtered counts rather than a hand-rolled GROUP BY statement:
+        // this endpoint is a low-traffic admin status read, and staying on the
+        // typed query builder keeps the status enum mapping in one place.
+        let count_for = |status: metadata_enrichment::EnrichmentStatus| {
+            metadata_enrichment::Entity::find()
+                .filter(metadata_enrichment::Column::Status.eq(status))
+                .count(&self.db)
+        };
+
+        Ok(EnrichmentStatusCounts {
+            pending: count_for(metadata_enrichment::EnrichmentStatus::Pending).await?,
+            enriched: count_for(metadata_enrichment::EnrichmentStatus::Enriched).await?,
+            unmatched: count_for(metadata_enrichment::EnrichmentStatus::Unmatched).await?,
+            failed: count_for(metadata_enrichment::EnrichmentStatus::Failed).await?,
+        })
     }
 }

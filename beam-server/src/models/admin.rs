@@ -135,6 +135,139 @@ pub struct AdminLogCountResponse {
     pub count: u64,
 }
 
+// ── Admin user management (issue #85) ────────────────────────────────────────
+
+/// One user row in the admin users tab. `is_admin` is informational and
+/// read-only here: admin is derived from the IdP-asserted claim on every
+/// login, so there is deliberately no endpoint to change it.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminUserDto {
+    pub id: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
+    pub is_admin: bool,
+    /// Local moderation switch (see `PATCH /v1/admin/users/{id}`): a disabled
+    /// user cannot log in and their sessions are revoked on disable.
+    pub disabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<beam_auth::utils::models::User> for AdminUserDto {
+    fn from(user: beam_auth::utils::models::User) -> Self {
+        let beam_auth::utils::models::User {
+            id,
+            oidc_issuer: _,
+            oidc_subject: _,
+            email,
+            display_name,
+            avatar_url,
+            is_admin,
+            disabled,
+            created_at,
+            updated_at: _,
+        } = user;
+        Self {
+            id: id.to_string(),
+            display_name,
+            email,
+            avatar_url,
+            is_admin,
+            disabled,
+            created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminUserListResponse {
+    pub items: Vec<AdminUserDto>,
+    /// Total number of users across all pages.
+    pub total: u64,
+}
+
+/// Body of `PATCH /v1/admin/users/{id}`. `disabled` is the only mutable
+/// field: `is_admin` is IdP-claim-driven (recomputed at every login), so a
+/// local toggle would be silently overwritten and is deliberately absent.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateAdminUserRequest {
+    pub disabled: bool,
+}
+
+// ── Admin system status (issue #85) ──────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminStatusCounts {
+    pub users: u64,
+    pub libraries: u64,
+    pub files: u64,
+}
+
+/// Metadata-enrichment queue overview: row counts per state.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct EnrichmentQueueCounts {
+    pub pending: u64,
+    pub enriched: u64,
+    pub unmatched: u64,
+    pub failed: u64,
+}
+
+impl From<beam_domain::models::enrichment::EnrichmentStatusCounts> for EnrichmentQueueCounts {
+    fn from(counts: beam_domain::models::enrichment::EnrichmentStatusCounts) -> Self {
+        let beam_domain::models::enrichment::EnrichmentStatusCounts {
+            pending,
+            enriched,
+            unmatched,
+            failed,
+        } = counts;
+        Self {
+            pending,
+            enriched,
+            unmatched,
+            failed,
+        }
+    }
+}
+
+/// One recent library-scan admin log entry, slimmed to what the system
+/// status tab renders.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RecentScanDto {
+    pub level: AdminLogLevelDto,
+    pub message: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl From<AdminLog> for RecentScanDto {
+    fn from(log: AdminLog) -> Self {
+        let AdminLog {
+            id: _,
+            level,
+            category: _,
+            message,
+            details: _,
+            created_at,
+        } = log;
+        Self {
+            level: level.into(),
+            message,
+            timestamp: created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminStatusResponse {
+    /// Whole seconds since the server process built its state.
+    pub uptime_secs: u64,
+    /// Server crate version (`CARGO_PKG_VERSION`).
+    pub version: String,
+    pub counts: AdminStatusCounts,
+    pub enrichment: EnrichmentQueueCounts,
+    /// Most recent `library_scan` admin log entries, newest first.
+    pub recent_scans: Vec<RecentScanDto>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,6 +17,16 @@ pub enum EnrichmentStatus {
     Failed,
 }
 
+/// Row counts per [`EnrichmentStatus`], backing the admin status endpoint's
+/// queue overview (issue #85).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EnrichmentStatusCounts {
+    pub pending: u64,
+    pub enriched: u64,
+    pub unmatched: u64,
+    pub failed: u64,
+}
+
 /// Per-title enrichment queue/status row.
 #[derive(Debug, Clone)]
 pub struct EnrichmentState {

@@ -197,4 +197,11 @@ impl FileRepository for SqlFileRepository {
 
         Ok(result.rows_affected)
     }
+
+    async fn count_all(&self) -> Result<u64, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{EntityTrait, PaginatorTrait};
+
+        files::Entity::find().count(&self.db).await
+    }
 }

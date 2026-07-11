@@ -20,6 +20,8 @@ pub trait LibraryRepository: Send + Sync + std::fmt::Debug {
         file_count: Option<i32>,
     ) -> Result<(), DbErr>;
     async fn delete(&self, id: Uuid) -> Result<(), DbErr>;
+    /// Total number of libraries, for the admin status endpoint (issue #85).
+    async fn count(&self) -> Result<u64, DbErr>;
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -97,6 +99,10 @@ pub mod in_memory {
         async fn delete(&self, id: Uuid) -> Result<(), DbErr> {
             self.libraries.lock().unwrap().remove(&id);
             Ok(())
+        }
+
+        async fn count(&self) -> Result<u64, DbErr> {
+            Ok(self.libraries.lock().unwrap().len() as u64)
         }
     }
 }

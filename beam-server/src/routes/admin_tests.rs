@@ -11,22 +11,29 @@ mod tests {
 
     use beam_auth::server::OidcRuntimeConfig;
     use beam_auth::utils::{
-        models::CreateUser,
+        models::{CreateUser, User},
         oidc::NotConfiguredOidcClient,
         pending_auth_store::in_memory::InMemoryPendingAuthStore,
         repository::{UserRepository, in_memory::InMemoryUserRepository},
         session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
     };
+    use beam_domain::models::enrichment::EnrichmentTargetId;
+    use beam_domain::models::file::{CreateMediaFile, FileStatus};
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
+    use beam_domain::repositories::{EnrichmentStateRepository, FileRepository};
     use beam_index::services::index::MockIndexService;
     use salvo::prelude::*;
     use salvo::test::{ResponseExt, TestClient};
 
-    use crate::models::{AdminLogEntryDto, CreateLibraryRequest, Library, ScanLibraryResponse};
+    use crate::models::{
+        AdminLogEntryDto, AdminStatusResponse, AdminUserListResponse, CreateLibraryRequest,
+        Library, ScanLibraryResponse, UpdateAdminUserRequest,
+    };
     use crate::routes::{
-        create_library, delete_library, get_admin_log_count, get_admin_logs, get_library,
-        get_library_files, list_libraries, refresh_media_metadata, scan_library,
+        create_library, delete_library, get_admin_log_count, get_admin_logs, get_admin_status,
+        get_library, get_library_files, list_admin_users, list_libraries, refresh_media_metadata,
+        scan_library, update_admin_user,
     };
     use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
     use crate::services::hash::HashService;
@@ -129,10 +136,16 @@ mod tests {
         }
     }
 
+    type InMemoryFileRepo = beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+    type InMemoryEnrichmentRepo =
+        beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
+
     struct TestFixture {
         state: AppState,
         session_store: Arc<InMemorySessionStore>,
         user_repo: Arc<InMemoryUserRepository>,
+        file_repo: Arc<InMemoryFileRepo>,
+        enrichment_repo: Arc<InMemoryEnrichmentRepo>,
     }
 
     fn make_test_state() -> TestFixture {
@@ -144,9 +157,16 @@ mod tests {
             InMemoryAdminLogRepository::default(),
         )));
 
+        // Shared between the library service and `AppServices::{library_repo,
+        // file_repo}` so the status endpoint's counts reflect libraries/files
+        // created through the library service.
+        let library_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepo::default());
+        let enrichment_repo = Arc::new(InMemoryEnrichmentRepo::default());
+
         let library: Arc<dyn LibraryService> = Arc::new(LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(beam_domain::repositories::file::in_memory::InMemoryFileRepository::default()),
+            library_repo.clone(),
+            file_repo.clone(),
             PathBuf::from("/videos"),
             notification.clone(),
             Arc::new({
@@ -170,6 +190,9 @@ mod tests {
             genre_repo: Arc::new(
                 beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
             ),
+            library_repo,
+            file_repo: file_repo.clone(),
+            enrichment_repo: enrichment_repo.clone(),
             session_store: session_store.clone(),
             oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
@@ -230,6 +253,8 @@ mod tests {
             state,
             session_store,
             user_repo,
+            file_repo,
+            enrichment_repo,
         }
     }
 
@@ -295,7 +320,10 @@ mod tests {
                                     .post(refresh_media_metadata),
                             )
                             .push(Router::with_path("logs").get(get_admin_logs))
-                            .push(Router::with_path("logs/count").get(get_admin_log_count)),
+                            .push(Router::with_path("logs/count").get(get_admin_log_count))
+                            .push(Router::with_path("users").get(list_admin_users))
+                            .push(Router::with_path("users/{id}").patch(update_admin_user))
+                            .push(Router::with_path("status").get(get_admin_status)),
                     ),
             );
         Service::new(router)
@@ -520,5 +548,375 @@ mod tests {
             .send(&service)
             .await;
         assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+    }
+
+    // ─── Admin users & system status (issue #85) ─────────────────────────────
+
+    /// Seeds an additional non-admin user (no session) and returns it.
+    async fn seed_plain_user(fixture: &TestFixture, subject: &str, name: &str) -> User {
+        fixture
+            .user_repo
+            .create(CreateUser {
+                oidc_issuer: "https://test.example".to_string(),
+                oidc_subject: subject.to_string(),
+                email: None,
+                display_name: name.to_string(),
+                avatar_url: None,
+                is_admin: false,
+            })
+            .await
+            .expect("seed user should succeed")
+    }
+
+    /// Creates a live session for `user_id` directly in the fixture's store.
+    async fn seed_session_for(fixture: &TestFixture, user_id: &str) {
+        fixture
+            .session_store
+            .create(
+                &SessionData {
+                    user_id: user_id.to_string(),
+                    device_hash: "target-device".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    last_active: chrono::Utc::now().timestamp(),
+                },
+                86400,
+                86400,
+            )
+            .await
+            .expect("seed session should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_admin_users_and_status_regular_user_returns_403() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
+        let cookie = seed_user_cookie(&fixture, false).await;
+        let target = seed_plain_user(&fixture, "target-subj", "Target").await;
+
+        let res = TestClient::get("http://localhost/v1/admin/users")
+            .add_header("Cookie", cookie.clone(), true)
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
+
+        let res = TestClient::patch(format!("http://localhost/v1/admin/users/{}", target.id))
+            .add_header("Cookie", cookie.clone(), true)
+            .json(&UpdateAdminUserRequest { disabled: true })
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
+
+        let res = TestClient::get("http://localhost/v1/admin/status")
+            .add_header("Cookie", cookie, true)
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
+    }
+
+    #[tokio::test]
+    async fn test_list_admin_users_missing_auth_returns_401() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
+        let res = TestClient::get("http://localhost/v1/admin/users")
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn test_list_admin_users_paginates_with_total() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
+        let cookie = seed_user_cookie(&fixture, true).await; // user 1 (admin)
+        seed_plain_user(&fixture, "s2", "Alice").await;
+        seed_plain_user(&fixture, "s3", "Bob").await;
+        seed_plain_user(&fixture, "s4", "Carol").await;
+
+        // Default limit returns everyone, all enabled, exactly one admin.
+        let mut res = TestClient::get("http://localhost/v1/admin/users")
+            .add_header("Cookie", cookie.clone(), true)
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::OK));
+        let body: AdminUserListResponse = res.take_json().await.unwrap();
+        assert_eq!(body.total, 4);
+        assert_eq!(body.items.len(), 4);
+        assert!(body.items.iter().all(|u| !u.disabled));
+        assert_eq!(body.items.iter().filter(|u| u.is_admin).count(), 1);
+
+        // Two pages of two cover all four users exactly once, and `total`
+        // stays the full count on every page.
+        let mut page1_res = TestClient::get("http://localhost/v1/admin/users?limit=2&offset=0")
+            .add_header("Cookie", cookie.clone(), true)
+            .send(&service)
+            .await;
+        let page1: AdminUserListResponse = page1_res.take_json().await.unwrap();
+        let mut page2_res = TestClient::get("http://localhost/v1/admin/users?limit=2&offset=2")
+            .add_header("Cookie", cookie.clone(), true)
+            .send(&service)
+            .await;
+        let page2: AdminUserListResponse = page2_res.take_json().await.unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert_eq!(page2.items.len(), 2);
+        assert_eq!(page1.total, 4);
+        assert_eq!(page2.total, 4);
+        let mut ids: Vec<String> = page1
+            .items
+            .iter()
+            .chain(page2.items.iter())
+            .map(|u| u.id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "pages must cover every user exactly once");
+
+        // limit is clamped to at least 1.
+        let mut clamped_res = TestClient::get("http://localhost/v1/admin/users?limit=0")
+            .add_header("Cookie", cookie, true)
+            .send(&service)
+            .await;
+        let clamped: AdminUserListResponse = clamped_res.take_json().await.unwrap();
+        assert_eq!(clamped.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_disable_user_revokes_sessions_and_reenable_flips_flag() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
+        let admin_cookie = seed_user_cookie(&fixture, true).await;
+
+        let target = seed_plain_user(&fixture, "target-subj", "Target").await;
+        seed_session_for(&fixture, &target.id.to_string()).await;
+        seed_session_for(&fixture, &target.id.to_string()).await;
+        assert_eq!(
+            fixture
+                .session_store
+                .list_for_user(&target.id.to_string())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let res = TestClient::patch(format!("http://localhost/v1/admin/users/{}", target.id))
+            .add_header("Cookie", admin_cookie.clone(), true)
+            .json(&UpdateAdminUserRequest { disabled: true })
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+
+        let stored = fixture
+            .user_repo
+            .find_by_id(target.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.disabled);
+        assert_eq!(
+            fixture
+                .session_store
+                .list_for_user(&target.id.to_string())
+                .await
+                .unwrap()
+                .len(),
+            0,
+            "disabling must revoke every session of the target"
+        );
+
+        // Re-enable: the flag flips back and no session reappears.
+        let res = TestClient::patch(format!("http://localhost/v1/admin/users/{}", target.id))
+            .add_header("Cookie", admin_cookie, true)
+            .json(&UpdateAdminUserRequest { disabled: false })
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+        let stored = fixture
+            .user_repo
+            .find_by_id(target.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.disabled);
+        assert_eq!(
+            fixture
+                .session_store
+                .list_for_user(&target.id.to_string())
+                .await
+                .unwrap()
+                .len(),
+            0,
+            "re-enabling must not mint sessions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_cannot_disable_themselves() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
+        let cookie = seed_user_cookie(&fixture, true).await;
+        let admin = fixture
+            .user_repo
+            .find_by_oidc_identity("https://test.example", "admin-subj")
+            .await
+            .unwrap()
+            .expect("admin was seeded");
+
+        let res = TestClient::patch(format!("http://localhost/v1/admin/users/{}", admin.id))
+            .add_header("Cookie", cookie.clone(), true)
+            .json(&UpdateAdminUserRequest { disabled: true })
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::BAD_REQUEST));
+
+        let stored = fixture
+            .user_repo
+            .find_by_id(admin.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.disabled, "self-disable must not change the account");
+    }
+
+    #[tokio::test]
+    async fn test_patch_user_unknown_id_returns_404_and_invalid_id_400() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
+        let cookie = seed_user_cookie(&fixture, true).await;
+
+        let res = TestClient::patch(format!(
+            "http://localhost/v1/admin/users/{}",
+            uuid::Uuid::new_v4()
+        ))
+        .add_header("Cookie", cookie.clone(), true)
+        .json(&UpdateAdminUserRequest { disabled: true })
+        .send(&service)
+        .await;
+        assert_eq!(res.status_code, Some(StatusCode::NOT_FOUND));
+
+        let res = TestClient::patch("http://localhost/v1/admin/users/not-a-uuid")
+            .add_header("Cookie", cookie, true)
+            .json(&UpdateAdminUserRequest { disabled: true })
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::BAD_REQUEST));
+    }
+
+    #[tokio::test]
+    async fn test_admin_status_reports_counts_queue_and_recent_scans() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
+        let cookie = seed_user_cookie(&fixture, true).await; // user 1 (admin)
+        seed_plain_user(&fixture, "s2", "Alice").await; // user 2
+
+        // One library created through the API, one file indexed into it.
+        let mut create_res = TestClient::post("http://localhost/v1/admin/libraries")
+            .add_header("Cookie", cookie.clone(), true)
+            .json(&CreateLibraryRequest {
+                name: "Movies".to_string(),
+                root_path: "movies".to_string(),
+            })
+            .send(&service)
+            .await;
+        assert_eq!(create_res.status_code, Some(StatusCode::OK));
+        let library: Library = create_res.take_json().await.unwrap();
+        fixture
+            .file_repo
+            .create(CreateMediaFile {
+                library_id: uuid::Uuid::parse_str(&library.id).unwrap(),
+                path: PathBuf::from("/videos/movies/a.mkv"),
+                hash: 1,
+                size_bytes: 10,
+                mtime: None,
+                mime_type: None,
+                duration: None,
+                container_format: None,
+                content: None,
+                status: FileStatus::Known,
+            })
+            .await
+            .unwrap();
+
+        // Enrichment queue: two rows, one of which then fails terminally.
+        fixture
+            .enrichment_repo
+            .ensure_pending(EnrichmentTargetId::Movie(uuid::Uuid::new_v4()))
+            .await
+            .unwrap();
+        fixture
+            .enrichment_repo
+            .ensure_pending(EnrichmentTargetId::Movie(uuid::Uuid::new_v4()))
+            .await
+            .unwrap();
+        let due = fixture
+            .enrichment_repo
+            .fetch_due(chrono::Utc::now(), 10)
+            .await
+            .unwrap();
+        fixture
+            .enrichment_repo
+            .mark_failed(due[0].id, "provider exploded", chrono::Utc::now())
+            .await
+            .unwrap();
+
+        // Two scan log entries plus one unrelated system entry that must be
+        // filtered out of `recent_scans`.
+        for message in ["scan one", "scan two"] {
+            fixture
+                .state
+                .services
+                .admin_log
+                .log(
+                    beam_domain::models::AdminLogLevel::Info,
+                    beam_domain::models::AdminLogCategory::LibraryScan,
+                    message.to_string(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        fixture
+            .state
+            .services
+            .admin_log
+            .log(
+                beam_domain::models::AdminLogLevel::Info,
+                beam_domain::models::AdminLogCategory::System,
+                "server started".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut res = TestClient::get("http://localhost/v1/admin/status")
+            .add_header("Cookie", cookie, true)
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::OK));
+        let body: AdminStatusResponse = res.take_json().await.unwrap();
+
+        // uptime_secs deserialized as u64 (its presence is shape-verified);
+        // version is the crate's own.
+        assert_eq!(body.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(body.counts.users, 2);
+        assert_eq!(body.counts.libraries, 1);
+        assert_eq!(body.counts.files, 1);
+        assert_eq!(body.enrichment.pending, 1);
+        assert_eq!(body.enrichment.failed, 1);
+        assert_eq!(body.enrichment.enriched, 0);
+        assert_eq!(body.enrichment.unmatched, 0);
+
+        let messages: Vec<&str> = body
+            .recent_scans
+            .iter()
+            .map(|scan| scan.message.as_str())
+            .collect();
+        assert_eq!(body.recent_scans.len(), 2);
+        assert!(messages.contains(&"scan one"));
+        assert!(messages.contains(&"scan two"));
+        assert!(
+            !messages.contains(&"server started"),
+            "non-scan categories must be filtered out"
+        );
     }
 }

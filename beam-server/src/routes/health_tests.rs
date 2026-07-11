@@ -164,6 +164,13 @@ mod tests {
             genre_repo: Arc::new(
                 beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
             ),
+            library_repo: Arc::new(
+                beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
+            ),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            enrichment_repo: Arc::new(
+                beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
+            ),
             session_store: Arc::new(InMemorySessionStore::default()),
             oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in health tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),

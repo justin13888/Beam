@@ -103,4 +103,11 @@ impl LibraryRepository for SqlLibraryRepository {
         library::Entity::delete_by_id(id).exec(&self.db).await?;
         Ok(())
     }
+
+    async fn count(&self) -> Result<u64, DbErr> {
+        use beam_entity::library;
+        use sea_orm::{EntityTrait, PaginatorTrait};
+
+        library::Entity::find().count(&self.db).await
+    }
 }

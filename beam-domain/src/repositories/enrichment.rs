@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::enrichment::{EnrichmentState, EnrichmentTargetId};
+use crate::models::enrichment::{EnrichmentState, EnrichmentStatusCounts, EnrichmentTargetId};
 
 /// Per-title enrichment queue/status, backing the `metadata_enrichment` table.
 #[async_trait]
@@ -62,6 +62,10 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
 
     /// Same as `request_refresh`, applied to every row. Returns the count affected.
     async fn request_refresh_all(&self, rematch: bool) -> Result<u64, DbErr>;
+
+    /// Row counts grouped by status, for the admin status endpoint's queue
+    /// overview (issue #85).
+    async fn count_by_status(&self) -> Result<EnrichmentStatusCounts, DbErr>;
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -224,6 +228,20 @@ pub mod in_memory {
                 count += 1;
             }
             Ok(count)
+        }
+
+        async fn count_by_status(&self) -> Result<EnrichmentStatusCounts, DbErr> {
+            let rows = self.rows.read();
+            let mut counts = EnrichmentStatusCounts::default();
+            for row in rows.values() {
+                match row.status {
+                    EnrichmentStatus::Pending => counts.pending += 1,
+                    EnrichmentStatus::Enriched => counts.enriched += 1,
+                    EnrichmentStatus::Unmatched => counts.unmatched += 1,
+                    EnrichmentStatus::Failed => counts.failed += 1,
+                }
+            }
+            Ok(counts)
         }
     }
 }

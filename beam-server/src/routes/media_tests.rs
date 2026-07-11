@@ -207,6 +207,15 @@ mod tests {
             genre_repo: Arc::new(
                 beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
             ),
+            library_repo: Arc::new(
+                beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
+            ),
+            file_repo: Arc::new(
+                beam_domain::repositories::file::in_memory::InMemoryFileRepository::default(),
+            ),
+            enrichment_repo: Arc::new(
+                beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
+            ),
             session_store: session_store.clone(),
             oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
