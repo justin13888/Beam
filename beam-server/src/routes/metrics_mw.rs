@@ -53,6 +53,7 @@ pub fn classify_route(_method: &Method, path: &str) -> &'static str {
         (Some("files"), Some(_), Some("download")) => "download",
         (Some("files"), Some(_), Some("progress")) => "progress",
         (Some("continue-watching"), None, None) => "continue_watching",
+        (Some("history"), None, None) => "history",
         (Some("libraries"), _, _) => "libraries",
         (Some("admin"), _, _) => "admin",
         (Some("auth"), _, _) => "auth",

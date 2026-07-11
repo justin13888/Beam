@@ -62,6 +62,21 @@ pub struct ContinueWatchingItem {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One row in the watch-history list. Same resolved shape as
+/// [`ContinueWatchingItem`] but additionally carries `completed`, since history
+/// lists finished items too (continue-watching filters them out).
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct HistoryItem {
+    pub file_id: String,
+    pub media_id: String,
+    pub media_type: String,
+    pub episode_id: Option<String>,
+    pub position_secs: f64,
+    pub duration_secs: Option<f64>,
+    pub completed: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[async_trait::async_trait]
 pub trait PlaybackService: Send + Sync + std::fmt::Debug {
     async fn report_progress(
@@ -77,6 +92,15 @@ pub trait PlaybackService: Send + Sync + std::fmt::Debug {
         user_id: Uuid,
         limit: u32,
     ) -> Result<Vec<ContinueWatchingItem>, PlaybackError>;
+
+    /// One page of the user's watch history (completed and in-progress),
+    /// most-recently-updated first, plus the total row count for pagination.
+    async fn get_history(
+        &self,
+        user_id: Uuid,
+        limit: u64,
+        offset: u64,
+    ) -> Result<(Vec<HistoryItem>, u64), PlaybackError>;
 }
 
 #[derive(Debug)]
@@ -200,6 +224,42 @@ impl PlaybackService for DbPlaybackService {
             }
         }
         Ok(items)
+    }
+
+    async fn get_history(
+        &self,
+        user_id: Uuid,
+        limit: u64,
+        offset: u64,
+    ) -> Result<(Vec<HistoryItem>, u64), PlaybackError> {
+        // `total` is counted over all rows independently of the page slice, so
+        // it stays stable across pages. Stale rows whose file was removed by a
+        // rescan are skipped from `items` (like continue-watching) but remain
+        // in `total`, so a page can legitimately hold fewer than `limit` items.
+        let total = self.playback_repo.count_by_user(user_id).await?;
+        let rows = self
+            .playback_repo
+            .find_page_by_user(user_id, limit, offset)
+            .await?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Ok((media_id, media_type, episode_id)) =
+                self.resolve_media_ref(row.file_id).await
+            {
+                items.push(HistoryItem {
+                    file_id: row.file_id.to_string(),
+                    media_id,
+                    media_type,
+                    episode_id,
+                    position_secs: row.position_secs,
+                    duration_secs: row.duration_secs,
+                    completed: row.completed,
+                    updated_at: row.updated_at,
+                });
+            }
+        }
+        Ok((items, total))
     }
 }
 

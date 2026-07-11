@@ -267,6 +267,146 @@ mod tests {
         assert_eq!(items[0].episode_id, Some(episode_id.to_string()));
     }
 
+    /// Seeds a movie + entry + file and returns the file id, so history tests
+    /// can create several resolvable rows quickly.
+    fn seed_movie_file(harness: &Harness) -> Uuid {
+        let movie = make_movie("Test Movie");
+        let movie_id = movie.id;
+        harness
+            .movie_repo
+            .movies
+            .lock()
+            .unwrap()
+            .insert(movie.id, movie);
+
+        let entry = MovieEntry {
+            id: Uuid::new_v4(),
+            library_id: Uuid::new_v4(),
+            movie_id,
+            edition: None,
+            is_primary: true,
+            created_at: chrono::Utc::now(),
+        };
+        let entry_id = entry.id;
+        harness
+            .movie_repo
+            .entries
+            .lock()
+            .unwrap()
+            .insert(entry.id, entry);
+
+        let file = make_media_file(MediaFileContent::Movie {
+            movie_entry_id: entry_id,
+        });
+        let file_id = file.id;
+        harness
+            .file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(file.id, file);
+        file_id
+    }
+
+    #[tokio::test]
+    async fn get_history_orders_desc_includes_completed_and_reports_total() {
+        let harness = make_harness();
+        let user_id = Uuid::new_v4();
+
+        let file_first = seed_movie_file(&harness);
+        let file_middle = seed_movie_file(&harness);
+        let file_completed = seed_movie_file(&harness);
+
+        // Distinct `updated_at`, oldest first; the completed one is newest.
+        harness
+            .service
+            .report_progress(user_id, file_first, 10.0, Some(100.0))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        harness
+            .service
+            .report_progress(user_id, file_middle, 20.0, Some(100.0))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        harness
+            .service
+            .report_progress(user_id, file_completed, 99.0, Some(100.0))
+            .await
+            .unwrap();
+
+        let (items, total) = harness.service.get_history(user_id, 50, 0).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(items.len(), 3);
+        // Most-recently-updated first; completed row is present (unlike
+        // continue-watching, which filters it out).
+        assert_eq!(items[0].file_id, file_completed.to_string());
+        assert!(items[0].completed);
+        assert_eq!(items[1].file_id, file_middle.to_string());
+        assert_eq!(items[2].file_id, file_first.to_string());
+
+        // Continue-watching, by contrast, excludes the completed row.
+        let cw = harness
+            .service
+            .get_continue_watching(user_id, 50)
+            .await
+            .unwrap();
+        assert_eq!(cw.len(), 2);
+        assert!(cw.iter().all(|i| i.file_id != file_completed.to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_history_slices_by_limit_and_offset() {
+        let harness = make_harness();
+        let user_id = Uuid::new_v4();
+
+        let mut files = Vec::new();
+        for _ in 0..3 {
+            let file_id = seed_movie_file(&harness);
+            harness
+                .service
+                .report_progress(user_id, file_id, 10.0, Some(100.0))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            files.push(file_id);
+        }
+        // files[2] is newest → first page. Ask for the 2nd page of size 1.
+        let (items, total) = harness.service.get_history(user_id, 1, 1).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].file_id, files[1].to_string());
+    }
+
+    #[tokio::test]
+    async fn get_history_skips_stale_rows_but_still_counts_them_in_total() {
+        let harness = make_harness();
+        let user_id = Uuid::new_v4();
+
+        let live_file = seed_movie_file(&harness);
+        let stale_file = seed_movie_file(&harness);
+
+        harness
+            .service
+            .report_progress(user_id, live_file, 10.0, Some(100.0))
+            .await
+            .unwrap();
+        harness
+            .service
+            .report_progress(user_id, stale_file, 10.0, Some(100.0))
+            .await
+            .unwrap();
+
+        // Remove the stale file as a rescan would.
+        harness.file_repo.files.lock().unwrap().remove(&stale_file);
+
+        let (items, total) = harness.service.get_history(user_id, 50, 0).await.unwrap();
+        assert_eq!(total, 2, "stale row is still counted in total");
+        assert_eq!(items.len(), 1, "stale row is skipped from items");
+        assert_eq!(items[0].file_id, live_file.to_string());
+    }
+
     #[tokio::test]
     async fn get_continue_watching_skips_rows_whose_file_no_longer_exists() {
         let harness = make_harness();

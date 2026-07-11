@@ -660,6 +660,16 @@ mod tests {
             ) -> Result<Vec<ContinueWatchingItem>, PlaybackError> {
                 unimplemented!("not called in stream handler tests")
             }
+
+            async fn get_history(
+                &self,
+                _user_id: uuid::Uuid,
+                _limit: u64,
+                _offset: u64,
+            ) -> Result<(Vec<crate::services::playback::HistoryItem>, u64), PlaybackError>
+            {
+                unimplemented!("not called in stream handler tests")
+            }
         }
 
         /// Library stub that always returns `Ok(None)` for file lookups so token
