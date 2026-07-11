@@ -12,6 +12,11 @@ pub struct User {
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub is_admin: bool,
+    /// Local moderation switch, distinct from the IdP-driven `is_admin`:
+    /// disabling revokes the account's sessions and blocks any future login
+    /// (issue #85). Never asserted by the IdP; managed only through the admin
+    /// API. JIT-provisioned users are always created enabled.
+    pub disabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -37,6 +42,7 @@ impl From<beam_entity::user::Model> for User {
             display_name: model.display_name,
             avatar_url: model.avatar_url,
             is_admin: model.is_admin,
+            disabled: model.disabled,
             created_at: model.created_at.into(),
             updated_at: model.updated_at.into(),
         }

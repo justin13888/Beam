@@ -539,6 +539,94 @@ mod tests {
         assert_eq!(res.status_code, Some(StatusCode::BAD_REQUEST));
     }
 
+    #[tokio::test]
+    async fn callback_disabled_user_is_rejected_without_a_session() {
+        // A previously-provisioned account that has since been disabled must be
+        // blocked at the callback: 403, no session cookie, and the session
+        // store stays empty for that user (issue #85).
+        let repo = Arc::new(InMemoryUserRepository::default());
+        let harness = make_harness_with_repo(
+            FakeOidcClient::with_identity(identity("blocked@example.com", true)),
+            repo.clone(),
+        );
+
+        // First login provisions the account and mints a session.
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+        let ok = do_callback(&harness, &state_cookie, &begin.state).await;
+        assert_eq!(ok.status_code, Some(StatusCode::FOUND));
+
+        let user = repo
+            .find_by_oidc_identity("https://dex.test", "subj-1")
+            .await
+            .unwrap()
+            .expect("user should be provisioned on first login");
+
+        // An admin disables the account, revoking its live sessions.
+        repo.set_disabled(user.id, true).await.unwrap();
+        harness
+            .session_store
+            .delete_all_for_user(&user.id.to_string())
+            .await
+            .unwrap();
+
+        // A fresh login attempt is refused with 403 and no new session.
+        let (state_cookie2, _) = do_login(&harness, None).await;
+        let begin2 = harness.oidc_client.last_begin().unwrap();
+        let res = do_callback(&harness, &state_cookie2, &begin2.state).await;
+        assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
+        assert!(
+            res.cookies().get("beam_session").is_none(),
+            "a disabled account must not receive a session cookie"
+        );
+        assert_eq!(
+            harness
+                .session_store
+                .list_for_user(&user.id.to_string())
+                .await
+                .unwrap()
+                .len(),
+            0,
+            "no session should exist for a rejected disabled account"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_re_enabled_user_can_log_in_again() {
+        // Re-enabling a disabled account restores login -- disabling is a
+        // reversible moderation switch, not a permanent ban (issue #85).
+        let repo = Arc::new(InMemoryUserRepository::default());
+        let harness = make_harness_with_repo(
+            FakeOidcClient::with_identity(identity("toggled@example.com", true)),
+            repo.clone(),
+        );
+
+        let (sc1, _) = do_login(&harness, None).await;
+        let b1 = harness.oidc_client.last_begin().unwrap();
+        do_callback(&harness, &sc1, &b1.state).await;
+        let user = repo
+            .find_by_oidc_identity("https://dex.test", "subj-1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        repo.set_disabled(user.id, true).await.unwrap();
+        let (sc2, _) = do_login(&harness, None).await;
+        let b2 = harness.oidc_client.last_begin().unwrap();
+        let blocked = do_callback(&harness, &sc2, &b2.state).await;
+        assert_eq!(blocked.status_code, Some(StatusCode::FORBIDDEN));
+
+        repo.set_disabled(user.id, false).await.unwrap();
+        let (sc3, _) = do_login(&harness, None).await;
+        let b3 = harness.oidc_client.last_begin().unwrap();
+        let allowed = do_callback(&harness, &sc3, &b3.state).await;
+        assert_eq!(allowed.status_code, Some(StatusCode::FOUND));
+        assert!(
+            allowed.cookies().get("beam_session").is_some(),
+            "a re-enabled account should receive a session cookie again"
+        );
+    }
+
     // ─── GET /me, POST /logout, GET /sessions, DELETE /sessions/:id ──────────
 
     async fn login_and_get_session_cookie(harness: &Harness, email: &str) -> String {
