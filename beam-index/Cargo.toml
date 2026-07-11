@@ -17,6 +17,9 @@ async-trait = { workspace = true }
 cameo = { version = "0.2.0", default-features = false, features = ["tmdb", "anilist"] }
 chrono = { workspace = true, features = ["serde"] }
 ffmpeg-next = { workspace = true }
+# Facade only: every counter is a no-op unless beam-server installed a
+# recorder (BEAM_ENABLE_METRICS=true).
+metrics = { workspace = true }
 notify = "6"
 num = { version = "0.4.3", features = ["serde"] }
 num_cpus = "1.17.0"
@@ -35,6 +38,7 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
 futures = "0.3.31"
+metrics-util = { workspace = true }
 mockall = "0.14.0"
 tempfile = "3.23.0"
 

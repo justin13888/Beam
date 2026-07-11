@@ -401,6 +401,8 @@ dependencies = [
  "chrono",
  "ffmpeg-next",
  "futures",
+ "metrics",
+ "metrics-util",
  "mockall",
  "notify",
  "num",
