@@ -37,6 +37,25 @@ mod tests {
         }
     }
 
+    /// Full control over the claims a fake IdP releases, for cases the terse
+    /// `identity` helper can't express: a missing email claim, or a specific
+    /// `(issuer, subject)` pair.
+    fn identity_with(
+        issuer: &str,
+        subject: &str,
+        email: Option<&str>,
+        name: Option<&str>,
+    ) -> OidcIdentity {
+        OidcIdentity {
+            issuer: issuer.to_string(),
+            subject: subject.to_string(),
+            email: email.map(str::to_string),
+            email_verified: email.is_some(),
+            name: name.map(str::to_string),
+            picture: None,
+        }
+    }
+
     struct Harness {
         service: Service,
         oidc_client: Arc<FakeOidcClient>,
@@ -45,13 +64,22 @@ mod tests {
     }
 
     fn make_harness(oidc_client: FakeOidcClient) -> Harness {
+        make_harness_with_repo(oidc_client, Arc::new(InMemoryUserRepository::default()))
+    }
+
+    /// Builds a harness around a caller-supplied user repository, so several
+    /// harnesses (e.g. two different issuers) can provision into the *same*
+    /// store and assertions can span both logins.
+    fn make_harness_with_repo(
+        oidc_client: FakeOidcClient,
+        user_repo: Arc<InMemoryUserRepository>,
+    ) -> Harness {
         let oidc_client = Arc::new(oidc_client);
         let oidc_dyn: Arc<dyn OidcClient> = oidc_client.clone();
         let pending_auth_store: Arc<dyn PendingAuthStore> =
             Arc::new(InMemoryPendingAuthStore::default());
         let session_store = Arc::new(InMemorySessionStore::default());
         let session_dyn: Arc<dyn SessionStore> = session_store.clone();
-        let user_repo = Arc::new(InMemoryUserRepository::default());
         let user_repo_dyn: Arc<dyn UserRepository> = user_repo.clone();
 
         let router = Router::new()
@@ -189,6 +217,101 @@ mod tests {
             2,
             "two logins should mint two sessions for the same user"
         );
+    }
+
+    #[tokio::test]
+    async fn callback_without_email_claim_provisions_user_with_null_email() {
+        // An IdP that releases no `email` claim must still provision a working
+        // account -- the `users.email NOT NULL UNIQUE` leftover that issue #79
+        // removes would have rejected this insert at the database.
+        let harness = make_harness(FakeOidcClient::with_identity(identity_with(
+            "https://dex.test",
+            "subj-1",
+            None,
+            None,
+        )));
+
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+        let res = do_callback(&harness, &state_cookie, &begin.state).await;
+
+        // Login still succeeds and mints a session.
+        assert_eq!(res.status_code, Some(StatusCode::FOUND));
+        assert!(
+            res.cookies().get("beam_session").is_some(),
+            "session cookie should be set even with no email claim"
+        );
+
+        let user = harness
+            .user_repo
+            .find_by_oidc_identity("https://dex.test", "subj-1")
+            .await
+            .unwrap()
+            .expect("user should be JIT-provisioned without an email claim");
+        assert_eq!(user.email, None, "email must be stored as NULL, not \"\"");
+        assert_eq!(
+            user.display_name, "user-subj-1",
+            "display_name falls back to a subject-derived placeholder"
+        );
+        assert!(
+            !user.is_admin,
+            "no email claim can never match the allowlist"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_same_email_under_different_issuers_both_provision() {
+        // Email is non-unique per data-model.md: the same address can appear
+        // under more than one issuer. Both logins must provision distinct
+        // users into the shared store -- the dropped `users_email_key` unique
+        // constraint (issue #79) would otherwise reject the second insert.
+        let shared_repo = Arc::new(InMemoryUserRepository::default());
+
+        let harness_a = make_harness_with_repo(
+            FakeOidcClient::with_identity(identity_with(
+                "https://issuer-a.test",
+                "subj-a",
+                Some("shared@example.com"),
+                Some("User A"),
+            )),
+            shared_repo.clone(),
+        );
+        let (state_a, _) = do_login(&harness_a, None).await;
+        let begin_a = harness_a.oidc_client.last_begin().unwrap();
+        let res_a = do_callback(&harness_a, &state_a, &begin_a.state).await;
+        assert_eq!(res_a.status_code, Some(StatusCode::FOUND));
+
+        let harness_b = make_harness_with_repo(
+            FakeOidcClient::with_identity(identity_with(
+                "https://issuer-b.test",
+                "subj-b",
+                Some("shared@example.com"),
+                Some("User B"),
+            )),
+            shared_repo.clone(),
+        );
+        let (state_b, _) = do_login(&harness_b, None).await;
+        let begin_b = harness_b.oidc_client.last_begin().unwrap();
+        let res_b = do_callback(&harness_b, &state_b, &begin_b.state).await;
+        assert_eq!(res_b.status_code, Some(StatusCode::FOUND));
+
+        let user_a = shared_repo
+            .find_by_oidc_identity("https://issuer-a.test", "subj-a")
+            .await
+            .unwrap()
+            .expect("issuer-a user should be provisioned");
+        let user_b = shared_repo
+            .find_by_oidc_identity("https://issuer-b.test", "subj-b")
+            .await
+            .unwrap()
+            .expect("issuer-b user should be provisioned");
+
+        assert_ne!(
+            user_a.id, user_b.id,
+            "distinct issuers yield distinct users"
+        );
+        assert_eq!(user_a.email.as_deref(), Some("shared@example.com"));
+        assert_eq!(user_b.email.as_deref(), Some("shared@example.com"));
     }
 
     #[tokio::test]
