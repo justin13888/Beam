@@ -198,6 +198,8 @@ mod tests {
             watch_enabled: false,
             watch_debounce_ms: 2000,
             enrich_interval_secs: 300,
+            enrich_batch_size: 25,
+            enrich_min_confidence: 0.7,
             tmdb_api_token: None,
             anilist_enabled: false,
             oidc_issuer: None,

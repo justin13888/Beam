@@ -12,7 +12,7 @@ use beam_auth::utils::{
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::services::clock::RealClock;
-use beam_index::services::enrichment::MetadataEnrichmentService;
+use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
 
 use crate::{
@@ -198,15 +198,22 @@ impl AppServices {
                 }
             };
 
-        let enrichment_service = Arc::new(MetadataEnrichmentService::new(
-            enrichment_repo.clone(),
-            movie_repo.clone(),
-            show_repo.clone(),
-            genre_repo,
-            enrichment_provider,
-            admin_log_service.clone(),
-            Arc::new(RealClock),
-        ));
+        let enrichment_service = Arc::new(
+            MetadataEnrichmentService::new(
+                enrichment_repo.clone(),
+                movie_repo.clone(),
+                show_repo.clone(),
+                genre_repo,
+                enrichment_provider,
+                admin_log_service.clone(),
+                Arc::new(RealClock),
+            )
+            .with_policy(EnrichmentPolicy {
+                batch_size: config.enrich_batch_size,
+                min_confidence: config.enrich_min_confidence,
+                ..EnrichmentPolicy::default()
+            }),
+        );
 
         let playback_service = Arc::new(DbPlaybackService::new(
             playback_repo,

@@ -4,8 +4,11 @@
 use beam_domain::providers::enrichment::{MovieSearchHit, ShowSearchHit};
 
 /// A hit is accepted only when it clears both bars: a low total score can
-/// still slip through on a strong year match alone otherwise.
-const ACCEPT_TOTAL_THRESHOLD: f64 = 0.70;
+/// still slip through on a strong year match alone otherwise. The total-score
+/// bar is caller-supplied (operator-tunable via `BEAM_ENRICH_MIN_CONFIDENCE`);
+/// [`DEFAULT_MIN_CONFIDENCE`] is the historical hardcoded value and the config
+/// default. The title bar stays a fixed structural floor.
+pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.70;
 const ACCEPT_TITLE_THRESHOLD: f64 = 0.55;
 
 const TITLE_WEIGHT: f64 = 0.70;
@@ -100,8 +103,8 @@ pub struct MatchScore {
 }
 
 impl MatchScore {
-    fn accepted(&self) -> bool {
-        self.total_score >= ACCEPT_TOTAL_THRESHOLD && self.title_score >= ACCEPT_TITLE_THRESHOLD
+    fn accepted(&self, min_confidence: f64) -> bool {
+        self.total_score >= min_confidence && self.title_score >= ACCEPT_TITLE_THRESHOLD
     }
 }
 
@@ -128,6 +131,7 @@ pub fn best_movie_match<'a>(
     query_title: &str,
     query_year: Option<u32>,
     hits: &'a [MovieSearchHit],
+    min_confidence: f64,
 ) -> Option<(&'a MovieSearchHit, MatchScore)> {
     hits.iter()
         .map(|hit| {
@@ -142,7 +146,7 @@ pub fn best_movie_match<'a>(
                 ),
             )
         })
-        .filter(|(_, s)| s.accepted())
+        .filter(|(_, s)| s.accepted(min_confidence))
         .max_by(|(a_hit, a_score), (b_hit, b_score)| {
             a_score
                 .total_score
@@ -175,6 +179,7 @@ pub fn best_show_match<'a>(
     query_title: &str,
     query_year: Option<u32>,
     hits: &'a [ShowSearchHit],
+    min_confidence: f64,
 ) -> Option<(&'a ShowSearchHit, MatchScore)> {
     hits.iter()
         .map(|hit| {
@@ -189,7 +194,7 @@ pub fn best_show_match<'a>(
                 ),
             )
         })
-        .filter(|(_, s)| s.accepted())
+        .filter(|(_, s)| s.accepted(min_confidence))
         .max_by(|(a_hit, a_score), (b_hit, b_score)| {
             a_score
                 .total_score
@@ -303,7 +308,12 @@ mod tests {
     #[test]
     fn exact_title_and_year_accepted() {
         let hits = vec![hit("Blade Runner 2049", Some(2017))];
-        let result = best_movie_match("Blade Runner 2049", Some(2017), &hits);
+        let result = best_movie_match(
+            "Blade Runner 2049",
+            Some(2017),
+            &hits,
+            DEFAULT_MIN_CONFIDENCE,
+        );
         assert!(result.is_some());
         let (_, score) = result.unwrap();
         assert!(score.total_score > 0.9);
@@ -312,21 +322,26 @@ mod tests {
     #[test]
     fn exact_title_no_year_query_still_accepted() {
         let hits = vec![hit("The Matrix", Some(1999))];
-        let result = best_movie_match("The Matrix", None, &hits);
+        let result = best_movie_match("The Matrix", None, &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
     #[test]
     fn wrong_year_by_one_still_accepted_with_lower_score() {
         let hits = vec![hit("Dune", Some(2021))];
-        let result = best_movie_match("Dune", Some(2020), &hits);
+        let result = best_movie_match("Dune", Some(2020), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
     #[test]
     fn wildly_different_title_rejected() {
         let hits = vec![hit("Completely Unrelated Film", Some(2017))];
-        let result = best_movie_match("Blade Runner 2049", Some(2017), &hits);
+        let result = best_movie_match(
+            "Blade Runner 2049",
+            Some(2017),
+            &hits,
+            DEFAULT_MIN_CONFIDENCE,
+        );
         assert!(result.is_none());
     }
 
@@ -336,13 +351,28 @@ mod tests {
         // year penalty should be enough to push a marginal title below the
         // total-score bar even though the title alone might not clear 0.55.
         let hits = vec![hit("The Matrix Reloaded", Some(1975))];
-        let result = best_movie_match("The Matrix", Some(2003), &hits);
+        let result = best_movie_match("The Matrix", Some(2003), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_none());
     }
 
     #[test]
+    fn min_confidence_threshold_is_respected() {
+        // An exact title with no year query scores exactly the title weight
+        // (0.70): it clears a lenient 0.5 bar but not a strict 0.9 one, so the
+        // same candidate flips from accepted to rejected purely on the knob.
+        let hits = vec![hit("The Matrix", None)];
+        let (_, score) = best_movie_match("The Matrix", None, &hits, 0.5)
+            .expect("should match at a lenient threshold");
+        assert!((score.total_score - 0.70).abs() < 1e-9);
+        assert!(
+            best_movie_match("The Matrix", None, &hits, 0.9).is_none(),
+            "the same candidate must be rejected once the bar is raised above its score"
+        );
+    }
+
+    #[test]
     fn empty_hits_returns_none() {
-        assert!(best_movie_match("Anything", None, &[]).is_none());
+        assert!(best_movie_match("Anything", None, &[], DEFAULT_MIN_CONFIDENCE).is_none());
     }
 
     #[test]
@@ -360,13 +390,13 @@ mod tests {
         year: Option<u32>,
         hits: &'a [MovieSearchHit],
     ) -> Option<(&'a MovieSearchHit, MatchScore)> {
-        best_movie_match(title, year, hits)
+        best_movie_match(title, year, hits, DEFAULT_MIN_CONFIDENCE)
     }
 
     #[test]
     fn show_matching_uses_same_rules() {
         let hits = vec![show_hit("Arcane", Some(2021))];
-        let result = best_show_match("Arcane", Some(2021), &hits);
+        let result = best_show_match("Arcane", Some(2021), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
@@ -376,14 +406,14 @@ mod tests {
         candidate.title = "Kimi no Na wa.".to_string();
         candidate.original_title = Some("Your Name".to_string());
         let hits = [candidate];
-        let result = best_movie_match("Your Name", Some(2016), &hits);
+        let result = best_movie_match("Your Name", Some(2016), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
     #[test]
     fn punctuation_and_case_ignored() {
         let hits = vec![hit("Se7en", Some(1995))];
-        let result = best_movie_match("se7en", Some(1995), &hits);
+        let result = best_movie_match("se7en", Some(1995), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
