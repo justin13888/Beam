@@ -189,7 +189,10 @@ impl From<ffmpeg::codec::Id> for CodecId {
     fn from(codec_id: ffmpeg::codec::Id) -> Self {
         match codec_id {
             ffmpeg::codec::Id::H264 => CodecId::H264,
-            ffmpeg::codec::Id::H265 => CodecId::H265,
+            // ffmpeg-next maps AV_CODEC_ID_HEVC to `Id::HEVC`, never to its
+            // `Id::H265` alias; match both so real HEVC streams don't fall
+            // through to `Other("hevc")`.
+            ffmpeg::codec::Id::HEVC | ffmpeg::codec::Id::H265 => CodecId::H265,
             ffmpeg::codec::Id::VP8 => CodecId::VP8,
             ffmpeg::codec::Id::VP9 => CodecId::VP9,
             ffmpeg::codec::Id::AV1 => CodecId::AV1,
