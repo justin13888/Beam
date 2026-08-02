@@ -85,10 +85,15 @@ pub async fn get_media_detail(
     }
 }
 
-/// List the playable/downloadable source files for a movie.
+/// List the playable/downloadable source files for a playable media id.
+///
+/// Accepts a movie id or an episode id (both are "playable" ids). A show id is
+/// rejected with 400 -- shows have no files of their own, so callers request
+/// sources for the show's individual episode ids instead. An episode with no
+/// files yet returns an empty array (a valid, "not yet playable" response).
 #[endpoint(
     tags("media"),
-    parameters(("id" = String, description = "Movie id (UUID)")),
+    parameters(("id" = String, description = "Playable media id: a movie UUID or an episode UUID")),
 )]
 pub async fn get_media_sources(
     req: &mut Request,
