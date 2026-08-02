@@ -43,7 +43,7 @@ beam-auth = { path = "../beam-auth", features = ["test-utils"] }
 beam-domain = { path = "../beam-domain", features = ["test-utils"] }
 beam-index = { path = "../beam-index", features = ["test-utils"] }
 metrics-util = { workspace = true }
-mockall = "0.14.0"
+mockall = "0.15.0"
 
 [features]
 test-utils = ["beam-domain/test-utils", "beam-index/test-utils"]
