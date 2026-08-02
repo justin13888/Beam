@@ -33,7 +33,7 @@ metrics-util = { version = "0.20.4", default-features = false, features = [
 ] }
 rand = "0.10.0"
 regex = "1.12.3"
-salvo = { version = "0.89.1", features = [
+salvo = { version = "0.90.1", features = [
     "oapi",
     "cors",
     "serve-static",
