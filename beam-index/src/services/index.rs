@@ -56,6 +56,40 @@ fn record_file_outcome(result: &'static str) {
     metrics::counter!("beam_index_files_processed_total", "result" => result).increment(1);
 }
 
+/// Render a runtime in whole minutes for human-facing warnings (e.g. `40 min`).
+fn humanize_minutes(secs: f64) -> String {
+    format!("{} min", (secs / 60.0).round() as i64)
+}
+
+/// Thresholds for flagging renditions of the same title whose probed runtimes
+/// disagree by enough to suggest a misnamed or mismatched file (issue #88).
+///
+/// A pair of renditions is treated as *divergent* only when BOTH conditions
+/// hold: the relative difference `|a - b| / max(a, b)` exceeds
+/// `max_runtime_ratio` AND the absolute difference exceeds
+/// `min_runtime_delta_secs`. The double condition keeps the check quiet in the
+/// two cases where a single threshold is noisy -- on short content, where a
+/// large ratio can still be only a few seconds, and on long content, where a
+/// few minutes of legitimate edition drift is a tiny ratio.
+#[derive(Debug, Clone, Copy)]
+pub struct DivergencePolicy {
+    /// Minimum relative runtime difference (`0.0`–`1.0`) for a pair to count as
+    /// diverging. Defaults to `0.15` (15%).
+    pub max_runtime_ratio: f64,
+    /// Minimum absolute runtime difference, in seconds, for a pair to count as
+    /// diverging. Defaults to `240.0` (4 minutes).
+    pub min_runtime_delta_secs: f64,
+}
+
+impl Default for DivergencePolicy {
+    fn default() -> Self {
+        Self {
+            max_runtime_ratio: 0.15,
+            min_runtime_delta_secs: 240.0,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum IndexError {
     #[error("Database error: {0}")]
@@ -89,6 +123,7 @@ pub struct LocalIndexService {
     admin_log: Arc<dyn AdminLogService>,
     hash_unknown_files: bool,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
+    divergence_policy: DivergencePolicy,
 }
 
 impl LocalIndexService {
@@ -116,7 +151,16 @@ impl LocalIndexService {
             admin_log,
             hash_unknown_files: true,
             enrichment_repo: None,
+            divergence_policy: DivergencePolicy::default(),
         }
+    }
+
+    /// Override the runtime-divergence thresholds used when warning that two
+    /// renditions of the same movie/episode disagree on runtime. Defaults to
+    /// [`DivergencePolicy::default`].
+    pub fn with_divergence_policy(mut self, policy: DivergencePolicy) -> Self {
+        self.divergence_policy = policy;
+        self
     }
 
     /// Override whether files with unknown extensions are hashed for duplicate
@@ -387,6 +431,7 @@ impl LocalIndexService {
                 })
                 .await?;
             self.check_and_report_duplicate(&file).await;
+            self.check_and_report_runtime_divergence(&file).await;
             return Ok(true);
         }
 
@@ -445,6 +490,7 @@ impl LocalIndexService {
 
         self.insert_media_streams(file.id, &metadata).await?;
         self.check_and_report_duplicate(&file).await;
+        self.check_and_report_runtime_divergence(&file).await;
         Ok(true)
     }
 
@@ -555,6 +601,7 @@ impl LocalIndexService {
                 })
                 .await?;
             self.check_and_report_duplicate(&updated).await;
+            self.check_and_report_runtime_divergence(&updated).await;
             return Ok(());
         }
 
@@ -580,6 +627,7 @@ impl LocalIndexService {
                     })
                     .await?;
                 self.check_and_report_duplicate(&updated).await;
+                self.check_and_report_runtime_divergence(&updated).await;
                 Ok(())
             }
             Err(e) => {
@@ -603,6 +651,7 @@ impl LocalIndexService {
                     })
                     .await?;
                 self.check_and_report_duplicate(&updated).await;
+                self.check_and_report_runtime_divergence(&updated).await;
                 Ok(())
             }
         }
@@ -652,6 +701,160 @@ impl LocalIndexService {
                 })),
             )
             .await;
+    }
+
+    /// Warn when `file` maps to a movie/episode that already has other files
+    /// whose probed runtime disagrees beyond [`DivergencePolicy`]'s thresholds
+    /// -- usually a sign of a misnamed or mismatched file (issue #88). Never
+    /// fails the scan: like [`Self::check_and_report_duplicate`], every
+    /// repository error is swallowed with a `warn!` and the method returns.
+    async fn check_and_report_runtime_divergence(&self, file: &MediaFile) {
+        // Skip files without a usable probed duration -- nothing to compare.
+        let Some(duration) = file.duration else {
+            return;
+        };
+        let file_secs = duration.as_secs_f64();
+        if file_secs <= 0.0 {
+            return;
+        }
+
+        // Gather the sibling files that share this file's movie/episode.
+        let siblings: Vec<MediaFile> = match &file.content {
+            Some(MediaFileContent::Movie { movie_entry_id }) => {
+                let entry = match self.movie_repo.find_entry_by_id(*movie_entry_id).await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => return,
+                    Err(e) => {
+                        warn!(
+                            "Runtime-divergence check failed for {}: {}",
+                            file.path.display(),
+                            e
+                        );
+                        return;
+                    }
+                };
+                let entries = match self
+                    .movie_repo
+                    .find_entries_by_movie_id(entry.movie_id)
+                    .await
+                {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        warn!(
+                            "Runtime-divergence check failed for {}: {}",
+                            file.path.display(),
+                            e
+                        );
+                        return;
+                    }
+                };
+                let mut collected = Vec::new();
+                for entry in entries {
+                    match self.file_repo.find_by_movie_entry_id(entry.id).await {
+                        Ok(files) => collected.extend(files),
+                        Err(e) => {
+                            warn!(
+                                "Runtime-divergence check failed for {}: {}",
+                                file.path.display(),
+                                e
+                            );
+                            return;
+                        }
+                    }
+                }
+                collected
+            }
+            Some(MediaFileContent::Episode { episode_id }) => {
+                match self.file_repo.find_by_episode_id(*episode_id).await {
+                    Ok(files) => files,
+                    Err(e) => {
+                        warn!(
+                            "Runtime-divergence check failed for {}: {}",
+                            file.path.display(),
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
+            None => return,
+        };
+
+        // Compare against every sibling that carries a probed runtime, keeping
+        // the pairs that diverge past both thresholds.
+        let policy = &self.divergence_policy;
+        let mut diverging: Vec<(&MediaFile, f64)> = Vec::new();
+        for sibling in &siblings {
+            if sibling.id == file.id {
+                continue;
+            }
+            let Some(sibling_duration) = sibling.duration else {
+                continue;
+            };
+            let sibling_secs = sibling_duration.as_secs_f64();
+            if sibling_secs <= 0.0 {
+                continue;
+            }
+            let delta = (file_secs - sibling_secs).abs();
+            let ratio = delta / file_secs.max(sibling_secs);
+            if ratio > policy.max_runtime_ratio && delta > policy.min_runtime_delta_secs {
+                diverging.push((sibling, sibling_secs));
+            }
+        }
+        if diverging.is_empty() {
+            return;
+        }
+
+        // Name the sibling that diverges most (largest absolute delta) in the
+        // single warning we emit.
+        let (worst_sibling, worst_secs) = diverging
+            .iter()
+            .max_by(|(_, a), (_, b)| (file_secs - *a).abs().total_cmp(&(file_secs - *b).abs()))
+            .copied()
+            .expect("diverging is non-empty");
+
+        let message = format!(
+            "Runtime mismatch: '{}' ({}) differs from '{}' ({}); {} rendition(s) of the same title \
+             diverge -- likely a misnamed or mismatched file",
+            file.path.display(),
+            humanize_minutes(file_secs),
+            worst_sibling.path.display(),
+            humanize_minutes(worst_secs),
+            diverging.len(),
+        );
+
+        self.notification_service.publish(AdminEvent::warning(
+            EventCategory::LibraryScan,
+            message.clone(),
+            Some(file.library_id.to_string()),
+            None,
+        ));
+        let siblings_json: Vec<serde_json::Value> = diverging
+            .iter()
+            .map(|(sibling, secs)| {
+                serde_json::json!({
+                    "path": sibling.path.display().to_string(),
+                    "duration_secs": secs,
+                })
+            })
+            .collect();
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Warning,
+                AdminLogCategory::LibraryScan,
+                message,
+                Some(serde_json::json!({
+                    "file": file.path.display().to_string(),
+                    "siblings": siblings_json,
+                    "threshold": {
+                        "max_runtime_ratio": policy.max_runtime_ratio,
+                        "min_runtime_delta_secs": policy.min_runtime_delta_secs,
+                    },
+                })),
+            )
+            .await;
+        metrics::counter!("beam_index_divergence_warnings_total").increment(1);
     }
 
     /// Publish a warning for a file that could not be processed, without
@@ -3218,5 +3421,302 @@ mod tests {
 
         let total = service.scan_all_libraries().await.unwrap();
         assert_eq!(total, 2);
+    }
+
+    // ─── runtime-divergence detection (issue #88) ──────────────────────────────
+
+    /// Build a service wired for divergence tests: real in-memory file + movie
+    /// repos (so sibling lookups resolve), the caller's notification + admin-log
+    /// services for inspection, and mocks for the parts a bare divergence check
+    /// never touches.
+    fn make_divergence_service(
+        file_repo: Arc<dyn FileRepository>,
+        movie_repo: Arc<dyn MovieRepository>,
+        notification: Arc<InMemoryNotificationService>,
+        admin_log: Arc<dyn AdminLogService>,
+    ) -> LocalIndexService {
+        LocalIndexService::new(
+            Arc::new(InMemoryLibraryRepository::default()),
+            file_repo,
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            notification,
+            admin_log,
+        )
+    }
+
+    fn make_file_with_content(
+        content: Option<MediaFileContent>,
+        duration_secs: Option<f64>,
+        path: &str,
+    ) -> MediaFile {
+        MediaFile {
+            id: Uuid::new_v4(),
+            library_id: Uuid::new_v4(),
+            path: PathBuf::from(path),
+            hash: 0,
+            size_bytes: 1024,
+            mtime: None,
+            mime_type: None,
+            duration: duration_secs.map(Duration::from_secs_f64),
+            container_format: None,
+            content,
+            status: FileStatus::Known,
+            scanned_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Seed a movie with two entries (one file each) under the same movie id and
+    /// return the service, the notification fake, the admin-log repo, and the
+    /// first file (the one that gets checked).
+    async fn seed_two_movie_renditions(
+        first_secs: Option<f64>,
+        second_secs: Option<f64>,
+    ) -> (
+        LocalIndexService,
+        Arc<InMemoryNotificationService>,
+        Arc<InMemoryAdminLogRepository>,
+        MediaFile,
+    ) {
+        use beam_domain::models::{CreateMovie, CreateMovieEntry};
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let notification = Arc::new(InMemoryNotificationService::new());
+        let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+        let admin_log_svc = Arc::new(LocalAdminLogService::new(
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+        ));
+
+        let library_id = Uuid::new_v4();
+        let movie = movie_repo
+            .create(CreateMovie {
+                title: "Some Movie".to_string(),
+                year: None,
+                runtime: None,
+            })
+            .await
+            .unwrap();
+        let entry_a = movie_repo
+            .create_entry(CreateMovieEntry {
+                library_id,
+                movie_id: movie.id,
+                edition: None,
+                is_primary: true,
+            })
+            .await
+            .unwrap();
+        let entry_b = movie_repo
+            .create_entry(CreateMovieEntry {
+                library_id,
+                movie_id: movie.id,
+                edition: Some("Extended".to_string()),
+                is_primary: false,
+            })
+            .await
+            .unwrap();
+
+        let file_a = make_file_with_content(
+            Some(MediaFileContent::Movie {
+                movie_entry_id: entry_a.id,
+            }),
+            first_secs,
+            "/media/movie-a.mkv",
+        );
+        let file_b = make_file_with_content(
+            Some(MediaFileContent::Movie {
+                movie_entry_id: entry_b.id,
+            }),
+            second_secs,
+            "/media/movie-b.mkv",
+        );
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(file_a.id, file_a.clone());
+        file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+
+        let service =
+            make_divergence_service(file_repo, movie_repo, notification.clone(), admin_log_svc);
+        (service, notification, admin_log_repo, file_a)
+    }
+
+    #[tokio::test]
+    async fn test_divergence_movie_wildly_different_runtimes_warns() {
+        // 40 min vs 90 min: ratio ~0.56 and delta 3000s both blow past the
+        // thresholds → exactly one warning across both admin channels.
+        let (service, notification, admin_log_repo, file_a) =
+            seed_two_movie_renditions(Some(40.0 * 60.0), Some(90.0 * 60.0)).await;
+
+        service.check_and_report_runtime_divergence(&file_a).await;
+
+        let warnings: Vec<_> = notification
+            .published_events()
+            .into_iter()
+            .filter(|e| matches!(e.level, EventLevel::Warning))
+            .collect();
+        assert_eq!(warnings.len(), 1, "expected exactly one warning event");
+        let warning = &warnings[0];
+        assert!(matches!(warning.category, EventCategory::LibraryScan));
+        assert!(warning.message.contains("/media/movie-a.mkv"));
+        assert!(warning.message.contains("/media/movie-b.mkv"));
+        assert!(warning.message.contains("40 min"));
+        assert!(warning.message.contains("90 min"));
+
+        // The durable admin log must also carry a Warning LibraryScan entry.
+        let logs = admin_log_repo.list(100, 0).await.unwrap();
+        assert!(logs.iter().any(|l| {
+            l.level == AdminLogLevel::Warning
+                && l.category == AdminLogCategory::LibraryScan
+                && l.message.contains("Runtime mismatch")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_divergence_within_threshold_no_warning() {
+        // 90 min vs 92 min: delta 120s < 240s (and ratio ~0.022 < 0.15) → quiet.
+        let (service, notification, _admin_log_repo, file_a) =
+            seed_two_movie_renditions(Some(90.0 * 60.0), Some(92.0 * 60.0)).await;
+
+        service.check_and_report_runtime_divergence(&file_a).await;
+
+        assert!(
+            notification.published_events().is_empty(),
+            "renditions within threshold must not warn"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_divergence_short_content_guard_no_warning() {
+        // Two episodes at 2 min vs 3 min: the ratio (0.33) clears the relative
+        // threshold, but the 60s delta is far under the 240s floor → no warning.
+        let episode_id = Uuid::new_v4();
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let notification = Arc::new(InMemoryNotificationService::new());
+
+        let file_a = make_file_with_content(
+            Some(MediaFileContent::Episode { episode_id }),
+            Some(2.0 * 60.0),
+            "/media/ep-a.mkv",
+        );
+        let file_b = make_file_with_content(
+            Some(MediaFileContent::Episode { episode_id }),
+            Some(3.0 * 60.0),
+            "/media/ep-b.mkv",
+        );
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(file_a.id, file_a.clone());
+        file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+
+        let service = make_divergence_service(
+            file_repo,
+            Arc::new(InMemoryMovieRepository::default()),
+            notification.clone(),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service.check_and_report_runtime_divergence(&file_a).await;
+
+        assert!(
+            notification.published_events().is_empty(),
+            "short content below the absolute floor must not warn"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_divergence_episode_siblings_warn() {
+        // 30 min vs 60 min episodes: both thresholds cleared → one warning.
+        let episode_id = Uuid::new_v4();
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let notification = Arc::new(InMemoryNotificationService::new());
+
+        let file_a = make_file_with_content(
+            Some(MediaFileContent::Episode { episode_id }),
+            Some(30.0 * 60.0),
+            "/media/ep-a.mkv",
+        );
+        let file_b = make_file_with_content(
+            Some(MediaFileContent::Episode { episode_id }),
+            Some(60.0 * 60.0),
+            "/media/ep-b.mkv",
+        );
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(file_a.id, file_a.clone());
+        file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+
+        let service = make_divergence_service(
+            file_repo,
+            Arc::new(InMemoryMovieRepository::default()),
+            notification.clone(),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service.check_and_report_runtime_divergence(&file_a).await;
+
+        let warnings: Vec<_> = notification
+            .published_events()
+            .into_iter()
+            .filter(|e| matches!(e.level, EventLevel::Warning))
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("/media/ep-b.mkv"));
+    }
+
+    #[tokio::test]
+    async fn test_divergence_unprobed_sibling_skipped() {
+        // The checked file is probed (40 min) but its only sibling has no
+        // duration → the sibling is skipped and nothing is flagged.
+        let (service, notification, _admin_log_repo, file_a) =
+            seed_two_movie_renditions(Some(40.0 * 60.0), None).await;
+
+        service.check_and_report_runtime_divergence(&file_a).await;
+
+        assert!(
+            notification.published_events().is_empty(),
+            "an unprobed sibling must be skipped, not flagged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_divergence_check_never_fails_on_repo_error() {
+        // A repository error during the sibling lookup must be swallowed: the
+        // check returns without publishing anything, so it can never abort a
+        // scan (it is invoked with `.await`, never `?`).
+        let mut mock_file = MockFileRepository::new();
+        mock_file
+            .expect_find_by_episode_id()
+            .times(1)
+            .returning(|_| Err(sea_orm::DbErr::Custom("simulated lookup failure".into())));
+
+        let notification = Arc::new(InMemoryNotificationService::new());
+        let service = make_divergence_service(
+            Arc::new(mock_file),
+            Arc::new(MockMovieRepository::new()),
+            notification.clone(),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let file = make_file_with_content(
+            Some(MediaFileContent::Episode {
+                episode_id: Uuid::new_v4(),
+            }),
+            Some(45.0 * 60.0),
+            "/media/only.mkv",
+        );
+
+        // Must complete (infallible) and publish nothing.
+        service.check_and_report_runtime_divergence(&file).await;
+        assert!(notification.published_events().is_empty());
     }
 }
