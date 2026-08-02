@@ -170,6 +170,9 @@ mod tests {
             admin_log,
             user_repo: user_repo.clone(),
             playback,
+            genre_repo: Arc::new(
+                beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
+            ),
             session_store: session_store.clone(),
             oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
             pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),

@@ -152,6 +152,9 @@ pub(crate) fn make_app_state() -> AppState {
         admin_log,
         user_repo: Arc::new(InMemoryUserRepository::default()),
         playback,
+        genre_repo: Arc::new(
+            beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
+        ),
         session_store: Arc::new(InMemorySessionStore::default()),
         oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in routing tests")),
         pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
