@@ -12,7 +12,7 @@ role.
 
 | Route | Method(s) | Purpose |
 |---|---|---|
-| `/v1/health` | GET | Liveness/health check (public) |
+| `/v1/health` | GET | Deep health check (public): probes the database and returns `200` `{status:"healthy"}` or `503` `{status:"degraded"}` with per-dependency `checks` and process `uptime_secs` |
 | `/v1/media` | GET | Browse/search catalog (cursor pagination, filters, sort) |
 | `/v1/media/{id}` | GET | Full metadata for one movie or show |
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie, with probed per-stream codecs |

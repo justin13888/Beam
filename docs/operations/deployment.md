@@ -79,8 +79,10 @@ about. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam
      it up (`pg_dump` on a schedule is the minimum viable story).
 4. **Metadata enrichment** — set `BEAM_TMDB_API_TOKEN` for TMDB-sourced enrichment; without it,
    TMDB-eligible titles are left un-enriched while AniList titles still enrich.
-5. **Operations** — set `BEAM_ENABLE_METRICS=true` for monitoring and keep `RUST_LOG` at `info`
-   or `warn`; structured logs back the admin log viewer.
+5. **Operations** — set `BEAM_ENABLE_METRICS=true` for monitoring (Prometheus text exposition at
+   `GET /metrics`, top-level and unauthenticated — scrape it over the internal network and do not
+   forward it through the reverse proxy) and keep `RUST_LOG` at `info` or `warn`; structured logs
+   back the admin log viewer.
 
 Then `podman compose up -d`, and verify: `https://<your-domain>/v1/health` returns OK, the web
 app loads, login round-trips through your IdP, and an admin user can create a library pointing at

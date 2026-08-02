@@ -2,11 +2,15 @@ pub mod admin;
 pub mod api_error;
 pub mod health;
 pub mod media;
+pub mod metrics_mw;
 pub mod middleware;
 pub mod playback;
 pub mod rate_limit;
 pub mod stream;
+#[cfg(test)]
+pub(crate) mod test_support;
 
+use metrics_exporter_prometheus::PrometheusHandle;
 use salvo::prelude::*;
 
 pub use admin::*;
@@ -93,8 +97,16 @@ fn rest_routes(rate_limiters: Option<RateLimiters>) -> Router {
         .push(Router::with_path("sessions/{id}").delete(beam_auth::server::oidc_delete_session))
 }
 
-/// Create the main API router with all routes
-pub fn create_router(state: AppState) -> Router {
+/// Create the main API router with all routes.
+///
+/// `metrics_handle` is `Some` when `BEAM_ENABLE_METRICS=true` (main installs
+/// the Prometheus recorder and passes its handle here). It switches on both
+/// metrics pieces at once: the [`metrics_mw::HttpMetrics`] hoop wrapping the
+/// `/v1` subtree, and the top-level unauthenticated `GET /metrics` exposition
+/// route. When `None`, neither is mounted — zero overhead, matching the
+/// flag's promise. `/metrics` never appears in `create_docs_router`, so the
+/// exported OpenAPI spec is independent of the flag.
+pub fn create_router(state: AppState, metrics_handle: Option<PrometheusHandle>) -> Router {
     // Note: No authorization is done at the top-level here -- each endpoint is
     // either public or self-contained (admin routes gated via
     // `require_admin`).
@@ -113,18 +125,32 @@ pub fn create_router(state: AppState) -> Router {
     // Build limiters (or not) before `state` is moved into the affix hoop.
     let rate_limiters = build_rate_limiters(&state.config);
 
-    Router::new()
+    let mut v1 = Router::with_path("v1");
+    if metrics_handle.is_some() {
+        // First hoop on the subtree = outermost: it observes the final status
+        // of every /v1 response, including 429s from the rate limiters and
+        // same-origin rejections below.
+        v1 = v1.hoop(metrics_mw::HttpMetrics);
+    }
+    let v1 = v1
+        .hoop(middleware::enforce_same_origin)
+        .push(rest_routes(rate_limiters));
+
+    let mut router = Router::new()
         .hoop(affix_state::inject(state))
         .hoop(affix_state::inject(user_repo))
         .hoop(affix_state::inject(session_store))
         .hoop(affix_state::inject(oidc_client))
         .hoop(affix_state::inject(pending_auth_store))
         .hoop(affix_state::inject(oidc_config))
-        .push(
-            Router::with_path("v1")
-                .hoop(middleware::enforce_same_origin)
-                .push(rest_routes(rate_limiters)),
-        )
+        .push(v1);
+
+    if let Some(handle) = metrics_handle {
+        router =
+            router.push(Router::with_path("metrics").get(metrics_mw::MetricsEndpoint::new(handle)));
+    }
+
+    router
 }
 
 /// Create a minimal router for OpenAPI documentation export.

@@ -47,6 +47,15 @@ fn is_known_video(path: &Path) -> bool {
         .is_some_and(|e| KNOWN_VIDEO_EXTENSIONS.contains(&e.as_str()))
 }
 
+/// Records one processed-file outcome on the
+/// `beam_index_files_processed_total{result}` counter, covering both full
+/// scans and watcher-driven reconciles. `result` is one of `new`, `changed`,
+/// `unchanged`, or `failed`. A no-op unless beam-server installed a metrics
+/// recorder (`BEAM_ENABLE_METRICS=true`).
+fn record_file_outcome(result: &'static str) {
+    metrics::counter!("beam_index_files_processed_total", "result" => result).increment(1);
+}
+
 #[derive(Debug, Error)]
 pub enum IndexError {
     #[error("Database error: {0}")]
@@ -457,6 +466,7 @@ impl LocalIndexService {
 
         // Cheap gate: only a size or mtime change warrants a rehash.
         if size == existing.size_bytes && mtime == existing.mtime {
+            record_file_outcome("unchanged");
             return Ok(());
         }
 
@@ -476,6 +486,7 @@ impl LocalIndexService {
                     status: None,
                 })
                 .await?;
+            record_file_outcome("changed");
             return Ok(());
         }
 
@@ -484,6 +495,7 @@ impl LocalIndexService {
             Ok(h) => h,
             Err(e) => {
                 warn!("Failed to hash {}: {}", path.display(), e);
+                record_file_outcome("failed");
                 return Ok(());
             }
         };
@@ -503,11 +515,14 @@ impl LocalIndexService {
                     status: None,
                 })
                 .await?;
+            record_file_outcome("unchanged");
             return Ok(());
         }
 
         self.reconcile_changed_file(existing, path, size, mtime, new_hash, known_video)
-            .await
+            .await?;
+        record_file_outcome("changed");
+        Ok(())
     }
 
     /// Apply a confirmed content change: refresh hash, metadata and streams.
@@ -649,6 +664,7 @@ impl LocalIndexService {
         err: &IndexError,
     ) {
         error!("Failed to process file {}: {}", path.display(), err);
+        record_file_outcome("failed");
         self.notification_service.publish(AdminEvent::warning(
             EventCategory::LibraryScan,
             format!("Failed to process file '{}': {}", path.display(), err),
@@ -709,7 +725,9 @@ impl LocalIndexService {
         match self.file_repo.find_by_path(&path_str).await? {
             Some(existing) => self.reconcile_existing_file(&existing, &path).await,
             None => {
-                self.process_new_file(&path, library_id).await?;
+                if self.process_new_file(&path, library_id).await? {
+                    record_file_outcome("new");
+                }
                 Ok(())
             }
         }
@@ -816,7 +834,10 @@ impl IndexService for LocalIndexService {
             } else {
                 // New file.
                 match self.process_new_file(&path, lib_uuid).await {
-                    Ok(true) => added_count += 1,
+                    Ok(true) => {
+                        added_count += 1;
+                        record_file_outcome("new");
+                    }
                     Ok(false) => {}
                     Err(e) => {
                         self.report_file_failure(lib_uuid, &library.name, &path, &e)

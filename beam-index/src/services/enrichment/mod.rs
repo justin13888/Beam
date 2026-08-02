@@ -201,6 +201,23 @@ impl MetadataEnrichmentService {
             }
         }
 
+        // Prometheus counters, emitted from the report tallies already kept
+        // above so no extra state is threaded through the row processing.
+        // Each call is a no-op unless beam-server installed a recorder
+        // (BEAM_ENABLE_METRICS=true).
+        for (outcome, count) in [
+            ("enriched", u64::from(report.enriched)),
+            ("unmatched", u64::from(report.unmatched)),
+            ("retrying", u64::from(report.retrying)),
+            ("failed", u64::from(report.failed)),
+            ("rate_limited", u64::from(report.rate_limited)),
+        ] {
+            if count > 0 {
+                metrics::counter!("beam_enrichment_outcomes_total", "outcome" => outcome)
+                    .increment(count);
+            }
+        }
+
         report
     }
 
@@ -848,5 +865,105 @@ mod tests {
         assert_eq!(policy.backoff_for(1), Duration::from_secs(60));
         assert_eq!(policy.backoff_for(5), Duration::from_secs(86400));
         assert_eq!(policy.backoff_for(99), Duration::from_secs(86400));
+    }
+
+    /// The sweep's report tallies flow into
+    /// `beam_enrichment_outcomes_total{outcome}` counters. Asserted through a
+    /// thread-local recorder (never a global install, which would collide
+    /// across parallel tests): the async sweep runs on a current-thread
+    /// runtime *inside* the local-recorder scope so every sample is captured.
+    #[test]
+    fn sweep_outcomes_are_counted_as_metrics() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                // One row that enriches (exact title+year match) and one that
+                // fails (target movie deleted out from under the queue row).
+                let hit = MovieSearchHit {
+                    external_ref: ExternalMediaRef::new("tmdb", "603"),
+                    title: "The Matrix".to_string(),
+                    original_title: None,
+                    year: Some(1999),
+                    popularity: Some(80.0),
+                    vote_average: Some(8.7),
+                };
+                let enrichment = MovieEnrichment {
+                    tmdb_id: Some(603),
+                    title: "The Matrix".to_string(),
+                    year: Some(1999),
+                    ..Default::default()
+                };
+                let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+                    .with_movie_search("The Matrix", vec![hit])
+                    .with_movie_enrichment(enrichment);
+                let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) =
+                    harness(provider);
+
+                let matched = movie_repo
+                    .create(CreateMovie {
+                        title: "The Matrix".to_string(),
+                        year: Some(1999),
+                        runtime: None,
+                    })
+                    .await
+                    .unwrap();
+                state_repo
+                    .ensure_pending(EnrichmentTargetId::Movie(matched.id))
+                    .await
+                    .unwrap();
+
+                let doomed = movie_repo
+                    .create(CreateMovie {
+                        title: "Ghost".to_string(),
+                        year: None,
+                        runtime: None,
+                    })
+                    .await
+                    .unwrap();
+                state_repo
+                    .ensure_pending(EnrichmentTargetId::Movie(doomed.id))
+                    .await
+                    .unwrap();
+                movie_repo.movies.lock().unwrap().remove(&doomed.id);
+
+                let report = service.sweep_once().await;
+                assert_eq!(report.enriched, 1);
+                assert_eq!(report.failed, 1);
+            })
+        });
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let outcome_count = |outcome: &str| -> Option<u64> {
+            snapshot.iter().find_map(|(key, _, _, value)| {
+                let key = key.key();
+                if key.name() != "beam_enrichment_outcomes_total" {
+                    return None;
+                }
+                if !key
+                    .labels()
+                    .any(|l| l.key() == "outcome" && l.value() == outcome)
+                {
+                    return None;
+                }
+                match value {
+                    DebugValue::Counter(v) => Some(*v),
+                    _ => None,
+                }
+            })
+        };
+
+        assert_eq!(outcome_count("enriched"), Some(1), "snapshot: {snapshot:?}");
+        assert_eq!(outcome_count("failed"), Some(1), "snapshot: {snapshot:?}");
+        // Zero tallies must not mint a series at all.
+        assert_eq!(outcome_count("unmatched"), None);
+        assert_eq!(outcome_count("rate_limited"), None);
     }
 }

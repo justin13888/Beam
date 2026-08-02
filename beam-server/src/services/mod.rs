@@ -1,5 +1,6 @@
 pub mod admin_log;
 pub mod hash;
+pub mod health;
 pub mod library;
 pub mod media_info;
 pub mod metadata;

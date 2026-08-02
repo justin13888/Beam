@@ -21,6 +21,8 @@ color-eyre = "0.6.5"
 confique = { workspace = true }
 dotenvy = "0.15.7"
 eyre = "0.6.12"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 rust_decimal = "1.39.0"
@@ -40,6 +42,7 @@ futures = "0.3.31"
 beam-auth = { path = "../beam-auth", features = ["test-utils"] }
 beam-domain = { path = "../beam-domain", features = ["test-utils"] }
 beam-index = { path = "../beam-index", features = ["test-utils"] }
+metrics-util = { workspace = true }
 mockall = "0.14.0"
 
 [features]
