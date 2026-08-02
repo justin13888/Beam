@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Superseded by [ADR-0010](ADR-0010-openapi-3-2-kynos.md), which retains the REST-only decision while
+ratifying OpenAPI 3.2, typed SSE, and Kynos as the migration target.
 
 ## Context
 

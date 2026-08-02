@@ -50,9 +50,10 @@ requirements (referenced below as FR-xxx).
   SHOULD be reserved for simple, strict contract verification.
 - **NFR-204**: Core request-handling flows (auth, library CRUD, search, playback position updates,
   admin actions) MUST have at least one subcutaneous end-to-end test that instantiates the
-  application router with in-memory implementations and drives it via `salvo::test::TestClient`,
-  asserting on both the HTTP response and the resulting state mutation. Automated browser e2e tests
-  are deferred — tracked in [#74](https://github.com/justin13888/beam/issues/74).
+  application router with in-memory implementations and drives it through the active framework's
+  in-process test client, asserting on both the HTTP response and the resulting state mutation.
+  Automated browser e2e tests are deferred — tracked in
+  [#74](https://github.com/justin13888/beam/issues/74).
 - **NFR-205**: Edge cases that would otherwise require manual verification (missing file, corrupted
   or unreadable media entry, database-call failure, expired session, unauthorized admin action) MUST
   be codified as unit tests by configuring the relevant injected trait to return the corresponding
@@ -104,7 +105,7 @@ requirements (referenced below as FR-xxx).
   admin-mutating actions, sufficient to back the admin log viewer (FR-604, FR-605).
 - **NFR-404**: Real-time progress surfaces (scan, enrichment) MUST be implemented via Server-Sent
   Events rather than WebSockets or GraphQL subscriptions, consistent with the REST-only API
-  ([ADR-0002](../architecture/decisions/ADR-0002-rest-only-api.md)).
+  ([ADR-0010](../architecture/decisions/ADR-0010-openapi-3-2-kynos.md)).
 - **NFR-405**: The server MUST expose a single OpenAPI specification describing its full REST API
   surface, from which the TypeScript client types consumed by `beam-web` are generated, keeping the
   client and server contract in sync without hand-maintained duplicate type definitions.

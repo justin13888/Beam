@@ -7,6 +7,10 @@ a REST API and direct media byte streams. It persists all of its own state — c
 enrichment queue — in a single Postgres database. See `docs/requirements/product.md` for the
 product-level framing this architecture serves.
 
+The diagrams below describe the deployed Salvo implementation. Kynos is the ratified replacement,
+but is not adopted until the [migration readiness gates](kynos-migration-readiness.md) from
+[ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md) pass.
+
 ## System context
 
 ```mermaid

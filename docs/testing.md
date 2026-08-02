@@ -35,11 +35,12 @@ number of times — not for simulating multi-step state transitions.
 
 **Subcutaneous end-to-end tests.** Core request-handling flows are tested by instantiating the real
 in-process router/service graph with fakes wired in at the trait boundaries, then driving it with
-programmatic HTTP requests (Salvo's `TestClient`) and asserting on both the HTTP response and the
-resulting state mutation (NFR-204). This style — real routing, real handler code, real service
-logic, fake infrastructure below the trait line — is deliberately favored over deep unit-level
-mocking because it exercises the composition of components the way production traffic does, while
-remaining hermetic. OIDC login/callback/logout, media browse/detail/sources, library CRUD, search,
+programmatic HTTP requests through the active framework's in-process test client and asserting on
+both the HTTP response and the resulting state mutation (NFR-204). This style — real routing, real
+handler code, real service logic, fake infrastructure below the trait line — is deliberately
+favored over deep unit-level mocking because it exercises the composition of components the way
+production traffic does, while remaining hermetic. OIDC login/callback/logout, media
+browse/detail/sources, library CRUD, search,
 playback-position updates, streaming Range handling, and admin actions are all covered this way.
 
 **Edge cases as tests, not manual QA.** Any scenario that would otherwise require manual

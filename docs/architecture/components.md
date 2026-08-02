@@ -5,13 +5,17 @@ boundaries it must respect, and how it is tested. System-level context lives in
 [overview.md](overview.md); schema detail in [data-model.md](data-model.md); decision rationale in
 the [ADRs](decisions/).
 
+This page describes deployed components. Kynos is a ratified future replacement for Salvo, subject
+to the [migration readiness contract](kynos-migration-readiness.md); it is not yet a workspace
+dependency.
+
 ## Server (`beam-server`)
 
 The single deployable backend binary
 ([ADR-0001](decisions/ADR-0001-modular-monolith.md)). It owns:
 
 - The HTTP API (Salvo) under `/v1`, REST/OpenAPI-only
-  ([ADR-0002](decisions/ADR-0002-rest-only-api.md)): media browse/search/detail,
+  ([ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md)): media browse/search/detail,
   playback-progress/continue-watching, admin-gated library CRUD, operational logs, and an SSE
   endpoint for scan/enrichment progress.
 - Auth wiring: mounts `beam-auth`'s OIDC BFF routes; sessions are Postgres-backed via `beam-auth`

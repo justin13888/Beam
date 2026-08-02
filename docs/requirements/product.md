@@ -50,7 +50,8 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
 - A single modular-monolith server binary (`beam-server`): HTTP API, OIDC auth, in-process indexing
   and enrichment, direct-play streaming
   ([ADR-0001](../architecture/decisions/ADR-0001-modular-monolith.md)).
-- A single OpenAPI-first REST API ([ADR-0002](../architecture/decisions/ADR-0002-rest-only-api.md)),
+- A single OpenAPI-first REST API
+  ([ADR-0010](../architecture/decisions/ADR-0010-openapi-3-2-kynos.md)),
   with real-time scan and enrichment progress over Server-Sent Events (SSE).
 - OIDC-only authentication via the backend-for-frontend (BFF) pattern, with JIT user provisioning
   and admin-role determination via an email allowlist

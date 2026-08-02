@@ -2,7 +2,12 @@
 
 Beam exposes exactly one client-facing API: a domain-specific REST API, versioned under `/v1`,
 specified via Salvo's OpenAPI integration, with real-time admin events over SSE. There is no
-GraphQL endpoint — see [ADR-0002](decisions/ADR-0002-rest-only-api.md) for why REST-only.
+GraphQL endpoint — see [ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md) for why REST-only.
+
+The deployed implementation remains Salvo. [ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md)
+ratifies OpenAPI 3.2 and Kynos as its replacement, but migration is blocked until the
+[Kynos readiness contract](kynos-migration-readiness.md) is satisfied. This page continues to
+describe current runtime behavior until that migration lands.
 
 ## Surface
 
@@ -76,4 +81,4 @@ Real-time admin events (scan progress, enrichment outcomes, system events) are d
 Standard `EventSource` reconnection semantics apply; the server does not replay missed events — a
 reconnecting client re-fetches current state via `GET /v1/admin/events` or the corresponding REST
 resource. SSE was chosen over WebSockets because the channel is strictly server-to-client — see
-[ADR-0002](decisions/ADR-0002-rest-only-api.md).
+[ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md).
