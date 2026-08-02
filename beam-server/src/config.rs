@@ -173,6 +173,31 @@ pub struct ServerConfig {
     /// Absolute session lifetime, in days, regardless of activity.
     #[config(env = "BEAM_SESSION_MAX_DAYS", default = 60)]
     pub session_max_days: u64,
+
+    /// Whether the in-process rate limiter is installed on the auth and search
+    /// endpoints (see `routes::rate_limit`, NFR-107). When false, no limiter
+    /// hoops are mounted at all.
+    #[config(env = "BEAM_RATE_LIMIT_ENABLED", default = true)]
+    pub rate_limit_enabled: bool,
+
+    /// Sustained request rate — and burst capacity — for the auth endpoints
+    /// (`/v1/auth/login`, `/v1/auth/callback`), per client key, in requests per
+    /// minute. Must be at least 1.
+    #[config(env = "BEAM_RATE_LIMIT_AUTH_PER_MINUTE", default = 10)]
+    pub rate_limit_auth_per_minute: u32,
+
+    /// Sustained request rate — and burst capacity — for the media
+    /// browse/search endpoint (`GET /v1/media`), per client key, in requests
+    /// per minute. Must be at least 1.
+    #[config(env = "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE", default = 60)]
+    pub rate_limit_search_per_minute: u32,
+
+    /// Whether to trust a client-supplied `X-Forwarded-For` header when
+    /// deriving the rate-limit client key. Off by default: the header is
+    /// trivially spoofable unless the server sits behind a trusted proxy that
+    /// overwrites it. When off, the peer socket IP is used.
+    #[config(env = "BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR", default = false)]
+    pub rate_limit_trust_forwarded_for: bool,
 }
 
 /// Hand-written so the startup "Configuration loaded" log line can never
@@ -212,6 +237,10 @@ impl fmt::Debug for ServerConfig {
             cookie_secure,
             session_idle_days,
             session_max_days,
+            rate_limit_enabled,
+            rate_limit_auth_per_minute,
+            rate_limit_search_per_minute,
+            rate_limit_trust_forwarded_for,
         } = self;
         f.debug_struct("ServerConfig")
             .field("bind_address", bind_address)
@@ -244,6 +273,13 @@ impl fmt::Debug for ServerConfig {
             .field("cookie_secure", cookie_secure)
             .field("session_idle_days", session_idle_days)
             .field("session_max_days", session_max_days)
+            .field("rate_limit_enabled", rate_limit_enabled)
+            .field("rate_limit_auth_per_minute", rate_limit_auth_per_minute)
+            .field("rate_limit_search_per_minute", rate_limit_search_per_minute)
+            .field(
+                "rate_limit_trust_forwarded_for",
+                rate_limit_trust_forwarded_for,
+            )
             .finish()
     }
 }
@@ -398,6 +434,20 @@ impl ServerConfig {
             ));
         }
 
+        if self.rate_limit_auth_per_minute == 0 {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_RATE_LIMIT_AUTH_PER_MINUTE".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+
+        if self.rate_limit_search_per_minute == 0 {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -465,6 +515,10 @@ mod tests {
             cookie_secure: None,
             session_idle_days: 14,
             session_max_days: 60,
+            rate_limit_enabled: true,
+            rate_limit_auth_per_minute: 10,
+            rate_limit_search_per_minute: 60,
+            rate_limit_trust_forwarded_for: false,
         }
     }
 
@@ -635,6 +689,27 @@ mod tests {
             config.validate_values().is_ok(),
             "1.0 is a valid upper bound"
         );
+    }
+
+    #[test]
+    fn zero_rate_limit_per_minute_is_rejected() {
+        for field in [
+            "BEAM_RATE_LIMIT_AUTH_PER_MINUTE",
+            "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE",
+        ] {
+            let config = ServerConfig {
+                rate_limit_auth_per_minute: if field.contains("AUTH") { 0 } else { 10 },
+                rate_limit_search_per_minute: if field.contains("SEARCH") { 0 } else { 60 },
+                ..config_with_secrets()
+            };
+            let err = config
+                .validate_values()
+                .expect_err("a zero per-minute rate must be rejected");
+            assert!(
+                matches!(&err, ConfigError::InvalidValue(f, _) if f == field),
+                "unexpected error for {field}: {err}"
+            );
+        }
     }
 
     #[test]

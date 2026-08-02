@@ -28,8 +28,11 @@ requirements (referenced below as FR-xxx).
   paths as read-only. The server process SHOULD run with filesystem permissions that make write
   access to library roots impossible, not merely avoided by convention (FR-202).
 - **NFR-107**: Authentication-related endpoints (login initiation, callback, session refresh) SHOULD
-  be subject to rate limiting or an equivalent abuse-resistance mechanism. Enforcement is not yet
-  implemented. Deferred — tracked in [#69](https://github.com/justin13888/beam/issues/69).
+  be subject to rate limiting or an equivalent abuse-resistance mechanism. Enforced since
+  [#69](https://github.com/justin13888/beam/issues/69) via in-process token buckets on the auth
+  endpoints (`/v1/auth/login`, `/v1/auth/callback`) and the browse/search endpoint (`GET /v1/media`),
+  keyed per client IP. Streaming and download paths are deliberately excluded (a player legitimately
+  bursts range requests). Tunable and switchable via the `BEAM_RATE_LIMIT_*` variables.
 - **NFR-108**: The domain API MUST NOT expose raw filesystem paths, database primary keys of internal
   infrastructure tables, or other implementation details capable of enabling path traversal or
   infrastructure-probing, in any client-facing response (FR-407).

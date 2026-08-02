@@ -88,8 +88,11 @@ server-side against the catalog.
   a compile error.
 - Request handlers return `500` instead of panicking when expected injected state is missing —
   a wiring bug degrades one request, not the process.
-- Rate limiting on auth endpoints: deferred — tracked in
-  [#69](https://github.com/justin13888/beam/issues/69).
+- Rate limiting: in-process token buckets (see `beam-server/src/routes/rate_limit.rs`) guard the auth
+  endpoints (`/v1/auth/login`, `/v1/auth/callback`) and the browse/search endpoint (`GET /v1/media`),
+  keyed per client IP, returning `429` with a `Retry-After` header when exceeded. Streaming/download
+  paths are excluded on purpose. Enforced since [#69](https://github.com/justin13888/beam/issues/69);
+  tunable via `BEAM_RATE_LIMIT_*` (see [configuration](../operations/configuration.md)).
 
 ## Threat model notes
 
