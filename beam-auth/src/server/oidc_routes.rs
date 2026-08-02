@@ -152,6 +152,9 @@ pub enum OidcCallbackError {
     /// The state/nonce/PKCE round-trip failed verification.
     #[salvo(response(status_code = 400))]
     BadRequest(String),
+    /// The identity is valid but the local account is disabled (issue #85).
+    #[salvo(response(status_code = 403))]
+    Forbidden(String),
     /// Internal server error
     #[salvo(response(status_code = 500))]
     InternalError(String),
@@ -163,6 +166,10 @@ impl Writer for OidcCallbackError {
         match self {
             Self::BadRequest(msg) => {
                 res.status_code(StatusCode::BAD_REQUEST);
+                res.render(Text::Plain(msg));
+            }
+            Self::Forbidden(msg) => {
+                res.status_code(StatusCode::FORBIDDEN);
                 res.render(Text::Plain(msg));
             }
             Self::InternalError(msg) => {
@@ -408,6 +415,15 @@ pub async fn oidc_callback(
         .map_err(|e| OidcCallbackError::InternalError(e.to_string()))?
     {
         Some(existing) => {
+            // A disabled account is blocked at the door: no session is minted
+            // and no profile/admin fields are touched (issue #85). Only an
+            // already-provisioned account can be disabled -- JIT-provisioned
+            // new users below are always created enabled.
+            if existing.disabled {
+                return Err(OidcCallbackError::Forbidden(
+                    "This account has been disabled. Contact an administrator.".to_string(),
+                ));
+            }
             if existing.is_admin != is_admin {
                 user_repo
                     .set_admin(existing.id, is_admin)

@@ -91,7 +91,10 @@ fn rest_routes(rate_limiters: Option<RateLimiters>) -> Router {
                 .push(Router::with_path("logs").get(get_admin_logs))
                 .push(Router::with_path("logs/count").get(get_admin_log_count))
                 .push(Router::with_path("events").get(get_admin_events))
-                .push(Router::with_path("events/stream").get(stream_admin_events)),
+                .push(Router::with_path("events/stream").get(stream_admin_events))
+                .push(Router::with_path("users").get(list_admin_users))
+                .push(Router::with_path("users/{id}").patch(update_admin_user))
+                .push(Router::with_path("status").get(get_admin_status)),
         )
         .push(auth_router)
         .push(Router::with_path("me").get(beam_auth::server::oidc_me))

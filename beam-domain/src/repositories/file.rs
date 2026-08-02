@@ -19,6 +19,9 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr>;
     async fn delete(&self, id: Uuid) -> Result<(), DbErr>;
     async fn delete_by_ids(&self, ids: Vec<Uuid>) -> Result<u64, DbErr>;
+    /// Total number of indexed files across every library, for the admin
+    /// status endpoint (issue #85).
+    async fn count_all(&self) -> Result<u64, DbErr>;
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -171,6 +174,10 @@ pub mod in_memory {
                 }
             }
             Ok(count)
+        }
+
+        async fn count_all(&self) -> Result<u64, DbErr> {
+            Ok(self.files.lock().unwrap().len() as u64)
         }
     }
 }

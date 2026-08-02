@@ -1,12 +1,21 @@
 use async_trait::async_trait;
 use sea_orm::DbErr;
 
-use crate::models::admin_log::{AdminLog, CreateAdminLog};
+use crate::models::admin_log::{AdminLog, AdminLogCategory, CreateAdminLog};
 
 #[async_trait]
 pub trait AdminLogRepository: Send + Sync + std::fmt::Debug {
     async fn create(&self, entry: CreateAdminLog) -> Result<AdminLog, DbErr>;
     async fn list(&self, limit: u64, offset: u64) -> Result<Vec<AdminLog>, DbErr>;
+    /// Like [`list`](Self::list) (newest first) but restricted to a single
+    /// category -- e.g. `LibraryScan` for the admin status endpoint's recent
+    /// scan history (issue #85).
+    async fn list_by_category(
+        &self,
+        category: AdminLogCategory,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<AdminLog>, DbErr>;
     async fn count(&self) -> Result<u64, DbErr>;
 }
 
@@ -44,6 +53,26 @@ pub mod in_memory {
             let start = offset as usize;
             let end = (offset + limit) as usize;
             Ok(sorted.into_iter().skip(start).take(end - start).collect())
+        }
+
+        async fn list_by_category(
+            &self,
+            category: AdminLogCategory,
+            limit: u64,
+            offset: u64,
+        ) -> Result<Vec<AdminLog>, DbErr> {
+            let logs = self.logs.read();
+            let mut matching: Vec<AdminLog> = logs
+                .iter()
+                .filter(|log| log.category == category)
+                .cloned()
+                .collect();
+            matching.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(matching
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect())
         }
 
         async fn count(&self) -> Result<u64, DbErr> {

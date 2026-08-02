@@ -15,6 +15,7 @@ mod m20260704_000006_playback_progress;
 mod m20260705_000001_oidc_auth;
 mod m20260706_000001_users_oidc_only;
 mod m20260711_000001_users_email_optional;
+mod m20260711_000002_users_disabled;
 
 pub struct Migrator;
 
@@ -36,6 +37,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260705_000001_oidc_auth::Migration),
             Box::new(m20260706_000001_users_oidc_only::Migration),
             Box::new(m20260711_000001_users_email_optional::Migration),
+            Box::new(m20260711_000002_users_disabled::Migration),
         ]
     }
 }

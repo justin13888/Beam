@@ -25,6 +25,10 @@ pub struct Model {
     /// on every login -- granting and revoking; never trusted as durable state
     /// alone (see `docs/architecture/security.md` and issue #85).
     pub is_admin: bool,
+    /// Local moderation switch, distinct from the IdP-driven `is_admin`:
+    /// disabling revokes the account's sessions and blocks any future login
+    /// (issue #85). beam's own durable state, never asserted by the IdP.
+    pub disabled: bool,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

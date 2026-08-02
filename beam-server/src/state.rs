@@ -88,6 +88,12 @@ pub struct AppServices {
     /// Distinct genre catalog, backing `GET /v1/genres`. Shared with the
     /// enrichment service, which populates it as titles are enriched.
     pub genre_repo: Arc<dyn beam_domain::repositories::GenreRepository>,
+    /// Raw repositories the admin status endpoint (`GET /v1/admin/status`)
+    /// reads its counts from directly, following the `genre_repo` precedent
+    /// (issue #85). Shared with the library/index/enrichment services.
+    pub library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
+    pub file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
+    pub enrichment_repo: Arc<dyn beam_domain::repositories::EnrichmentStateRepository>,
     /// Backs the `beam_session` cookie -- the only credential the server
     /// issues (see ADR-0003/ADR-0005).
     pub session_store: Arc<dyn SessionStore>,
@@ -264,7 +270,7 @@ impl AppServices {
         let services = Self {
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
-                library_repo,
+                library_repo.clone(),
                 file_repo.clone(),
                 config.video_dir.clone(),
                 notification_service.clone(),
@@ -272,14 +278,17 @@ impl AppServices {
                 Arc::new(OsPathValidator),
             )),
             metadata: Arc::new(
-                DbMetadataService::new(movie_repo, show_repo, file_repo, stream_repo)
-                    .with_enrichment_repo(enrichment_repo),
+                DbMetadataService::new(movie_repo, show_repo, file_repo.clone(), stream_repo)
+                    .with_enrichment_repo(enrichment_repo.clone()),
             ),
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
             playback: playback_service,
             genre_repo,
+            library_repo,
+            file_repo,
+            enrichment_repo,
             session_store,
             oidc_client,
             pending_auth_store,

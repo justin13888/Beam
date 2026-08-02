@@ -33,6 +33,16 @@ pub trait AdminLogService: Send + Sync + std::fmt::Debug {
 
     async fn get_logs(&self, limit: u32, offset: u32) -> Result<Vec<AdminLog>>;
 
+    /// Like [`get_logs`](Self::get_logs) (newest first) but restricted to a
+    /// single category -- e.g. `LibraryScan` for the admin status endpoint's
+    /// recent scan history (issue #85).
+    async fn get_logs_by_category(
+        &self,
+        category: AdminLogCategory,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<AdminLog>>;
+
     async fn count(&self) -> Result<u64>;
 }
 
@@ -71,6 +81,18 @@ impl AdminLogService for LocalAdminLogService {
         Ok(self.repo.list(limit as u64, offset as u64).await?)
     }
 
+    async fn get_logs_by_category(
+        &self,
+        category: AdminLogCategory,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<AdminLog>> {
+        Ok(self
+            .repo
+            .list_by_category(category, limit as u64, offset as u64)
+            .await?)
+    }
+
     async fn count(&self) -> Result<u64> {
         Ok(self.repo.count().await?)
     }
@@ -93,6 +115,15 @@ impl AdminLogService for NoOpAdminLogService {
     }
 
     async fn get_logs(&self, _limit: u32, _offset: u32) -> Result<Vec<AdminLog>> {
+        Ok(vec![])
+    }
+
+    async fn get_logs_by_category(
+        &self,
+        _category: AdminLogCategory,
+        _limit: u32,
+        _offset: u32,
+    ) -> Result<Vec<AdminLog>> {
         Ok(vec![])
     }
 
