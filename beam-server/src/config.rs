@@ -14,6 +14,9 @@ pub enum ConfigError {
 
     #[error("Directory not found: {0}")]
     DirNotFoundError(String),
+
+    #[error("Invalid value for {0}: {1}")]
+    InvalidValue(String, String),
 }
 
 /// Application configuration
@@ -88,6 +91,18 @@ pub struct ServerConfig {
     #[config(env = "BEAM_ENRICH_INTERVAL_SECS", default = 300)]
     pub enrich_interval_secs: u64,
 
+    /// Maximum number of titles processed per metadata-enrichment sweep.
+    /// Larger batches drain a backlog faster but make each sweep longer and
+    /// lean harder on the provider's rate limits. Must be at least 1.
+    #[config(env = "BEAM_ENRICH_BATCH_SIZE", default = 25)]
+    pub enrich_batch_size: u32,
+
+    /// Minimum overall match confidence, in `(0.0, 1.0]`, a provider candidate
+    /// must reach before its metadata is applied to a title. Higher is
+    /// stricter: fewer false matches, but more titles left un-enriched.
+    #[config(env = "BEAM_ENRICH_MIN_CONFIDENCE", default = 0.7)]
+    pub enrich_min_confidence: f64,
+
     /// TMDB API read-access token used by `cameo` for TMDB-sourced
     /// enrichment. If absent, TMDB-eligible titles are left un-enriched
     /// rather than failing the scan; AniList-sourced titles still enrich
@@ -98,6 +113,15 @@ pub struct ServerConfig {
     /// Toggles AniList-sourced enrichment via `cameo`.
     #[config(env = "BEAM_ANILIST_ENABLED", default = true)]
     pub anilist_enabled: bool,
+
+    /// Preferred language for provider metadata, as a BCP-47 tag like `en`
+    /// or `en-US` (lowercase language, uppercase region). Applied to the
+    /// TMDB client only -- AniList has no language concept. Unset -> the
+    /// provider's own default. An empty or whitespace-only value is
+    /// normalized to unset (confique parses a set-but-empty env var as
+    /// `Some("")`).
+    #[config(env = "BEAM_METADATA_LANGUAGE")]
+    pub metadata_language: Option<String>,
 
     /// OIDC issuer URL (e.g. Dex in dev: `http://localhost:5556/dex`). OIDC
     /// login is disabled -- returning a clear error rather than panicking --
@@ -173,8 +197,11 @@ impl fmt::Debug for ServerConfig {
             watch_enabled,
             watch_debounce_ms,
             enrich_interval_secs,
+            enrich_batch_size,
+            enrich_min_confidence,
             tmdb_api_token,
             anilist_enabled,
+            metadata_language,
             oidc_issuer,
             oidc_client_id,
             oidc_client_secret,
@@ -202,8 +229,11 @@ impl fmt::Debug for ServerConfig {
             .field("watch_enabled", watch_enabled)
             .field("watch_debounce_ms", watch_debounce_ms)
             .field("enrich_interval_secs", enrich_interval_secs)
+            .field("enrich_batch_size", enrich_batch_size)
+            .field("enrich_min_confidence", enrich_min_confidence)
             .field("tmdb_api_token", &redact_option(tmdb_api_token))
             .field("anilist_enabled", anilist_enabled)
+            .field("metadata_language", metadata_language)
             .field("oidc_issuer", oidc_issuer)
             .field("oidc_client_id", oidc_client_id)
             .field("oidc_client_secret", &redact_option(oidc_client_secret))
@@ -318,12 +348,57 @@ impl ServerConfig {
     /// Load configuration from environment variables and validate paths
     pub fn load_and_validate() -> Result<Self, ConfigError> {
         // 1. Load the configuration purely from environment variables
-        let config = Self::builder().env().load()?;
+        let mut config = Self::builder().env().load()?;
 
-        // 2. Validate paths and ensure writeable directories exist
+        // 2. Normalize before validating: a set-but-empty optional env var
+        // arrives as `Some("")` (confique parses presence, not content) and
+        // must mean the same thing as unset.
+        config.normalize_values();
+
+        // 3. Validate scalar values (ranges, non-empty) before touching the
+        // filesystem: a bad number should fail fast without side effects.
+        config.validate_values()?;
+
+        // 4. Validate paths and ensure writeable directories exist
         config.validate_paths()?;
 
         Ok(config)
+    }
+
+    /// Canonicalizes values whose raw env form is ambiguous. Currently:
+    /// `metadata_language` is trimmed, and an empty result becomes `None`
+    /// (an operator commenting a var out and setting it to `""` must be
+    /// equivalent).
+    fn normalize_values(&mut self) {
+        self.metadata_language = self
+            .metadata_language
+            .take()
+            .map(|lang| lang.trim().to_string())
+            .filter(|lang| !lang.is_empty());
+    }
+
+    /// Validates scalar configuration values that confique's type-level
+    /// parsing can't (ranges, mutually-consistent bounds). Pure and
+    /// side-effect-free so it can be unit-tested against a constructed config.
+    fn validate_values(&self) -> Result<(), ConfigError> {
+        if self.enrich_batch_size == 0 {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_ENRICH_BATCH_SIZE".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+
+        if !(self.enrich_min_confidence > 0.0 && self.enrich_min_confidence <= 1.0) {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_ENRICH_MIN_CONFIDENCE".to_string(),
+                format!(
+                    "must be in the range (0.0, 1.0], got {}",
+                    self.enrich_min_confidence
+                ),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Validates configuration paths
@@ -375,8 +450,11 @@ mod tests {
             watch_enabled: true,
             watch_debounce_ms: 2000,
             enrich_interval_secs: 300,
+            enrich_batch_size: 25,
+            enrich_min_confidence: 0.7,
             tmdb_api_token: Some("tmdb-secret-token".to_string()),
             anilist_enabled: true,
+            metadata_language: None,
             oidc_issuer: Some("https://idp.example.com".to_string()),
             oidc_client_id: Some("beam-client".to_string()),
             oidc_client_secret: Some("oidc-secret-value".to_string()),
@@ -501,6 +579,90 @@ mod tests {
             .load()
             .expect("defaults-only config should load");
         assert!(config.auto_migrate);
+    }
+
+    #[test]
+    fn enrichment_defaults_pass_validation() {
+        // The compiled-in defaults must themselves be valid, or a
+        // defaults-only deployment would refuse to start.
+        let config = ServerConfig {
+            enrich_batch_size: 25,
+            enrich_min_confidence: 0.7,
+            ..config_with_secrets()
+        };
+        assert!(config.validate_values().is_ok());
+    }
+
+    #[test]
+    fn zero_enrich_batch_size_is_rejected() {
+        let config = ServerConfig {
+            enrich_batch_size: 0,
+            ..config_with_secrets()
+        };
+        let err = config
+            .validate_values()
+            .expect_err("batch size 0 must be rejected");
+        assert!(
+            matches!(&err, ConfigError::InvalidValue(field, _) if field == "BEAM_ENRICH_BATCH_SIZE"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn out_of_range_enrich_min_confidence_is_rejected() {
+        // (0.0, 1.0]: the open lower bound rejects 0.0, the closed upper bound
+        // accepts exactly 1.0 but rejects anything above it.
+        for bad in [0.0_f64, -0.1, 1.5] {
+            let config = ServerConfig {
+                enrich_min_confidence: bad,
+                ..config_with_secrets()
+            };
+            let err = config
+                .validate_values()
+                .expect_err("min confidence outside (0.0, 1.0] must be rejected");
+            assert!(
+                matches!(&err, ConfigError::InvalidValue(field, _) if field == "BEAM_ENRICH_MIN_CONFIDENCE"),
+                "value {bad} produced unexpected error: {err}"
+            );
+        }
+
+        // Boundary that must be accepted.
+        let config = ServerConfig {
+            enrich_min_confidence: 1.0,
+            ..config_with_secrets()
+        };
+        assert!(
+            config.validate_values().is_ok(),
+            "1.0 is a valid upper bound"
+        );
+    }
+
+    #[test]
+    fn metadata_language_normalization_maps_empty_and_whitespace_to_none() {
+        // (raw value as loaded, expected after normalization)
+        let cases: [(Option<&str>, Option<&str>); 5] = [
+            // Set-but-empty env var: confique yields Some("") -- must mean unset.
+            (Some(""), None),
+            (Some("   "), None),
+            // Surrounding whitespace is trimmed off a real value.
+            (Some("  en-US  "), Some("en-US")),
+            // A clean value survives untouched.
+            (Some("ja"), Some("ja")),
+            (None, None),
+        ];
+
+        for (raw, expected) in cases {
+            let mut config = ServerConfig {
+                metadata_language: raw.map(str::to_string),
+                ..config_with_secrets()
+            };
+            config.normalize_values();
+            assert_eq!(
+                config.metadata_language.as_deref(),
+                expected,
+                "raw value {raw:?} normalized incorrectly"
+            );
+        }
     }
 
     #[test]

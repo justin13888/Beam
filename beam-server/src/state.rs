@@ -12,7 +12,7 @@ use beam_auth::utils::{
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::services::clock::RealClock;
-use beam_index::services::enrichment::MetadataEnrichmentService;
+use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
 
 use crate::{
@@ -184,29 +184,49 @@ impl AppServices {
 
         // Real cameo client when at least TMDB or AniList is configured;
         // NoopEnrichmentProvider (every sweep a fast no-op) otherwise -- e.g.
-        // a fresh dev environment with no TMDB_API_TOKEN set.
+        // a fresh dev environment with no TMDB_API_TOKEN set. A build failure
+        // is only tolerated (warn + disable enrichment) when the enrichment
+        // knobs were left implicit; an explicitly-set BEAM_METADATA_LANGUAGE
+        // that fails the build (cameo validates the BCP-47 tag at
+        // construction) fails startup instead -- an explicit knob must never
+        // be silently ignored on a headless server, matching the fail-fast
+        // precedent of `validate_values` and the cookie-Secure verdict.
         let enrichment_provider: Arc<dyn EnrichmentProvider> =
             match beam_index::providers::cameo::build_client(CameoWiringConfig {
                 tmdb_api_token: config.tmdb_api_token.clone(),
                 anilist_enabled: config.anilist_enabled,
+                metadata_language: config.metadata_language.clone(),
             }) {
                 Ok(Some(client)) => Arc::new(CameoEnrichmentProvider::new(client)),
                 Ok(None) => Arc::new(NoopEnrichmentProvider),
+                Err(e) if config.metadata_language.is_some() => {
+                    return Err(eyre::eyre!(
+                        "failed to build cameo client with BEAM_METADATA_LANGUAGE={:?}: {e}",
+                        config.metadata_language.as_deref().unwrap_or_default(),
+                    ));
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to build cameo client; metadata enrichment disabled");
                     Arc::new(NoopEnrichmentProvider)
                 }
             };
 
-        let enrichment_service = Arc::new(MetadataEnrichmentService::new(
-            enrichment_repo.clone(),
-            movie_repo.clone(),
-            show_repo.clone(),
-            genre_repo,
-            enrichment_provider,
-            admin_log_service.clone(),
-            Arc::new(RealClock),
-        ));
+        let enrichment_service = Arc::new(
+            MetadataEnrichmentService::new(
+                enrichment_repo.clone(),
+                movie_repo.clone(),
+                show_repo.clone(),
+                genre_repo,
+                enrichment_provider,
+                admin_log_service.clone(),
+                Arc::new(RealClock),
+            )
+            .with_policy(EnrichmentPolicy {
+                batch_size: config.enrich_batch_size,
+                min_confidence: config.enrich_min_confidence,
+                ..EnrichmentPolicy::default()
+            }),
+        );
 
         let playback_service = Arc::new(DbPlaybackService::new(
             playback_repo,

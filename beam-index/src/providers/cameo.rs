@@ -30,6 +30,16 @@ use beam_domain::providers::enrichment::{
 pub struct CameoWiringConfig {
     pub tmdb_api_token: Option<String>,
     pub anilist_enabled: bool,
+    /// Preferred metadata language as a BCP-47 tag (e.g. `"en-US"`). Applied
+    /// to the TMDB client only -- cameo's language support is client-level
+    /// configuration (`TmdbConfig::with_language`), not a per-search
+    /// parameter, and AniList has no language concept. `None` (or an
+    /// empty/whitespace value, filtered out defensively) keeps the provider
+    /// default. cameo validates the tag at client construction; an invalid
+    /// tag fails `build_client` with a message naming the tag, which
+    /// beam-server escalates to a fatal startup error when this knob was
+    /// explicitly set (an explicit knob is never silently ignored).
+    pub metadata_language: Option<String>,
 }
 
 /// Build a `cameo` client from config, or `None` if no provider is
@@ -41,7 +51,16 @@ pub fn build_client(
     let mut any = false;
 
     if let Some(token) = config.tmdb_api_token.filter(|t| !t.is_empty()) {
-        builder = builder.with_tmdb(cameo::TmdbConfig::new(token));
+        let mut tmdb_config = cameo::TmdbConfig::new(token);
+        if let Some(language) = config
+            .metadata_language
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        {
+            tmdb_config = tmdb_config.with_language(language);
+        }
+        builder = builder.with_tmdb(tmdb_config);
         any = true;
     }
     if config.anilist_enabled {
@@ -472,6 +491,7 @@ mod tests {
         let config = CameoWiringConfig {
             tmdb_api_token: None,
             anilist_enabled: false,
+            metadata_language: None,
         };
         let client = build_client(config).unwrap();
         assert!(client.is_none());
@@ -482,6 +502,52 @@ mod tests {
         let config = CameoWiringConfig {
             tmdb_api_token: None,
             anilist_enabled: true,
+            metadata_language: None,
+        };
+        let client = build_client(config).unwrap();
+        assert!(client.is_some());
+    }
+
+    #[test]
+    fn build_client_accepts_valid_metadata_language_for_tmdb() {
+        // Client construction is offline (no discovery request); cameo only
+        // validates the config, so a valid BCP-47 tag must build fine.
+        let config = CameoWiringConfig {
+            tmdb_api_token: Some("test-token".to_string()),
+            anilist_enabled: false,
+            metadata_language: Some("en-US".to_string()),
+        };
+        let client = build_client(config).unwrap();
+        assert!(client.is_some());
+    }
+
+    #[test]
+    fn build_client_rejects_invalid_metadata_language_with_clear_error() {
+        // cameo validates BCP-47 at construction; the startup fallback path
+        // logs this error before disabling enrichment, so it must name the
+        // language problem rather than something opaque.
+        let config = CameoWiringConfig {
+            tmdb_api_token: Some("test-token".to_string()),
+            anilist_enabled: false,
+            metadata_language: Some("english".to_string()),
+        };
+        let err = build_client(config).expect_err("an invalid language tag must fail the build");
+        let message = err.to_string();
+        assert!(
+            message.contains("language") && message.contains("english"),
+            "error must name the bad language tag, got: {message}"
+        );
+    }
+
+    #[test]
+    fn build_client_ignores_whitespace_only_metadata_language() {
+        // Defense in depth: beam-server normalizes empty -> None, but the
+        // wiring config is a public seam, so a stray whitespace value must
+        // not reach cameo's validator and kill enrichment.
+        let config = CameoWiringConfig {
+            tmdb_api_token: Some("test-token".to_string()),
+            anilist_enabled: false,
+            metadata_language: Some("   ".to_string()),
         };
         let client = build_client(config).unwrap();
         assert!(client.is_some());

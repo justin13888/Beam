@@ -29,6 +29,10 @@ use crate::services::clock::Clock;
 pub struct EnrichmentPolicy {
     /// Max rows processed per `sweep_once` call.
     pub batch_size: u32,
+    /// Minimum overall match confidence in `(0.0, 1.0]` a provider candidate
+    /// must reach before its metadata is applied. Passed straight through to
+    /// [`matcher::best_movie_match`]/[`matcher::best_show_match`].
+    pub min_confidence: f64,
     /// Attempts before a row is given up on (`Failed`).
     pub max_attempts: u32,
     /// Backoff delay applied after the Nth transient failure (0-indexed;
@@ -40,6 +44,7 @@ impl Default for EnrichmentPolicy {
     fn default() -> Self {
         Self {
             batch_size: 25,
+            min_confidence: matcher::DEFAULT_MIN_CONFIDENCE,
             max_attempts: 5,
             backoff_schedule: vec![
                 Duration::from_secs(60),
@@ -232,7 +237,12 @@ impl MetadataEnrichmentService {
                     year: movie.year,
                 };
                 match self.provider.search_movies(&query).await {
-                    Ok(hits) => match matcher::best_movie_match(&movie.title, movie.year, &hits) {
+                    Ok(hits) => match matcher::best_movie_match(
+                        &movie.title,
+                        movie.year,
+                        &hits,
+                        self.policy.min_confidence,
+                    ) {
                         Some((hit, score)) => {
                             let ref_id = hit.external_ref.clone();
                             self.provider
@@ -299,7 +309,12 @@ impl MetadataEnrichmentService {
                     year: show.year,
                 };
                 match self.provider.search_shows(&query).await {
-                    Ok(hits) => match matcher::best_show_match(&show.title, show.year, &hits) {
+                    Ok(hits) => match matcher::best_show_match(
+                        &show.title,
+                        show.year,
+                        &hits,
+                        self.policy.min_confidence,
+                    ) {
                         Some((hit, score)) => {
                             let ref_id = hit.external_ref.clone();
                             self.provider
@@ -568,6 +583,46 @@ mod tests {
         let updated = movie_repo.find_by_id(movie.id).await.unwrap().unwrap();
         assert_eq!(updated.tmdb_id, Some(603));
         assert_eq!(genre_repo.genres_for_movie(movie.id).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn strict_min_confidence_policy_rejects_borderline_match() {
+        // Exact title, but the local movie carries no year, so the candidate
+        // scores exactly the title weight (0.70): accepted under the default
+        // policy, rejected once the operator raises BEAM_ENRICH_MIN_CONFIDENCE
+        // above it. Same fixture, opposite outcome purely on the knob.
+        let hit = MovieSearchHit {
+            external_ref: ExternalMediaRef::new("tmdb", "603"),
+            title: "The Matrix".to_string(),
+            original_title: None,
+            year: Some(1999),
+            popularity: None,
+            vote_average: None,
+        };
+        let provider =
+            InMemoryEnrichmentProvider::new(&["tmdb"]).with_movie_search("The Matrix", vec![hit]);
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
+        let service = service.with_policy(EnrichmentPolicy {
+            min_confidence: 0.9,
+            ..EnrichmentPolicy::default()
+        });
+
+        let movie = movie_repo
+            .create(CreateMovie {
+                title: "The Matrix".to_string(),
+                year: None,
+                runtime: None,
+            })
+            .await
+            .unwrap();
+        state_repo
+            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
+            .await
+            .unwrap();
+
+        let report = service.sweep_once().await;
+        assert_eq!(report.unmatched, 1);
+        assert_eq!(report.enriched, 0);
     }
 
     #[tokio::test]
