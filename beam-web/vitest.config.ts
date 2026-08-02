@@ -33,17 +33,18 @@ export default defineConfig({
 				"src/main.tsx",
 				"src/test/**",
 			],
-			// Calibrated against a measured honest baseline of ~13.8% lines /
-			// ~4.7% branches / ~13.3% functions / ~13.8%
-			// statements -- most of `beam-web`'s current tests cover pure
-			// hooks/utils (already ~98%+), not the large route components,
-			// which need router/query harness investment to test
-			// meaningfully. Ratchet up over time, don't relax to pass a PR.
+			// Calibrated against a measured honest baseline of ~68.6% lines /
+			// ~59.4% branches / ~57.6% functions / ~65.6% statements, once the
+			// route components (explore, admin, history, profile, libraries,
+			// media detail, library detail) gained subcutaneous component
+			// tests behind router/query harnesses. Thresholds sit ~3 points
+			// under the measured numbers so unrelated diffs don't flap the
+			// gate. Ratchet up over time, don't relax to pass a PR.
 			thresholds: {
-				lines: 12,
-				functions: 10,
-				branches: 3,
-				statements: 12,
+				lines: 65,
+				functions: 54,
+				branches: 56,
+				statements: 62,
 			},
 		},
 	},
