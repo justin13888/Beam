@@ -20,7 +20,8 @@ without server-side changes (see NFR-6xx in `non-functional.md`); none exists to
 
 **Self-hoster / administrator** — runs the Beam server, typically on home-lab hardware. Owns the
 media filesystem and the Beam data directory. Configures library root paths, triggers and monitors
-scans, manages access (OIDC identity provider configuration and the `BEAM_ADMIN_EMAILS` allowlist),
+scans, manages access (OIDC identity provider configuration, including the claim that grants admin —
+`BEAM_OIDC_ADMIN_CLAIM`),
 and triages enrichment or indexing failures. Interacts with Beam through the admin area of the web
 client, server environment variables, and logs.
 

@@ -140,6 +140,23 @@ pub struct ServerConfig {
     #[config(env = "BEAM_OIDC_SCOPES", default = "openid profile email")]
     pub oidc_scopes: String,
 
+    /// Name of the ID-token claim the IdP asserts to grant admin (e.g.
+    /// `groups`). Admin is derived solely from this claim, recomputed on every
+    /// login (issue #85) -- there is no server-side email allowlist. Unset ->
+    /// nobody is granted admin, and any existing admin is **demoted at their
+    /// next login**. An empty value is treated as unset.
+    #[config(env = "BEAM_OIDC_ADMIN_CLAIM")]
+    pub oidc_admin_claim: Option<String>,
+
+    /// Expected value of `oidc_admin_claim`. Unset -> the claim must assert
+    /// boolean `true` (a stringified `"true"` is also accepted). Set -> admin
+    /// is granted when the claim is a string equal to this value, or an array
+    /// containing it (case-sensitive; covers a `groups` claim). Setting this
+    /// while `BEAM_OIDC_ADMIN_CLAIM` is unset is a startup error. An empty
+    /// value is treated as unset.
+    #[config(env = "BEAM_OIDC_ADMIN_VALUE")]
+    pub oidc_admin_value: Option<String>,
+
     /// Base URL of the web client; the OIDC callback redirects here on
     /// success, and it's implicitly allowed as a CSRF-safe request Origin.
     #[config(env = "BEAM_WEB_URL", default = "http://localhost:5173")]
@@ -150,12 +167,6 @@ pub struct ServerConfig {
     /// client, a mobile app's custom scheme during dev).
     #[config(env = "BEAM_EXTRA_ALLOWED_ORIGINS")]
     pub extra_allowed_origins: Option<String>,
-
-    /// Comma-separated, case-insensitive allowlist of emails granted admin
-    /// on OIDC login. An unverified email is never granted admin regardless
-    /// of allowlist membership.
-    #[config(env = "BEAM_ADMIN_EMAILS")]
-    pub admin_emails: Option<String>,
 
     /// Whether auth cookies are marked `Secure`. Defaults to whatever
     /// `server_url`'s scheme implies (`https` -> secure) when unset; only
@@ -231,9 +242,10 @@ impl fmt::Debug for ServerConfig {
             oidc_client_id,
             oidc_client_secret,
             oidc_scopes,
+            oidc_admin_claim,
+            oidc_admin_value,
             web_url,
             extra_allowed_origins,
-            admin_emails,
             cookie_secure,
             session_idle_days,
             session_max_days,
@@ -267,9 +279,10 @@ impl fmt::Debug for ServerConfig {
             .field("oidc_client_id", oidc_client_id)
             .field("oidc_client_secret", &redact_option(oidc_client_secret))
             .field("oidc_scopes", oidc_scopes)
+            .field("oidc_admin_claim", oidc_admin_claim)
+            .field("oidc_admin_value", oidc_admin_value)
             .field("web_url", web_url)
             .field("extra_allowed_origins", extra_allowed_origins)
-            .field("admin_emails", admin_emails)
             .field("cookie_secure", cookie_secure)
             .field("session_idle_days", session_idle_days)
             .field("session_max_days", session_max_days)
@@ -401,16 +414,21 @@ impl ServerConfig {
         Ok(config)
     }
 
-    /// Canonicalizes values whose raw env form is ambiguous. Currently:
-    /// `metadata_language` is trimmed, and an empty result becomes `None`
-    /// (an operator commenting a var out and setting it to `""` must be
-    /// equivalent).
+    /// Canonicalizes values whose raw env form is ambiguous: a value that is
+    /// empty (or whitespace-only) after trimming becomes `None`, so an operator
+    /// commenting a var out and setting it to `""` are equivalent. Confique
+    /// parses a set-but-empty optional env var as `Some("")`, which this
+    /// undoes.
     fn normalize_values(&mut self) {
-        self.metadata_language = self
-            .metadata_language
-            .take()
-            .map(|lang| lang.trim().to_string())
-            .filter(|lang| !lang.is_empty());
+        fn empty_to_none(value: Option<String>) -> Option<String> {
+            value
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        }
+
+        self.metadata_language = empty_to_none(self.metadata_language.take());
+        self.oidc_admin_claim = empty_to_none(self.oidc_admin_claim.take());
+        self.oidc_admin_value = empty_to_none(self.oidc_admin_value.take());
     }
 
     /// Validates scalar configuration values that confique's type-level
@@ -445,6 +463,16 @@ impl ServerConfig {
             return Err(ConfigError::InvalidValue(
                 "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE".to_string(),
                 "must be at least 1".to_string(),
+            ));
+        }
+
+        // An expected admin-claim value is meaningless without the claim to
+        // read it from -- reject the half-configured combination up front
+        // rather than silently granting admin to nobody.
+        if self.oidc_admin_value.is_some() && self.oidc_admin_claim.is_none() {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_OIDC_ADMIN_VALUE".to_string(),
+                "requires BEAM_OIDC_ADMIN_CLAIM to also be set".to_string(),
             ));
         }
 
@@ -509,9 +537,10 @@ mod tests {
             oidc_client_id: Some("beam-client".to_string()),
             oidc_client_secret: Some("oidc-secret-value".to_string()),
             oidc_scopes: "openid profile email".to_string(),
+            oidc_admin_claim: Some("groups".to_string()),
+            oidc_admin_value: Some("beam-admin".to_string()),
             web_url: "https://beam.example.com".to_string(),
             extra_allowed_origins: None,
-            admin_emails: Some("admin@example.com".to_string()),
             cookie_secure: None,
             session_idle_days: 14,
             session_max_days: 60,
@@ -710,6 +739,67 @@ mod tests {
                 "unexpected error for {field}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn admin_value_without_admin_claim_is_rejected() {
+        let config = ServerConfig {
+            oidc_admin_claim: None,
+            oidc_admin_value: Some("beam-admin".to_string()),
+            ..config_with_secrets()
+        };
+        let err = config
+            .validate_values()
+            .expect_err("BEAM_OIDC_ADMIN_VALUE without BEAM_OIDC_ADMIN_CLAIM must be rejected");
+        assert!(
+            matches!(&err, ConfigError::InvalidValue(field, _) if field == "BEAM_OIDC_ADMIN_VALUE"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn admin_claim_configurations_pass_validation() {
+        // Both unset (nobody admin), claim-only (boolean claim), and
+        // claim+value (string/array claim) are all valid.
+        for (claim, value) in [
+            (None, None),
+            (Some("is_admin"), None),
+            (Some("groups"), Some("beam-admin")),
+        ] {
+            let config = ServerConfig {
+                oidc_admin_claim: claim.map(str::to_string),
+                oidc_admin_value: value.map(str::to_string),
+                ..config_with_secrets()
+            };
+            assert!(
+                config.validate_values().is_ok(),
+                "claim={claim:?} value={value:?} should validate"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_claim_and_value_normalization_maps_empty_to_none() {
+        // Set-but-empty env vars (confique yields Some("")) must mean unset,
+        // so a half-empty pair doesn't later trip the validation error.
+        let mut config = ServerConfig {
+            oidc_admin_claim: Some("  ".to_string()),
+            oidc_admin_value: Some("".to_string()),
+            ..config_with_secrets()
+        };
+        config.normalize_values();
+        assert_eq!(config.oidc_admin_claim, None);
+        assert_eq!(config.oidc_admin_value, None);
+
+        // A real value is trimmed but preserved.
+        let mut config = ServerConfig {
+            oidc_admin_claim: Some(" groups ".to_string()),
+            oidc_admin_value: Some(" beam-admin ".to_string()),
+            ..config_with_secrets()
+        };
+        config.normalize_values();
+        assert_eq!(config.oidc_admin_claim.as_deref(), Some("groups"));
+        assert_eq!(config.oidc_admin_value.as_deref(), Some("beam-admin"));
     }
 
     #[test]

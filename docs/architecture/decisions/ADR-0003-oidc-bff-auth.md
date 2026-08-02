@@ -26,8 +26,10 @@ login, `beam-server` creates a session (opaque token, hashed at rest, stored in 
 `sessions` table — see ADR-0005) and sets a single httpOnly, `SameSite=Lax` cookie as the browser's
 only credential, used for every subsequent request including video playback. The `?token=`
 query-parameter stream-token scheme was deleted outright. Users are JIT-provisioned keyed by
-`(oidc_issuer, oidc_subject)`; admin status is resolved from an email allowlist checked at every
-login, not read from a stored flag. Dev environments run Dex (a lightweight IdP with static users)
+`(oidc_issuer, oidc_subject)`; admin status is resolved at every login, not read from a stored flag.
+(The original email-allowlist mechanism was later replaced — see issue #85 — by deriving admin
+solely from a configured ID-token claim, `BEAM_OIDC_ADMIN_CLAIM`; the "recompute every login"
+principle here is unchanged.) Dev environments run Dex (a lightweight IdP with static users)
 via `compose.dependencies.yaml`.
 
 ## Consequences

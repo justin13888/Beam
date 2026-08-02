@@ -42,7 +42,8 @@ optional variables unset/commented rather than blank.
 | `BEAM_OIDC_SCOPES` | `openid profile email` | Space-separated scopes requested at login. |
 | `BEAM_WEB_URL` | `http://localhost:5173` | Web client origin: OIDC success redirect target and an implicitly allowed CSRF Origin. |
 | `BEAM_EXTRA_ALLOWED_ORIGINS` | unset | Comma-separated extra Origins accepted on state-changing requests. |
-| `BEAM_ADMIN_EMAILS` | unset | Comma-separated, case-insensitive emails granted admin on OIDC login. An unverified email is never granted admin. |
+| `BEAM_OIDC_ADMIN_CLAIM` | unset | Name of an ID-token claim the IdP asserts to grant admin (e.g. `groups`). Admin is derived **solely** from this claim, recomputed on every login. **Unset → nobody is admin, and any existing admin is demoted at their next login.** An empty value is treated as unset. |
+| `BEAM_OIDC_ADMIN_VALUE` | unset | Expected value for `BEAM_OIDC_ADMIN_CLAIM`. Unset → the claim must assert boolean `true` (a stringified `"true"` is also accepted). Set → admin is granted when the claim is a string equal to this value **or** an array containing it (case-sensitive; covers a `groups` claim). Setting this while `BEAM_OIDC_ADMIN_CLAIM` is unset **fails startup**. |
 | `BEAM_COOKIE_SECURE` | unset (derived) | Whether auth cookies are marked `Secure`. Unset → derived from `BEAM_SERVER_URL`'s scheme. If other configured origins imply HTTPS while cookies would resolve insecure and this is unset, **the server refuses to start**; set it explicitly (`true` for TLS-terminating proxies in front of a plain-HTTP origin, `false` only if you genuinely want insecure cookies — loudly warned). |
 | `BEAM_SESSION_IDLE_DAYS` | `14` | Session idle timeout (slides forward on activity, capped by the absolute lifetime). |
 | `BEAM_SESSION_MAX_DAYS` | `60` | Absolute session lifetime. |

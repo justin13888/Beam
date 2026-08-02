@@ -64,7 +64,10 @@ services:
       - BEAM_OIDC_SCOPES=${BEAM_OIDC_SCOPES:-openid profile email}
       - BEAM_WEB_URL=${BEAM_WEB_URL:-http://localhost:5173}
       - BEAM_EXTRA_ALLOWED_ORIGINS
-      - BEAM_ADMIN_EMAILS
+      # Admin is granted by an IdP-asserted ID-token claim, not the server.
+      # e.g. BEAM_OIDC_ADMIN_CLAIM=groups BEAM_OIDC_ADMIN_VALUE=beam-admin
+      - BEAM_OIDC_ADMIN_CLAIM
+      - BEAM_OIDC_ADMIN_VALUE
       - BEAM_COOKIE_SECURE
       - BEAM_SESSION_IDLE_DAYS=${BEAM_SESSION_IDLE_DAYS:-14}
       - BEAM_SESSION_MAX_DAYS=${BEAM_SESSION_MAX_DAYS:-60}

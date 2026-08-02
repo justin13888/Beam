@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::utils::admin_allowlist::is_admin_email;
+use crate::utils::admin_claim::admin_claim_matches;
 use crate::utils::models::CreateUser;
 use crate::utils::oidc::{OidcClient, OidcError};
 use crate::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
@@ -40,8 +40,14 @@ pub struct OidcRuntimeConfig {
     /// Whether to mark cookies `Secure` (derived from the deployment's
     /// scheme; `false` only makes sense for plain-HTTP local dev).
     pub cookie_secure: bool,
-    /// Comma-separated admin email allowlist (see `admin_allowlist`).
-    pub admin_emails_csv: String,
+    /// Name of the ID-token claim that grants admin (see `admin_claim`).
+    /// `None` -> nobody is granted admin at login, and any existing admin is
+    /// demoted at their next login (issue #85).
+    pub admin_claim: Option<String>,
+    /// Expected value for `admin_claim`. `None` -> the claim must assert
+    /// boolean `true`; `Some(v)` -> the claim must equal `v` or (if an array)
+    /// contain `v`.
+    pub admin_value: Option<String>,
     pub session_idle_days: u64,
     pub session_max_days: u64,
 }
@@ -380,13 +386,16 @@ pub async fn oidc_callback(
             other => OidcCallbackError::BadRequest(format!("Login failed: {other}")),
         })?;
 
-    // Not all IdPs release an email claim -- absence just means the user
-    // can never match the admin allowlist, not a login failure.
-    let is_admin = identity.email_verified
-        && identity
-            .email
-            .as_deref()
-            .is_some_and(|email| is_admin_email(email, &config.admin_emails_csv));
+    // Admin is derived solely from a configured ID-token claim asserted by the
+    // IdP (issue #85): the IdP is the single authority. Recomputed on every
+    // login below, so it both grants and revokes -- and with no admin claim
+    // configured, `false` here demotes any previously-admin user at next login.
+    let is_admin = match config.admin_claim.as_deref() {
+        Some(claim_name) => {
+            admin_claim_matches(&identity.claims, claim_name, config.admin_value.as_deref())
+        }
+        None => false,
+    };
     let display_name = derive_display_name(
         identity.name.as_deref(),
         identity.email.as_deref(),

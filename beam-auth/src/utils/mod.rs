@@ -1,4 +1,4 @@
-pub mod admin_allowlist;
+pub mod admin_claim;
 pub mod models;
 pub mod oidc;
 pub mod pending_auth_store;

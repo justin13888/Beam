@@ -97,7 +97,7 @@ requirements (referenced below as FR-xxx).
   required to deploy.
 - **NFR-402**: All environment-specific configuration MUST be configurable via `BEAM_`-prefixed
   environment variables (e.g., `BEAM_VIDEO_DIR`, `BEAM_DATA_DIR`, `BEAM_DATABASE_URL`,
-  `BEAM_OIDC_ISSUER`, `BEAM_ADMIN_EMAILS`, `BEAM_TMDB_API_TOKEN`), with sensible behavior (per
+  `BEAM_OIDC_ISSUER`, `BEAM_OIDC_ADMIN_CLAIM`, `BEAM_TMDB_API_TOKEN`), with sensible behavior (per
   FR-307) when optional variables are absent. See `../operations/configuration.md`.
 - **NFR-403**: The server MUST emit structured logs (machine-parseable, e.g. JSON or key-value
   fields) for scan lifecycle events, enrichment lifecycle events, authentication events, and

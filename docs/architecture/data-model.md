@@ -19,10 +19,10 @@ The account record. Identity is OIDC-only; no password or other end-user credent
 | `id` | UUID | no | PK |
 | `oidc_issuer` | TEXT | no | OIDC `iss` claim |
 | `oidc_subject` | TEXT | no | OIDC `sub` claim |
-| `email` | TEXT | yes | OIDC `email` claim; drives admin-allowlist matching only, never identity |
+| `email` | TEXT | yes | OIDC `email` claim; informational/display only, never identity (and no longer used for admin) |
 | `display_name` | TEXT | no | OIDC `name` claim, falling back to `preferred_username`; refreshed on login |
 | `avatar_url` | TEXT | yes | OIDC `picture` claim; refreshed on login |
-| `is_admin` | BOOLEAN | no | default `false`; recomputed from the `BEAM_ADMIN_EMAILS` allowlist at every login, never trusted as durable state alone — see `security.md` |
+| `is_admin` | BOOLEAN | no | default `false`; recomputed from the configured ID-token claim (`BEAM_OIDC_ADMIN_CLAIM`) at every login — grants and revokes — never trusted as durable state alone; see `security.md` |
 | `created_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 

@@ -82,7 +82,7 @@ everything up to the trait boundary hermetically, and validate the real round-tr
 
 - **OIDC ↔ IdP round-trip.** The `beam-auth` client logic is unit-tested exhaustively against a
   `FakeOidcClient` — authorization URL construction, PKCE handling, callback/token exchange, JIT
-  user provisioning, admin-allowlist evaluation. The real browser-driven Authorization Code + PKCE
+  user provisioning, admin-claim evaluation. The real browser-driven Authorization Code + PKCE
   flow is exercised manually against the bundled Dex today; an automated Playwright suite is
   tracked in [#74](https://github.com/justin13888/beam/issues/74).
 - **Real `cameo` → TMDB/AniList network calls.** The enrichment pipeline is unit-tested against its

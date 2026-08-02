@@ -18,8 +18,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
   ([ADR-0005](../architecture/decisions/ADR-0005-sessions-in-postgres.md)).
 - **FR-105**: On a user's first successful login, the server MUST just-in-time (JIT) provision a
   local user record keyed by the `(issuer, subject)` pair from the OIDC identity token.
-- **FR-106**: On every login, the server MUST evaluate the authenticated user's email address against
-  the `BEAM_ADMIN_EMAILS` allowlist and MUST set or clear the user's admin role accordingly.
+- **FR-106**: On every login, the server MUST derive the user's admin role solely from the configured
+  ID-token claim (`BEAM_OIDC_ADMIN_CLAIM`/`BEAM_OIDC_ADMIN_VALUE`) asserted by the IdP, and MUST set
+  or clear the stored admin role accordingly (granting **and** revoking). With no admin claim
+  configured, no user is admin. The server MUST NOT expose any other mechanism to grant admin.
 - **FR-107**: The web client MUST initiate login by redirecting the browser to `/v1/auth/login`. The
   client MUST NOT embed or invoke any OIDC client-side library.
 - **FR-108**: The web client MUST determine current-session identity and role by calling

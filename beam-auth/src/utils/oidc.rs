@@ -30,11 +30,17 @@ pub struct OidcIdentity {
     /// The `sub` claim -- the other half.
     pub subject: String,
     pub email: Option<String>,
-    /// Whether the IdP asserts the email is verified. An unverified email is
-    /// never trusted for admin-allowlist matching.
+    /// Whether the IdP asserts the email is verified. Informational only --
+    /// admin is derived from a configured claim, not the email (issue #85).
     pub email_verified: bool,
     pub name: Option<String>,
     pub picture: Option<String>,
+    /// The full, already-verified ID-token claim set as raw JSON, so callers
+    /// can evaluate a deployment-configured admin claim (see
+    /// [`crate::utils::admin_claim`]) -- including non-standard claims like
+    /// `groups` that the typed OIDC claim set discards. `Value::Null` when the
+    /// claim set was unavailable or not an object.
+    pub claims: serde_json::Value,
 }
 
 #[derive(Debug, Error)]
@@ -193,6 +199,13 @@ mod discovered {
                 .claims(&self.client.id_token_verifier(), &expected_nonce)
                 .map_err(|e| OidcError::ClaimsVerification(e.to_string()))?;
 
+            // `claims` above verified the token's signature and nonce, but the
+            // typed `CoreIdTokenClaims` (with `EmptyAdditionalClaims`) drops any
+            // non-standard claim -- e.g. the `groups`/`roles` a deployment binds
+            // admin to (issue #85). Re-decode the now-trusted payload as raw JSON
+            // to carry every claim through for admin evaluation.
+            let raw_claims = decode_verified_claims(id_token);
+
             Ok(OidcIdentity {
                 issuer: claims.issuer().as_str().to_string(),
                 subject: claims.subject().as_str().to_string(),
@@ -206,8 +219,27 @@ mod discovered {
                     .picture()
                     .and_then(|p| p.get(None))
                     .map(|p| p.as_str().to_string()),
+                claims: raw_claims,
             })
         }
+    }
+
+    /// Decodes the claim-set (payload) segment of an already-verified compact
+    /// JWT into raw JSON. The signature/nonce were validated by the caller
+    /// before this runs, so the bytes are trusted; any decode failure yields
+    /// `Value::Null` (admin is then simply never granted) rather than an error.
+    fn decode_verified_claims(id_token: &openidconnect::core::CoreIdToken) -> serde_json::Value {
+        use base64::Engine;
+
+        let compact = id_token.to_string();
+        let Some(payload_b64) = compact.split('.').nth(1) else {
+            return serde_json::Value::Null;
+        };
+        let Ok(payload) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64)
+        else {
+            return serde_json::Value::Null;
+        };
+        serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null)
     }
 }
 

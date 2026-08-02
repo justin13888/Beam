@@ -47,9 +47,10 @@ See [ADR-0003](../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md) for the
 - **Pending-auth state**: the in-flight state/nonce/PKCE verifier for a login attempt is stored
   server-side (`PendingAuthStore`, single-use, short TTL) and bound to a `beam_oidc_state` cookie
   -- no secrets round-trip through the client beyond the opaque `state` value.
-- **Admin status**: recomputed from the `BEAM_ADMIN_EMAILS` allowlist on every login (not stored
-  as a persistent grant); an unverified email is never granted admin regardless of allowlist
-  membership.
+- **Admin status**: derived solely from a configured ID-token claim (`BEAM_OIDC_ADMIN_CLAIM`,
+  matched per `BEAM_OIDC_ADMIN_VALUE`), recomputed on every login — granting **and** revoking — not
+  stored as a persistent grant. The IdP is the single authority (issue #85); with no admin claim
+  configured, nobody is admin. Claim evaluation is a pure function in `utils/admin_claim.rs`.
 
 ## Testing
 
