@@ -90,4 +90,34 @@ impl PlaybackProgressRepository for SqlPlaybackProgressRepository {
 
         Ok(models.into_iter().map(PlaybackProgress::from).collect())
     }
+
+    async fn find_page_by_user(
+        &self,
+        user_id: Uuid,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<PlaybackProgress>, DbErr> {
+        use beam_entity::playback_progress;
+        use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
+
+        let models = playback_progress::Entity::find()
+            .filter(playback_progress::Column::UserId.eq(user_id))
+            .order_by(playback_progress::Column::UpdatedAt, Order::Desc)
+            .offset(offset)
+            .limit(limit)
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(PlaybackProgress::from).collect())
+    }
+
+    async fn count_by_user(&self, user_id: Uuid) -> Result<u64, DbErr> {
+        use beam_entity::playback_progress;
+        use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+        playback_progress::Entity::find()
+            .filter(playback_progress::Column::UserId.eq(user_id))
+            .count(&self.db)
+            .await
+    }
 }

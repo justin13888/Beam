@@ -23,7 +23,10 @@ mod tests {
     use salvo::prelude::*;
     use salvo::test::{ResponseExt, TestClient};
 
-    use crate::routes::{ReportProgressRequest, get_continue_watching, report_playback_progress};
+    use crate::routes::{
+        HistoryResponse, ReportProgressRequest, get_continue_watching, get_history,
+        report_playback_progress,
+    };
     use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
     use crate::services::hash::HashService;
     use crate::services::library::LibraryError;
@@ -279,7 +282,8 @@ mod tests {
                     .push(
                         Router::with_path("files/{file_id}/progress").put(report_playback_progress),
                     )
-                    .push(Router::with_path("continue-watching").get(get_continue_watching)),
+                    .push(Router::with_path("continue-watching").get(get_continue_watching))
+                    .push(Router::with_path("history").get(get_history)),
             );
         Service::new(router)
     }
@@ -459,5 +463,116 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].media_id, movie_id.to_string());
         assert_eq!(items[0].media_type, "movie");
+    }
+
+    /// Seeds a resolvable movie + entry + file and returns the file id.
+    fn seed_movie_file(fixture: &TestFixture) -> uuid::Uuid {
+        let movie = Movie {
+            id: uuid::Uuid::new_v4(),
+            title: "Test Movie".to_string(),
+            title_localized: None,
+            description: None,
+            year: None,
+            release_date: None,
+            runtime: None,
+            poster_url: None,
+            backdrop_url: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            anilist_id: None,
+            rating_tmdb: None,
+            rating_imdb: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let movie_id = movie.id;
+        fixture
+            .movie_repo
+            .movies
+            .lock()
+            .unwrap()
+            .insert(movie.id, movie);
+
+        let entry = MovieEntry {
+            id: uuid::Uuid::new_v4(),
+            library_id: uuid::Uuid::new_v4(),
+            movie_id,
+            edition: None,
+            is_primary: true,
+            created_at: chrono::Utc::now(),
+        };
+        let entry_id = entry.id;
+        fixture
+            .movie_repo
+            .entries
+            .lock()
+            .unwrap()
+            .insert(entry.id, entry);
+
+        let file = make_media_file(MediaFileContent::Movie {
+            movie_entry_id: entry_id,
+        });
+        let file_id = file.id;
+        fixture
+            .file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(file.id, file);
+        file_id
+    }
+
+    #[tokio::test]
+    async fn test_history_requires_auth() {
+        let fixture = make_test_state();
+        let service = build_service(&fixture);
+        let res = TestClient::get("http://localhost/v1/history")
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn test_history_returns_items_and_total_including_completed() {
+        let fixture = make_test_state();
+        let in_progress_file = seed_movie_file(&fixture);
+        let completed_file = seed_movie_file(&fixture);
+
+        let service = build_service(&fixture);
+        let cookie = seed_session_cookie(&fixture).await;
+
+        // One in-progress and one completed report.
+        TestClient::put(format!(
+            "http://localhost/v1/files/{in_progress_file}/progress"
+        ))
+        .add_header("Cookie", cookie.clone(), true)
+        .json(&ReportProgressRequest {
+            position_secs: 10.0,
+            duration_secs: Some(100.0),
+        })
+        .send(&service)
+        .await;
+        TestClient::put(format!(
+            "http://localhost/v1/files/{completed_file}/progress"
+        ))
+        .add_header("Cookie", cookie.clone(), true)
+        .json(&ReportProgressRequest {
+            position_secs: 99.0,
+            duration_secs: Some(100.0),
+        })
+        .send(&service)
+        .await;
+
+        let mut res = TestClient::get("http://localhost/v1/history")
+            .add_header("Cookie", cookie, true)
+            .send(&service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::OK));
+        let body: HistoryResponse = res.take_json().await.unwrap();
+        assert_eq!(body.total, 2);
+        assert_eq!(body.items.len(), 2);
+        // The completed row is included in history (continue-watching hides it).
+        assert!(body.items.iter().any(|i| i.completed));
     }
 }

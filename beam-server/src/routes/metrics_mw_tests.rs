@@ -47,6 +47,7 @@ fn classify_route_covers_every_class_and_falls_back_to_other() {
         ("/v1/files/abc/download", "download"),
         ("/v1/files/abc/progress", "progress"),
         ("/v1/continue-watching", "continue_watching"),
+        ("/v1/history", "history"),
         ("/v1/libraries", "libraries"),
         ("/v1/libraries/abc", "libraries"),
         ("/v1/libraries/abc/files", "libraries"),

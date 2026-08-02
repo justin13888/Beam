@@ -81,6 +81,7 @@ fn rest_routes(rate_limiters: Option<RateLimiters>) -> Router {
         .push(Router::with_path("files/{file_id}/stream").get(stream_file))
         .push(Router::with_path("files/{file_id}/download").get(download_file))
         .push(Router::with_path("continue-watching").get(get_continue_watching))
+        .push(Router::with_path("history").get(get_history))
         .push(
             Router::with_path("admin")
                 .push(Router::with_path("libraries").post(create_library))
