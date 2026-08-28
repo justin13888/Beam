@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
+mutants = { workspace = true }
 num = { version = "0.4.3", features = ["serde"] }
 parking_lot = "0.12.5"
 regex = { workspace = true }
@@ -15,6 +16,8 @@ sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# `RealClock::sleep` needs `tokio::time`; `TestClock`'s waiters need `tokio::sync`.
+tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }

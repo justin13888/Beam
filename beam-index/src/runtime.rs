@@ -11,10 +11,10 @@ use uuid::Uuid;
 
 use beam_domain::repositories::LibraryRepository;
 
-use crate::services::clock::{Clock, RealClock};
 use crate::services::enrichment::MetadataEnrichmentService;
 use crate::services::index::LocalIndexService;
 use crate::services::watcher::{FsWatcher, NotifyFsWatcher, PathDebouncer};
+use crate::services::{Clock, RealClock};
 
 /// Spawn the metadata-enrichment sweep loop. Runs forever, sweeping
 /// `interval` apart unless poked sooner via

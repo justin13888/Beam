@@ -31,6 +31,14 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 metrics-util = { version = "0.20.4", default-features = false, features = [
     "debugging",
 ] }
+# Provides the `#[mutants::skip]` attribute. cargo-mutants recognises only the
+# literal `#[cfg(test)]` when deciding what not to mutate -- it parses
+# `#[cfg(any(test, feature = "test-utils"))]` as an unrecognised form and
+# mutates the contents -- so every test-utils-gated double must carry an
+# explicit skip. `mise run check:mutants-skip-fakes` enforces this. The crate is
+# MIT with zero dependencies and compiles to nothing when cargo-mutants is not
+# running. See docs/testing.md and ADR-0011.
+mutants = "0.0.4"
 rand = "0.10.0"
 regex = "1.12.3"
 salvo = { version = "0.89.1", features = [

@@ -12,7 +12,7 @@ use beam_auth::utils::{
 };
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
-use beam_index::services::clock::RealClock;
+use beam_index::services::RealClock;
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
 
