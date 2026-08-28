@@ -23,7 +23,13 @@ import { RouteError } from "../components/RouteError";
 
 type Library = components["schemas"]["beam_server.models.library.Library"];
 
-export const Route = createFileRoute("/libraries")({
+// `/libraries/` -- an index route, not a layout.
+//
+// While this file was `libraries.tsx` the router treated it as the *parent* of
+// `/libraries/$id`, and it renders no `<Outlet />`, so navigating to a library
+// detail page silently rendered the library list instead. Every test mocked the
+// router away, so nothing could see it.
+export const Route = createFileRoute("/libraries/")({
 	errorComponent: RouteError,
 	component: LibrariesPage,
 });

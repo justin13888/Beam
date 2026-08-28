@@ -36,7 +36,7 @@ vi.mock("@/hooks/auth", () => ({
 	useAuth: () => ({ isAuthenticated: true }),
 }));
 
-import { LibrariesPage } from "./libraries";
+import { LibrariesPage } from "./libraries.index";
 
 const testLibrary = {
 	id: "lib-1",
