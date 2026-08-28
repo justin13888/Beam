@@ -1,0 +1,206 @@
+name: Mutants
+
+# Mutation testing. ADVISORY ONLY -- nothing here is a merge gate, and `ci-ok`
+# in ci.yml must never gain a dependency on these jobs. A surviving mutant is a
+# prompt to harden the code (delete the branch, make the illegal state
+# unrepresentable, or add the missing assertion), not a broken build. See
+# docs/testing.md and ADR-0011 for the resolution order.
+#
+# As with ci.yml, every job body is a `mise run <task>` -- the commands live in
+# mise.toml so CI, the git hooks, and humans cannot drift apart (ADR-0009).
+
+on:
+  pull_request:
+    branches: [master]
+  schedule:
+    # 03:00 UTC daily. GitHub disables `schedule` after 60 days without repo
+    # activity, which is why workflow_dispatch is also wired up below.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Link a system FFmpeg rather than vendoring one, exactly as ci.yml's rust
+  # jobs do. Vendoring would compile all of FFmpeg from source into every
+  # scratch build directory cargo-mutants creates.
+  BEAM_CARGO_FEATURES: ""
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Pull requests: mutate only what this branch changed. Minutes, not hours.
+  # ---------------------------------------------------------------------
+  diff:
+    name: Mutants (changed code)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # rust:mutants:diff needs the merge base, so the full history and the
+          # base branch ref must both be present.
+          fetch-depth: 0
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # setup-rust-toolchain defaults RUSTFLAGS to "-D warnings". Under
+          # mutation that turns every mutant which merely provokes a warning
+          # (unused_variables, unreachable_code) into an "unviable" result,
+          # silently shrinking the denominator. .cargo/mutants.toml also sets
+          # cap_lints, but do not rely on only one of the two.
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+
+      - name: Mutate changed code
+        id: mutants
+        # Advisory: exit 2 (survivors) and 3 (timeouts) must not fail the job.
+        continue-on-error: true
+        env:
+          MUTANTS_BASE: ${{ github.event.pull_request.base.sha }}
+        run: mise run rust:mutants:diff
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Mutation testing (advisory)"
+            echo
+            if [ ! -d mutants.out ]; then
+              echo "No mutants were generated -- no Rust changes on this branch."
+              exit 0
+            fi
+            for f in caught missed timeout unviable; do
+              if [ -s "mutants.out/$f.txt" ]; then
+                printf '**%s: %s**\n\n' "$f" "$(wc -l < "mutants.out/$f.txt")"
+              fi
+            done
+            if [ -s mutants.out/missed.txt ]; then
+              echo "Surviving mutants -- harden the code first, test second:"
+              echo '```'
+              cat mutants.out/missed.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-diff
+          path: mutants.out/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # Scheduled: the whole workspace, sharded.
+  #
+  # The matrix is gated on a plain test run because the shards pass
+  # --baseline=skip. Skipping the baseline is what makes sharding affordable
+  # (it drops one clean build+test per shard), but it also means a shard cannot
+  # tell "the tree is broken" from "this mutant was caught" on its own.
+  # ---------------------------------------------------------------------
+  gate:
+    name: Baseline is green
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+      - run: mise run rust:test
+
+  full:
+    name: Mutants ${{ matrix.shard }}/12
+    needs: gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0-based, as cargo-mutants expects. ~1,320 mutants over 12 shards is
+        # ~110 each; at roughly a minute apiece that is a ~2h shard, well inside
+        # GitHub's 6h job cap even if the estimate is badly off.
+        #
+        # If the runner-hours become unwelcome, the cheap downgrade is to move
+        # this job to `- cron: "0 3 * * 0"` (weekly) and leave the PR diff job
+        # carrying the day-to-day signal.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+
+      - name: Mutate shard
+        continue-on-error: true
+        run: mise run rust:mutants:shard ${{ matrix.shard }}/12
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out/
+          retention-days: 14
+
+  report:
+    name: Aggregate
+    needs: full
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-shard-*
+          path: shards/
+
+      # The shards are `continue-on-error`, so survivors and timeouts pass
+      # quietly -- that is the point of an advisory run. A shard that produced
+      # no outcomes.json at all is a different thing: it crashed, or the
+      # baseline was not actually green. Fail loudly on that, the same way
+      # ci-ok distinguishes "skipped" from "failed".
+      - name: Report and check for crashed shards
+        run: |
+          set -eu
+          missing=0
+          caught=0; missed=0; timeout=0; unviable=0
+          for i in $(seq 0 11); do
+            dir="shards/mutants-shard-$i"
+            if [ ! -f "$dir/outcomes.json" ]; then
+              echo "::error::shard $i produced no outcomes.json -- it crashed or the baseline was red"
+              missing=1
+              continue
+            fi
+            for f in caught missed timeout unviable; do
+              n=0
+              [ -f "$dir/$f.txt" ] && n=$(wc -l < "$dir/$f.txt")
+              eval "$f=\$(( \$$f + n ))"
+            done
+          done
+
+          total=$(( caught + missed + timeout ))
+          {
+            echo "## Mutation testing (advisory)"
+            echo
+            echo "| outcome | count |"
+            echo "|---|---|"
+            echo "| caught | $caught |"
+            echo "| missed | $missed |"
+            echo "| timeout | $timeout |"
+            echo "| unviable | $unviable |"
+            if [ "$total" -gt 0 ]; then
+              echo
+              echo "Caught rate: $(( caught * 100 / total ))%"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$missing"

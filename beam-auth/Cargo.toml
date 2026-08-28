@@ -35,11 +35,18 @@ server = [
     "oidc",
     "dep:salvo",
 ]
+test-utils = ["utils", "beam-domain/test-utils"]
+# The feature set cargo-mutants builds this package with.
+#
+# cargo-mutants builds each package on its own, so it needs one *unqualified*
+# feature name that is valid everywhere -- and the set it selects has to compile
+# every `cfg`-gated production path, or mutants in code that was never built are
+# reported MISSED for a reason that has nothing to do with the tests.
+mutation-testing = ["server", "test-utils"]
 # Opt-in tier: runs the shared repository contracts against a real Postgres.
 # Never enabled by `rust:test`, `rust:coverage`, `mise run ci`, or the pre-push
 # hook -- see NFR-201 and ADR-0011.
 pg-integration = ["beam-test-support/pg-integration"]
-test-utils = ["utils", "beam-domain/test-utils"]
 
 [dependencies]
 # Non-optional: always compiled (needed by server/oidc_routes.rs and #[tokio::test]s)

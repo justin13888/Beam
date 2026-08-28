@@ -86,6 +86,15 @@ hooks {
                 glob = List("Cargo.toml", "beam-server/Containerfile", ".github/actions/setup-ffmpeg/action.yml")
                 check = "mise run check:ffmpeg-version"
             }
+            // A pure grep over the tracked .rs files -- milliseconds, and it catches
+            // the one mistake that would silently corrupt every mutation-testing
+            // result: a test double that cargo-mutants will mutate as if it were
+            // production code. See the task in mise.toml for why the cfg attribute
+            // alone is not enough.
+            ["mutants-skip-fakes"] {
+                glob = List("*.rs")
+                check = "mise run check:mutants-skip-fakes"
+            }
             ["ts-check"] {
                 glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json")
                 check = "mise run ts:check"

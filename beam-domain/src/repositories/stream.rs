@@ -14,6 +14,7 @@ pub trait MediaStreamRepository: Send + Sync + std::fmt::Debug {
     async fn delete_by_file_id(&self, file_id: Uuid) -> Result<u64, DbErr>;
 }
 
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;

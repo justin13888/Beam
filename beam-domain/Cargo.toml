@@ -31,10 +31,23 @@ version = "0.14.0"
 optional = true
 
 [dev-dependencies]
+# Also a `test-utils`-gated optional dependency above. Listed here too so this
+# crate's own `#[cfg(test)]` build works standalone (`cargo test -p
+# beam-domain`) instead of only when a workspace build happens to unify the
+# feature in from a downstream crate's dev-dependencies -- which is what
+# cargo-mutants does when it builds each package on its own.
+mockall = "0.14.0"
 proptest = "1.9.0"
 tempfile = "3.23.0"
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [features]
 entity = ["dep:beam-entity"]
+# The feature set cargo-mutants builds this package with.
+#
+# cargo-mutants builds each package on its own, so it needs one *unqualified*
+# feature name that is valid everywhere -- and the set it selects has to compile
+# every `cfg`-gated production path, or mutants in code that was never built are
+# reported MISSED for a reason that has nothing to do with the tests.
+mutation-testing = ["entity", "test-utils"]
 test-utils = ["dep:mockall"]

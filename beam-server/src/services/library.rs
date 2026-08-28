@@ -54,59 +54,74 @@ impl PathValidator for OsPathValidator {
     }
 }
 
+/// Test doubles. Gated behind `test-utils` so downstream crates can depend on
+/// them without them reaching a release build.
+///
+/// Collected into one module rather than left as loose `#[cfg(...)]` items so a
+/// single `#[mutants::skip]` covers the lot: cargo-mutants recognises only the
+/// literal `#[cfg(test)]` and would otherwise mutate these bodies and report the
+/// scaffolding as untested product behaviour. `mise run check:mutants-skip-fakes`
+/// enforces the attribute.
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Debug, Clone)]
-pub enum InMemoryPathValidatorResult {
-    Success(PathBuf),
-    PathNotFound(String),
-    ValidationError(String),
-}
+pub mod in_memory {
+    use super::*;
 
-#[cfg(any(test, feature = "test-utils"))]
-#[derive(Debug)]
-pub struct InMemoryPathValidator {
-    result: InMemoryPathValidatorResult,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl InMemoryPathValidator {
-    pub fn success(path: PathBuf) -> Self {
-        Self {
-            result: InMemoryPathValidatorResult::Success(path),
-        }
+    #[derive(Debug, Clone)]
+    pub enum InMemoryPathValidatorResult {
+        Success(PathBuf),
+        PathNotFound(String),
+        ValidationError(String),
     }
 
-    pub fn path_not_found(msg: impl Into<String>) -> Self {
-        Self {
-            result: InMemoryPathValidatorResult::PathNotFound(msg.into()),
-        }
+    #[derive(Debug)]
+    pub struct InMemoryPathValidator {
+        result: InMemoryPathValidatorResult,
     }
 
-    pub fn validation_error(msg: impl Into<String>) -> Self {
-        Self {
-            result: InMemoryPathValidatorResult::ValidationError(msg.into()),
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl PathValidator for InMemoryPathValidator {
-    fn validate_library_path(
-        &self,
-        _requested: &Path,
-        _root: &Path,
-    ) -> Result<PathBuf, LibraryError> {
-        match &self.result {
-            InMemoryPathValidatorResult::Success(path) => Ok(path.clone()),
-            InMemoryPathValidatorResult::PathNotFound(msg) => {
-                Err(LibraryError::PathNotFound(msg.clone()))
+    impl InMemoryPathValidator {
+        pub fn success(path: PathBuf) -> Self {
+            Self {
+                result: InMemoryPathValidatorResult::Success(path),
             }
-            InMemoryPathValidatorResult::ValidationError(msg) => {
-                Err(LibraryError::Validation(msg.clone()))
+        }
+
+        pub fn path_not_found(msg: impl Into<String>) -> Self {
+            Self {
+                result: InMemoryPathValidatorResult::PathNotFound(msg.into()),
+            }
+        }
+
+        pub fn validation_error(msg: impl Into<String>) -> Self {
+            Self {
+                result: InMemoryPathValidatorResult::ValidationError(msg.into()),
             }
         }
     }
+
+    impl PathValidator for InMemoryPathValidator {
+        fn validate_library_path(
+            &self,
+            _requested: &Path,
+            _root: &Path,
+        ) -> Result<PathBuf, LibraryError> {
+            match &self.result {
+                InMemoryPathValidatorResult::Success(path) => Ok(path.clone()),
+                InMemoryPathValidatorResult::PathNotFound(msg) => {
+                    Err(LibraryError::PathNotFound(msg.clone()))
+                }
+                InMemoryPathValidatorResult::ValidationError(msg) => {
+                    Err(LibraryError::Validation(msg.clone()))
+                }
+            }
+        }
+    }
 }
+
+// Re-exported at the module root so the doubles keep the paths they had before
+// they moved into `in_memory`.
+#[cfg(any(test, feature = "test-utils"))]
+pub use in_memory::{InMemoryPathValidator, InMemoryPathValidatorResult};
 
 #[async_trait::async_trait]
 pub trait LibraryService: Send + Sync + std::fmt::Debug {

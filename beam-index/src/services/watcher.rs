@@ -159,61 +159,76 @@ impl FsWatcher for NotifyFsWatcher {
     }
 }
 
-/// In-memory watcher fake. Events are supplied by tests via [`Self::emit`].
+/// Test doubles. Gated behind `test-utils` so downstream crates can depend on
+/// them without them reaching a release build.
+///
+/// Collected into one module rather than left as loose `#[cfg(...)]` items so a
+/// single `#[mutants::skip]` covers the lot: cargo-mutants recognises only the
+/// literal `#[cfg(test)]` and would otherwise mutate these bodies and report the
+/// scaffolding as untested product behaviour. `mise run check:mutants-skip-fakes`
+/// enforces the attribute.
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Debug)]
-pub struct InMemoryFsWatcher {
-    sender: tokio::sync::mpsc::UnboundedSender<FsEvent>,
-    receiver: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FsEvent>>,
-    watched: std::sync::Mutex<Vec<Uuid>>,
-}
+pub mod in_memory {
+    use super::*;
 
-#[cfg(any(test, feature = "test-utils"))]
-impl InMemoryFsWatcher {
-    pub fn new() -> Self {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        Self {
-            sender,
-            receiver: tokio::sync::Mutex::new(receiver),
-            watched: std::sync::Mutex::new(Vec::new()),
+    /// In-memory watcher fake. Events are supplied by tests via [`Self::emit`].
+    #[derive(Debug)]
+    pub struct InMemoryFsWatcher {
+        sender: tokio::sync::mpsc::UnboundedSender<FsEvent>,
+        receiver: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FsEvent>>,
+        watched: std::sync::Mutex<Vec<Uuid>>,
+    }
+
+    impl InMemoryFsWatcher {
+        pub fn new() -> Self {
+            let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+            Self {
+                sender,
+                receiver: tokio::sync::Mutex::new(receiver),
+                watched: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Push a synthetic event to the consumer.
+        pub fn emit(&self, event: FsEvent) {
+            let _ = self.sender.send(event);
+        }
+
+        /// Library IDs currently registered via `watch_library`, in registration order.
+        pub fn watched_libraries(&self) -> Vec<Uuid> {
+            self.watched.lock().unwrap().clone()
         }
     }
 
-    /// Push a synthetic event to the consumer.
-    pub fn emit(&self, event: FsEvent) {
-        let _ = self.sender.send(event);
+    impl Default for InMemoryFsWatcher {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
-    /// Library IDs currently registered via `watch_library`, in registration order.
-    pub fn watched_libraries(&self) -> Vec<Uuid> {
-        self.watched.lock().unwrap().clone()
+    #[async_trait::async_trait]
+    impl FsWatcher for InMemoryFsWatcher {
+        fn watch_library(&self, library_id: Uuid, _root: &Path) -> Result<(), WatchError> {
+            self.watched.lock().unwrap().push(library_id);
+            Ok(())
+        }
+
+        fn unwatch_library(&self, library_id: Uuid) -> Result<(), WatchError> {
+            self.watched.lock().unwrap().retain(|id| *id != library_id);
+            Ok(())
+        }
+
+        async fn next_event(&self) -> Option<FsEvent> {
+            self.receiver.lock().await.recv().await
+        }
     }
 }
 
+// Re-exported at the module root so the doubles keep the paths they had before
+// they moved into `in_memory`.
 #[cfg(any(test, feature = "test-utils"))]
-impl Default for InMemoryFsWatcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-#[async_trait::async_trait]
-impl FsWatcher for InMemoryFsWatcher {
-    fn watch_library(&self, library_id: Uuid, _root: &Path) -> Result<(), WatchError> {
-        self.watched.lock().unwrap().push(library_id);
-        Ok(())
-    }
-
-    fn unwatch_library(&self, library_id: Uuid) -> Result<(), WatchError> {
-        self.watched.lock().unwrap().retain(|id| *id != library_id);
-        Ok(())
-    }
-
-    async fn next_event(&self) -> Option<FsEvent> {
-        self.receiver.lock().await.recv().await
-    }
-}
+pub use in_memory::InMemoryFsWatcher;
 
 /// Coalesces a burst of filesystem events. At most one pending event is kept
 /// per `(library_id, path)`; the most recently submitted kind wins, so a

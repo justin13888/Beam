@@ -56,6 +56,13 @@ tempfile = "3.23.0"
 pg-integration = ["beam-test-support/pg-integration"]
 test-utils = ["dep:mockall", "beam-domain/test-utils"]
 vendored-ffmpeg = ["ffmpeg-next/build"]
+# The feature set cargo-mutants builds this package with.
+#
+# cargo-mutants builds each package on its own, so it needs one *unqualified*
+# feature name that is valid everywhere -- and the set it selects has to compile
+# every `cfg`-gated production path, or mutants in code that was never built are
+# reported MISSED for a reason that has nothing to do with the tests.
+mutation-testing = ["vendored-ffmpeg", "test-utils"]
 
 [dependencies.mockall]
 version = "0.14.0"

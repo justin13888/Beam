@@ -188,9 +188,11 @@ jobs:
       - uses: ./.github/actions/install-rust-build-deps
       - uses: ./.github/actions/setup-ffmpeg
 
-      # The 65% line gate is calibrated against a measured ~67.5% (see
-      # docs/testing.md). Ratchet it up over time; do not relax it to make a
-      # red pull request pass.
+      # Gates lines, regions, and functions. Regions stand in for branches:
+      # cargo-llvm-cov's --branch needs nightly, and rust-toolchain.toml pins
+      # stable. Thresholds are calibrated a few points under measured (see
+      # mise.toml and docs/testing.md). Ratchet them up over time; do not relax
+      # one to make a red pull request pass.
       - run: mise run rust:coverage
 
       - name: Upload coverage report

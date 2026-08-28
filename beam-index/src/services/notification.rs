@@ -137,50 +137,69 @@ impl NotificationService for LocalNotificationService {
     }
 }
 
-/// In-memory notification service for use in tests and as a stub.
-/// Exposes `published_events()` to inspect what was emitted.
-#[derive(Debug, Clone)]
-pub struct InMemoryNotificationService {
-    sender: broadcast::Sender<AdminEvent>,
-    event_log: Arc<RwLock<VecDeque<AdminEvent>>>,
-}
+/// Test doubles. Gated behind `test-utils` so downstream crates can depend on
+/// them without them reaching a release build.
+///
+/// Collected into one module rather than left as loose `#[cfg(...)]` items so a
+/// single `#[mutants::skip]` covers the lot: cargo-mutants recognises only the
+/// literal `#[cfg(test)]` and would otherwise mutate these bodies and report the
+/// scaffolding as untested product behaviour. `mise run check:mutants-skip-fakes`
+/// enforces the attribute.
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory {
+    use super::*;
 
-impl InMemoryNotificationService {
-    pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
-        Self {
-            sender,
-            event_log: Arc::new(RwLock::new(VecDeque::new())),
+    /// In-memory notification service for use in tests and as a stub.
+    /// Exposes `published_events()` to inspect what was emitted.
+    #[derive(Debug, Clone)]
+    pub struct InMemoryNotificationService {
+        sender: broadcast::Sender<AdminEvent>,
+        event_log: Arc<RwLock<VecDeque<AdminEvent>>>,
+    }
+
+    impl InMemoryNotificationService {
+        pub fn new() -> Self {
+            let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
+            Self {
+                sender,
+                event_log: Arc::new(RwLock::new(VecDeque::new())),
+            }
+        }
+
+        pub fn published_events(&self) -> Vec<AdminEvent> {
+            self.event_log.read().iter().cloned().collect()
         }
     }
 
-    pub fn published_events(&self) -> Vec<AdminEvent> {
-        self.event_log.read().iter().cloned().collect()
+    impl Default for InMemoryNotificationService {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl NotificationService for InMemoryNotificationService {
+        fn publish(&self, event: AdminEvent) {
+            self.event_log.write().push_back(event.clone());
+            let _ = self.sender.send(event);
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<AdminEvent> {
+            self.sender.subscribe()
+        }
+
+        fn recent_events(&self, limit: usize) -> Vec<AdminEvent> {
+            let log = self.event_log.read();
+            let events: Vec<_> = log.iter().rev().take(limit).cloned().collect();
+            events.into_iter().rev().collect()
+        }
     }
 }
 
-impl Default for InMemoryNotificationService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl NotificationService for InMemoryNotificationService {
-    fn publish(&self, event: AdminEvent) {
-        self.event_log.write().push_back(event.clone());
-        let _ = self.sender.send(event);
-    }
-
-    fn subscribe(&self) -> broadcast::Receiver<AdminEvent> {
-        self.sender.subscribe()
-    }
-
-    fn recent_events(&self, limit: usize) -> Vec<AdminEvent> {
-        let log = self.event_log.read();
-        let events: Vec<_> = log.iter().rev().take(limit).cloned().collect();
-        events.into_iter().rev().collect()
-    }
-}
+// Re-exported at the module root so the double keeps the path it had before it
+// moved into `in_memory`.
+#[cfg(any(test, feature = "test-utils"))]
+pub use in_memory::InMemoryNotificationService;
 
 #[cfg(test)]
 mod tests {
