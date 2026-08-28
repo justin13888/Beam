@@ -1,9 +1,10 @@
 import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
-import { createFileRoute, ErrorComponent } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { Download, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import type { components } from "@/api.gen";
+import { RouteError } from "@/components/RouteError";
 import { VideoPlayer } from "@/components/VideoPlayer";
 import { env } from "@/env";
 import { useAuth } from "@/hooks/auth";
@@ -42,7 +43,9 @@ export const Route = createFileRoute("/media/$id")({
 	loader: async ({ context: { queryClient }, params: { id } }) => {
 		return queryClient.ensureQueryData(mediaQueryOptions(id));
 	},
-	errorComponent: ({ error }) => <ErrorComponent error={error} />,
+	// The app's own error surface, same as every other route -- TanStack's
+	// `ErrorComponent` renders a bare stack trace and offers no way back.
+	errorComponent: RouteError,
 	component: RouteComponent,
 });
 

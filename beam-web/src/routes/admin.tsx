@@ -292,11 +292,14 @@ function UsersTab() {
 			)}
 
 			{!loading && !error && users.length > 0 && (
-				<div className="divide-y divide-gray-700/30">
+				// A real list: each account is one item. Previously nested
+				// `<div>`s, which gave assistive technology (and a test trying
+				// to scope an assertion to one account) nothing to work with.
+				<ul className="divide-y divide-gray-700/30">
 					{users.map((u) => {
 						const isSelf = u.id === currentUser?.id;
 						return (
-							<div
+							<li
 								key={u.id}
 								className="px-6 py-4 flex items-center gap-4 hover:bg-gray-700/20 transition-colors"
 							>
@@ -372,10 +375,10 @@ function UsersTab() {
 										</Button>
 									)}
 								</div>
-							</div>
+							</li>
 						);
 					})}
-				</div>
+				</ul>
 			)}
 
 			{totalPages > 1 && (

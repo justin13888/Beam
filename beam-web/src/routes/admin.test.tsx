@@ -1,65 +1,35 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Toaster } from "sonner";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpResponse, http } from "msw";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { components } from "@/api.gen";
+import * as factory from "@/test/factories";
+import { BASE_URL, meUnauthenticatedHandler } from "@/test/handlers";
+import { renderRoute, waitForRouter } from "@/test/harness";
+import { recordRequests } from "@/test/requests";
+import { server } from "@/test/server";
 
-const { mockGet, mockPatch } = vi.hoisted(() => ({
-	mockGet: vi.fn(),
-	mockPatch: vi.fn(),
-}));
-
-vi.mock("@/lib/apiClient", () => ({
-	apiClient: {
-		GET: mockGet,
-		PATCH: mockPatch,
-	},
-}));
-
-vi.mock("@tanstack/react-router", () => ({
-	createFileRoute: (_path: string) => (opts: Record<string, unknown>) => opts,
-	redirect: (opts: unknown) => opts,
-	useNavigate: () => vi.fn(),
-}));
-
-// The authed operator is user-1: their own row must not offer a disable action.
-vi.mock("@/hooks/auth", () => ({
-	useAuth: () => ({
-		user: {
-			id: "user-1",
-			display_name: "Ada Lovelace",
-			email: "ada@example.com",
-			is_admin: true,
-		},
-		isAuthenticated: true,
-		isLoading: false,
-		login: vi.fn(),
-		logout: vi.fn(),
-		refresh: vi.fn(),
-	}),
-}));
-
-// SSE is exercised by the hook's own tests; here it is a no-op.
+// The admin page opens a Server-Sent Events connection; `EventSource` does not
+// exist in jsdom. The hook's own behaviour is covered by
+// `src/hooks/useAdminEventStream.test.ts`; here it is a collaborator.
 vi.mock("../hooks/useAdminEventStream", () => ({
 	useAdminEventStream: () => ({ events: [], connected: false }),
 }));
 
-import { AdminPage, type AdminSearch, type AdminTab } from "./admin";
+type AdminLogEntry =
+	components["schemas"]["beam_server.models.admin.AdminLogEntryDto"];
+type AdminStatus =
+	components["schemas"]["beam_server.models.admin.AdminStatusResponse"];
 
-function adminUser(overrides: Partial<Record<string, unknown>> = {}) {
-	return {
-		id: "user-2",
-		display_name: "Grace Hopper",
-		email: "grace@example.com",
-		avatar_url: null,
-		is_admin: false,
-		disabled: false,
-		created_at: "2024-01-02T00:00:00Z",
-		...overrides,
-	};
-}
+/** The operator running these tests. Their own row must not offer a disable. */
+const operator = factory.user({
+	id: "user-1",
+	display_name: "Ada Lovelace",
+	email: "ada@example.com",
+	is_admin: true,
+});
 
-const statusResponse = {
+const statusResponse: AdminStatus = {
 	// 3d 4h 12m exactly: 3*86400 + 4*3600 + 12*60 = 274320
 	uptime_secs: 274320,
 	version: "1.2.3",
@@ -79,116 +49,109 @@ const statusResponse = {
 	],
 };
 
-/** Routes mocked GET calls by path. `users`/`total` back the users tab and
- * can be overridden per test; a fresh queue lets pagination assertions read
- * successive offsets. */
-function mockApi({
-	users = [adminUser()] as unknown[],
+const serverStartedLog: AdminLogEntry = {
+	id: "log-1",
+	level: "info",
+	category: "system",
+	message: "Server started",
+	created_at: "2024-06-01T00:00:00Z",
+	details: null,
+};
+
+function serveAdmin({
+	users = [factory.adminUser({ id: "user-2", display_name: "Grace Hopper" })],
 	total = 1,
 	status = statusResponse,
-	logs = [] as unknown[],
+	logs = [] as AdminLogEntry[],
 	logCount = 0,
+	admin = true,
 } = {}) {
-	mockGet.mockImplementation(async (path: string) => {
-		switch (path) {
-			case "/v1/admin/users":
-				return { data: { items: users, total }, error: undefined };
-			case "/v1/admin/status":
-				return { data: status, error: undefined };
-			case "/v1/admin/logs":
-				return { data: logs, error: undefined };
-			case "/v1/admin/logs/count":
-				return { data: { count: logCount }, error: undefined };
-			default:
-				return { data: undefined, error: { message: `unexpected ${path}` } };
-		}
-	});
-}
-
-function renderPage(tab: AdminTab = "logs", navigate = vi.fn()) {
-	const queryClient = new QueryClient({
-		defaultOptions: {
-			queries: { retry: false },
-			mutations: { retry: false },
-		},
-	});
-	const utils = render(
-		<QueryClientProvider client={queryClient}>
-			<AdminPage tab={tab} navigate={navigate} />
-			<Toaster />
-		</QueryClientProvider>,
+	server.use(
+		http.get(`${BASE_URL}/v1/me`, () =>
+			HttpResponse.json(factory.user({ ...operator, is_admin: admin })),
+		),
+		http.get(`${BASE_URL}/v1/admin/users`, () =>
+			HttpResponse.json({ items: users, total }),
+		),
+		http.get(`${BASE_URL}/v1/admin/status`, () => HttpResponse.json(status)),
+		http.get(`${BASE_URL}/v1/admin/logs`, () => HttpResponse.json(logs)),
+		http.get(`${BASE_URL}/v1/admin/logs/count`, () =>
+			HttpResponse.json({ count: logCount }),
+		),
 	);
-	return { ...utils, navigate };
 }
 
-/** Resolves the most recent navigate({ search }) update against `prev`. */
-function lastNavigatedSearch(
-	navigate: ReturnType<typeof vi.fn>,
-	prev: AdminSearch,
-): AdminSearch {
-	const calls = navigate.mock.calls;
-	expect(calls.length).toBeGreaterThan(0);
-	const { search } = calls[calls.length - 1][0];
-	return typeof search === "function" ? search(prev) : search;
-}
-
-/** The GET calls made against a given path, oldest first. */
-function callsTo(path: string) {
-	return mockGet.mock.calls.filter(([p]) => p === path);
-}
-
-describe("AdminPage tabs", () => {
-	beforeEach(() => {
-		mockGet.mockReset();
-		mockPatch.mockReset();
+describe("/admin access", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
 	});
 
+	it("redirects an unauthenticated visitor to login", async () => {
+		server.use(meUnauthenticatedHandler);
+
+		const { getLocation } = renderRoute("/admin");
+		await waitForRouter();
+
+		// `tab` defaults into the URL via `validateSearch`, so the captured
+		// redirect carries it -- which is the point: signing in lands the
+		// operator back on the tab they asked for.
+		await waitFor(() =>
+			expect(getLocation()).toBe("/login?redirect=%2Fadmin%3Ftab%3Dlogs"),
+		);
+	});
+
+	it("keeps a signed-in non-admin out of the admin surface", async () => {
+		serveAdmin({ admin: false });
+
+		const { getLocation } = renderRoute("/admin");
+		await waitForRouter();
+
+		await waitFor(() => expect(getLocation()).not.toContain("/admin"));
+	});
+});
+
+describe("/admin tabs", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
 	});
 
 	it("renders the three tabs and switches via URL search state", async () => {
-		mockApi();
+		serveAdmin();
 		const user = userEvent.setup();
-		const { navigate } = renderPage("logs");
+		const { getLocation } = renderRoute("/admin?tab=logs");
 
-		expect(screen.getByRole("button", { name: "Users" })).toBeInTheDocument();
+		expect(
+			await screen.findByRole("button", { name: "Users" }),
+		).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Status" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Logs" })).toBeInTheDocument();
 
 		await user.click(screen.getByRole("button", { name: "Users" }));
 
-		expect(lastNavigatedSearch(navigate, { tab: "logs" })).toEqual({
-			tab: "users",
-		});
+		await waitFor(() => expect(getLocation()).toBe("/admin?tab=users"));
 	});
 });
 
-describe("AdminPage users tab", () => {
-	beforeEach(() => {
-		mockGet.mockReset();
-		mockPatch.mockReset();
-	});
-
+describe("/admin users tab", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
 	});
 
 	it("renders a row per user with name, email, admin badge, and disabled state", async () => {
-		mockApi({
+		serveAdmin({
 			users: [
-				adminUser({
+				factory.adminUser({
 					id: "user-2",
 					display_name: "Grace Hopper",
 					email: "grace@example.com",
 				}),
-				adminUser({
+				factory.adminUser({
 					id: "user-3",
 					display_name: "Alan Turing",
 					email: "alan@example.com",
 					is_admin: true,
 				}),
-				adminUser({
+				factory.adminUser({
 					id: "user-4",
 					display_name: "Katherine Johnson",
 					email: "katherine@example.com",
@@ -197,58 +160,73 @@ describe("AdminPage users tab", () => {
 			],
 			total: 3,
 		});
-		renderPage("users");
+		renderRoute("/admin?tab=users");
 
 		expect(await screen.findByText("Grace Hopper")).toBeInTheDocument();
 		expect(screen.getByText("grace@example.com")).toBeInTheDocument();
 		expect(screen.getByText("Alan Turing")).toBeInTheDocument();
-		// Read-only admin badge for the IdP-admin user.
-		expect(screen.getByText("Admin")).toBeInTheDocument();
-		// Local moderation state for the disabled user.
-		expect(screen.getByText("Disabled")).toBeInTheDocument();
+		// The header also greets an admin operator with an "Admin" link, so
+		// scope the badge assertions to the user's own row.
+		const row = (name: string) =>
+			screen.getByText(name).closest("li") as HTMLElement;
+		expect(row("Alan Turing")).toHaveTextContent("Admin");
+		expect(row("Grace Hopper")).not.toHaveTextContent("Admin");
+		expect(row("Katherine Johnson")).toHaveTextContent("Disabled");
+		expect(row("Grace Hopper")).not.toHaveTextContent("Disabled");
 	});
 
 	it("disables a user by id, confirming first, then refetches the list", async () => {
+		const requests = recordRequests();
 		vi.stubGlobal(
 			"confirm",
 			vi.fn(() => true),
 		);
-		mockApi({
-			users: [adminUser({ id: "user-2", display_name: "Grace Hopper" })],
-			total: 1,
-		});
-		mockPatch.mockResolvedValue({
-			data: undefined,
-			error: undefined,
-			response: { ok: true },
-		});
+		serveAdmin();
 		const user = userEvent.setup();
-		renderPage("users");
+		renderRoute("/admin?tab=users");
 
 		await user.click(await screen.findByRole("button", { name: /Disable/ }));
 
-		expect(mockPatch).toHaveBeenCalledWith(
-			"/v1/admin/users/{id}",
-			expect.objectContaining({
-				params: { path: { id: "user-2" } },
-				body: { disabled: true },
-			}),
-		);
+		await waitFor(() => {
+			const patches = requests.matching("PATCH", "/v1/admin/users/user-2");
+			expect(patches).toHaveLength(1);
+			expect(patches[0].body).toEqual({ disabled: true });
+		});
 		// invalidateQueries(["admin","users"]) triggers a refetch.
 		await waitFor(() =>
-			expect(callsTo("/v1/admin/users").length).toBeGreaterThan(1),
+			expect(
+				requests.matching("GET", "/v1/admin/users").length,
+			).toBeGreaterThan(1),
 		);
 	});
 
+	it("does not disable anything when the confirmation is declined", async () => {
+		const requests = recordRequests();
+		vi.stubGlobal(
+			"confirm",
+			vi.fn(() => false),
+		);
+		serveAdmin();
+		const user = userEvent.setup();
+		renderRoute("/admin?tab=users");
+
+		await user.click(await screen.findByRole("button", { name: /Disable/ }));
+
+		await waitFor(() =>
+			expect(screen.getByText("Grace Hopper")).toBeInTheDocument(),
+		);
+		expect(requests.matching("PATCH", "/v1/admin/users/user-2")).toEqual([]);
+	});
+
 	it("does not offer a disable action on the operator's own row", async () => {
-		mockApi({
+		serveAdmin({
 			users: [
-				adminUser({
+				factory.adminUser({
 					id: "user-1",
 					display_name: "Ada Lovelace",
 					email: "ada@example.com",
 				}),
-				adminUser({
+				factory.adminUser({
 					id: "user-2",
 					display_name: "Grace Hopper",
 					email: "grace@example.com",
@@ -256,57 +234,41 @@ describe("AdminPage users tab", () => {
 			],
 			total: 2,
 		});
-		renderPage("users");
+		renderRoute("/admin?tab=users");
 
-		// Grace only appears in a row (Ada's name is also the header operator).
 		await screen.findByText("Grace Hopper");
-		// Exactly one Disable button (Grace's) -- Ada is the current operator.
 		expect(screen.getAllByRole("button", { name: /Disable/ })).toHaveLength(1);
 		expect(screen.getByText("You")).toBeInTheDocument();
 	});
 
 	it("requests the next page at offset 50", async () => {
-		mockApi({
-			users: [adminUser({ id: "user-2", display_name: "Grace Hopper" })],
-			total: 60,
-		});
+		const requests = recordRequests();
+		serveAdmin({ total: 60 });
 		const user = userEvent.setup();
-		renderPage("users");
+		renderRoute("/admin?tab=users");
 
 		await screen.findByText("Grace Hopper");
 		await user.click(screen.getByRole("button", { name: "Next" }));
 
-		await waitFor(() =>
-			expect(mockGet).toHaveBeenLastCalledWith(
-				"/v1/admin/users",
-				expect.objectContaining({
-					params: { query: { limit: 50, offset: 50 } },
-				}),
-			),
-		);
+		await waitFor(() => {
+			const gets = requests.matching("GET", "/v1/admin/users");
+			const last = gets[gets.length - 1];
+			expect(last.query.get("limit")).toBe("50");
+			expect(last.query.get("offset")).toBe("50");
+		});
 	});
 });
 
-describe("AdminPage status tab", () => {
-	beforeEach(() => {
-		mockGet.mockReset();
-		mockPatch.mockReset();
-	});
-
+describe("/admin status tab", () => {
 	it("renders humanized uptime, counts, enrichment tallies, and recent scans", async () => {
-		mockApi();
-		renderPage("status");
+		serveAdmin();
+		renderRoute("/admin?tab=status");
 
 		expect(await screen.findByText("3d 4h 12m")).toBeInTheDocument();
 		expect(screen.getByText("v1.2.3")).toBeInTheDocument();
-
-		// Counts.
 		expect(screen.getByText("4242")).toBeInTheDocument();
-		// Enrichment tallies.
 		expect(screen.getByText("900")).toBeInTheDocument();
 		expect(screen.getByText("11")).toBeInTheDocument();
-
-		// Recent scans.
 		expect(screen.getByText("Scanned Movies library")).toBeInTheDocument();
 		expect(
 			screen.getByText("Failed to read /media/broken.mkv"),
@@ -314,65 +276,33 @@ describe("AdminPage status tab", () => {
 	});
 });
 
-describe("AdminPage logs tab", () => {
-	beforeEach(() => {
-		mockGet.mockReset();
-		mockPatch.mockReset();
-	});
-
-	it("still renders the system log list", async () => {
-		mockApi({
-			logs: [
-				{
-					id: "log-1",
-					level: "info",
-					category: "system",
-					message: "Server started",
-					created_at: "2024-06-01T00:00:00Z",
-					details: null,
-				},
-			],
-			logCount: 1,
-		});
-		renderPage("logs");
+describe("/admin logs tab", () => {
+	it("renders the system log list", async () => {
+		serveAdmin({ logs: [serverStartedLog], logCount: 1 });
+		renderRoute("/admin?tab=logs");
 
 		expect(await screen.findByText("System Logs")).toBeInTheDocument();
 		expect(await screen.findByText("Server started")).toBeInTheDocument();
 	});
 
 	it("pages the log list, requesting offset 50 on Next and disabling it on the last page", async () => {
+		const requests = recordRequests();
 		// 60 entries at PAGE_SIZE 50 => two pages, so the pager renders.
-		mockApi({
-			logs: [
-				{
-					id: "log-1",
-					level: "info",
-					category: "system",
-					message: "Server started",
-					created_at: "2024-06-01T00:00:00Z",
-					details: null,
-				},
-			],
-			logCount: 60,
-		});
+		serveAdmin({ logs: [serverStartedLog], logCount: 60 });
 		const user = userEvent.setup();
-		renderPage("logs");
+		renderRoute("/admin?tab=logs");
 
 		await screen.findByText("Server started");
-		// First page: Previous is disabled, Next is available.
 		expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
 
 		await user.click(screen.getByRole("button", { name: "Next" }));
 
-		// Advancing re-queries with the next page's offset.
-		await waitFor(() =>
-			expect(mockGet).toHaveBeenLastCalledWith(
-				"/v1/admin/logs",
-				expect.objectContaining({
-					params: { query: { limit: 50, offset: 50 } },
-				}),
-			),
-		);
+		await waitFor(() => {
+			const gets = requests.matching("GET", "/v1/admin/logs");
+			const last = gets[gets.length - 1];
+			expect(last.query.get("limit")).toBe("50");
+			expect(last.query.get("offset")).toBe("50");
+		});
 		// Page 2 of 2 is the last page: Next disables (count-driven).
 		await waitFor(() =>
 			expect(screen.getByRole("button", { name: "Next" })).toBeDisabled(),

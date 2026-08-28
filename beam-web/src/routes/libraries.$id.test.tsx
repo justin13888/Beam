@@ -1,51 +1,19 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpResponse, http } from "msw";
+import { describe, expect, it } from "vitest";
+import type { components } from "@/api.gen";
+import * as factory from "@/test/factories";
+import { BASE_URL } from "@/test/handlers";
+import { renderRoute } from "@/test/harness";
+import { server } from "@/test/server";
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
-	mockGet: vi.fn(),
-	mockPost: vi.fn(),
-}));
+type LibraryFile =
+	components["schemas"]["beam_server.models.library.file.LibraryFile"];
 
-vi.mock("@/lib/apiClient", () => ({
-	apiClient: {
-		GET: mockGet,
-		POST: mockPost,
-	},
-}));
+const testLibrary = factory.library({ id: "lib-1", name: "Movies", size: 3 });
 
-vi.mock("@tanstack/react-router", () => ({
-	createFileRoute: (_path: string) => (opts: Record<string, unknown>) => opts,
-	Link: ({
-		children,
-		to: _to,
-		params: _params,
-		...rest
-	}: {
-		children: React.ReactNode;
-		to?: string;
-		params?: Record<string, string>;
-	}) => <a {...rest}>{children}</a>,
-}));
-
-vi.mock("@/hooks/auth", () => ({
-	useAuth: () => ({ isAuthenticated: true }),
-}));
-
-import { LibraryDetailPage } from "./libraries.$id";
-
-const testLibrary = {
-	id: "lib-1",
-	name: "Movies",
-	description: null,
-	size: 3,
-	last_scan_started_at: null,
-	last_scan_finished_at: null,
-	last_scan_file_count: null,
-};
-
-function libraryFile(overrides: Record<string, unknown> = {}) {
+function libraryFile(overrides: Partial<LibraryFile> = {}): LibraryFile {
 	return {
 		id: "file-x",
 		library_id: "lib-1",
@@ -62,7 +30,7 @@ function libraryFile(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-const files = [
+const files: LibraryFile[] = [
 	libraryFile({
 		id: "f-a",
 		path: "/media/movies/Alpha.mkv",
@@ -89,33 +57,25 @@ const files = [
 	}),
 ];
 
-/** Routes mocked GET calls by path. `filesResult` may resolve to an error
- * response to exercise the failure branch. */
-function mockApi({
-	library = testLibrary as unknown,
-	filesResult = { data: files, error: undefined } as Record<string, unknown>,
-} = {}) {
-	mockGet.mockImplementation(async (path: string) => {
-		switch (path) {
-			case "/v1/libraries/{id}":
-				return { data: library, error: undefined };
-			case "/v1/libraries/{id}/files":
-				return filesResult;
-			default:
-				return { data: undefined, error: { message: `unexpected ${path}` } };
-		}
-	});
+/** Serve the library and its files; `filesStatus` drives the failure branch. */
+function serveLibrary({ filesStatus = 200 }: { filesStatus?: number } = {}) {
+	server.use(
+		http.get(`${BASE_URL}/v1/libraries/:id`, () =>
+			HttpResponse.json(testLibrary),
+		),
+		http.get(`${BASE_URL}/v1/libraries/:id/files`, () =>
+			filesStatus === 200
+				? HttpResponse.json(files)
+				: HttpResponse.json(
+						{ message: "boom", code: "internal" },
+						{ status: filesStatus },
+					),
+		),
+	);
 }
 
 function renderPage() {
-	const queryClient = new QueryClient({
-		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-	});
-	return render(
-		<QueryClientProvider client={queryClient}>
-			<LibraryDetailPage libraryId="lib-1" />
-		</QueryClientProvider>,
-	);
+	return renderRoute("/libraries/lib-1");
 }
 
 /** The rendered file rows' filenames, in DOM (i.e. sorted) order. */
@@ -125,14 +85,9 @@ function filenameOrder(): string[] {
 		.map((el) => el.textContent ?? "");
 }
 
-describe("LibraryDetailPage", () => {
-	beforeEach(() => {
-		mockGet.mockReset();
-		mockPost.mockReset();
-	});
-
+describe("/libraries/$id", () => {
 	it("renders the library name and a row per file with size and status", async () => {
-		mockApi();
+		serveLibrary();
 		renderPage();
 
 		expect(
@@ -152,7 +107,7 @@ describe("LibraryDetailPage", () => {
 	});
 
 	it("narrows the table with the client-side search filter", async () => {
-		mockApi();
+		serveLibrary();
 		const user = userEvent.setup();
 		renderPage();
 
@@ -167,7 +122,7 @@ describe("LibraryDetailPage", () => {
 	});
 
 	it("filters by index status", async () => {
-		mockApi();
+		serveLibrary();
 		const user = userEvent.setup();
 		renderPage();
 
@@ -183,7 +138,7 @@ describe("LibraryDetailPage", () => {
 	});
 
 	it("sorts by size and toggles direction on repeated header clicks", async () => {
-		mockApi();
+		serveLibrary();
 		const user = userEvent.setup();
 		renderPage();
 
@@ -205,9 +160,7 @@ describe("LibraryDetailPage", () => {
 	});
 
 	it("shows an error state with a retry affordance when files fail to load", async () => {
-		mockApi({
-			filesResult: { data: undefined, error: { message: "boom" } },
-		});
+		serveLibrary({ filesStatus: 500 });
 		renderPage();
 
 		expect(
