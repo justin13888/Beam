@@ -200,6 +200,43 @@ jobs:
           path: lcov.info
           retention-days: 7
 
+  rust-test-pg:
+    name: Rust Postgres integration tier
+    needs: [changes, ffmpeg]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BEAM_CARGO_FEATURES: ""
+      # Same engine and credentials as compose.dependencies.yaml, so the tier
+      # behaves identically locally and here.
+      BEAM_TEST_DATABASE_URL: postgres://beam:password@localhost:5432/beam
+    services:
+      postgres:
+        image: postgres:18.0
+        env:
+          POSTGRES_USER: beam
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: beam
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U beam"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+
+      # Deliberately outside `mise run ci` and the pre-push hook: this is the one
+      # tier that needs infrastructure, and NFR-201 says the default run must not.
+      - run: mise run rust:test:pg
+
   openapi:
     name: Generate OpenAPI artifacts
     needs: [changes, ffmpeg]
@@ -321,6 +358,7 @@ jobs:
       - rust-deny
       - rust-clippy
       - rust-test
+      - rust-test-pg
       - openapi
       - ts-check
       - ts-typecheck

@@ -35,6 +35,10 @@ server = [
     "oidc",
     "dep:salvo",
 ]
+# Opt-in tier: runs the shared repository contracts against a real Postgres.
+# Never enabled by `rust:test`, `rust:coverage`, `mise run ci`, or the pre-push
+# hook -- see NFR-201 and ADR-0011.
+pg-integration = ["beam-test-support/pg-integration"]
 test-utils = ["utils", "beam-domain/test-utils"]
 
 [dependencies]
@@ -69,6 +73,7 @@ uuid = { workspace = true, optional = true }
 # doubles are available to `#[cfg(test)]` modules: a dependency is not compiled
 # with `cfg(test)`.
 beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
+beam-test-support = { path = "../beam-test-support" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 # `mock` for the hermetic SQL-shape tests. Enabling it removes `Clone` from

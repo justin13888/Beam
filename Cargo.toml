@@ -1,5 +1,5 @@
 [workspace]
-members = ["beam-auth", "beam-domain", "beam-index", "beam-server", "beam-migration", "beam-entity"]
+members = ["beam-auth", "beam-domain", "beam-index", "beam-server", "beam-migration", "beam-entity", "beam-test-support"]
 resolver = "3"
 
 # Beam ships as one product -- a server binary and a web image built from the

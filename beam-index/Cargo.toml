@@ -42,6 +42,7 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 # domain-level doubles -- `TestClock`, builders -- are available to this crate's
 # own `#[cfg(test)]` modules: a dependency is not compiled with `cfg(test)`.
 beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
+beam-test-support = { path = "../beam-test-support" }
 futures = "0.3.31"
 metrics-util = { workspace = true }
 mockall = "0.14.0"
@@ -49,6 +50,10 @@ sea-orm = { workspace = true, features = ["mock"] }
 tempfile = "3.23.0"
 
 [features]
+# Opt-in tier: runs the shared repository contracts against a real Postgres.
+# Never enabled by `rust:test`, `rust:coverage`, `mise run ci`, or the pre-push
+# hook -- see NFR-201 and ADR-0011.
+pg-integration = ["beam-test-support/pg-integration"]
 test-utils = ["dep:mockall", "beam-domain/test-utils"]
 vendored-ffmpeg = ["ffmpeg-next/build"]
 

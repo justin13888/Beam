@@ -346,6 +346,7 @@ dependencies = [
  "base64 0.22.1",
  "beam-domain",
  "beam-entity",
+ "beam-test-support",
  "chrono",
  "http",
  "mutants",
@@ -402,6 +403,7 @@ dependencies = [
  "async-trait",
  "beam-domain",
  "beam-entity",
+ "beam-test-support",
  "cameo",
  "chrono",
  "ffmpeg-next",
@@ -476,6 +478,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "beam-test-support"
+version = "0.1.0"
+dependencies = [
+ "beam-domain",
+ "beam-entity",
+ "beam-migration",
+ "chrono",
+ "sea-orm",
+ "sea-orm-migration",
+ "tokio",
  "uuid",
 ]
 

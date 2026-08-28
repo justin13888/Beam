@@ -82,6 +82,27 @@ run = [
     "cargo llvm-cov report --summary-only",
 ]
 
+[tasks."rust:test:pg"]
+description = "Opt-in tier: run the repository contracts against a real Postgres"
+# Deliberately NOT part of `ci`, `rust:test`, `rust:coverage`, or the pre-push
+# hook: it is the one tier that needs infrastructure, and NFR-201 says the
+# default run must not. Bring the database up first:
+#   docker compose -f compose.dependencies.yaml up -d
+# and point BEAM_TEST_DATABASE_URL at it. Unset, the tier fails loudly rather
+# than skipping -- a tier that silently passes when it did not run is worse
+# than one that does not run.
+# `--package beam-index` means BEAM_CARGO_FEATURES' workspace-qualified names
+# do not apply; the vendored-ffmpeg toggle is spelled unqualified here instead.
+# (`BEAM_MUTANTS_FEATURES` carries the same unqualified name for cargo-mutants.)
+run = '''
+features="pg-integration"
+case "${BEAM_CARGO_FEATURES:-}" in
+    *vendored-ffmpeg*) features="$features,vendored-ffmpeg" ;;
+esac
+cargo test --package beam-index --features "$features" --test pg_integration
+cargo test --package beam-auth --features "pg-integration,test-utils" --test pg_integration
+'''
+
 [tasks."rust:deny"]
 description = "Audit dependencies for advisories, licenses, bans, and sources"
 run = "cargo deny check"
