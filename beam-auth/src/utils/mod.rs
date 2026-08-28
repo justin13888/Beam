@@ -9,3 +9,7 @@ pub mod oidc;
 pub mod pending_auth_store;
 pub mod repository;
 pub mod session_store;
+
+#[cfg(test)]
+#[path = "sql_shape_tests.rs"]
+mod sql_shape_tests;

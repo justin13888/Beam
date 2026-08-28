@@ -71,5 +71,9 @@ uuid = { workspace = true, optional = true }
 beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+# `mock` for the hermetic SQL-shape tests. Enabling it removes `Clone` from
+# `DatabaseConnection` for the whole build graph, which is why every store here
+# holds an `Arc<DatabaseConnection>`.
 beam-entity = { path = "../beam-entity" }
+sea-orm = { workspace = true, features = ["mock"] }
 uuid = { workspace = true }

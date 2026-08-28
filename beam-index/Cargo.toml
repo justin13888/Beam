@@ -45,6 +45,7 @@ beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
 futures = "0.3.31"
 metrics-util = { workspace = true }
 mockall = "0.14.0"
+sea-orm = { workspace = true, features = ["mock"] }
 tempfile = "3.23.0"
 
 [features]
