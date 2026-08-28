@@ -116,7 +116,7 @@ impl FileRepository for SqlFileRepository {
             episode_id: Set(episode_id),
             scanned_at: Set(now.into()),
             updated_at: Set(now.into()),
-            file_status: Set(create.status.to_string()),
+            file_status: Set(create.status.into()),
             mtime: Set(create.mtime.map(|d| d.into())),
         };
 
@@ -152,7 +152,7 @@ impl FileRepository for SqlFileRepository {
             active_model.container_format = Set(Some(container));
         }
         if let Some(status) = update.status {
-            active_model.file_status = Set(status.to_string());
+            active_model.file_status = Set(status.into());
         }
 
         if let Some(content) = update.content {

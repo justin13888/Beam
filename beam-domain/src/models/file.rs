@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
@@ -34,28 +33,12 @@ pub enum FileStatus {
     Unknown,
 }
 
-impl fmt::Display for FileStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FileStatus::Known => write!(f, "known"),
-            FileStatus::Changed => write!(f, "changed"),
-            FileStatus::Unknown => write!(f, "unknown"),
-        }
-    }
-}
-
-impl std::str::FromStr for FileStatus {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "known" => Ok(FileStatus::Known),
-            "changed" => Ok(FileStatus::Changed),
-            "unknown" => Ok(FileStatus::Unknown),
-            _ => Err(format!("Invalid file status: {}", s)),
-        }
-    }
-}
+// `Display`/`FromStr` used to exist here to move this enum in and out of the
+// `files.file_status` column as text. That was the bug: the column is a
+// Postgres enum type, and binding text to it fails at runtime. The conversion
+// now goes through `beam_entity::files::FileStatus` (a `DeriveActiveEnum`),
+// which leaves the string forms with no callers -- so they are gone rather
+// than kept as an untested second way to spell the same values.
 
 /// The content type of a media file
 #[derive(Debug, Clone)]
@@ -97,6 +80,28 @@ pub struct UpdateMediaFile {
 }
 
 #[cfg(feature = "entity")]
+impl From<beam_entity::files::FileStatus> for FileStatus {
+    fn from(status: beam_entity::files::FileStatus) -> Self {
+        match status {
+            beam_entity::files::FileStatus::Known => FileStatus::Known,
+            beam_entity::files::FileStatus::Changed => FileStatus::Changed,
+            beam_entity::files::FileStatus::Unknown => FileStatus::Unknown,
+        }
+    }
+}
+
+#[cfg(feature = "entity")]
+impl From<FileStatus> for beam_entity::files::FileStatus {
+    fn from(status: FileStatus) -> Self {
+        match status {
+            FileStatus::Known => beam_entity::files::FileStatus::Known,
+            FileStatus::Changed => beam_entity::files::FileStatus::Changed,
+            FileStatus::Unknown => beam_entity::files::FileStatus::Unknown,
+        }
+    }
+}
+
+#[cfg(feature = "entity")]
 impl From<beam_entity::files::Model> for MediaFile {
     fn from(model: beam_entity::files::Model) -> Self {
         let content = model
@@ -107,8 +112,6 @@ impl From<beam_entity::files::Model> for MediaFile {
                     .episode_id
                     .map(|id| MediaFileContent::Episode { episode_id: id })
             });
-
-        let status = model.file_status.parse().unwrap_or(FileStatus::Unknown);
 
         Self {
             id: model.id,
@@ -121,7 +124,7 @@ impl From<beam_entity::files::Model> for MediaFile {
             duration: model.duration_secs.map(Duration::from_secs_f64),
             container_format: model.container_format,
             content,
-            status,
+            status: FileStatus::from(model.file_status),
             scanned_at: model.scanned_at.with_timezone(&Utc),
             updated_at: model.updated_at.with_timezone(&Utc),
         }
