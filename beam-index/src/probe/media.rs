@@ -276,3 +276,225 @@ impl From<ffmpeg::Discard> for Discard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every codec this module names explicitly. The `Other`/`None` fallbacks
+    /// are covered separately.
+    const NAMED: &[(ffmpeg::codec::Id, CodecId)] = &[
+        (ffmpeg::codec::Id::H264, CodecId::H264),
+        (ffmpeg::codec::Id::HEVC, CodecId::H265),
+        (ffmpeg::codec::Id::VP8, CodecId::VP8),
+        (ffmpeg::codec::Id::VP9, CodecId::VP9),
+        (ffmpeg::codec::Id::AV1, CodecId::AV1),
+        (ffmpeg::codec::Id::MPEG1VIDEO, CodecId::MPEG1VIDEO),
+        (ffmpeg::codec::Id::MPEG2VIDEO, CodecId::MPEG2VIDEO),
+        (ffmpeg::codec::Id::MPEG4, CodecId::MPEG4),
+        (ffmpeg::codec::Id::AAC, CodecId::AAC),
+        (ffmpeg::codec::Id::MP3, CodecId::MP3),
+        (ffmpeg::codec::Id::AC3, CodecId::AC3),
+        (ffmpeg::codec::Id::EAC3, CodecId::EAC3),
+        (ffmpeg::codec::Id::DTS, CodecId::DTS),
+        (ffmpeg::codec::Id::TRUEHD, CodecId::TRUEHD),
+        (ffmpeg::codec::Id::FLAC, CodecId::FLAC),
+        (ffmpeg::codec::Id::VORBIS, CodecId::VORBIS),
+        (ffmpeg::codec::Id::OPUS, CodecId::OPUS),
+        (ffmpeg::codec::Id::SUBRIP, CodecId::SUBRIP),
+        (ffmpeg::codec::Id::ASS, CodecId::ASS),
+        (ffmpeg::codec::Id::WEBVTT, CodecId::WEBVTT),
+    ];
+
+    #[test]
+    fn every_named_codec_is_classified_the_way_ffmpeg_classifies_it() {
+        // Derived, not mirrored: the expectation comes from FFmpeg's own
+        // `Id::medium()` rather than from a second copy of the match arms in
+        // this module, so a codec put in the wrong arm here fails even though
+        // both tables would have been edited together.
+        for (ffmpeg_id, expected) in NAMED {
+            let converted = CodecId::from(*ffmpeg_id);
+            assert_eq!(&converted, expected, "conversion of {ffmpeg_id:?}");
+            assert_eq!(
+                converted.media_type(),
+                MediaType::from(ffmpeg_id.medium()),
+                "{ffmpeg_id:?} is classified differently here than by FFmpeg"
+            );
+        }
+    }
+
+    #[test]
+    fn hevc_and_its_h265_alias_are_the_same_codec() {
+        // ffmpeg-next maps AV_CODEC_ID_HEVC to `Id::HEVC`; missing the alias
+        // sent every real HEVC stream to `Other("hevc")`.
+        assert_eq!(CodecId::from(ffmpeg::codec::Id::HEVC), CodecId::H265);
+        assert_eq!(CodecId::from(ffmpeg::codec::Id::H265), CodecId::H265);
+    }
+
+    #[test]
+    fn an_unrecognised_codec_keeps_its_ffmpeg_name_rather_than_being_dropped() {
+        // The catch-all must preserve enough to diagnose a file, and must not
+        // leak an FFI type out of the probing layer.
+        let converted = CodecId::from(ffmpeg::codec::Id::THEORA);
+        assert_eq!(converted, CodecId::Other("theora".to_string()));
+        assert_eq!(converted.media_type(), MediaType::Unknown);
+        assert_eq!(format!("{converted:?}"), "Other(\"theora\")");
+    }
+
+    #[test]
+    fn the_absence_of_a_codec_is_not_an_unknown_codec() {
+        assert_eq!(CodecId::from(ffmpeg::codec::Id::None), CodecId::None);
+        assert_eq!(CodecId::None.media_type(), MediaType::Unknown);
+    }
+
+    #[test]
+    fn the_is_predicates_agree_with_the_media_type() {
+        for (_, codec) in NAMED {
+            assert_eq!(codec.is_video(), codec.media_type().is_video());
+            assert_eq!(codec.is_audio(), codec.media_type().is_audio());
+            assert_eq!(codec.is_subtitle(), codec.media_type().is_subtitle());
+        }
+    }
+
+    #[test]
+    fn every_named_codec_has_a_distinct_display_name() {
+        let mut seen = std::collections::HashSet::new();
+        for (_, codec) in NAMED {
+            assert!(
+                seen.insert(codec.name()),
+                "{codec:?} shares a display name with another codec"
+            );
+            assert_ne!(codec.name(), "Unknown", "{codec:?} has no display name");
+            assert_eq!(format!("{codec}"), codec.name());
+        }
+    }
+
+    #[test]
+    fn hardware_acceleration_is_claimed_only_for_video() {
+        // Claiming it for an audio or subtitle codec would be nonsense; the
+        // property is checked against the classification rather than restated.
+        for (_, codec) in NAMED {
+            if codec.supports_hardware_acceleration() {
+                assert!(codec.is_video(), "{codec:?} is not a video codec");
+            }
+        }
+        assert!(CodecId::H264.supports_hardware_acceleration());
+        assert!(CodecId::AV1.supports_hardware_acceleration());
+        assert!(
+            !CodecId::VP8.supports_hardware_acceleration(),
+            "VP8 is deliberately excluded"
+        );
+    }
+
+    #[test]
+    fn lossless_covers_flac_and_every_text_subtitle_format() {
+        // Text subtitles are trivially lossless; among audio codecs only FLAC
+        // is. Anything else claiming losslessness is a mistake.
+        for (_, codec) in NAMED {
+            if codec.is_subtitle() {
+                assert!(codec.is_lossless(), "{codec:?} is text and so lossless");
+            }
+            if codec.is_video() {
+                assert!(!codec.is_lossless(), "{codec:?} is a lossy video codec");
+            }
+        }
+        assert!(CodecId::FLAC.is_lossless());
+        assert!(!CodecId::MP3.is_lossless());
+        assert!(!CodecId::OPUS.is_lossless());
+    }
+
+    #[test]
+    fn every_media_type_describes_itself_distinctly() {
+        // The description labels a stream in the admin file view; one shared
+        // string makes every track in a file look identical.
+        let mut seen = std::collections::HashSet::new();
+        for media_type in [
+            MediaType::Video,
+            MediaType::Audio,
+            MediaType::Subtitle,
+            MediaType::Data,
+            MediaType::Attachment,
+            MediaType::Unknown,
+        ] {
+            let description = media_type.description();
+            assert!(!description.is_empty(), "{media_type:?} has no description");
+            assert!(
+                seen.insert(description),
+                "{media_type:?} shares a description with another type"
+            );
+        }
+        assert_eq!(MediaType::Video.description(), "Video");
+        assert_eq!(MediaType::Subtitle.description(), "Subtitle");
+    }
+
+    #[test]
+    fn media_types_round_trip_from_ffmpeg_and_report_themselves() {
+        for (ffmpeg_type, expected) in [
+            (ffmpeg::media::Type::Video, MediaType::Video),
+            (ffmpeg::media::Type::Audio, MediaType::Audio),
+            (ffmpeg::media::Type::Subtitle, MediaType::Subtitle),
+            (ffmpeg::media::Type::Data, MediaType::Data),
+            (ffmpeg::media::Type::Attachment, MediaType::Attachment),
+            (ffmpeg::media::Type::Unknown, MediaType::Unknown),
+        ] {
+            let converted = MediaType::from(ffmpeg_type);
+            assert_eq!(converted, expected);
+            // Exactly one predicate answers true for each type (Unknown: none).
+            let set = [
+                converted.is_video(),
+                converted.is_audio(),
+                converted.is_subtitle(),
+                converted.is_data(),
+                converted.is_attachment(),
+            ];
+            let true_count = set.iter().filter(|b| **b).count();
+            let expected_count = usize::from(converted != MediaType::Unknown);
+            assert_eq!(true_count, expected_count, "for {converted:?}");
+        }
+    }
+
+    #[test]
+    fn every_discard_setting_describes_itself_distinctly() {
+        let mut seen = std::collections::HashSet::new();
+        for discard in [
+            Discard::None,
+            Discard::Default,
+            Discard::NonReference,
+            Discard::Bidirectional,
+            Discard::NonIntra,
+            Discard::NonKey,
+            Discard::All,
+        ] {
+            let description = discard.description();
+            assert!(!description.is_empty(), "{discard:?} has no description");
+            assert!(
+                seen.insert(description),
+                "{discard:?} shares a description with another setting"
+            );
+        }
+        assert_eq!(Discard::NonReference.description(), "Non-Reference");
+    }
+
+    #[test]
+    fn only_the_default_discard_setting_keeps_a_stream() {
+        // `should_discard` inverts a single variant; getting it backwards
+        // would silently drop every stream in the file.
+        for (ffmpeg_discard, expected) in [
+            (ffmpeg::Discard::None, Discard::None),
+            (ffmpeg::Discard::Default, Discard::Default),
+            (ffmpeg::Discard::NonReference, Discard::NonReference),
+            (ffmpeg::Discard::Bidirectional, Discard::Bidirectional),
+            (ffmpeg::Discard::NonIntra, Discard::NonIntra),
+            (ffmpeg::Discard::NonKey, Discard::NonKey),
+            (ffmpeg::Discard::All, Discard::All),
+        ] {
+            let converted = Discard::from(ffmpeg_discard);
+            assert_eq!(converted, expected);
+            assert_eq!(
+                converted.should_discard(),
+                converted != Discard::Default,
+                "for {converted:?}"
+            );
+        }
+    }
+}

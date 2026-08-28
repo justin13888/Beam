@@ -20,6 +20,7 @@ ffmpeg-next = { workspace = true }
 # Facade only: every counter is a no-op unless beam-server installed a
 # recorder (BEAM_ENABLE_METRICS=true).
 metrics = { workspace = true }
+mutants = { workspace = true }
 notify = "6"
 num = { version = "0.4.3", features = ["serde"] }
 num_cpus = "1.17.0"

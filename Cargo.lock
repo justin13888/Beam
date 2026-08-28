@@ -407,6 +407,7 @@ dependencies = [
  "metrics",
  "metrics-util",
  "mockall",
+ "mutants",
  "notify",
  "num",
  "num_cpus",
