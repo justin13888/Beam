@@ -349,3 +349,83 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Filenames are attacker-adjacent input: they come from whatever is on
+    // the disk, in whatever encoding, at whatever length. The table-driven
+    // tests above pin the behaviour for realistic names; these pin the
+    // invariants that must hold for *every* name, including the ones nobody
+    // thought to enumerate.
+    proptest! {
+        #[test]
+        fn parsing_never_panics(stem in ".*") {
+            let _ = parse_media_filename(&stem);
+        }
+
+        #[test]
+        fn parsing_is_deterministic(stem in ".*") {
+            prop_assert_eq!(
+                parse_media_filename(&stem),
+                parse_media_filename(&stem)
+            );
+        }
+
+        #[test]
+        fn the_title_never_grows_beyond_the_input(stem in ".*") {
+            let parsed = parse_media_filename(&stem);
+            prop_assert!(
+                parsed.title.chars().count() <= stem.chars().count(),
+                "title {:?} is longer than the stem {:?} it came from",
+                parsed.title,
+                stem
+            );
+        }
+
+        #[test]
+        fn the_title_is_trimmed(stem in ".*") {
+            let parsed = parse_media_filename(&stem);
+            prop_assert_eq!(parsed.title.trim(), parsed.title.as_str());
+        }
+
+        #[test]
+        fn a_year_is_always_a_plausible_release_year(stem in ".*") {
+            if let Some(year) = parse_media_filename(&stem).year {
+                prop_assert!(
+                    (1900..=2099).contains(&year),
+                    "implausible year {year} from {stem:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn season_and_episode_are_reported_together_or_not_at_all(stem in ".*") {
+            let parsed = parse_media_filename(&stem);
+            prop_assert_eq!(
+                parsed.season.is_some(),
+                parsed.episode.is_some(),
+                "half an SxxEyy marker parsed from {:?}: {:?}",
+                stem,
+                parsed
+            );
+        }
+
+        // An `SxxEyy` marker anywhere in the stem must be found, whatever
+        // surrounds it.
+        #[test]
+        fn an_embedded_marker_is_always_found(
+            prefix in "[A-Za-z][A-Za-z0-9. ]{0,20}",
+            season in 1u32..40,
+            episode in 1u32..40,
+            suffix in "[A-Za-z0-9. -]{0,20}",
+        ) {
+            let stem = format!("{prefix}.S{season:02}E{episode:02}.{suffix}");
+            let parsed = parse_media_filename(&stem);
+            prop_assert_eq!(parsed.season, Some(season));
+            prop_assert_eq!(parsed.episode, Some(episode));
+        }
+    }
+}

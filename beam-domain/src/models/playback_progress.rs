@@ -79,6 +79,23 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_duration_is_never_completed() {
+        // `duration_secs > 0.0` guards a division-free comparison that would
+        // otherwise mark *any* position on a zero-length file as finished --
+        // and a zero duration is exactly what a still-probing or corrupt file
+        // reports. Such a file would silently drop off continue-watching.
+        for position in [0.0, 1.0, 1_000.0] {
+            let upsert = UpsertPlaybackProgress {
+                user_id: Uuid::new_v4(),
+                file_id: Uuid::new_v4(),
+                position_secs: position,
+                duration_secs: Some(0.0),
+            };
+            assert!(!upsert.is_completed(), "position {position} of a 0s file");
+        }
+    }
+
+    #[test]
     fn is_completed_false_when_duration_unknown() {
         let upsert = UpsertPlaybackProgress {
             user_id: Uuid::new_v4(),

@@ -95,3 +95,62 @@ impl From<beam_entity::metadata_enrichment::Model> for EnrichmentState {
         }
     }
 }
+
+#[cfg(all(test, feature = "entity"))]
+mod entity_conversion_tests {
+    use super::*;
+
+    fn model(
+        movie_id: Option<Uuid>,
+        show_id: Option<Uuid>,
+    ) -> beam_entity::metadata_enrichment::Model {
+        let now: chrono::DateTime<chrono::FixedOffset> = Utc::now().into();
+        beam_entity::metadata_enrichment::Model {
+            id: Uuid::new_v4(),
+            movie_id,
+            show_id,
+            status: beam_entity::metadata_enrichment::EnrichmentStatus::Pending,
+            attempts: 2,
+            next_attempt_at: None,
+            enriched_at: None,
+            match_confidence: None,
+            matched_ref: None,
+            force_refresh: false,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn a_movie_row_becomes_a_movie_target() {
+        let movie_id = Uuid::new_v4();
+        let state = EnrichmentState::from(model(Some(movie_id), None));
+        assert_eq!(state.target, EnrichmentTargetId::Movie(movie_id));
+    }
+
+    #[test]
+    fn a_show_row_becomes_a_show_target() {
+        // The two arms are near-identical and trivially transposable; getting
+        // them the wrong way round would send every show through the movie
+        // enrichment path.
+        let show_id = Uuid::new_v4();
+        let state = EnrichmentState::from(model(None, Some(show_id)));
+        assert_eq!(state.target, EnrichmentTargetId::Show(show_id));
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one of movie_id/show_id")]
+    fn a_row_targeting_neither_is_a_broken_invariant_not_a_silent_default() {
+        // The schema's check constraint makes this unreachable; if it ever is
+        // reached, the row is corrupt and guessing a target would enrich the
+        // wrong title.
+        let _ = EnrichmentState::from(model(None, None));
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one of movie_id/show_id")]
+    fn a_row_targeting_both_is_a_broken_invariant_too() {
+        let _ = EnrichmentState::from(model(Some(Uuid::new_v4()), Some(Uuid::new_v4())));
+    }
+}
