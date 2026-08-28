@@ -342,3 +342,7 @@ pub(crate) fn provider_from_build(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod state_tests;

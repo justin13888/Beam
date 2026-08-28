@@ -1,6 +1,4 @@
 use eyre::{Result, eyre};
-use http::Method;
-use salvo::cors::Cors;
 use salvo::prelude::*;
 use tracing::info;
 
@@ -23,27 +21,12 @@ async fn main() -> Result<()> {
 
     info!("Configuration loaded: {:?}", config);
 
-    match config.cookie_security_verdict() {
-        beam_server::config::CookieSecurityVerdict::Ok => {}
-        beam_server::config::CookieSecurityVerdict::WarnExplicitInsecure => {
-            tracing::warn!(
-                "BEAM_COOKIE_SECURE=false was set explicitly while BEAM_WEB_URL/\
-                 BEAM_EXTRA_ALLOWED_ORIGINS suggest an HTTPS deployment -- the session \
-                 cookie will be issued without the Secure flag. Only keep this override \
-                 if you understand why your topology needs it."
-            );
+    match beam_server::bootstrap::check_cookie_security(&config) {
+        Ok(beam_server::bootstrap::StartupGate::Proceed) => {}
+        Ok(beam_server::bootstrap::StartupGate::ProceedWithWarning(warning)) => {
+            tracing::warn!("{warning}");
         }
-        beam_server::config::CookieSecurityVerdict::ErrLikelyMisconfigured => {
-            return Err(eyre!(
-                "cookie security misconfiguration: cookies resolved to Secure=false (from \
-                 BEAM_SERVER_URL={:?}) while BEAM_WEB_URL/BEAM_EXTRA_ALLOWED_ORIGINS suggest an \
-                 HTTPS deployment. The session cookie would ship without the Secure flag on \
-                 what looks like a production HTTPS site. Set BEAM_SERVER_URL to the \
-                 externally-visible HTTPS URL, or set BEAM_COOKIE_SECURE=true (or =false to \
-                 explicitly accept insecure cookies).",
-                config.server_url
-            ));
-        }
+        Err(message) => return Err(eyre!(message)),
     }
 
     // Ensure the data directory exists (video_dir is validated by config)
@@ -138,27 +121,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Build CORS handler
-    let cors = Cors::new()
-        .allow_origin(salvo::cors::AllowOrigin::mirror_request())
-        .allow_methods(vec![
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers(vec![
-            "authorization",
-            "content-type",
-            "accept",
-            "x-requested-with",
-            "range",
-        ])
-        .expose_headers(vec!["accept-ranges", "content-length", "content-range"])
-        .allow_credentials(true)
-        .max_age(3600) // Cache the preflight for 1 hour to reduce noise
-        .into_handler();
+    let cors = beam_server::bootstrap::cors_handler();
 
     // Build API router
     let router = create_router(state.clone(), metrics_handle);

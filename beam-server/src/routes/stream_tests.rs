@@ -239,41 +239,13 @@ mod tests {
         };
 
         let config = crate::config::ServerConfig {
-            bind_address: "0.0.0.0:8000".to_string(),
-            server_url: "http://localhost:8000".to_string(),
-            enable_metrics: false,
-            shutdown_timeout_secs: 30,
             video_dir: PathBuf::from("/tmp"),
             data_dir: PathBuf::from("/tmp"),
             database_url: "postgres://unused:unused@localhost/unused".to_string(),
-            auto_migrate: true,
-            db_max_connections: 20,
-            db_min_connections: 5,
-            hash_unknown_files: true,
-            scan_interval_secs: 3600,
             watch_enabled: false,
-            watch_debounce_ms: 2000,
-            enrich_interval_secs: 300,
-            enrich_batch_size: 25,
-            enrich_min_confidence: 0.7,
-            tmdb_api_token: None,
             anilist_enabled: false,
-            metadata_language: None,
-            oidc_issuer: None,
-            oidc_client_id: None,
-            oidc_client_secret: None,
-            oidc_scopes: "openid profile email".to_string(),
-            web_url: "http://localhost:5173".to_string(),
-            extra_allowed_origins: None,
-            oidc_admin_claim: None,
-            oidc_admin_value: None,
             cookie_secure: Some(false),
-            session_idle_days: 14,
-            session_max_days: 60,
-            rate_limit_enabled: true,
-            rate_limit_auth_per_minute: 10,
-            rate_limit_search_per_minute: 60,
-            rate_limit_trust_forwarded_for: false,
+            ..Default::default()
         };
 
         let state = AppState::new(
@@ -645,5 +617,151 @@ mod tests {
         .await;
 
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+    }
+}
+
+/// Range headers arrive verbatim from the client, so `parse_byte_range` sees
+/// whatever a browser, a download manager, or an attacker sends. The
+/// table-driven cases above pin the behaviour for the headers that matter;
+/// these pin the invariants that must hold for all of them -- in particular
+/// that a served slice can never reach outside the file, which is the one
+/// failure here with a security consequence.
+mod range_properties {
+    use proptest::prelude::*;
+
+    use crate::routes::stream::{RangeError, parse_byte_range};
+
+    proptest! {
+        #[test]
+        fn parsing_never_panics(header in ".*", file_size in 0u64..u64::MAX) {
+            let _ = parse_byte_range(&header, file_size);
+        }
+
+        #[test]
+        fn an_accepted_range_always_lies_inside_the_file(
+            header in ".*",
+            file_size in 1u64..1_000_000,
+        ) {
+            if let Ok((start, end)) = parse_byte_range(&header, file_size) {
+                prop_assert!(start <= end, "inverted range {start}..={end}");
+                prop_assert!(
+                    end < file_size,
+                    "range {start}..={end} reaches past the {file_size}-byte file"
+                );
+            }
+        }
+
+        #[test]
+        fn an_empty_file_never_satisfies_a_range(header in ".*") {
+            // Bound first: `prop_assert!` stringifies its argument into a
+            // format string, and a struct pattern's braces are not valid there.
+            let rejected = matches!(
+                parse_byte_range(&header, 0),
+                Err(RangeError::RangeNotSatisfiable { file_size: 0, .. })
+            );
+            prop_assert!(rejected, "an empty file satisfied {:?}", header);
+        }
+
+        #[test]
+        fn a_header_without_the_bytes_unit_is_rejected(
+            unit in "[a-z]{1,8}",
+            rest in "[0-9-]{0,10}",
+            file_size in 1u64..1_000_000,
+        ) {
+            prop_assume!(unit != "bytes");
+            prop_assert_eq!(
+                parse_byte_range(&format!("{unit}={rest}"), file_size),
+                Err(RangeError::MissingBytesPrefix)
+            );
+        }
+
+        /// `bytes=N-` serves from N to the end.
+        #[test]
+        fn an_open_ended_range_runs_to_the_last_byte(
+            file_size in 1u64..1_000_000,
+            offset in 0u64..1_000_000,
+        ) {
+            let start = offset % file_size;
+            prop_assert_eq!(
+                parse_byte_range(&format!("bytes={start}-"), file_size),
+                Ok((start, file_size - 1))
+            );
+        }
+
+        /// `bytes=-N` serves the last N bytes, clamped to the whole file.
+        #[test]
+        fn a_suffix_range_returns_the_last_n_bytes(
+            file_size in 1u64..1_000_000,
+            suffix in 1u64..2_000_000,
+        ) {
+            let (start, end) = parse_byte_range(&format!("bytes=-{suffix}"), file_size)
+                .expect("a non-zero suffix of a non-empty file is satisfiable");
+            prop_assert_eq!(end, file_size - 1);
+            prop_assert_eq!(end - start + 1, suffix.min(file_size));
+        }
+
+        /// An end bound past the file is clamped rather than rejected -- that
+        /// is what browsers send when they ask for "the next megabyte".
+        #[test]
+        fn an_end_bound_past_the_file_is_clamped(
+            file_size in 1u64..1_000_000,
+            overshoot in 1u64..1_000_000,
+        ) {
+            let end = file_size - 1 + overshoot;
+            prop_assert_eq!(
+                parse_byte_range(&format!("bytes=0-{end}"), file_size),
+                Ok((0, file_size - 1))
+            );
+        }
+
+        /// A start bound past the file is *not* clamped: RFC 9110 requires a
+        /// 416, and clamping would silently serve the wrong bytes.
+        #[test]
+        fn a_start_bound_past_the_file_is_not_satisfiable(
+            file_size in 1u64..1_000_000,
+            overshoot in 0u64..1_000_000,
+        ) {
+            let start = file_size + overshoot;
+            let rejected = matches!(
+                parse_byte_range(&format!("bytes={start}-"), file_size),
+                Err(RangeError::RangeNotSatisfiable { .. })
+            );
+            prop_assert!(
+                rejected,
+                "start {} past a {}-byte file was accepted",
+                start,
+                file_size
+            );
+        }
+
+        #[test]
+        fn an_inverted_range_is_not_satisfiable(
+            file_size in 2u64..1_000_000,
+            a in 0u64..1_000_000,
+            b in 0u64..1_000_000,
+        ) {
+            let start = (a % file_size).max(1);
+            let end = b % start;
+            let rejected = matches!(
+                parse_byte_range(&format!("bytes={start}-{end}"), file_size),
+                Err(RangeError::RangeNotSatisfiable { .. })
+            );
+            prop_assert!(rejected, "inverted range {}-{} was accepted", start, end);
+        }
+
+        #[test]
+        fn a_non_numeric_bound_is_rejected_rather_than_coerced(
+            junk in "[A-Za-z_][A-Za-z_]{0,8}",
+            file_size in 1u64..1_000_000,
+        ) {
+            prop_assert_eq!(
+                parse_byte_range(&format!("bytes={junk}-"), file_size),
+                Err(RangeError::NonNumericBound)
+            );
+            prop_assert_eq!(
+                parse_byte_range(&format!("bytes=0-{junk}"), file_size),
+                Err(RangeError::NonNumericBound)
+            );
+        }
     }
 }

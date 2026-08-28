@@ -463,6 +463,7 @@ dependencies = [
  "metrics-util",
  "mockall",
  "mutants",
+ "proptest",
  "rand 0.10.2",
  "regex",
  "rust_decimal",

@@ -19,6 +19,22 @@ pub enum ConfigError {
     InvalidValue(String, String),
 }
 
+/// A configuration with every declared default applied and every optional
+/// field unset -- what the process would load with no environment and no
+/// config file.
+///
+/// Derived from the `#[config(default = ...)]` attributes via confique's
+/// generated layer type rather than restated field by field, so it cannot
+/// drift from the declarations and adding a field does not break any caller.
+/// Tests build the config they need as `ServerConfig { video_dir: ...,
+/// ..Default::default() }` instead of writing out all forty fields.
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self::from_layer(<<Self as Config>::Layer as confique::Layer>::default_values())
+            .expect("every non-optional field of ServerConfig declares a default")
+    }
+}
+
 /// Application configuration
 #[derive(Clone, Config)]
 pub struct ServerConfig {
@@ -297,6 +313,9 @@ impl fmt::Debug for ServerConfig {
     }
 }
 
+/// Seconds in a day.
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
 /// Renders an `Option` secret without its value.
 fn redact_option(secret: &Option<String>) -> Option<&'static str> {
     secret.as_ref().map(|_| "<redacted>")
@@ -386,6 +405,21 @@ impl ServerConfig {
         format!("{}/v1/auth/callback", self.server_url)
     }
 
+    /// How long a session survives without activity, in seconds.
+    ///
+    /// Named because the `days * 24 * 60 * 60` conversion appeared inline at
+    /// the call sites, where a mistyped operator yields a session that expires
+    /// in minutes -- non-zero, apparently working, and impossible to notice
+    /// without reading the arithmetic.
+    pub fn session_idle_ttl_secs(&self) -> u64 {
+        self.session_idle_days * SECONDS_PER_DAY
+    }
+
+    /// Hard ceiling on session lifetime from creation, in seconds.
+    pub fn session_absolute_ttl_secs(&self) -> u64 {
+        self.session_max_days * SECONDS_PER_DAY
+    }
+
     /// Whether enough OIDC configuration is present to attempt discovery.
     /// All three of issuer/client_id/client_secret are required together.
     pub fn oidc_configured(&self) -> bool {
@@ -394,24 +428,33 @@ impl ServerConfig {
             && self.oidc_client_secret.is_some()
     }
 
-    /// Load configuration from environment variables and validate paths
+    /// Load configuration from environment variables and validate it.
+    ///
+    /// `#[mutants::skip]`: the body is two lines, and the half that is not
+    /// already covered is `Self::builder().env().load()`, which reads the
+    /// process environment. Exercising it means mutating that environment,
+    /// which is `unsafe` in Rust 2024 precisely because the suite runs in
+    /// parallel. Everything decidable has been moved into
+    /// [`Self::normalize_and_validate`], which is tested directly. See
+    /// ADR-0011's decision log.
+    #[mutants::skip]
     pub fn load_and_validate() -> Result<Self, ConfigError> {
-        // 1. Load the configuration purely from environment variables
-        let mut config = Self::builder().env().load()?;
+        Self::builder().env().load()?.normalize_and_validate()
+    }
 
-        // 2. Normalize before validating: a set-but-empty optional env var
-        // arrives as `Some("")` (confique parses presence, not content) and
-        // must mean the same thing as unset.
-        config.normalize_values();
-
-        // 3. Validate scalar values (ranges, non-empty) before touching the
-        // filesystem: a bad number should fail fast without side effects.
-        config.validate_values()?;
-
-        // 4. Validate paths and ensure writeable directories exist
-        config.validate_paths()?;
-
-        Ok(config)
+    /// Canonicalize and check an already-loaded configuration.
+    ///
+    /// Separated from [`Self::load_and_validate`] so the ordering is testable
+    /// without touching the process environment. The order matters: normalize
+    /// first, because a set-but-empty optional env var arrives as `Some("")`
+    /// (confique parses presence, not content) and must mean the same thing as
+    /// unset; then scalar validation, so a bad number fails fast without
+    /// touching the filesystem; then paths, which create directories.
+    pub(crate) fn normalize_and_validate(mut self) -> Result<Self, ConfigError> {
+        self.normalize_values();
+        self.validate_values()?;
+        self.validate_paths()?;
+        Ok(self)
     }
 
     /// Canonicalizes values whose raw env form is ambiguous: a value that is
@@ -481,8 +524,10 @@ impl ServerConfig {
 
     /// Validates configuration paths
     fn validate_paths(&self) -> Result<(), ConfigError> {
-        // VIDEO_DIR must exist (read-only mount)
-        if !self.video_dir.exists() {
+        // VIDEO_DIR must exist and be a directory (read-only mount). `exists()`
+        // alone would accept a regular file, and the scanner would then walk
+        // nothing and report an empty library rather than a misconfiguration.
+        if !self.video_dir.is_dir() {
             return Err(ConfigError::DirNotFoundError(
                 self.video_dir.display().to_string(),
             ));
@@ -513,41 +558,18 @@ mod tests {
     /// none of them survive into `Debug` output.
     fn config_with_secrets() -> ServerConfig {
         ServerConfig {
-            bind_address: "0.0.0.0:8000".to_string(),
             server_url: "https://beam.example.com".to_string(),
-            enable_metrics: false,
-            shutdown_timeout_secs: 30,
             video_dir: PathBuf::from("/videos"),
             data_dir: PathBuf::from("/cache"),
             database_url: "postgres://beam:db-secret-pw@localhost:5432/beam".to_string(),
-            auto_migrate: true,
-            db_max_connections: 20,
-            db_min_connections: 5,
-            hash_unknown_files: true,
-            scan_interval_secs: 3600,
-            watch_enabled: true,
-            watch_debounce_ms: 2000,
-            enrich_interval_secs: 300,
-            enrich_batch_size: 25,
-            enrich_min_confidence: 0.7,
             tmdb_api_token: Some("tmdb-secret-token".to_string()),
-            anilist_enabled: true,
-            metadata_language: None,
             oidc_issuer: Some("https://idp.example.com".to_string()),
             oidc_client_id: Some("beam-client".to_string()),
             oidc_client_secret: Some("oidc-secret-value".to_string()),
-            oidc_scopes: "openid profile email".to_string(),
             oidc_admin_claim: Some("groups".to_string()),
             oidc_admin_value: Some("beam-admin".to_string()),
             web_url: "https://beam.example.com".to_string(),
-            extra_allowed_origins: None,
-            cookie_secure: None,
-            session_idle_days: 14,
-            session_max_days: 60,
-            rate_limit_enabled: true,
-            rate_limit_auth_per_minute: 10,
-            rate_limit_search_per_minute: 60,
-            rate_limit_trust_forwarded_for: false,
+            ..Default::default()
         }
     }
 
@@ -655,25 +677,175 @@ mod tests {
     }
 
     #[test]
-    fn auto_migrate_defaults_to_enabled() {
-        // Container-only deployments rely on this default for schema setup;
-        // see docs/operations/deployment.md.
-        let config = ServerConfig::builder()
-            .load()
-            .expect("defaults-only config should load");
-        assert!(config.auto_migrate);
+    fn a_set_but_empty_optional_setting_means_the_same_as_unset() {
+        // `BEAM_METADATA_LANGUAGE=` in a compose file arrives as `Some("")`.
+        // Left that way it reaches cameo as a language tag and fails the
+        // client build -- which, being explicit, refuses to start the server.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("videos")).unwrap();
+
+        let validated = ServerConfig {
+            video_dir: temp.path().join("videos"),
+            data_dir: temp.path().join("data"),
+            metadata_language: Some("   ".to_string()),
+            oidc_admin_claim: Some(String::new()),
+            oidc_admin_value: None,
+            ..Default::default()
+        }
+        .normalize_and_validate()
+        .expect("blank optional settings are not a misconfiguration");
+
+        assert_eq!(validated.metadata_language, None);
+        assert_eq!(validated.oidc_admin_claim, None);
     }
 
     #[test]
-    fn enrichment_defaults_pass_validation() {
-        // The compiled-in defaults must themselves be valid, or a
-        // defaults-only deployment would refuse to start.
+    fn a_value_is_normalised_before_it_is_validated() {
+        // Order matters: `BEAM_OIDC_ADMIN_VALUE` set with `BEAM_OIDC_ADMIN_CLAIM`
+        // blank is the half-configured combination `validate_values` rejects --
+        // but only once the blank claim has been normalised to `None`.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("videos")).unwrap();
+
+        let error = ServerConfig {
+            video_dir: temp.path().join("videos"),
+            data_dir: temp.path().join("data"),
+            oidc_admin_claim: Some("  ".to_string()),
+            oidc_admin_value: Some("beam-admin".to_string()),
+            ..Default::default()
+        }
+        .normalize_and_validate()
+        .expect_err("a blank claim with a value set is still half-configured");
+
+        assert!(
+            matches!(&error, ConfigError::InvalidValue(field, _) if field == "BEAM_OIDC_ADMIN_VALUE"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_bad_scalar_fails_before_any_directory_is_created() {
+        // `validate_values` runs before `validate_paths` so a typo'd number
+        // does not leave a half-made data directory behind.
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("state").join("beam");
+
+        let error = ServerConfig {
+            video_dir: temp.path().join("videos"),
+            data_dir: data_dir.clone(),
+            enrich_batch_size: 0,
+            ..Default::default()
+        }
+        .normalize_and_validate()
+        .expect_err("a zero batch size is rejected");
+
+        assert!(
+            matches!(&error, ConfigError::InvalidValue(field, _) if field == "BEAM_ENRICH_BATCH_SIZE"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !temp.path().join("state").exists(),
+            "no filesystem side effect before the values are known to be valid"
+        );
+    }
+
+    #[test]
+    fn the_oidc_redirect_url_points_at_this_servers_own_callback() {
+        // It is sent to the identity provider as the place to come back to and
+        // is matched exactly against the client's registered redirect URIs, so
+        // it must be the *server* origin -- not the web origin, and not empty.
         let config = ServerConfig {
-            enrich_batch_size: 25,
-            enrich_min_confidence: 0.7,
-            ..config_with_secrets()
+            server_url: "https://beam.example.com".to_string(),
+            web_url: "https://app.example.com".to_string(),
+            ..Default::default()
         };
-        assert!(config.validate_values().is_ok());
+        assert_eq!(
+            config.oidc_redirect_url(),
+            "https://beam.example.com/v1/auth/callback"
+        );
+    }
+
+    #[test]
+    fn session_days_are_converted_to_seconds() {
+        // 14 days is 1_209_600 seconds. A mistyped conversion still produces a
+        // plausible-looking number and signs everyone out within minutes.
+        let config = ServerConfig {
+            session_idle_days: 14,
+            session_max_days: 60,
+            ..Default::default()
+        };
+        assert_eq!(config.session_idle_ttl_secs(), 1_209_600);
+        assert_eq!(config.session_absolute_ttl_secs(), 5_184_000);
+        assert_eq!(
+            ServerConfig {
+                session_idle_days: 1,
+                ..Default::default()
+            }
+            .session_idle_ttl_secs(),
+            86_400
+        );
+    }
+
+    #[test]
+    fn oidc_is_configured_only_when_all_three_settings_are_present() {
+        // Any one of them missing means discovery cannot succeed; treating a
+        // partial configuration as complete turns a clear "not configured"
+        // startup message into a discovery failure at first login.
+        let all = |issuer, client_id, secret| ServerConfig {
+            oidc_issuer: issuer,
+            oidc_client_id: client_id,
+            oidc_client_secret: secret,
+            ..Default::default()
+        };
+        let set = || Some("x".to_string());
+
+        assert!(all(set(), set(), set()).oidc_configured());
+        assert!(!all(None, set(), set()).oidc_configured());
+        assert!(!all(set(), None, set()).oidc_configured());
+        assert!(!all(set(), set(), None).oidc_configured());
+        assert!(!all(None, None, None).oidc_configured());
+    }
+
+    #[test]
+    fn an_absent_secret_stays_absent_in_debug_output() {
+        // `redact_option` must distinguish "not configured" from "configured
+        // but hidden": rendering `None` as `<redacted>` would make an operator
+        // debugging a missing token believe it was set.
+        let unset = ServerConfig {
+            tmdb_api_token: None,
+            oidc_client_secret: None,
+            ..Default::default()
+        };
+        let output = format!("{unset:?}");
+        assert!(
+            output.contains("tmdb_api_token: None"),
+            "an unset secret must render as None, got: {output}"
+        );
+
+        let set = ServerConfig {
+            tmdb_api_token: Some("tmdb-secret-token".to_string()),
+            ..Default::default()
+        };
+        let output = format!("{set:?}");
+        // The field itself, not merely a `<redacted>` somewhere in the struct:
+        // `database_url` renders one too, so a looser assertion passes even
+        // when the secret is dropped entirely.
+        assert!(
+            output.contains(r#"tmdb_api_token: Some("<redacted>")"#),
+            "a set secret must render as redacted, not as absent: {output}"
+        );
+        assert!(!output.contains("tmdb-secret-token"), "output: {output}");
+    }
+
+    #[test]
+    fn the_compiled_in_defaults_are_internally_valid() {
+        // A defaults-only deployment must start: every declared default has to
+        // satisfy the validation the same struct enforces. Asserting each
+        // default's *value* would just restate the attribute above it; this
+        // asserts the property that actually matters.
+        ServerConfig::default()
+            .validate_values()
+            .expect("a defaults-only configuration must pass its own validation");
     }
 
     #[test]
@@ -849,5 +1021,88 @@ mod tests {
             redact_url_password("postgres://localhost/db@name"),
             "postgres://localhost/db@name"
         );
+    }
+
+    mod validate_paths {
+        use super::*;
+
+        /// `validate_paths` reaches the real filesystem, and a `TempDir` is a
+        /// real filesystem that needs no infrastructure -- so it is the subject
+        /// here rather than a `FileSystem` double, which would only prove the
+        /// double returns what it was configured to return.
+        fn config_in(dir: &std::path::Path) -> ServerConfig {
+            ServerConfig {
+                video_dir: dir.join("videos"),
+                data_dir: dir.join("data"),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn a_missing_video_dir_is_rejected() {
+            let temp = tempfile::tempdir().unwrap();
+            let config = config_in(temp.path());
+
+            let err = config
+                .validate_paths()
+                .expect_err("a video dir that does not exist must be rejected");
+            assert!(
+                matches!(&err, ConfigError::DirNotFoundError(path) if path.contains("videos")),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn a_video_dir_that_is_a_file_is_rejected() {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join("videos"), b"not a directory").unwrap();
+
+            let err = config_in(temp.path())
+                .validate_paths()
+                .expect_err("a regular file is not a usable video directory");
+            assert!(
+                matches!(&err, ConfigError::DirNotFoundError(_)),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn an_existing_video_dir_is_accepted_and_the_data_parent_is_created() {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(temp.path().join("videos")).unwrap();
+            let config = ServerConfig {
+                video_dir: temp.path().join("videos"),
+                // Two levels deep: the parent does not exist yet.
+                data_dir: temp.path().join("state").join("beam"),
+                ..Default::default()
+            };
+
+            config
+                .validate_paths()
+                .expect("an existing video dir and a creatable data dir are valid");
+
+            assert!(
+                temp.path().join("state").is_dir(),
+                "the data directory's parent must be created, not merely tolerated"
+            );
+            assert!(
+                !temp.path().join("state").join("beam").exists(),
+                "only the parent is created; the data dir itself is the server's to make"
+            );
+        }
+
+        #[test]
+        fn a_data_dir_at_the_filesystem_root_needs_no_parent_created() {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(temp.path().join("videos")).unwrap();
+            let config = ServerConfig {
+                video_dir: temp.path().join("videos"),
+                // Parent is the temp dir, which already exists.
+                data_dir: temp.path().join("data"),
+                ..Default::default()
+            };
+
+            config.validate_paths().expect("an existing parent is fine");
+        }
     }
 }

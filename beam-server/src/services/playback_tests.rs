@@ -14,6 +14,7 @@ mod tests {
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+    use beam_domain::services::TestClock;
 
     fn make_movie(title: &str) -> Movie {
         Movie {
@@ -61,10 +62,16 @@ mod tests {
         file_repo: Arc<InMemoryFileRepository>,
         movie_repo: Arc<InMemoryMovieRepository>,
         show_repo: Arc<InMemoryShowRepository>,
+        clock: Arc<TestClock>,
     }
 
     fn make_harness() -> Harness {
-        let playback_repo = Arc::new(InMemoryPlaybackProgressRepository::default());
+        // The clock is injected and handed back so the ordering tests can
+        // advance it. Wall-clock sleeps used to stand in for this: flaky under
+        // load, and two `Utc::now()` calls milliseconds apart can collide
+        // outright on a busy build host.
+        let clock = Arc::new(TestClock::new());
+        let playback_repo = Arc::new(InMemoryPlaybackProgressRepository::new(clock.clone()));
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let movie_repo = Arc::new(InMemoryMovieRepository::default());
         let show_repo = Arc::new(InMemoryShowRepository::default());
@@ -81,6 +88,7 @@ mod tests {
             file_repo,
             movie_repo,
             show_repo,
+            clock,
         }
     }
 
@@ -323,13 +331,13 @@ mod tests {
             .report_progress(user_id, file_first, 10.0, Some(100.0))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        harness.clock.advance(Duration::from_secs(60));
         harness
             .service
             .report_progress(user_id, file_middle, 20.0, Some(100.0))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        harness.clock.advance(Duration::from_secs(60));
         harness
             .service
             .report_progress(user_id, file_completed, 99.0, Some(100.0))
@@ -369,7 +377,7 @@ mod tests {
                 .report_progress(user_id, file_id, 10.0, Some(100.0))
                 .await
                 .unwrap();
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            harness.clock.advance(Duration::from_secs(60));
             files.push(file_id);
         }
         // files[2] is newest → first page. Ask for the 2nd page of size 1.

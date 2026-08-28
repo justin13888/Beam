@@ -128,6 +128,18 @@ impl MetadataService for StubMetadataService {
 /// dependency probe, for tests that exercise router wiring rather than any
 /// individual service.
 pub(crate) fn make_app_state() -> AppState {
+    make_app_state_with(|config| config, Arc::new(beam_domain::services::RealClock))
+}
+
+/// [`make_app_state`] with the configuration adjusted and the clock chosen.
+///
+/// `adjust` receives the defaults-shaped config so a test can change only the
+/// fields it cares about, and `clock` lets a test move time -- `uptime_secs`
+/// is otherwise always zero and unassertable.
+pub(crate) fn make_app_state_with(
+    adjust: impl FnOnce(crate::config::ServerConfig) -> crate::config::ServerConfig,
+    clock: Arc<dyn beam_domain::services::Clock>,
+) -> AppState {
     let notification = Arc::new(InMemoryNotificationService::new());
     let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
         InMemoryAdminLogRepository::default(),
@@ -176,46 +188,19 @@ pub(crate) fn make_app_state() -> AppState {
     };
 
     let config = crate::config::ServerConfig {
-        bind_address: "0.0.0.0:8000".to_string(),
-        server_url: "http://localhost:8000".to_string(),
-        enable_metrics: false,
-        shutdown_timeout_secs: 30,
         video_dir: PathBuf::from("/tmp"),
         data_dir: PathBuf::from("/tmp"),
         database_url: "postgres://unused:unused@localhost/unused".to_string(),
-        auto_migrate: true,
-        db_max_connections: 20,
-        db_min_connections: 5,
-        hash_unknown_files: true,
-        scan_interval_secs: 3600,
         watch_enabled: false,
-        watch_debounce_ms: 2000,
-        enrich_interval_secs: 300,
-        enrich_batch_size: 25,
-        enrich_min_confidence: 0.7,
-        tmdb_api_token: None,
         anilist_enabled: false,
-        metadata_language: None,
-        oidc_issuer: None,
-        oidc_client_id: None,
-        oidc_client_secret: None,
-        oidc_scopes: "openid profile email".to_string(),
-        web_url: "http://localhost:5173".to_string(),
-        extra_allowed_origins: None,
-        oidc_admin_claim: None,
-        oidc_admin_value: None,
         cookie_secure: Some(false),
-        session_idle_days: 14,
-        session_max_days: 60,
-        rate_limit_enabled: true,
-        rate_limit_auth_per_minute: 10,
-        rate_limit_search_per_minute: 60,
-        rate_limit_trust_forwarded_for: false,
+        ..Default::default()
     };
 
-    AppState::new(
-        config,
+    AppState::with_clock(
+        adjust(config),
         services,
         Arc::new(InMemoryDependencyProbe::healthy()),
+        clock,
     )
 }
