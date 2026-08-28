@@ -38,6 +38,10 @@ walkdir = { workspace = true }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
+# `test-utils` here (not just under the crate's own `test-utils` feature) so the
+# domain-level doubles -- `TestClock`, builders -- are available to this crate's
+# own `#[cfg(test)]` modules: a dependency is not compiled with `cfg(test)`.
+beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
 futures = "0.3.31"
 metrics-util = { workspace = true }
 mockall = "0.14.0"
