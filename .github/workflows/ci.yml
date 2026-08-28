@@ -240,7 +240,9 @@ jobs:
   openapi:
     name: Generate OpenAPI artifacts
     needs: [changes, ffmpeg]
-    if: needs.changes.outputs.ts == 'true'
+    # Also on Rust changes: the spec is generated from the server's route
+    # annotations, so a Rust-only change is exactly how it drifts.
+    if: needs.changes.outputs.ts == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
       BEAM_CARGO_FEATURES: ""
@@ -255,6 +257,11 @@ jobs:
       - uses: ./.github/actions/bun-install
 
       - run: mise run codegen:openapi
+
+      # `beam-web/openapi.json` is committed, and it is the contract every
+      # client is generated from. Fail when it no longer matches what the
+      # server serves.
+      - run: mise run codegen:openapi:check
 
       - name: Upload OpenAPI artifacts
         uses: actions/upload-artifact@v4

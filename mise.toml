@@ -170,6 +170,28 @@ run = [
 # Commit hygiene
 # ---------------------------------------------------------------------------
 
+[tasks."codegen:openapi:check"]
+description = "Fail when the committed OpenAPI spec differs from the one the router generates"
+# `beam-web/openapi.json` is committed so a change to the wire contract is a
+# reviewable diff rather than an invisible regeneration. This is the guard that
+# keeps it honest.
+run = '''
+set -eu
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > "$tmp"
+if ! diff -u beam-web/openapi.json "$tmp"; then
+    echo
+    echo "beam-web/openapi.json is stale. Run: mise run codegen:openapi" >&2
+    exit 1
+fi
+echo "OpenAPI spec matches the router"
+'''
+
+# ---------------------------------------------------------------------------
+# Commit hygiene
+# ---------------------------------------------------------------------------
+
 [tasks."commits:check"]
 description = "Validate that commits on this branch are Conventional Commits"
 # convco reads the revision range from $CONVCO_REV. CI sets it explicitly from
@@ -252,6 +274,7 @@ depends = [
     "rust:deny",
     "rust:lockfile",
     "check:ffmpeg-version",
+    "codegen:openapi:check",
     "ts:check",
     "ts:typecheck",
     "ts:test",
