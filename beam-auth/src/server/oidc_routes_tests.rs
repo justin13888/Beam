@@ -99,11 +99,30 @@ mod tests {
         user_repo: Arc<InMemoryUserRepository>,
         config: OidcRuntimeConfig,
     ) -> Harness {
+        make_harness_sharing_store(
+            oidc_client,
+            user_repo,
+            Arc::new(InMemorySessionStore::default()),
+            config,
+        )
+    }
+
+    /// As [`make_harness_full`], but joins an existing session store.
+    ///
+    /// `FakeOidcClient` returns one fixed identity, so "two different users"
+    /// means two routers with two clients -- which by default would also mean
+    /// two isolated session stores, and then a cross-account revocation test
+    /// would pass for the wrong reason.
+    fn make_harness_sharing_store(
+        oidc_client: FakeOidcClient,
+        user_repo: Arc<InMemoryUserRepository>,
+        session_store: Arc<InMemorySessionStore>,
+        config: OidcRuntimeConfig,
+    ) -> Harness {
         let oidc_client = Arc::new(oidc_client);
         let oidc_dyn: Arc<dyn OidcClient> = oidc_client.clone();
         let pending_auth_store: Arc<dyn PendingAuthStore> =
             Arc::new(InMemoryPendingAuthStore::default());
-        let session_store = Arc::new(InMemorySessionStore::default());
         let session_dyn: Arc<dyn SessionStore> = session_store.clone();
         let user_repo_dyn: Arc<dyn UserRepository> = user_repo.clone();
 
@@ -629,6 +648,19 @@ mod tests {
 
     // ─── GET /me, POST /logout, GET /sessions, DELETE /sessions/:id ──────────
 
+    /// Whether the response tells the browser to drop the session cookie.
+    ///
+    /// `remove_cookie` emits an expiring `Set-Cookie` rather than a live one,
+    /// so `res.cookies()` never shows it -- the header is what a browser acts
+    /// on and therefore what this asserts.
+    fn clears_session_cookie(res: &Response) -> bool {
+        res.headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|c| c.starts_with("beam_session=;"))
+    }
+
     async fn login_and_get_session_cookie(harness: &Harness, email: &str) -> String {
         let (state_cookie, _) = do_login(harness, None).await;
         let begin = harness.oidc_client.last_begin().unwrap();
@@ -737,5 +769,393 @@ mod tests {
                 .send(&harness.service)
                 .await;
         assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn logging_out_everywhere_revokes_every_session_of_that_user_only() {
+        // The mutant this pins: replacing the handler body with `Ok(())`
+        // returns 204 and leaves every session alive. Asserting the status
+        // alone cannot tell the difference.
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "everywhere@example.com",
+            true,
+        )));
+        let first = login_and_get_session_cookie(&harness, "everywhere@example.com").await;
+        let second = login_and_get_session_cookie(&harness, "everywhere@example.com").await;
+        assert_ne!(first, second, "two logins are two sessions");
+
+        // A genuinely different user over the *same* store, whose session must
+        // survive. Identity is `(issuer, subject)`, so the subject has to
+        // differ -- `identity()` pins it, which would make this one account.
+        let bystander_harness = make_harness_sharing_store(
+            FakeOidcClient::with_identity(identity_with(
+                "https://dex.test",
+                "subj-bystander",
+                Some("bystander@example.com"),
+                Some("Bystander"),
+            )),
+            harness.user_repo.clone(),
+            harness.session_store.clone(),
+            test_config(),
+        );
+        let bystander_cookie =
+            login_and_get_session_cookie(&bystander_harness, "bystander@example.com").await;
+
+        let res = TestClient::post("http://0.0.0.0/logout-all")
+            .add_header("Cookie", format!("beam_session={first}"), true)
+            .send(&harness.service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+
+        for cookie in [&first, &second] {
+            let res = TestClient::get("http://0.0.0.0/me")
+                .add_header("Cookie", format!("beam_session={cookie}"), true)
+                .send(&harness.service)
+                .await;
+            assert_eq!(
+                res.status_code,
+                Some(StatusCode::UNAUTHORIZED),
+                "every session of the caller must be gone"
+            );
+        }
+        let res = TestClient::get("http://0.0.0.0/me")
+            .add_header("Cookie", format!("beam_session={bystander_cookie}"), true)
+            .send(&bystander_harness.service)
+            .await;
+        assert_eq!(
+            res.status_code,
+            Some(StatusCode::OK),
+            "logging one user out everywhere must not touch anyone else"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_user_cannot_revoke_another_users_session_by_its_id() {
+        // The ownership check in `oidc_delete_session` is the only thing
+        // standing between a listed session id and a cross-account logout.
+        let user_repo = Arc::new(InMemoryUserRepository::default());
+        let session_store = Arc::new(InMemorySessionStore::default());
+
+        // Distinct subjects: identity is `(issuer, subject)`, and `identity()`
+        // pins the subject, so two calls to it are one account.
+        let victim = make_harness_sharing_store(
+            FakeOidcClient::with_identity(identity_with(
+                "https://dex.test",
+                "subj-victim",
+                Some("victim@example.com"),
+                Some("Victim"),
+            )),
+            user_repo.clone(),
+            session_store.clone(),
+            test_config(),
+        );
+        let attacker = make_harness_sharing_store(
+            FakeOidcClient::with_identity(identity_with(
+                "https://dex.test",
+                "subj-attacker",
+                Some("attacker@example.com"),
+                Some("Attacker"),
+            )),
+            user_repo.clone(),
+            session_store.clone(),
+            test_config(),
+        );
+
+        let victim_cookie = login_and_get_session_cookie(&victim, "victim@example.com").await;
+        let attacker_cookie = login_and_get_session_cookie(&attacker, "attacker@example.com").await;
+        assert_ne!(victim_cookie, attacker_cookie);
+
+        let mut res = TestClient::get("http://0.0.0.0/sessions")
+            .add_header("Cookie", format!("beam_session={victim_cookie}"), true)
+            .send(&victim.service)
+            .await;
+        let sessions: Vec<Value> = res.take_json().await.unwrap();
+        assert_eq!(sessions.len(), 1, "the victim sees only their own session");
+        let victim_session_id = sessions[0]["id"].as_str().unwrap().to_string();
+
+        let res = TestClient::delete(format!("http://0.0.0.0/sessions/{victim_session_id}"))
+            .add_header("Cookie", format!("beam_session={attacker_cookie}"), true)
+            .send(&attacker.service)
+            .await;
+        assert_eq!(
+            res.status_code,
+            Some(StatusCode::UNAUTHORIZED),
+            "another user's session id must not be revocable, and must not be \
+             distinguishable from one that does not exist"
+        );
+
+        let res = TestClient::get("http://0.0.0.0/me")
+            .add_header("Cookie", format!("beam_session={victim_cookie}"), true)
+            .send(&victim.service)
+            .await;
+        assert_eq!(
+            res.status_code,
+            Some(StatusCode::OK),
+            "the victim is still signed in"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_session_other_than_the_current_one_leaves_the_cookie_alone() {
+        // `current.value() == current_token` decides whether to clear the
+        // caller's own cookie. Inverting it would sign the caller out every
+        // time they revoked one of their *other* devices.
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "twodevices@example.com",
+            true,
+        )));
+
+        // Log in the old device first and read its id while it is the only
+        // session, so the id is known rather than guessed at.
+        let old_device = login_and_get_session_cookie(&harness, "twodevices@example.com").await;
+        let mut res = TestClient::get("http://0.0.0.0/sessions")
+            .add_header("Cookie", format!("beam_session={old_device}"), true)
+            .send(&harness.service)
+            .await;
+        let sessions: Vec<Value> = res.take_json().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        let old_device_id = sessions[0]["id"].as_str().unwrap().to_string();
+
+        let current = login_and_get_session_cookie(&harness, "twodevices@example.com").await;
+        assert_ne!(old_device, current);
+
+        let res = TestClient::delete(format!("http://0.0.0.0/sessions/{old_device_id}"))
+            .add_header("Cookie", format!("beam_session={current}"), true)
+            .send(&harness.service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+        assert!(
+            !clears_session_cookie(&res),
+            "revoking another device must not clear the caller's own cookie"
+        );
+
+        // The caller is still signed in; the other device is not.
+        assert_eq!(
+            TestClient::get("http://0.0.0.0/me")
+                .add_header("Cookie", format!("beam_session={current}"), true)
+                .send(&harness.service)
+                .await
+                .status_code,
+            Some(StatusCode::OK)
+        );
+        assert_eq!(
+            TestClient::get("http://0.0.0.0/me")
+                .add_header("Cookie", format!("beam_session={old_device}"), true)
+                .send(&harness.service)
+                .await
+                .status_code,
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_the_session_in_use_clears_the_callers_cookie() {
+        // The other half of the same condition: when the id *is* the caller's
+        // own session, leaving a live cookie behind for a dead session makes
+        // every later request a confusing 401.
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "selfrevoke@example.com",
+            true,
+        )));
+        let cookie = login_and_get_session_cookie(&harness, "selfrevoke@example.com").await;
+
+        let mut res = TestClient::get("http://0.0.0.0/sessions")
+            .add_header("Cookie", format!("beam_session={cookie}"), true)
+            .send(&harness.service)
+            .await;
+        let sessions: Vec<Value> = res.take_json().await.unwrap();
+        let own_id = sessions[0]["id"].as_str().unwrap().to_string();
+
+        let res = TestClient::delete(format!("http://0.0.0.0/sessions/{own_id}"))
+            .add_header("Cookie", format!("beam_session={cookie}"), true)
+            .send(&harness.service)
+            .await;
+        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+        assert!(
+            clears_session_cookie(&res),
+            "revoking the session in use must clear its cookie"
+        );
+    }
+
+    /// An identity with an explicit name and picture, for the profile-refresh
+    /// tests. `identity_with` deliberately leaves `picture` unset.
+    fn identity_with_profile(email: &str, name: &str, picture: &str) -> OidcIdentity {
+        OidcIdentity {
+            issuer: "https://idp.test".to_string(),
+            subject: format!("sub-{email}"),
+            email: Some(email.to_string()),
+            email_verified: true,
+            name: Some(name.to_string()),
+            picture: Some(picture.to_string()),
+            claims: json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_login_with_an_unchanged_profile_does_not_rewrite_it() {
+        // `display_name != .. || avatar_url != ..` gates the profile refresh.
+        // Inverting either comparison writes on every login (or never writes),
+        // and the response body looks identical either way -- so this asserts
+        // the stored row instead.
+        let user_repo = Arc::new(InMemoryUserRepository::default());
+        let steady = identity_with_profile(
+            "steady@example.com",
+            "Steady Eddie",
+            "https://idp.test/steady.png",
+        );
+
+        let first = make_harness_full(
+            FakeOidcClient::with_identity(steady.clone()),
+            user_repo.clone(),
+            test_config(),
+        );
+        let _ = login_and_get_session_cookie(&first, "steady@example.com").await;
+        let user = user_repo
+            .find_by_oidc_identity("https://idp.test", "sub-steady@example.com")
+            .await
+            .unwrap()
+            .expect("provisioned on first login");
+        assert_eq!(user.display_name, "Steady Eddie");
+        assert_eq!(
+            user.avatar_url.as_deref(),
+            Some("https://idp.test/steady.png")
+        );
+
+        let second = make_harness_full(
+            FakeOidcClient::with_identity(steady),
+            user_repo.clone(),
+            test_config(),
+        );
+        let _ = login_and_get_session_cookie(&second, "steady@example.com").await;
+
+        let after = user_repo
+            .find_by_oidc_identity("https://idp.test", "sub-steady@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.id, user.id, "the same account, not a second one");
+        assert_eq!(after.display_name, "Steady Eddie");
+        assert_eq!(
+            after.avatar_url.as_deref(),
+            Some("https://idp.test/steady.png")
+        );
+    }
+
+    /// Log in once with `before`, then again with `after`, over one user
+    /// repository, and return the stored row afterwards.
+    async fn relogin_with(
+        subject: &str,
+        before: OidcIdentity,
+        after: OidcIdentity,
+    ) -> crate::utils::models::User {
+        let user_repo = Arc::new(InMemoryUserRepository::default());
+        let first = make_harness_full(
+            FakeOidcClient::with_identity(before),
+            user_repo.clone(),
+            test_config(),
+        );
+        let _ = login_and_get_session_cookie(&first, subject).await;
+
+        let second = make_harness_full(
+            FakeOidcClient::with_identity(after),
+            user_repo.clone(),
+            test_config(),
+        );
+        let _ = login_and_get_session_cookie(&second, subject).await;
+
+        user_repo
+            .find_by_oidc_identity("https://idp.test", subject)
+            .await
+            .unwrap()
+            .expect("provisioned on the first login")
+    }
+
+    #[tokio::test]
+    async fn a_changed_name_alone_is_written_through() {
+        // The refresh condition is `name != .. || picture != ..`. With `&&`
+        // instead, a change to only one field is silently dropped -- and a
+        // display name is the field users actually change.
+        let stored = relogin_with(
+            "sub-nameonly@example.com",
+            identity_with_profile(
+                "nameonly@example.com",
+                "Old Name",
+                "https://idp.test/same.png",
+            ),
+            identity_with_profile(
+                "nameonly@example.com",
+                "New Name",
+                "https://idp.test/same.png",
+            ),
+        )
+        .await;
+
+        assert_eq!(stored.display_name, "New Name");
+        assert_eq!(
+            stored.avatar_url.as_deref(),
+            Some("https://idp.test/same.png")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_picture_alone_is_written_through() {
+        let stored = relogin_with(
+            "sub-piconly@example.com",
+            identity_with_profile(
+                "piconly@example.com",
+                "Same Name",
+                "https://idp.test/old.png",
+            ),
+            identity_with_profile(
+                "piconly@example.com",
+                "Same Name",
+                "https://idp.test/new.png",
+            ),
+        )
+        .await;
+
+        assert_eq!(stored.display_name, "Same Name");
+        assert_eq!(
+            stored.avatar_url.as_deref(),
+            Some("https://idp.test/new.png")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_name_or_picture_at_the_idp_is_written_through_on_the_next_login() {
+        let user_repo = Arc::new(InMemoryUserRepository::default());
+
+        let before = make_harness_full(
+            FakeOidcClient::with_identity(identity_with_profile(
+                "changing@example.com",
+                "Old Name",
+                "https://idp.test/old.png",
+            )),
+            user_repo.clone(),
+            test_config(),
+        );
+        let _ = login_and_get_session_cookie(&before, "changing@example.com").await;
+
+        let after_change = make_harness_full(
+            FakeOidcClient::with_identity(identity_with_profile(
+                "changing@example.com",
+                "New Name",
+                "https://idp.test/new.png",
+            )),
+            user_repo.clone(),
+            test_config(),
+        );
+        let _ = login_and_get_session_cookie(&after_change, "changing@example.com").await;
+
+        let after = user_repo
+            .find_by_oidc_identity("https://idp.test", "sub-changing@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.display_name, "New Name");
+        assert_eq!(
+            after.avatar_url.as_deref(),
+            Some("https://idp.test/new.png")
+        );
     }
 }

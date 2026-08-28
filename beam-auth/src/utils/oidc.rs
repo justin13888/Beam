@@ -204,7 +204,7 @@ mod discovered {
             // non-standard claim -- e.g. the `groups`/`roles` a deployment binds
             // admin to (issue #85). Re-decode the now-trusted payload as raw JSON
             // to carry every claim through for admin evaluation.
-            let raw_claims = decode_verified_claims(id_token);
+            let raw_claims = decode_claims_payload(&id_token.to_string());
 
             Ok(OidcIdentity {
                 issuer: claims.issuer().as_str().to_string(),
@@ -225,13 +225,17 @@ mod discovered {
     }
 
     /// Decodes the claim-set (payload) segment of an already-verified compact
-    /// JWT into raw JSON. The signature/nonce were validated by the caller
+    /// JWT into raw JSON. The signature and nonce were validated by the caller
     /// before this runs, so the bytes are trusted; any decode failure yields
     /// `Value::Null` (admin is then simply never granted) rather than an error.
-    fn decode_verified_claims(id_token: &openidconnect::core::CoreIdToken) -> serde_json::Value {
+    ///
+    /// Takes the compact string rather than a `CoreIdToken`, because that type
+    /// can only be built by signing and verifying a real JWT -- which put the
+    /// decoding, and the admin-claim evaluation that depends on it, out of
+    /// reach of every test. The caller stringifies at the one call site.
+    pub(crate) fn decode_claims_payload(compact: &str) -> serde_json::Value {
         use base64::Engine;
 
-        let compact = id_token.to_string();
         let Some(payload_b64) = compact.split('.').nth(1) else {
             return serde_json::Value::Null;
         };
@@ -240,6 +244,68 @@ mod discovered {
             return serde_json::Value::Null;
         };
         serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[cfg(test)]
+    mod claims_payload_tests {
+        use super::decode_claims_payload;
+        use base64::Engine as _;
+        use serde_json::{Value, json};
+
+        fn compact_jwt(payload: &Value) -> String {
+            let encode =
+                |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+            format!(
+                "{}.{}.{}",
+                encode(br#"{"alg":"RS256"}"#),
+                encode(payload.to_string().as_bytes()),
+                encode(b"not-checked-here")
+            )
+        }
+
+        #[test]
+        fn every_claim_in_the_payload_is_carried_through() {
+            // This raw claim set is what admin evaluation reads; dropping it
+            // silently means nobody is ever an admin, with no error anywhere.
+            let payload = json!({
+                "sub": "subj-1",
+                "groups": ["beam-admin", "everyone"],
+                "is_admin": true,
+                "nested": { "a": 1 },
+            });
+            assert_eq!(decode_claims_payload(&compact_jwt(&payload)), payload);
+        }
+
+        #[test]
+        fn the_header_and_signature_segments_are_ignored() {
+            // Only the middle segment is the claim set; reading the first
+            // would return the algorithm header instead.
+            let decoded = decode_claims_payload(&compact_jwt(&json!({"sub": "subj-1"})));
+            assert_eq!(decoded["sub"], "subj-1");
+            assert!(decoded.get("alg").is_none());
+        }
+
+        #[test]
+        fn a_malformed_token_decodes_to_null_rather_than_failing_the_login() {
+            // A login that already passed signature and nonce verification must
+            // not be rejected here; the worst case is no admin claim.
+            for malformed in [
+                "",
+                "not-a-jwt",
+                "onlyheader.",
+                "header.!!!not-base64!!!.sig",
+                &format!(
+                    "header.{}.sig",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not json")
+                ),
+            ] {
+                assert_eq!(
+                    decode_claims_payload(malformed),
+                    Value::Null,
+                    "for {malformed:?}"
+                );
+            }
+        }
     }
 }
 
@@ -283,6 +349,7 @@ impl OidcClient for NotConfiguredOidcClient {
 /// verifier round-trip the same way a real IdP implicitly would (via ID
 /// token claim verification / an authorization-server-side check), so tests
 /// exercising a tampered or replayed callback see the same failure mode.
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod fake {
     use super::{BeginAuth, OidcClient, OidcError, OidcIdentity};

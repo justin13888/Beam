@@ -52,6 +52,26 @@ pub struct OidcRuntimeConfig {
     pub session_max_days: u64,
 }
 
+/// Seconds in a day. Named because the conversion appeared inline at three
+/// call sites, where a `* 24 * 60 * 60` typed as `* 24 + 60 * 60` produces a
+/// session that expires in about a minute and a half instead of two weeks --
+/// a difference no type checks and, until this was extracted, no test could
+/// reach.
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+impl OidcRuntimeConfig {
+    /// How long a session survives without activity, in seconds.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn idle_ttl_secs(&self) -> u64 {
+        self.session_idle_days * SECONDS_PER_DAY
+    }
+
+    /// Hard ceiling on session lifetime from creation, in seconds.
+    pub fn absolute_ttl_secs(&self) -> u64 {
+        self.session_max_days * SECONDS_PER_DAY
+    }
+}
+
 fn device_hash_from_request(req: &Request) -> String {
     let user_agent = req
         .headers()
@@ -249,7 +269,7 @@ async fn require_web_session(
         .map(|c| c.value().to_string())
         .ok_or_else(|| OidcAuthError::Unauthorized("Missing session cookie".into()))?;
 
-    let idle_ttl_secs = config.session_idle_days * 24 * 60 * 60;
+    let idle_ttl_secs = config.idle_ttl_secs();
     let session = get_and_touch(session_store.as_ref(), &token, idle_ttl_secs)
         .await
         .map_err(|e| OidcAuthError::InternalError(e.to_string()))?
@@ -455,8 +475,8 @@ pub async fn oidc_callback(
 
     let device_hash = device_hash_from_request(req);
     let ip = extract_client_ip(req);
-    let idle_ttl_secs = config.session_idle_days * 24 * 60 * 60;
-    let absolute_ttl_secs = config.session_max_days * 24 * 60 * 60;
+    let idle_ttl_secs = config.idle_ttl_secs();
+    let absolute_ttl_secs = config.absolute_ttl_secs();
 
     let session_data = SessionData {
         user_id: user.id.to_string(),
@@ -604,8 +624,16 @@ pub async fn oidc_delete_session(
 
     // Revoking the session the caller is currently using should also clear
     // their cookie, rather than leaving a dead cookie around.
-    if let Some(current) = req.cookie(SESSION_COOKIE)
-        && current.value() == current_token
+    //
+    // Whether that happened is decided by re-reading the caller's own token:
+    // this used to compare the request cookie to `current_token`, which is
+    // *derived from that same cookie* and so was always equal -- revoking any
+    // other device signed the caller out of the one they were holding.
+    if session_store
+        .get(&current_token)
+        .await
+        .map_err(|e| OidcAuthError::InternalError(e.to_string()))?
+        .is_none()
     {
         res.remove_cookie(SESSION_COOKIE);
     }
@@ -630,6 +658,222 @@ pub fn oidc_routes() -> Router {
         .push(Router::with_path("logout-all").post(oidc_logout_all))
         .push(Router::with_path("sessions").get(oidc_list_sessions))
         .push(Router::with_path("sessions/{id}").delete(oidc_delete_session))
+}
+
+/// Tests for the pure helpers in this module. The subcutaneous route tests
+/// live in `oidc_routes_tests.rs`; these reach the private functions those
+/// routes are built from, several of which are security controls whose failure
+/// mode is silent.
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    mod redirect_sanitisation {
+        use super::*;
+
+        /// This is an open-redirect defence. Anything it lets through becomes
+        /// a `Location` header after a successful login, so an attacker who
+        /// can get a victim to click `/login?redirect=...` picks where the
+        /// authenticated user lands.
+        #[test]
+        fn a_same_origin_path_is_preserved_exactly() {
+            for path in [
+                "/",
+                "/libraries",
+                "/media/abc-123?fileId=def",
+                "/a/deep/path#fragment",
+                "/path with spaces",
+            ] {
+                assert_eq!(sanitize_redirect_path(Some(path)), path);
+            }
+        }
+
+        #[test]
+        fn an_absolute_url_is_refused() {
+            for hostile in [
+                "https://evil.example/",
+                "http://evil.example/",
+                "javascript:alert(1)",
+                "data:text/html,<script>alert(1)</script>",
+                "//evil.example/",
+                "/\\evil.example/",
+                "\\\\evil.example",
+                "evil.example",
+                "",
+            ] {
+                assert_eq!(
+                    sanitize_redirect_path(Some(hostile)),
+                    "/",
+                    "{hostile:?} escaped the same-origin check"
+                );
+            }
+        }
+
+        #[test]
+        fn a_protocol_relative_path_is_refused_in_both_slash_forms() {
+            // `//host` and `/\host` are both read as protocol-relative by at
+            // least one shipping browser; either would leave the site.
+            assert_eq!(sanitize_redirect_path(Some("//evil.example/x")), "/");
+            assert_eq!(sanitize_redirect_path(Some("/\\evil.example/x")), "/");
+            // But a single slash followed by anything else is fine, including
+            // a path that merely starts with a backslash later on.
+            assert_eq!(sanitize_redirect_path(Some("/a\\b")), "/a\\b");
+        }
+
+        #[test]
+        fn no_redirect_at_all_lands_on_the_root() {
+            assert_eq!(sanitize_redirect_path(None), "/");
+        }
+    }
+
+    mod display_name_fallback {
+        use super::*;
+
+        #[test]
+        fn the_name_claim_wins_when_the_idp_sends_one() {
+            assert_eq!(
+                derive_display_name(Some("Ada Lovelace"), Some("ada@example.com"), "sub-1"),
+                "Ada Lovelace"
+            );
+        }
+
+        #[test]
+        fn an_empty_name_claim_is_treated_as_absent() {
+            // An IdP that sends `"name": ""` would otherwise leave the user
+            // with a blank name everywhere in the UI.
+            assert_eq!(
+                derive_display_name(Some(""), Some("ada@example.com"), "sub-1"),
+                "ada"
+            );
+        }
+
+        #[test]
+        fn the_email_local_part_is_the_next_choice() {
+            assert_eq!(
+                derive_display_name(None, Some("ada@example.com"), "sub-1"),
+                "ada"
+            );
+        }
+
+        #[test]
+        fn an_email_with_an_empty_local_part_falls_through_to_the_subject() {
+            assert_eq!(
+                derive_display_name(None, Some("@example.com"), "sub-1"),
+                "user-sub-1"
+            );
+        }
+
+        #[test]
+        fn with_neither_claim_the_subject_is_the_placeholder() {
+            assert_eq!(derive_display_name(None, None, "sub-1"), "user-sub-1");
+        }
+    }
+
+    mod session_ttls {
+        use super::*;
+
+        fn config(idle_days: u64, max_days: u64) -> OidcRuntimeConfig {
+            OidcRuntimeConfig {
+                web_url: "http://localhost:5173".to_string(),
+                cookie_secure: false,
+                admin_claim: None,
+                admin_value: None,
+                session_idle_days: idle_days,
+                session_max_days: max_days,
+            }
+        }
+
+        #[test]
+        fn days_are_converted_to_seconds_not_to_something_that_merely_looks_large() {
+            // 14 days is 1_209_600 seconds. A mistyped conversion yields a
+            // number in the hundreds or thousands -- still non-zero, still
+            // "works", and signs everyone out within minutes.
+            assert_eq!(config(14, 60).idle_ttl_secs(), 1_209_600);
+            assert_eq!(config(14, 60).absolute_ttl_secs(), 5_184_000);
+            assert_eq!(config(1, 1).idle_ttl_secs(), 86_400);
+            assert_eq!(config(1, 1).absolute_ttl_secs(), 86_400);
+        }
+
+        #[test]
+        fn the_idle_and_absolute_windows_are_read_from_their_own_settings() {
+            let config = config(3, 90);
+            assert_eq!(config.idle_ttl_secs(), 3 * 86_400);
+            assert_eq!(config.absolute_ttl_secs(), 90 * 86_400);
+        }
+    }
+
+    mod request_fingerprinting {
+        use super::*;
+
+        fn request_with(headers: &[(&'static str, &'static str)]) -> Request {
+            let mut builder = salvo::test::TestClient::get("http://0.0.0.0/");
+            for (name, value) in headers {
+                builder = builder.add_header(*name, *value, true);
+            }
+            builder.build()
+        }
+
+        #[test]
+        fn the_device_hash_is_a_digest_of_the_user_agent_not_the_agent_itself() {
+            let firefox = device_hash_from_request(&request_with(&[("user-agent", "Firefox/1")]));
+            let chrome = device_hash_from_request(&request_with(&[("user-agent", "Chrome/1")]));
+
+            assert_ne!(firefox, chrome, "different clients must hash differently");
+            assert_eq!(firefox.len(), 64, "a SHA-256 digest is 64 hex characters");
+            assert!(
+                !firefox.contains("Firefox"),
+                "the raw agent must not be stored"
+            );
+            // Stable: the same client returning must match its existing row.
+            assert_eq!(
+                firefox,
+                device_hash_from_request(&request_with(&[("user-agent", "Firefox/1")]))
+            );
+        }
+
+        #[test]
+        fn a_client_that_sends_no_user_agent_still_gets_a_hash() {
+            let hash = device_hash_from_request(&request_with(&[]));
+            assert_eq!(hash.len(), 64);
+            assert!(!hash.is_empty());
+        }
+
+        #[test]
+        fn the_client_ip_prefers_the_first_forwarded_hop() {
+            // The first entry is the originating client; the rest are proxies.
+            assert_eq!(
+                extract_client_ip(&request_with(&[(
+                    "x-forwarded-for",
+                    "203.0.113.7, 198.51.100.1, 10.0.0.1"
+                )])),
+                "203.0.113.7"
+            );
+            assert_eq!(
+                extract_client_ip(&request_with(&[("x-forwarded-for", "  203.0.113.7  ")])),
+                "203.0.113.7",
+                "surrounding whitespace is not part of the address"
+            );
+        }
+
+        #[test]
+        fn x_real_ip_is_the_fallback_when_there_is_no_forwarded_chain() {
+            assert_eq!(
+                extract_client_ip(&request_with(&[("x-real-ip", "203.0.113.9")])),
+                "203.0.113.9"
+            );
+        }
+
+        #[test]
+        fn forwarded_for_wins_over_real_ip_when_both_are_present() {
+            assert_eq!(
+                extract_client_ip(&request_with(&[
+                    ("x-forwarded-for", "203.0.113.7"),
+                    ("x-real-ip", "198.51.100.1"),
+                ])),
+                "203.0.113.7"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
