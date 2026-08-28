@@ -85,9 +85,14 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Deep-health probe over the same pool, built before the connection is
-    // moved into the services (sea-orm's `DatabaseConnection` is a cheap
-    // `Arc`-backed clone).
+    // One pool behind one `Arc`, shared by the health probe and by every
+    // repository and store inside `AppServices`. sea-orm's
+    // `DatabaseConnection` is only `Clone` while its `mock` feature is off, and
+    // the hermetic SQL-shape tests need that feature -- so the sharing is
+    // explicit rather than a `.clone()` per consumer.
+    let db = std::sync::Arc::new(db);
+
+    // Deep-health probe over the same pool.
     let probe: std::sync::Arc<dyn beam_server::services::health::DependencyProbe> =
         std::sync::Arc::new(beam_server::services::health::DbProbe::new(db.clone()));
 

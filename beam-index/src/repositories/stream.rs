@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
@@ -8,11 +10,11 @@ use beam_domain::repositories::MediaStreamRepository;
 /// SQL-based implementation of the MediaStreamRepository trait.
 #[derive(Debug, Clone)]
 pub struct SqlMediaStreamRepository {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 }
 
 impl SqlMediaStreamRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -121,7 +123,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
                 channel_layout: Set(channel_layout),
             };
 
-            new_stream.insert(&self.db).await?;
+            new_stream.insert(self.db.as_ref()).await?;
             inserted_count += 1;
         }
 
@@ -135,7 +137,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
         let models = media_stream::Entity::find()
             .filter(media_stream::Column::FileId.eq(file_id))
             .order_by(media_stream::Column::StreamIndex, Order::Asc)
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(MediaStream::from).collect())
@@ -147,7 +149,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
 
         let result = media_stream::Entity::delete_many()
             .filter(media_stream::Column::FileId.eq(file_id))
-            .exec(&self.db)
+            .exec(self.db.as_ref())
             .await?;
 
         Ok(result.rows_affected)

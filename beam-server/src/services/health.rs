@@ -7,6 +7,8 @@
 //! the healthy and the failing paths without a real database (see
 //! `docs/testing.md`).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::DatabaseConnection;
 
@@ -24,11 +26,11 @@ pub trait DependencyProbe: Send + Sync + std::fmt::Debug {
 /// Production probe: round-trips the live Postgres pool via sea-orm's `ping`.
 #[derive(Debug, Clone)]
 pub struct DbProbe {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 }
 
 impl DbProbe {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -39,53 +41,68 @@ impl DependencyProbe for DbProbe {
         self.db.ping().await.map_err(|e| e.to_string())
     }
 }
-
-/// Test double: reports a fixed (but at-runtime settable) database health,
-/// so the failing branch of `/v1/health` is exercised without a real
-/// connection drop.
+/// Test doubles. Gated behind `test-utils` so downstream crates can depend on
+/// them without them reaching a release build.
+///
+/// Collected into one module rather than left as loose `#[cfg(...)]` items so a
+/// single `#[mutants::skip]` covers the lot: cargo-mutants recognises only the
+/// literal `#[cfg(test)]` and would otherwise mutate these bodies and report the
+/// scaffolding as untested product behaviour. `mise run check:mutants-skip-fakes`
+/// enforces the attribute.
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Debug)]
-pub struct InMemoryDependencyProbe {
-    database_healthy: std::sync::atomic::AtomicBool,
-    error_message: String,
-}
+pub mod in_memory {
+    use super::*;
 
-#[cfg(any(test, feature = "test-utils"))]
-impl InMemoryDependencyProbe {
-    /// A probe whose database check always succeeds.
-    pub fn healthy() -> Self {
-        Self {
-            database_healthy: std::sync::atomic::AtomicBool::new(true),
-            error_message: "database unreachable".to_string(),
+    /// Test double: reports a fixed (but at-runtime settable) database health,
+    /// so the failing branch of `/v1/health` is exercised without a real
+    /// connection drop.
+    #[derive(Debug)]
+    pub struct InMemoryDependencyProbe {
+        database_healthy: std::sync::atomic::AtomicBool,
+        error_message: String,
+    }
+
+    impl InMemoryDependencyProbe {
+        /// A probe whose database check always succeeds.
+        pub fn healthy() -> Self {
+            Self {
+                database_healthy: std::sync::atomic::AtomicBool::new(true),
+                error_message: "database unreachable".to_string(),
+            }
+        }
+
+        /// A probe whose database check always fails with `message`.
+        pub fn failing(message: impl Into<String>) -> Self {
+            Self {
+                database_healthy: std::sync::atomic::AtomicBool::new(false),
+                error_message: message.into(),
+            }
+        }
+
+        /// Flip the reported database health for a running probe.
+        pub fn set_database_healthy(&self, healthy: bool) {
+            self.database_healthy
+                .store(healthy, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
-    /// A probe whose database check always fails with `message`.
-    pub fn failing(message: impl Into<String>) -> Self {
-        Self {
-            database_healthy: std::sync::atomic::AtomicBool::new(false),
-            error_message: message.into(),
+    #[async_trait]
+    impl DependencyProbe for InMemoryDependencyProbe {
+        async fn check_database(&self) -> Result<(), String> {
+            if self
+                .database_healthy
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                Ok(())
+            } else {
+                Err(self.error_message.clone())
+            }
         }
-    }
-
-    /// Flip the reported database health for a running probe.
-    pub fn set_database_healthy(&self, healthy: bool) {
-        self.database_healthy
-            .store(healthy, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
+// Re-exported at the module root so the doubles keep the paths they had before
+// they moved into `in_memory`.
 #[cfg(any(test, feature = "test-utils"))]
-#[async_trait]
-impl DependencyProbe for InMemoryDependencyProbe {
-    async fn check_database(&self) -> Result<(), String> {
-        if self
-            .database_healthy
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            Ok(())
-        } else {
-            Err(self.error_message.clone())
-        }
-    }
-}
+pub use in_memory::InMemoryDependencyProbe;

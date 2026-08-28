@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::*;
 use uuid::Uuid;
+
+use beam_domain::services::{Clock, RealClock};
 
 use crate::utils::models::{CreateUser, User};
 
@@ -56,12 +60,22 @@ pub trait UserRepository: Send + Sync + std::fmt::Debug {
 
 #[derive(Debug)]
 pub struct SqlUserRepository {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
+    /// Source of the `created_at`/`updated_at` stamps. Injected rather than
+    /// read from `Utc::now()` so the shared contract can assert
+    /// oldest-first ordering by advancing a clock instead of racing the
+    /// wall clock (equal timestamps make `list_page` order by the `id`
+    /// tie-break, which is not the property under test).
+    clock: Arc<dyn Clock>,
 }
 
 impl SqlUserRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
-        Self { db }
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+        Self::with_clock(db, Arc::new(RealClock))
+    }
+
+    pub fn with_clock(db: Arc<DatabaseConnection>, clock: Arc<dyn Clock>) -> Self {
+        Self { db, clock }
     }
 }
 
@@ -71,7 +85,7 @@ impl UserRepository for SqlUserRepository {
         use beam_entity::user;
         use sea_orm::EntityTrait;
 
-        let model = user::Entity::find_by_id(id).one(&self.db).await?;
+        let model = user::Entity::find_by_id(id).one(self.db.as_ref()).await?;
         Ok(model.map(User::from))
     }
 
@@ -86,14 +100,13 @@ impl UserRepository for SqlUserRepository {
         let model = user::Entity::find()
             .filter(user::Column::OidcIssuer.eq(issuer))
             .filter(user::Column::OidcSubject.eq(subject))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?;
         Ok(model.map(User::from))
     }
 
     async fn create(&self, create: CreateUser) -> Result<User, DbErr> {
         use beam_entity::user;
-        use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 
         let CreateUser {
@@ -105,7 +118,7 @@ impl UserRepository for SqlUserRepository {
             is_admin,
         } = create;
 
-        let now = Utc::now();
+        let now = self.clock.now();
         let new_user = user::ActiveModel {
             id: Set(Uuid::new_v4()),
             oidc_issuer: Set(oidc_issuer),
@@ -121,7 +134,7 @@ impl UserRepository for SqlUserRepository {
             updated_at: Set(now.into()),
         };
 
-        let result = new_user.insert(&self.db).await?;
+        let result = new_user.insert(self.db.as_ref()).await?;
         Ok(User::from(result))
     }
 
@@ -129,12 +142,12 @@ impl UserRepository for SqlUserRepository {
         use beam_entity::user;
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-        let Some(model) = user::Entity::find_by_id(id).one(&self.db).await? else {
+        let Some(model) = user::Entity::find_by_id(id).one(self.db.as_ref()).await? else {
             return Ok(());
         };
         let mut active_model: user::ActiveModel = model.into();
         active_model.is_admin = Set(is_admin);
-        active_model.update(&self.db).await?;
+        active_model.update(self.db.as_ref()).await?;
         Ok(())
     }
 
@@ -146,7 +159,7 @@ impl UserRepository for SqlUserRepository {
             .order_by_asc(user::Column::CreatedAt)
             .offset(offset)
             .limit(limit)
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
         Ok(models.into_iter().map(User::from).collect())
     }
@@ -155,19 +168,19 @@ impl UserRepository for SqlUserRepository {
         use beam_entity::user;
         use sea_orm::{EntityTrait, PaginatorTrait};
 
-        user::Entity::find().count(&self.db).await
+        user::Entity::find().count(self.db.as_ref()).await
     }
 
     async fn set_disabled(&self, id: Uuid, disabled: bool) -> Result<(), DbErr> {
         use beam_entity::user;
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-        let Some(model) = user::Entity::find_by_id(id).one(&self.db).await? else {
+        let Some(model) = user::Entity::find_by_id(id).one(self.db.as_ref()).await? else {
             return Ok(());
         };
         let mut active_model: user::ActiveModel = model.into();
         active_model.disabled = Set(disabled);
-        active_model.update(&self.db).await?;
+        active_model.update(self.db.as_ref()).await?;
         Ok(())
     }
 
@@ -180,28 +193,44 @@ impl UserRepository for SqlUserRepository {
         use beam_entity::user;
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-        let Some(model) = user::Entity::find_by_id(id).one(&self.db).await? else {
+        let Some(model) = user::Entity::find_by_id(id).one(self.db.as_ref()).await? else {
             return Ok(());
         };
         let mut active_model: user::ActiveModel = model.into();
         active_model.display_name = Set(display_name);
         active_model.avatar_url = Set(avatar_url);
-        active_model.update(&self.db).await?;
+        active_model.update(self.db.as_ref()).await?;
         Ok(())
     }
 }
 
 /// In-memory user repository for use in tests and offline scenarios.
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
-    use chrono::Utc;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     pub struct InMemoryUserRepository {
         users: Mutex<HashMap<Uuid, User>>,
+        clock: Arc<dyn Clock>,
+    }
+
+    impl InMemoryUserRepository {
+        pub fn new(clock: Arc<dyn Clock>) -> Self {
+            Self {
+                users: Mutex::new(HashMap::new()),
+                clock,
+            }
+        }
+    }
+
+    impl Default for InMemoryUserRepository {
+        fn default() -> Self {
+            Self::new(Arc::new(RealClock))
+        }
     }
 
     #[async_trait]
@@ -223,7 +252,7 @@ pub mod in_memory {
         }
 
         async fn create(&self, user: CreateUser) -> Result<User, DbErr> {
-            let now = Utc::now();
+            let now = self.clock.now();
             let new_user = User {
                 id: Uuid::new_v4(),
                 oidc_issuer: user.oidc_issuer,
@@ -294,80 +323,56 @@ pub mod in_memory {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::in_memory::InMemoryUserRepository;
-    use super::*;
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory_fixture {
+    use std::sync::Arc;
 
-    fn create_user(subject: &str, name: &str) -> CreateUser {
-        CreateUser {
-            oidc_issuer: "https://idp.test".to_string(),
-            oidc_subject: subject.to_string(),
-            email: None,
-            display_name: name.to_string(),
-            avatar_url: None,
-            is_admin: false,
+    use beam_domain::services::TestClock;
+
+    use super::UserRepository;
+    use super::in_memory::InMemoryUserRepository;
+    use crate::utils::contract::fixture::UserRepositoryFixture;
+
+    /// The hermetic instantiation of the shared `UserRepository` contract.
+    pub struct InMemoryFixture {
+        repo: InMemoryUserRepository,
+        clock: Arc<TestClock>,
+    }
+
+    impl InMemoryFixture {
+        pub fn new() -> Self {
+            let clock = Arc::new(TestClock::new());
+            Self {
+                repo: InMemoryUserRepository::new(clock.clone()),
+                clock,
+            }
         }
     }
 
-    #[tokio::test]
-    async fn new_users_default_to_enabled() {
-        let repo = InMemoryUserRepository::default();
-        let user = repo.create(create_user("s1", "Alice")).await.unwrap();
-        assert!(!user.disabled, "JIT-provisioned users must start enabled");
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
-    #[tokio::test]
-    async fn count_tracks_created_users() {
-        let repo = InMemoryUserRepository::default();
-        assert_eq!(repo.count().await.unwrap(), 0);
-        repo.create(create_user("s1", "Alice")).await.unwrap();
-        repo.create(create_user("s2", "Bob")).await.unwrap();
-        assert_eq!(repo.count().await.unwrap(), 2);
+    #[async_trait::async_trait]
+    impl UserRepositoryFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn UserRepository {
+            &self.repo
+        }
+
+        fn clock(&self) -> &TestClock {
+            &self.clock
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    async fn setup() -> super::in_memory_fixture::InMemoryFixture {
+        super::in_memory_fixture::InMemoryFixture::new()
     }
 
-    #[tokio::test]
-    async fn list_page_orders_oldest_first_and_paginates() {
-        let repo = InMemoryUserRepository::default();
-        // created_at is set to "now" per insert; the id tie-break keeps this
-        // deterministic even when the timestamps collide.
-        let a = repo.create(create_user("s1", "Alice")).await.unwrap();
-        let b = repo.create(create_user("s2", "Bob")).await.unwrap();
-        let c = repo.create(create_user("s3", "Carol")).await.unwrap();
-
-        let all = repo.list_page(10, 0).await.unwrap();
-        assert_eq!(all.len(), 3);
-
-        // First page of two, then the remaining one, cover the whole set once.
-        let page1 = repo.list_page(2, 0).await.unwrap();
-        let page2 = repo.list_page(2, 2).await.unwrap();
-        assert_eq!(page1.len(), 2);
-        assert_eq!(page2.len(), 1);
-
-        let mut seen: Vec<Uuid> = page1.iter().chain(page2.iter()).map(|u| u.id).collect();
-        seen.sort();
-        let mut expected = vec![a.id, b.id, c.id];
-        expected.sort();
-        assert_eq!(
-            seen, expected,
-            "pagination must cover every user exactly once"
-        );
-    }
-
-    #[tokio::test]
-    async fn set_disabled_toggles_flag_and_is_noop_for_unknown_id() {
-        let repo = InMemoryUserRepository::default();
-        let user = repo.create(create_user("s1", "Alice")).await.unwrap();
-
-        repo.set_disabled(user.id, true).await.unwrap();
-        let disabled = repo.find_by_id(user.id).await.unwrap().unwrap();
-        assert!(disabled.disabled);
-
-        repo.set_disabled(user.id, false).await.unwrap();
-        let enabled = repo.find_by_id(user.id).await.unwrap().unwrap();
-        assert!(!enabled.disabled);
-
-        // Unknown id is a silent no-op, never an error.
-        repo.set_disabled(Uuid::new_v4(), true).await.unwrap();
-    }
+    crate::user_repository_contract!(setup);
 }
