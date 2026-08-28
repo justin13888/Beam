@@ -58,10 +58,35 @@ requirements (referenced below as FR-xxx).
   or unreadable media entry, database-call failure, expired session, unauthorized admin action) MUST
   be codified as unit tests by configuring the relevant injected trait to return the corresponding
   `Result::Err`.
-- **NFR-206**: Rust workspace code coverage SHOULD be maintained at or above 70%, and web
-  (`beam-web`) code coverage SHOULD be maintained at or above 60%, measured in CI.
-- **NFR-207**: Domain entity test data MUST be constructed via builder patterns defined in
-  `#[cfg(test)]` modules, rather than duplicated ad hoc struct literals across test files.
+- **NFR-206**: Rust workspace coverage SHOULD be maintained at or above 70% of lines, and web
+  (`beam-web`) coverage at or above 60% of lines, measured and enforced in CI. Rust MUST additionally
+  gate region and function coverage; regions stand in for branches, whose measurement requires a
+  nightly toolchain the project does not use. Thresholds are calibrated below the measured value and
+  ratcheted upward; a threshold MUST NOT be lowered to make a failing pull request pass.
+- **NFR-207**: Domain entity test data MUST be constructed via shared builder patterns exposed under
+  the `test-utils` feature, rather than duplicated ad hoc struct literals across test files.
+- **NFR-209**: A test MUST NOT take a test double as its subject. Asserting the behaviour of an
+  `InMemory*`, `Fake*`, `Stub*`, `Noop*`, `Mock*` or `TestClock` verifies scaffolding, not the
+  product. Where a fake and a real implementation share a trait, both MUST be verified by the same
+  shared contract test.
+- **NFR-210**: Mutation testing (`cargo-mutants`) MUST be available as a project task and run in CI
+  as an advisory, non-blocking signal. A surviving mutant MUST be resolved by removing the redundant
+  branch, or by making the illegal state unrepresentable, in preference to adding a test; an
+  exemption MUST be recorded with a justification of why the mutant is behaviourally equivalent.
+- **NFR-211**: Test doubles gated on `feature = "test-utils"` MUST be excluded from mutation
+  explicitly, and that exclusion MUST be enforced by an automated check rather than by convention.
+- **NFR-212**: Repository implementations MUST have their generated SQL verified without external
+  infrastructure. Behaviour that only a real Postgres can exhibit (trigram similarity, index usage,
+  migration up/down) MUST be covered by a tier that is disabled by default, so NFR-201 holds
+  unconditionally.
+- **NFR-213**: Every route registered on the HTTP router MUST appear exactly once in the generated
+  OpenAPI document, and vice versa, verified by an automated test. Web test doubles MUST be typed
+  against the generated client so a response shape cannot drift from the specification unnoticed.
+- **NFR-214**: Code whose behaviour depends on the passage of time MUST read it from an injected
+  clock rather than from the wall clock directly. A test MUST NOT use a real sleep to order two
+  events or to reach an expiry; it MUST advance the injected clock. This is what makes
+  session TTLs, rescan cadence, debounce windows and rate-limit refill assertable at all, and it
+  removes the class of failure where a test passes or fails according to machine load.
 - **NFR-208**: CI MUST enforce, on every pull request: `cargo fmt --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, the full Rust test suite, and the TypeScript `bun run check` step
   (covering lint/typecheck for `beam-web`/`beam-docs`).
