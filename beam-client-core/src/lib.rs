@@ -20,6 +20,15 @@
 //!
 //! [ADR-0004]: ../../docs/architecture/decisions/ADR-0004-never-transcode.md
 
+// `BeamError::UntrustedCertificate` carries the whole certificate, which makes
+// the error type large enough to trip `result_large_err`. Boxing is the usual
+// remedy and is not available here: UniFFI cannot express a `Box` inside an
+// exported error, and it would buy nothing anyway, since the value is copied
+// across the FFI boundary either way. Carrying the details inline is also what
+// lets the trust prompt render from the error itself, rather than making a
+// second call and racing the connection that produced it.
+#![allow(clippy::result_large_err)]
+
 /// The REST client, generated from `api/openapi.json` by spargen at build time.
 ///
 /// Names here are derived from the spec's `operationId`s, which salvo emits as
@@ -36,6 +45,8 @@ pub mod clock;
 pub mod error;
 pub mod ports;
 pub mod progress;
+pub mod servers;
+pub mod session;
 pub mod trust;
 pub mod upnext;
 
@@ -47,6 +58,8 @@ pub use clock::{Clock, SystemClock};
 pub use error::{BeamError, StorageError};
 pub use ports::kv::KeyValueStore;
 pub use progress::{ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress};
+pub use servers::{ServerRecord, normalize_base_url, server_id_for};
+pub use session::{SessionEvent, SessionState, UserSummary};
 pub use trust::CertificateDetails;
 pub use upnext::{UpNextEpisode, UpNextSeason, next_playable_episode};
 
