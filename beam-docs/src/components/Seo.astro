@@ -1,0 +1,38 @@
+---
+/*
+ * Head tags for the marketing pages under `src/pages/`.
+ *
+ * Starlight cannot use this: its pages render through its own layout and take extra tags as
+ * plain descriptor objects via the `head` option in astro.config.mjs. Both sources read
+ * `src/site.ts` so the two stay consistent.
+ */
+import { ogImageUrl, site } from "../site";
+
+interface Props {
+	title: string;
+	description: string;
+}
+
+const { title, description } = Astro.props;
+const canonical = new URL(Astro.url.pathname, site.origin).href;
+---
+
+<title>{title}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonical} />
+
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+<meta property="og:site_name" content={site.name} />
+<meta property="og:type" content="website" />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonical} />
+<meta property="og:image" content={ogImageUrl} />
+
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={ogImageUrl} />
+
+<meta name="theme-color" content="#0b1220" />

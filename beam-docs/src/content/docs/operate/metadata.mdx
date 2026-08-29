@@ -1,0 +1,78 @@
+---
+title: Metadata and artwork
+description: Where posters and descriptions come from, why some titles have none, and how to re-run enrichment.
+---
+
+import { Aside, LinkCard } from "@astrojs/starlight/components";
+
+Scanning finds your files. **Enrichment** is the separate background pass that gives them posters,
+descriptions, ratings, genres and release dates. A freshly scanned library is playable
+immediately and looks bare for a while.
+
+## The providers
+
+| Provider | Needs a key? | Covers |
+|---|---|---|
+| AniList | No | Anime |
+| TMDB | Yes — `BEAM_TMDB_API_TOKEN` | Film and TV generally |
+
+AniList is enabled by default and needs no credentials, so a stock install already enriches anime.
+TMDB requires a token; **without one, titles that would have matched TMDB are simply left
+un-enriched.** Scans do not fail over it, and nothing in the UI breaks — you just get no artwork
+for those titles.
+
+<Aside type="caution" title="A default install talks to AniList">
+Because `BEAM_ANILIST_ENABLED` defaults to true, a Beam server contacts `graphql.anilist.co`
+during enrichment even if you never configure TMDB. Set it to false if you want a server that
+contacts nothing but your identity provider.
+</Aside>
+
+## Why a title has no artwork
+
+In rough order of likelihood:
+
+1. **Enrichment has not reached it yet.** It works through titles in batches.
+2. **No TMDB token**, and the title is not anime.
+3. **The title Beam parsed does not match anything.** Beam searches with the name it derived from
+   your filename, so scene noise or an unusual layout produces a query that finds nothing. Check
+   how the title appears in the UI — if it reads oddly, the filename is why. See
+   [Managing libraries](/operate/libraries/#how-beam-decides-what-a-file-is).
+4. **The match scored below the confidence threshold**, `BEAM_ENRICH_MIN_CONFIDENCE`. Beam prefers
+   no metadata to wrong metadata.
+
+The admin **Status** tab shows each title's enrichment state, so you can tell "not tried yet"
+apart from "tried and found nothing".
+
+## Re-running enrichment
+
+Failures retry automatically with a growing delay. You can also trigger a re-enrich for a title
+from the admin area — the right move after fixing a filename, or after adding a TMDB token to a
+library that was indexed without one.
+
+## Tuning
+
+`BEAM_ENRICH_BATCH_SIZE` and `BEAM_ENRICH_INTERVAL_SECS` control throughput.
+`BEAM_METADATA_LANGUAGE` selects the language of returned metadata **from TMDB only** — AniList has
+no equivalent setting. Raising throughput too far risks provider rate limits, which cost you more
+time than the smaller batch would have.
+
+## Artwork and viewer privacy
+
+Beam stores providers' image URLs and serves those URLs to the browser. **It does not proxy or
+cache the images**, so every viewer's browser connects directly to TMDB's or AniList's CDN and
+those CDNs see viewers' IP addresses and which artwork they requested.
+
+This is a deliberate, recorded trade-off
+([ADR-0008](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0008-image-cdn-direct.md)),
+not an oversight — and worth knowing if you run Beam precisely so that nothing leaves your
+network. No Beam cookie or credential is ever sent to a provider, so they learn viewing patterns
+by IP, not identities.
+
+There is currently no opt-out short of disabling enrichment. A server-side image proxy is tracked
+in [#70](https://github.com/justin13888/beam/issues/70).
+
+<LinkCard
+	title="Why enrichment works this way"
+	description="ADR-0006 records the decision to delegate metadata to the cameo library."
+	href="https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0006-cameo-enrichment.md"
+/>

@@ -54,8 +54,10 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
   ([ADR-0010](../architecture/decisions/ADR-0010-openapi-3-2-kynos.md)),
   with real-time scan and enrichment progress over Server-Sent Events (SSE).
 - OIDC-only authentication via the backend-for-frontend (BFF) pattern, with JIT user provisioning
-  and admin-role determination via an email allowlist
-  ([ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)).
+  and admin-role determination from a configured ID-token claim
+  (`BEAM_OIDC_ADMIN_CLAIM`/`BEAM_OIDC_ADMIN_VALUE`), recomputed on every login so the role is
+  revoked as well as granted (FR-106,
+  [ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)).
 - Rich metadata enrichment (posters, backdrops, descriptions, ratings, genres, release dates,
   season/episode titles) via the `cameo` crate (TMDB + AniList), run as an asynchronous background
   pipeline after indexing ([ADR-0006](../architecture/decisions/ADR-0006-cameo-enrichment.md)).
@@ -63,6 +65,11 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
   direct-play playback with a source-quality picker, resume playback with a continue-watching row,
   server-side instant search (Postgres `pg_trgm`), full-file download, and an admin area (library
   management, scan progress, enrichment status and manual re-enrich, log viewing).
+- In-process per-client token-bucket rate limiting on the OIDC login/callback endpoints and on the
+  browse/search endpoint, tunable and switchable via `BEAM_RATE_LIMIT_*` (NFR-107). Streaming and
+  download are deliberately excluded, because a player legitimately bursts range requests.
+- Operator-tunable enrichment: batch size, interval, minimum match confidence and metadata
+  language, via `BEAM_ENRICH_*` and `BEAM_METADATA_LANGUAGE`.
 - A security posture in which no bearer or session tokens ever appear in a URL or query string, CSRF
   is defended via SameSite cookies plus Origin/Referer validation, and all admin-only mutations are
   gated by role, not merely by authentication. See `non-functional.md` NFR-1xx.
@@ -77,9 +84,6 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
 - Server-side image proxy for poster/backdrop art (currently direct CDN links, see NFR-501 and
   [ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md)) —
   [#70](https://github.com/justin13888/beam/issues/70).
-- Rate limiting on auth endpoints — [#69](https://github.com/justin13888/beam/issues/69).
-- Enrichment tuning knobs (batch size, min confidence, metadata language) —
-  [#71](https://github.com/justin13888/beam/issues/71).
 - Automated browser e2e tests (Playwright) — [#74](https://github.com/justin13888/beam/issues/74).
 - Kubernetes/Helm deployment — [#76](https://github.com/justin13888/beam/issues/76).
 

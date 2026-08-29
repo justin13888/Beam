@@ -1,0 +1,103 @@
+---
+title: Identity and admin access
+description: Point Beam at your OIDC provider and decide who is an admin — both are configured outside Beam.
+---
+
+import { Aside, LinkCard, Tabs, TabItem } from "@astrojs/starlight/components";
+
+Beam has no user database of its own to speak of and no passwords. Authentication is OpenID
+Connect, exclusively. Without a working provider, nobody can sign in — including you.
+
+The browser never receives a token. Beam performs the whole flow server-side and gives the browser
+only an opaque session cookie.
+
+## Register Beam with your provider
+
+Create a confidential client and set its redirect URI to:
+
+```
+<BEAM_SERVER_URL>/v1/auth/callback
+```
+
+Then set `BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID` and `BEAM_OIDC_CLIENT_SECRET`. **All three are
+required together** — Beam treats OIDC as unconfigured unless it has all of them, and
+`/v1/auth/login` answers 503.
+
+<Tabs syncKey="idp">
+	<TabItem label="Keycloak">
+	Create a client in your realm with client authentication enabled and the standard authorization
+	code flow. The issuer is `https://<host>/realms/<realm>`.
+	</TabItem>
+	<TabItem label="Authentik">
+	Create an OAuth2/OIDC provider with client type *Confidential*, then an application bound to
+	it. The issuer is the provider's configuration URL without the
+	`.well-known/openid-configuration` suffix.
+	</TabItem>
+	<TabItem label="Authelia">
+	Add Beam to `identity_providers.oidc.clients` with a hashed client secret and the redirect URI
+	above. The issuer is Authelia's root URL.
+	</TabItem>
+	<TabItem label="Dex (local only)">
+	`compose.dependencies.yaml` runs Dex with static test users so you can develop without an
+	external provider. It is **not** for production — the users are fixed and defined in the repo.
+	</TabItem>
+</Tabs>
+
+Beam must be able to reach the issuer's `.well-known/openid-configuration` at startup.
+
+## Accounts appear on first sign-in
+
+There is no user list to populate. The first time someone authenticates, Beam creates a local user
+record keyed to the identity your provider asserted. You control who can sign in by controlling
+who your provider lets through — Beam has no allow-list of its own.
+
+## Admin access comes from a claim
+
+Set `BEAM_OIDC_ADMIN_CLAIM` to the ID-token claim that marks an administrator, and
+`BEAM_OIDC_ADMIN_VALUE` to the value it must have.
+
+<Aside type="caution" title="Three things about admin that catch people out">
+1. **With no claim configured, nobody is an admin** — including the person who installed Beam.
+   There is no bootstrap account and no override.
+2. **It is recalculated at every sign-in, and it revokes as well as grants.** Stop asserting the
+   claim and that user loses admin at their next sign-in.
+3. **Changes do not affect a live session.** After changing anything at your provider, sign out
+   and back in.
+</Aside>
+
+There is deliberately no other route to admin: no environment variable listing admin emails, and
+no button in Beam's own UI.
+
+## Disabling an account
+
+An admin can disable a user. A disabled user gets stopped at the callback with a clear message and
+no session is created — the identity still verifies, but Beam refuses it. Their existing sessions
+are revoked.
+
+## Sessions
+
+Sessions are stored server-side in PostgreSQL and identified by an opaque, `httpOnly` cookie.
+Two settings control lifetime:
+
+- `BEAM_SESSION_IDLE_DAYS` — expiry after inactivity.
+- `BEAM_SESSION_MAX_DAYS` — absolute maximum age regardless of activity.
+
+Because sessions live in the database, revoking one takes effect immediately.
+
+<Aside type="tip">
+`BEAM_COOKIE_SECURE` must match how browsers actually reach you. If Beam thinks it is on HTTPS and
+you are serving plain HTTP, the browser drops the session cookie and sign-in appears to fail
+silently for no visible reason.
+</Aside>
+
+<LinkCard
+	title="Full configuration reference"
+	description="Exact names, defaults and semantics for every BEAM_OIDC_* and session variable."
+	href="https://github.com/justin13888/beam/blob/master/docs/operations/configuration.md"
+/>
+
+<LinkCard
+	title="Security architecture"
+	description="The BFF auth model, CSRF defences, and the threat notes behind these choices."
+	href="https://github.com/justin13888/beam/blob/master/docs/architecture/security.md"
+/>

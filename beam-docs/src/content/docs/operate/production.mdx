@@ -1,0 +1,66 @@
+---
+title: Going to production
+description: A checklist for exposing Beam beyond your LAN.
+---
+
+import { Aside, LinkCard } from "@astrojs/starlight/components";
+
+<Aside type="caution">
+Beam is pre-alpha with no released version. Read [Backups and upgrades](/operate/backup-and-upgrade/)
+before you depend on an instance.
+</Aside>
+
+## Checklist
+
+**Secrets**
+
+- Change `POSTGRES_PASSWORD` from the default.
+- Keep `BEAM_OIDC_CLIENT_SECRET` out of version control.
+
+**TLS and URLs**
+
+- Terminate TLS at a reverse proxy — nginx, Caddy or Traefik. Do not expose `beam-server`
+  directly.
+- Set `BEAM_SERVER_URL` and `BEAM_WEB_URL` to the real public HTTPS origins. They drive the OIDC
+  redirect URI and the same-origin checks, so a wrong value breaks sign-in.
+- Make sure `BEAM_COOKIE_SECURE` matches your scheme. A mismatch means the browser silently
+  discards the session cookie and sign-in appears to do nothing.
+- Serving Beam on another hostname as well? Add it to `BEAM_EXTRA_ALLOWED_ORIGINS`, or
+  state-changing requests are rejected with a 403.
+
+**Identity**
+
+- Use a real identity provider. **Dex is for local testing only** — its users are static and
+  defined in this repository.
+- Set `BEAM_OIDC_ADMIN_CLAIM`, or nobody will be an admin.
+
+**Exposure**
+
+- Leave `/metrics` off the proxy. It is unauthenticated. Better still, leave
+  `BEAM_ENABLE_METRICS` off unless something scrapes it.
+- Keep rate limiting on. It defends `/v1/auth/login`, `/v1/auth/callback` and `/v1/media`.
+- Behind a proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — otherwise every user shares one
+  bucket. Only do this behind a proxy that **overwrites** `X-Forwarded-For`; if it appends, a
+  client can forge the header and evade the limit entirely.
+
+**Storage**
+
+- Mount your media read-only (`:ro`) for defence in depth.
+- Put `BEAM_DATA_DIR` and the database volume on storage you back up.
+
+## What Beam does not do for you
+
+- **No multi-node deployment.** One host running Compose is the supported topology; Kubernetes is
+  [#76](https://github.com/justin13888/beam/issues/76). Rate limiting is per-process and in-memory,
+  so it does not coordinate across replicas anyway.
+- **No built-in TLS.** That is the proxy's job.
+- **No bandwidth limits or per-user quotas.** Beam serves files at whatever rate the network
+  allows.
+- **No transcoding**, so server CPU is not the bottleneck for concurrent viewers — disk and
+  network are.
+
+<LinkCard
+	title="Deployment guide"
+	description="Compose topology, reverse-proxy specifics and production guidance in the repository."
+	href="https://github.com/justin13888/beam/blob/master/docs/operations/deployment.md"
+/>

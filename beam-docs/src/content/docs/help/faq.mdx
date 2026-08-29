@@ -1,0 +1,167 @@
+---
+title: FAQ
+description: Short answers to the questions people ask about Beam.
+---
+
+## About the project
+
+### What is Beam?
+
+A self-hosted media server. It indexes video files you already have, adds metadata and artwork,
+and streams them to a browser without re-encoding them.
+
+### Is it ready to use?
+
+Not for anything you depend on. Beam is pre-alpha with no tagged release, breaking changes land
+regularly, and upgrades can include migrations that discard data. Try it against a copy of your
+library. See [Backups and upgrades](/operate/backup-and-upgrade/).
+
+### How is it different from Jellyfin or Plex?
+
+Leaner and more opinionated. The biggest practical difference is that **Beam never transcodes** —
+it serves your files as they are, so playback depends on your browser's codec support, and the
+server does not need a powerful CPU to serve several viewers. It is also OIDC-only, with no
+built-in accounts, and has one client: the web app.
+
+### What licence is it under?
+
+AGPL-3.0.
+
+### Is there an app for my phone, TV, or desktop?
+
+No. The web app is the only client. Native clients are tracked under
+[#78](https://github.com/justin13888/beam/issues/78) and none is built; a native Windows client is
+explicitly out of scope ([#64](https://github.com/justin13888/beam/issues/64)).
+
+### Does Beam send my data anywhere?
+
+There is no telemetry, analytics, crash reporting or update check of any kind. The server contacts
+only your identity provider and the metadata providers.
+
+Two things are worth knowing, though:
+
+- **AniList enrichment is on by default**, so a stock server contacts AniList during enrichment
+  even if you never configure TMDB. Turn it off with `BEAM_ANILIST_ENABLED=false`.
+- **Artwork is not proxied.** Posters are served as TMDB/AniList CDN URLs, so each viewer's
+  browser connects to those CDNs directly and they see viewers' IP addresses. No Beam cookie or
+  credential is ever sent to them. See [Metadata and artwork](/operate/metadata/).
+
+## Playback
+
+### Why won't this file play?
+
+Your browser almost certainly cannot decode it, and Beam will not convert it. See
+[When a file won't play](/using/playback-compatibility/).
+
+### Will Beam ever transcode?
+
+No. It is a rejected design rather than unbuilt work — see
+[ADR-0004](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0004-never-transcode.md).
+
+### How do I get a lower-quality version for a slow connection?
+
+Add a smaller re-encode of the file to your library. Beam indexes both and lets viewers pick.
+This works for **movies only** — episodes cannot have multiple files. See
+[Managing libraries](/operate/libraries/#multiple-versions).
+
+### Does seeking work?
+
+Yes, anywhere in a title, including parts that have not buffered.
+
+### Do subtitles work?
+
+No. Beam detects and stores the subtitle tracks in your files, but they are dropped before they
+reach the player, and separate `.srt`/`.ass` files are not recognised. Download the file and use a
+desktop player if you need subtitles.
+
+## Accounts and access
+
+### How do I create an account?
+
+You don't. Sign in through the server's identity provider and Beam creates your account
+automatically the first time.
+
+### Why is there no password login?
+
+Beam delegates authentication entirely, so it never stores passwords and cannot leak them. There
+is no sign-up, no password reset and no credential in Beam to steal.
+
+### How do I become an admin?
+
+Your identity provider must assert the claim the server configured. Only the person running the
+server can arrange that.
+
+### I was an admin yesterday and I'm not today.
+
+Admin is recomputed at every sign-in and revokes as well as grants, so the claim has stopped being
+asserted for you. Ask whoever manages your identity provider.
+
+### It says my account has been disabled.
+
+An administrator disabled it. Your identity still verifies — Beam is refusing it. Only they can
+undo it.
+
+### How do I sign out everywhere?
+
+There is a sign-out-everywhere action on your profile. It ends every session including the one you
+are using. See [Account and sessions](/using/account-and-sessions/).
+
+## Your library
+
+### What files does Beam index, and how should I name them?
+
+Common video containers — `mp4`, `mkv`, `avi`, `mov`, `webm` and others. Naming matters: a file is
+treated as a TV episode only if its name contains an `SxxEyy` marker, and a show takes its name
+from the folder directly containing the episode. See
+[Managing libraries](/operate/libraries/#how-beam-decides-what-a-file-is).
+
+### Will Beam rename, move or delete my files?
+
+No. The indexer only reads. It writes nothing to your library — not even artwork or sidecar files.
+
+### Why does a title have no poster or description?
+
+Enrichment runs after the scan and takes a while; without a TMDB token, non-anime titles are never
+enriched at all. See [Metadata and artwork](/operate/metadata/).
+
+### Do I need a TMDB API key?
+
+Only for non-anime. AniList needs no key and is on by default. Without a TMDB token, matching
+titles are left un-enriched and the scan still succeeds.
+
+### How often does Beam notice new files?
+
+A filesystem watcher picks up changes as they happen, and a periodic rescan is the backstop. You
+can also trigger a scan manually.
+
+## Running Beam
+
+### What do I need to run it?
+
+A host with Docker or Podman and Compose, and an OIDC identity provider. See
+[Install Beam](/install/).
+
+### Can I run it on Kubernetes?
+
+Not in a supported way — [#76](https://github.com/justin13888/beam/issues/76). One host running
+Compose is the supported topology.
+
+### Do I have to run database migrations?
+
+No, they apply automatically at startup by default. Take a backup first — pre-alpha migrations can
+be destructive.
+
+### What should I back up?
+
+The PostgreSQL database and `BEAM_DATA_DIR`. Not your media — Beam never touches it. The only
+thing that cannot be rebuilt by rescanning is watch history and progress.
+
+### Is it safe to expose to the internet?
+
+Only behind a reverse proxy with TLS, and read [Going to production](/operate/production/) first —
+particularly the part about keeping `/metrics` unexposed, since it is unauthenticated.
+
+### Why am I getting "Rate limit exceeded"?
+
+Sign-in and search are rate limited. Behind a proxy, all your users may share one bucket — see
+[Troubleshooting](/help/troubleshooting/#everything-returns-429).

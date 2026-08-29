@@ -1,0 +1,26 @@
+/*
+ * Beam brand tokens.
+ *
+ * Plain CSS custom properties, deliberately free of Tailwind at-rules: this file is imported by
+ * both `landing.css` (which runs through Tailwind) and `starlight.css` (which does not), so it
+ * must be readable without the Tailwind toolchain.
+ *
+ * Values are copied verbatim from Tailwind v4's default theme so the docs site and the beam-web
+ * SPA render identical colours. beam-web applies cyan ad hoc rather than tokenising it -- see
+ * `beam-web/src/components/Header.tsx`, which renders the wordmark as `text-cyan-400` -- and its
+ * shell is `from-gray-950 via-gray-900 to-gray-950`.
+ */
+:root {
+	/* Accent ramp -- Tailwind cyan-300/400/500/700. */
+	--beam-accent-bright: oklch(86.5% 0.127 207.078);
+	--beam-accent: oklch(78.9% 0.154 211.53);
+	--beam-accent-dim: oklch(71.5% 0.143 215.221);
+	--beam-accent-deep: oklch(52% 0.105 223.128);
+
+	/* Foreground for use on top of an accent fill -- Tailwind zinc-950. */
+	--beam-accent-fg: oklch(14.1% 0.005 285.823);
+
+	/* Dark shell surfaces -- Tailwind gray-950 and gray-900. */
+	--beam-surface: oklch(13% 0.028 261.692);
+	--beam-surface-raised: oklch(21% 0.034 264.665);
+}

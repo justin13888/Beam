@@ -1,0 +1,138 @@
+---
+title: Troubleshooting
+description: Symptom-first fixes for the problems Beam actually produces.
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+
+Organised by what you see. If you have a specific HTTP status instead, go to
+[the error reference](/reference/errors/).
+
+## The server will not start
+
+<Steps>
+1. Read the container logs — Beam refuses to start on invalid configuration and says which
+   variable is at fault.
+2. Check PostgreSQL is up and `BEAM_DATABASE_URL` points at it.
+3. Run `./verify-config.sh`.
+4. If it starts and then exits, suspect a failed migration. Check the logs for migration errors.
+</Steps>
+
+## Sign-in bounces back and I am still signed out
+
+Almost always the session cookie not surviving the round trip.
+
+<Steps>
+1. Check `BEAM_SERVER_URL` and `BEAM_WEB_URL` are the URLs your **browser** actually uses — not
+   `localhost` when you are connecting from another machine.
+2. Check `BEAM_COOKIE_SECURE` matches your scheme. `true` over plain HTTP means the browser
+   discards the cookie and nothing visible explains it.
+3. Try without third-party cookie blocking, or in a normal (non-private) window.
+4. Start from the app rather than reloading the callback URL — it is single-use, and reloading it
+   fails by design.
+</Steps>
+
+## "OIDC login unavailable"
+
+Beam cannot start a sign-in flow.
+
+<Steps>
+1. `BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID` and `BEAM_OIDC_CLIENT_SECRET` must **all three** be
+   set. Any missing one means OIDC counts as unconfigured.
+2. Check none of them is set to an empty string — comment them out instead.
+3. From the server, confirm the issuer's `.well-known/openid-configuration` is reachable.
+4. Check the redirect URI registered with your provider is exactly
+   `<BEAM_SERVER_URL>/v1/auth/callback`.
+</Steps>
+
+## I am not an admin
+
+<Steps>
+1. `BEAM_OIDC_ADMIN_CLAIM` must be set. With no claim configured, **nobody** is an admin.
+2. Confirm your provider actually asserts that claim, with the value in `BEAM_OIDC_ADMIN_VALUE`,
+   in the **ID token** — not just in a userinfo response.
+3. **Sign out and back in.** Admin is recomputed only at sign-in; nothing changes in a live
+   session.
+</Steps>
+
+## The scan finds nothing
+
+<Steps>
+1. The library path is the path **inside the container**. If you mounted `/srv/media` at
+   `/videos`, use `/videos/...`.
+2. Check your files use an indexed extension — see
+   [Managing libraries](/operate/libraries/#which-files-get-indexed). `.iso` and `.vob` are not
+   indexed.
+3. Check the server can read the directory.
+4. Look at the admin Logs tab for per-file failures.
+</Steps>
+
+## My TV show is called "Season 01"
+
+Expected, and the most common layout mistake. A show's name comes from the episode file's
+immediate parent directory, so `Show Name/Season 01/episode.mkv` produces a show called
+"Season 01".
+
+Put episodes directly under a folder named after the show, then rescan. See
+[the layout guidance](/operate/libraries/#directory-layout-for-tv).
+
+## My episodes are showing up as movies
+
+Beam recognises exactly one episode pattern: `SxxEyy`. Names using `1x02`, `Episode 2` or plain
+sequential numbering classify as movies. Rename to include an `SxxEyy` marker and rescan.
+
+## Two different films merged into one entry
+
+Movies are grouped by their cleaned title, and the **year is not part of the key**, so two films
+with the same name become one. Distinguish them in the filename beyond the year — there is no
+setting for this.
+
+## A title has no poster
+
+<Steps>
+1. Wait. Enrichment runs after the scan, in batches.
+2. Without `BEAM_TMDB_API_TOKEN`, non-anime titles are never enriched. This is silent by design.
+3. Check the parsed title in the UI. If it looks wrong, the filename is why — fix it, rescan, and
+   re-enrich.
+4. Check the admin Status tab to tell "not tried yet" from "tried and found nothing".
+</Steps>
+
+## A file will not play
+
+Start with [When a file won't play](/using/playback-compatibility/) — Beam never transcodes, so
+this is usually your browser lacking a codec rather than a fault. Try another browser first.
+
+## Playback stops partway through
+
+<Steps>
+1. If it stops at the same point every time, the file is likely truncated or corrupt. Confirm it
+   plays elsewhere.
+2. If the point varies, suspect the network or disk throughput. Beam streams the original file, so
+   a high-bitrate remux needs real bandwidth — there is no automatic quality drop.
+3. Offer a smaller version of the movie so viewers can choose one — see
+   [Managing libraries](/operate/libraries/#multiple-versions).
+</Steps>
+
+## "Source video file not found"
+
+The catalogue has the file but the path does not exist. A bind mount is missing, the library
+moved, or the file was deleted outside Beam. Fix the mount, then rescan.
+
+## Everything returns 429
+
+Rate limiting, which applies to sign-in and search only.
+
+<Aside type="tip">
+Behind a reverse proxy, every user can share one bucket because they all appear to come from the
+proxy's IP. Set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only if your proxy **overwrites**
+`X-Forwarded-For`. If it appends, clients can forge the header and bypass the limit.
+</Aside>
+
+## Health says "degraded"
+
+Read the `checks` object in the `/v1/health` response — in practice this is the database being
+unreachable or refusing connections. See [Monitoring and logs](/operate/monitoring/).
+
+## Still stuck
+
+[Getting help](/help/support/) lists what to include so the report can be acted on.

@@ -1,0 +1,22 @@
+---
+import BeamMark from "../../assets/beam-mark.svg";
+import { site } from "../../site";
+---
+
+<header class="border-b border-white/10">
+	<nav
+		class="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-4"
+		aria-label="Primary"
+	>
+		<a class="flex items-center gap-2.5 font-semibold tracking-tight" href="/">
+			<BeamMark class="h-7 w-7" aria-hidden="true" />
+			<span class="text-lg">{site.name}</span>
+		</a>
+		<div class="flex items-center gap-6 text-sm">
+			<a class="text-white/70 transition-colors hover:text-white" href="/getting-started/">
+				Documentation
+			</a>
+			<a class="text-white/70 transition-colors hover:text-white" href={site.repo}>GitHub</a>
+		</div>
+	</nav>
+</header>

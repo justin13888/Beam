@@ -1,0 +1,29 @@
+---
+import LandingLayout from "../layouts/LandingLayout.astro";
+---
+
+<LandingLayout
+	title="Page not found | Beam"
+	description="That page does not exist on the Beam documentation site."
+>
+	<main class="mx-auto flex min-h-screen max-w-2xl flex-col justify-center px-6 py-24">
+		<p class="text-sm font-medium tracking-widest text-brand uppercase">404</p>
+		<h1 class="mt-3 text-3xl font-bold tracking-tight">That page does not exist</h1>
+		<p class="mt-4 text-white/70">
+			The page may have moved, or the link that brought you here may be out of date.
+		</p>
+		<ul class="mt-8 space-y-2">
+			<li><a class="text-brand-bright underline" href="/">Back to the home page</a></li>
+			<li>
+				<a class="text-brand-bright underline" href="/getting-started/">
+					Browse the documentation
+				</a>
+			</li>
+			<li>
+				<a class="text-brand-bright underline" href="https://github.com/justin13888/beam/issues">
+					Report a broken link
+				</a>
+			</li>
+		</ul>
+	</main>
+</LandingLayout>

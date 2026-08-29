@@ -1,0 +1,63 @@
+---
+title: Monitoring and logs
+description: Check that Beam is healthy, watch scans in progress, and read the server's logs.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+## Health
+
+```bash
+curl http://localhost:8000/v1/health
+```
+
+Returns the server's status, its dependency checks, version and uptime. A healthy server answers
+`200`; a degraded one answers **`503`** with the same body shape, and the `checks` object names
+what is wrong — in practice, the database.
+
+This is the endpoint the Compose healthcheck uses, so a container stuck unhealthy is telling you
+this call is failing.
+
+## The admin area
+
+- **Status** — library and title counts, and a breakdown of enrichment state, which is where to
+  look when artwork is missing.
+- **Logs** — recent server events without shelling into the container.
+- **Users** — the accounts Beam has provisioned, and where you disable one.
+
+Scan and enrichment progress is pushed to these views as it happens rather than polled, so an
+in-progress scan updates live.
+
+<Aside type="note">
+The **Logs** tab is backed by the database and survives a restart. The live event feed behind the
+progress indicators is a separate in-memory ring buffer of recent events, which does not — so a
+scan that finished before the last restart is in the Logs tab but not in the live feed.
+</Aside>
+
+## Logs
+
+`RUST_LOG` sets verbosity, e.g. `RUST_LOG=beam_server=debug`. Logs go to stdout, so
+`podman logs` / `docker logs` and any normal log shipper work.
+
+Turn this up before reporting a bug — most 500s carry a structured log line with far more context
+than the response body, which is deliberately terse.
+
+## Metrics
+
+Setting `BEAM_ENABLE_METRICS=true` exposes Prometheus metrics at `GET /metrics`. Beam does not
+push anywhere; something must scrape it.
+
+<Aside type="danger" title="Do not expose /metrics publicly">
+`/metrics` is **not authenticated** and is mounted at the top level, outside the `/v1` API. If you
+run Beam behind a reverse proxy, do not forward that path — restrict it to your monitoring
+network. It is off by default.
+</Aside>
+
+## What to check when something is wrong
+
+1. `/v1/health` — is the database reachable?
+2. The container logs, with `RUST_LOG` raised.
+3. The admin Status tab — is enrichment stuck, or just slow?
+4. [The error reference](/reference/errors/) for the specific status you are seeing.
+
+[Troubleshooting](/help/troubleshooting/) works symptom-first if you would rather start there.

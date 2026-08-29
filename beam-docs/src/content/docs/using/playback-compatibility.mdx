@@ -1,0 +1,59 @@
+---
+title: When a file won't play
+description: Beam never transcodes, so playback depends on what your browser can decode. Here is how to tell, and what to do.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+This is the one behaviour that most often surprises people coming from other media servers, so it
+is worth stating plainly.
+
+**Beam sends the file. Your browser decodes it.** There is no conversion step. If your browser
+cannot decode a file's container or codecs, that file will not play, and no setting will change
+that.
+
+Most media servers hide this by transcoding on the fly — re-encoding into something the client
+understands. Beam does not, and will not: it is a
+[settled architectural decision](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0004-never-transcode.md),
+not a feature that has yet to be built. The trade is deliberate: no transcoding means no CPU
+melting under several viewers, no quality lost to re-encoding, and playback that starts as fast as
+the file can be read.
+
+## What it looks like when it fails
+
+| Symptom | Usually means |
+|---|---|
+| Video plays, no audio | The container is fine; the **audio** codec is not supported |
+| Audio plays, black screen | The **video** codec is not supported |
+| Nothing plays at all | The **container** itself is not supported |
+| Plays in one browser, not another | Codec support differs between browsers — this is normal |
+
+That last row is the quickest diagnostic: try the same title in a different browser. Safari and
+Chrome support noticeably different sets of codecs, and Firefox differs again.
+
+## What you can do
+
+1. **Try another browser.** Costs a minute and resolves a good share of cases.
+2. **Check for another source.** If a movie offers a source picker, another version may be in a
+   format your browser handles — see [Watching](/using/watching/). Episodes never offer one.
+3. **Download it and use a desktop player.** VLC and mpv play essentially anything. Beam hands you
+   the original file, so it will play there even when the browser refuses — see
+   [Downloading for offline](/using/downloads/).
+4. **Ask your administrator to index a compatible version.**
+
+<Aside type="tip" title="If you run the server">
+For a **movie**, add a browser-friendly version alongside the original: Beam indexes both as
+sources of the same title and lets viewers choose. Practically that means H.264 video with AAC
+audio in an MP4 container, which every current browser plays.
+
+For a **TV episode** this does not work — an episode can only have one file, so a second one is
+rejected during the scan. Replace the file instead. See
+[Managing libraries](/operate/libraries/#multiple-versions).
+</Aside>
+
+## What will not help
+
+- Waiting for a transcoding feature. There is not going to be one.
+- Looking for a quality or format setting in the player. Beam only offers the files that exist.
+- Reporting it as a bug, unless a file that your browser *can* decode still fails — that is worth
+  [reporting](/help/support/).

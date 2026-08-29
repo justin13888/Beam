@@ -1,0 +1,72 @@
+---
+title: Configuration
+description: How Beam is configured, and where the authoritative variable reference lives.
+---
+
+import { Aside, LinkCard } from "@astrojs/starlight/components";
+
+All Beam configuration is environment variables, every one prefixed `BEAM_`.
+
+This page explains the *shape* of configuration and helps you find the right variable. It
+deliberately does **not** reproduce defaults or exact semantics — those live in one place in the
+repository, and a copy here would drift silently into being wrong.
+
+<LinkCard
+	title="Full configuration reference"
+	description="Every variable, its default and its exact meaning. This is the authoritative list."
+	href="https://github.com/justin13888/beam/blob/master/docs/operations/configuration.md"
+/>
+
+## How values are loaded
+
+The server reads a `.env` file if present, then the process environment. In Compose deployments,
+values flow from the repository-root `.env` through the `environment:` block.
+
+<Aside type="caution" title="Unset is not the same as empty">
+Leave an optional variable **commented out** rather than setting it to an empty string. Beam
+distinguishes the two: an unset variable is genuinely absent, whereas an explicitly empty one can
+parse as a real value. Setting `BEAM_OIDC_ISSUER=` makes Beam believe OIDC is configured against
+an empty issuer URL, and sign-in fails in a confusing way.
+</Aside>
+
+`beam-server/src/config.rs` is the final authority. If the reference doc and the code ever
+disagree, the code wins and the doc has a bug.
+
+## Checking your configuration
+
+```bash
+./verify-config.sh
+```
+
+A preflight that checks the variables Beam actually reads are set to something plausible. Run it
+before starting the stack — it catches a misconfiguration in a second that would otherwise present
+as a failed sign-in.
+
+## What there is, by purpose
+
+Names only — follow the link above for values.
+
+**Server and URLs** — `BEAM_BIND_ADDRESS`, `BEAM_SERVER_URL`, `BEAM_WEB_URL`,
+`BEAM_EXTRA_ALLOWED_ORIGINS`, `BEAM_SHUTDOWN_TIMEOUT_SECS`
+
+**Database** — `BEAM_DATABASE_URL`, `BEAM_AUTO_MIGRATE`, `BEAM_DB_MIN_CONNECTIONS`,
+`BEAM_DB_MAX_CONNECTIONS`
+
+**Storage** — `BEAM_VIDEO_DIR`, `BEAM_DATA_DIR` (with `HOST_VIDEO_DIR` and `HOST_DATA_DIR` as the
+host-side mounts in Compose)
+
+**Indexing** — `BEAM_SCAN_INTERVAL_SECS`, `BEAM_WATCH_ENABLED`, `BEAM_WATCH_DEBOUNCE_MS`,
+`BEAM_HASH_UNKNOWN_FILES`
+
+**Enrichment** — `BEAM_TMDB_API_TOKEN`, `BEAM_ANILIST_ENABLED`, `BEAM_METADATA_LANGUAGE`,
+`BEAM_ENRICH_BATCH_SIZE`, `BEAM_ENRICH_INTERVAL_SECS`, `BEAM_ENRICH_MIN_CONFIDENCE`
+
+**Identity** — `BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID`, `BEAM_OIDC_CLIENT_SECRET`,
+`BEAM_OIDC_SCOPES`, `BEAM_OIDC_ADMIN_CLAIM`, `BEAM_OIDC_ADMIN_VALUE`
+
+**Cookies and sessions** — `BEAM_COOKIE_SECURE`, `BEAM_SESSION_IDLE_DAYS`, `BEAM_SESSION_MAX_DAYS`
+
+**Rate limiting** — `BEAM_RATE_LIMIT_ENABLED`, `BEAM_RATE_LIMIT_AUTH_PER_MINUTE`,
+`BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`, `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR`
+
+**Observability** — `BEAM_ENABLE_METRICS`, `RUST_LOG`

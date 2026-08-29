@@ -1,0 +1,63 @@
+---
+title: Watching
+description: How playback works, what the player can do, and how to pick a different source file.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Press play and Beam begins sending the file's bytes. Your browser does the decoding. Nothing is
+converted along the way, which is why playback starts quickly and why it depends entirely on what
+your browser can handle — see [When a file won't play](/using/playback-compatibility/).
+
+## The player
+
+The player offers the usual controls — seeking, volume, fullscreen and keyboard shortcuts.
+Seeking anywhere in a title works immediately, including into parts that have not been buffered:
+Beam serves any byte range of the file on request rather than streaming it strictly start to
+finish.
+
+## Choosing a source
+
+A **movie** can have more than one file indexed against it — say a high-bitrate rip and a smaller
+re-encode. When it does, the player offers a picker, and each option is labelled with its actual
+resolution and codec, read from the file itself:
+
+```
+1080p · h264
+720p · h264
+```
+
+A file whose video stream Beam could not probe is listed as **Original**.
+
+One of them is selected for you, but **not the best one** — the sources come back in no
+particular order, so check the picker rather than assuming you got the highest quality.
+
+Switch to a smaller one when your connection cannot keep up: this is how Beam handles constrained
+bandwidth. It has no adaptive streaming and will never switch for you, because there is no
+transcoder generating alternatives on the fly. Every option in that list is a file that already
+exists on the server.
+
+<Aside type="caution" title="Movies only">
+Multiple sources work for movies. **TV episodes cannot have more than one file**: an episode is
+unique per season and episode number, so a second file for the same episode is rejected during the
+scan rather than offered as an alternative. See
+[Managing libraries](/operate/libraries/#multiple-versions).
+</Aside>
+
+If a movie shows no picker, only one file is indexed for it. Adding another version is something
+an administrator does.
+
+## Subtitles
+
+**Beam does not currently play subtitles.** Beam detects and stores the subtitle tracks inside
+your files, but they are dropped before they reach the player, so there is no track selector and
+no way to turn captions on. Separate subtitle files sitting next to a video — `.srt`, `.ass` and
+the like — are not recognised as subtitles either.
+
+This is a gap rather than a deliberate exclusion: unlike transcoding, nothing in Beam's design
+rules subtitles out. If you need them today, download the file and play it in a desktop player.
+
+## Your position is saved
+
+Beam records where you stopped as you watch, so you can close the tab and come back — see
+[Resume and history](/using/continue-watching/).

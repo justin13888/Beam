@@ -1,0 +1,29 @@
+---
+/*
+ * Shell for the marketing pages under `src/pages/`, which sit outside Starlight's `[...slug]`
+ * route and therefore get no layout from it.
+ *
+ * This is the only module that imports `landing.css`, and it must stay that way -- see the comment
+ * at the top of that file for why the Tailwind boundary is drawn by import site.
+ */
+import Seo from "../components/Seo.astro";
+import "../styles/landing.css";
+
+interface Props {
+	title: string;
+	description: string;
+}
+
+const { title, description } = Astro.props;
+---
+
+<html lang="en" class="scheme-dark">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<Seo title={title} description={description} />
+	</head>
+	<body class="bg-surface text-white antialiased">
+		<slot />
+	</body>
+</html>

@@ -1,0 +1,225 @@
+---
+import SiteFooter from "../components/landing/SiteFooter.astro";
+import SiteHeader from "../components/landing/SiteHeader.astro";
+import LandingLayout from "../layouts/LandingLayout.astro";
+import { site } from "../site";
+
+/** Drawn from the three delivery scenarios in docs/requirements/product.md. */
+const delivery = [
+	{
+		title: "Direct play",
+		body: "Press play and Beam sends the file's bytes over HTTP range requests. Your browser decodes the original container and codec. Nothing is re-encoded, remuxed or repackaged on the way.",
+	},
+	{
+		title: "Download",
+		body: "Ask for a file and you get the file, byte for byte, as an attachment. Range requests are honoured, so an interrupted download resumes instead of starting over.",
+	},
+	{
+		title: "Pick your source",
+		body: "Indexed a 1080p remux and a 480p re-encode of the same movie? Beam lists both with their real probed resolution and codec, and the player switches between them.",
+	},
+];
+
+/** Each claim maps to a numbered requirement in docs/requirements/functional.md. */
+const features = [
+	{
+		title: "Indexing that leaves your files alone",
+		body: "The indexer only reads: it never renames, moves, deletes or writes beside your media. A filesystem watcher picks up changes, and unchanged files are skipped on rescan.",
+	},
+	{
+		title: "Metadata fetched in the background",
+		body: "Posters, backdrops, descriptions, ratings, genres and per-episode detail from TMDB and AniList. Enrichment runs after the scan, so indexing never waits on the internet.",
+	},
+	{
+		title: "Sign-in through your own identity provider",
+		body: "OpenID Connect only — Keycloak, Authentik, Authelia or a hosted provider. Beam stores no passwords, has no sign-up form, and never hands a token to the browser.",
+	},
+	{
+		title: "Search that stays on the server",
+		body: "Type-ahead search backed by a Postgres trigram query, with filters for type, genre, year and rating. The catalogue is never shipped to the browser to be filtered there.",
+	},
+	{
+		title: "Resume where you left off",
+		body: "Playback position is reported as you watch and survives a refresh or a crash, backing a continue-watching row and a watch-history page.",
+	},
+	{
+		title: "An admin area that shows the work",
+		body: "Libraries, live scan and enrichment progress, per-title enrichment status with a manual re-run, a user list, and a log viewer.",
+	},
+];
+
+const notDoing = [
+	{
+		text: "No transcoding or remuxing, on the fly or otherwise. This is a rejected design, not a missing feature.",
+		href: `${site.repo}/blob/master/docs/architecture/decisions/ADR-0004-never-transcode.md`,
+		hrefLabel: "ADR-0004",
+	},
+	{
+		text: "No HLS or DASH, and so no adaptive bitrate.",
+		href: `${site.repo}/issues/75`,
+		hrefLabel: "#75",
+	},
+	{
+		text: "No native mobile, TV or desktop apps. The web app is the only client.",
+		href: `${site.repo}/issues/78`,
+		hrefLabel: "#78",
+	},
+	{ text: "No password login, registration or password reset. You bring an identity provider." },
+	{
+		text: "No Kubernetes or Helm. One host running Compose is the supported topology.",
+		href: `${site.repo}/issues/76`,
+		hrefLabel: "#76",
+	},
+	{ text: "No recommendations, no watch analytics, no plugin ecosystem." },
+];
+
+const next = [
+	{ title: "Install Beam", href: "/install/", body: "Bring the stack up with Compose." },
+	{ title: "Using Beam", href: "/using/signing-in/", body: "For people watching things." },
+	{ title: "Running Beam", href: "/operate/libraries/", body: "For people running the server." },
+	{ title: "Help & FAQ", href: "/help/faq/", body: "Short answers and fixes." },
+];
+---
+
+<LandingLayout
+	title="Beam — self-hosted media server without transcoding"
+	description={site.description}
+>
+	<SiteHeader />
+
+	<main>
+		{/* Hero */}
+		<section class="mx-auto max-w-5xl px-6 pt-20 pb-14">
+			<p class="text-xs font-semibold tracking-[0.2em] text-brand uppercase">
+				Pre-alpha · AGPL-3.0 · Self-hosted
+			</p>
+			<h1 class="mt-5 max-w-3xl text-4xl font-bold tracking-tight text-balance sm:text-6xl">
+				Your media library, served exactly as you encoded it.
+			</h1>
+			<p class="mt-6 max-w-2xl text-lg text-white/70">
+				Beam is a self-hosted media server for home labs and small teams. It indexes the
+				files you already have, enriches them with real metadata, and streams the original
+				bytes straight to your browser. No live transcoding, ever.
+			</p>
+			<div class="mt-9 flex flex-wrap items-center gap-4">
+				<a
+					class="rounded-lg bg-brand px-5 py-2.5 font-semibold text-brand-fg transition-colors hover:bg-brand-bright"
+					href="/getting-started/"
+				>
+					Get started
+				</a>
+				<a
+					class="rounded-lg border border-white/20 px-5 py-2.5 font-medium transition-colors hover:border-white/40"
+					href={site.repo}
+				>
+					View on GitHub
+				</a>
+			</div>
+		</section>
+
+		{/* Honesty strip -- deliberately above the feature list. */}
+		<section class="mx-auto max-w-5xl px-6">
+			<div class="rounded-xl border border-amber-400/25 bg-amber-400/5 px-6 py-5">
+				<p class="text-sm text-white/80">
+					<strong class="font-semibold text-amber-300">Beam is pre-alpha.</strong> There is
+					no tagged release, breaking changes land regularly — including database migrations
+					that discard data — and the web app is the only client. Point it at a copy of your
+					library, not your only copy.
+				</p>
+			</div>
+		</section>
+
+		{/* Delivery model */}
+		<section class="mx-auto max-w-5xl px-6 pt-20">
+			<h2 class="text-2xl font-bold tracking-tight sm:text-3xl">How Beam delivers media</h2>
+			<div class="mt-10 grid gap-6 sm:grid-cols-3">
+				{
+					delivery.map((d) => (
+						<div class="rounded-xl border border-white/10 bg-surface-raised/40 p-6">
+							<h3 class="font-semibold text-brand-bright">{d.title}</h3>
+							<p class="mt-3 text-sm leading-relaxed text-white/70">{d.body}</p>
+						</div>
+					))
+				}
+			</div>
+			<p class="mt-8 max-w-3xl text-white/60">
+				That is the entire delivery model. There is no transcoder to fall over, no HLS or
+				DASH manifests, and no segment cache filling your disk.
+			</p>
+		</section>
+
+		{/* Features */}
+		<section class="mx-auto max-w-5xl px-6 pt-20">
+			<h2 class="text-2xl font-bold tracking-tight sm:text-3xl">What's in the box</h2>
+			<div class="mt-10 grid gap-x-10 gap-y-8 sm:grid-cols-2">
+				{
+					features.map((f) => (
+						<div>
+							<h3 class="font-semibold">{f.title}</h3>
+							<p class="mt-2 text-sm leading-relaxed text-white/70">{f.body}</p>
+						</div>
+					))
+				}
+			</div>
+		</section>
+
+		{/* Non-goals */}
+		<section class="mx-auto max-w-5xl px-6 pt-20">
+			<h2 class="text-2xl font-bold tracking-tight sm:text-3xl">What Beam is not</h2>
+			<p class="mt-4 max-w-2xl text-white/60">
+				Worth knowing before you invest an evening in it.
+			</p>
+			<ul class="mt-8 max-w-3xl space-y-3">
+				{
+					notDoing.map((n) => (
+						<li class="flex gap-3 text-white/70">
+							<span class="mt-2 h-1 w-4 flex-none rounded-full bg-white/25" />
+							<span>
+								{n.text}
+								{n.href && (
+									<>
+										{" "}
+										<a class="text-brand-bright underline" href={n.href}>
+											{n.hrefLabel}
+										</a>
+									</>
+								)}
+							</span>
+						</li>
+					))
+				}
+			</ul>
+		</section>
+
+		{/* Requirements */}
+		<section class="mx-auto max-w-5xl px-6 pt-20">
+			<h2 class="text-2xl font-bold tracking-tight sm:text-3xl">What you'll need</h2>
+			<ul class="mt-8 grid max-w-3xl gap-3 text-white/70 sm:grid-cols-2">
+				<li>A Linux host running Docker or Podman with Compose.</li>
+				<li>PostgreSQL — bundled in the Compose file.</li>
+				<li>An OIDC identity provider. Beam cannot sign anyone in without one.</li>
+				<li>A directory of video files Beam can read.</li>
+			</ul>
+		</section>
+
+		{/* Next */}
+		<section class="mx-auto max-w-5xl px-6 pt-20">
+			<h2 class="text-2xl font-bold tracking-tight sm:text-3xl">Where to go next</h2>
+			<div class="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+				{
+					next.map((n) => (
+						<a
+							class="rounded-xl border border-white/10 p-5 transition-colors hover:border-brand/50"
+							href={n.href}
+						>
+							<h3 class="font-semibold text-brand-bright">{n.title}</h3>
+							<p class="mt-2 text-sm text-white/60">{n.body}</p>
+						</a>
+					))
+				}
+			</div>
+		</section>
+	</main>
+
+	<SiteFooter />
+</LandingLayout>

@@ -54,7 +54,14 @@ jobs:
               - '**/*.js'
               - '**/*.mjs'
               - '**/*.cjs'
-              - '**/*.astro'
+              # Scoped to beam-web so that editing only beam-docs' .astro templates does not
+              # drag the whole ts chain -- including the Rust/FFmpeg OpenAPI build that
+              # ts-typecheck depends on -- into a docs-only change. beam-docs is covered by
+              # the docs filter and the docs-build job. Its other files (.ts, .mjs,
+              # package.json) still match the patterns above and still trigger ts, which is
+              # correct: Biome lints beam-docs' .ts sources. beam-web has no .astro files
+              # today; the pattern is here so that it would be covered if it gained any.
+              - 'beam-web/**/*.astro'
               - '**/tsconfig*.json'
               - 'biome.json'
               - '**/package.json'
@@ -66,6 +73,11 @@ jobs:
             docs:
               - *tooling
               - 'beam-docs/**'
+              # beam-docs resolves its dependencies through the root lockfile, so a change
+              # there can alter what the site builds against even when beam-docs/ is
+              # untouched. Without this, the first sign of a break would be release.yml's
+              # docs-deploy -- after the tag.
+              - 'bun.lock'
             ffmpeg:
               - *tooling
               - 'Cargo.toml'
@@ -346,7 +358,11 @@ jobs:
     if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
+      # Starlight's lastUpdated reads git history; a shallow clone renders wrong
+      # "Last updated" dates rather than failing, so the error would ship silently.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
       - run: mise run docs:build

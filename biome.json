@@ -17,6 +17,7 @@
 			"beam-docs/src/**/*.ts",
 			"beam-docs/src/**/*.tsx",
 			"beam-docs/astro.config.mjs",
+			"beam-docs/postcss.config.mjs",
 			"!beam-web/src/routeTree.gen.ts",
 			"!beam-web/src/api.gen.ts",
 			"!beam-web/src/gql.ts",

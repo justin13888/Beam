@@ -1,0 +1,64 @@
+---
+title: Getting help
+description: Where to ask, what to include, and what support channels exist.
+---
+
+import { Aside, LinkCard } from "@astrojs/starlight/components";
+
+## Where to ask
+
+**GitHub Issues is the only channel.**
+
+<LinkCard
+	title="Beam issues on GitHub"
+	description="Search first — someone may have hit it already. Then open a new issue."
+	href="https://github.com/justin13888/beam/issues"
+/>
+
+To save you looking: there is **no Discussions forum, no chat server, no mailing list, and no
+commercial support**. Beam is a small pre-alpha project maintained by one person, and there is no
+response-time commitment. Naming that is more useful than letting you hunt for a channel that does
+not exist.
+
+## What to include
+
+An issue with these in it can usually be acted on immediately; one without them turns into a
+round trip.
+
+- **The version**, from `GET /v1/health` on your server.
+- **How you deployed** — Compose from the repository, or built some other way.
+- **Your browser and OS**, for anything involving playback or the UI.
+- **Which OIDC provider** you use, for anything involving sign-in.
+- **The exact HTTP status and the response body, verbatim.** Beam's messages are free-form and
+  the specific wording often identifies the code path — see
+  [the error reference](/reference/errors/).
+- **Server log lines** from around the time it happened. Reproduce with `RUST_LOG=debug` if you
+  can: a 500's response body is deliberately terse, but the log line usually carries the cause.
+- **Whether it survives a rescan**, for anything involving indexing or metadata.
+
+For a file that will not play, include the container and codecs — `ffprobe` output is ideal — and
+say whether another browser plays it. Read
+[When a file won't play](/using/playback-compatibility/) first; most such reports are the expected
+behaviour of a server that never transcodes.
+
+## Security issues
+
+<Aside type="caution" title="There is no private reporting channel yet">
+This repository has no security policy and private vulnerability reporting is not enabled, so
+there is currently no way to report a vulnerability privately.
+
+If you find one, open an issue that describes **the class of problem and the affected area only** —
+no working exploit, and no step-by-step reproduction — and say that you have details to share
+privately. Do not post anything that would let someone else exploit it first.
+</Aside>
+
+## Contributing
+
+There is no contributing guide yet. The repository is the documentation: `AGENTS.md` describes the
+conventions, `docs/` holds the ratified engineering documentation, and `mise run ci` runs
+everything CI enforces.
+
+Documentation fixes are welcome and low-friction — every page here has an **Edit this page** link
+at the bottom that goes straight to the file.
+
+Beam is licensed AGPL-3.0.

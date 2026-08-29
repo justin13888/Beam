@@ -1,0 +1,169 @@
+---
+title: Error reference
+description: Every HTTP status Beam returns, what the response body looks like, and what to do about it.
+---
+
+import { Aside, LinkCard } from "@astrojs/starlight/components";
+
+## How to read this page
+
+**Beam has no error codes.** There is no stable machine-readable identifier in an error response —
+the HTTP status is the entire contract. Everything else is prose for a human reading devtools or a
+log.
+
+**Do not parse, match on, or branch on the message text.** Messages are free-form, frequently
+include an interpolated internal error, and change without notice or a deprecation. If you are
+writing a client, branch on **status plus endpoint**.
+
+Every message quoted below is an *example* of what that condition can produce, not an exhaustive
+list.
+
+## The response body shapes
+
+Which shape you get depends on **which endpoint you called**, not which status you received.
+
+| Shape | Content type | Body | Endpoints |
+|---|---|---|---|
+| JSON error | `application/json` | `{"error": "<message>"}` | `/v1/media*`, `/v1/genres`, `/v1/libraries*`, `/v1/continue-watching`, `/v1/history`, `/v1/files/{id}/progress`, all `/v1/admin/*`, and rate-limit rejections |
+| Plain text | `text/plain` | the message alone | `/v1/files/{id}/stream`, `/v1/files/{id}/download`, `/v1/auth/*`, `/v1/me`, `/v1/logout`, `/v1/logout-all`, `/v1/sessions*`, and same-origin rejections |
+| Health object | `application/json` | the full health object | `/v1/health`, on both `200` and `503` |
+
+<Aside type="caution" title="A fourth shape for unmatched routes">
+A request to a path that matches **no route at all** is answered by the web framework, not by
+Beam, and does not use any shape above. With `Accept: application/json` it returns a *nested*
+object — `{"error":{"code":404,"name":"Not Found","brief":"…"}}` — and to a browser it returns an
+HTML error page. A client cannot deserialise Beam's 404s and a wrong-URL 404 with the same type.
+
+Relatedly, a request to a real path with the wrong HTTP method returns **405**, not 404.
+</Aside>
+
+## 400 Bad Request
+
+The request itself was malformed.
+
+- **JSON**, from the REST API: an identifier that is not a valid UUID — `invalid file id`,
+  `invalid user id: …`.
+- **Plain text**, from a stream or download URL: `Invalid range header`.
+- **Plain text**, from `/v1/auth/callback`: `Missing state cookie`, `Missing state parameter`,
+  `Unknown, already-used, or expired login attempt`, `Missing code parameter`, `Nonce mismatch`,
+  or `Login failed: …`.
+
+**What to do.** A 400 from the callback nearly always means a stale or replayed sign-in: the
+callback URL is single-use, so reloading it fails by design. Start again from the app. If it
+happens every time, the browser is dropping the short-lived state cookie — third-party cookie
+blocking, or a `BEAM_COOKIE_SECURE` setting that does not match your scheme.
+
+## 401 Unauthorized
+
+No usable session.
+
+- **JSON**: `Missing session cookie`, `Invalid or expired session`, `user no longer exists`.
+- **Plain text**, from the auth and session endpoints: the same conditions.
+
+<Aside type="note" title="401 on a media URL does not mean what it says">
+On `/v1/files/{id}/stream` and `/v1/files/{id}/download`, a *forbidden* condition is reported as
+**401 rather than 403** — the file-delivery path collapses the two. So a 401 from a media URL does
+not prove your session is missing or expired; you may simply not be allowed that file.
+</Aside>
+
+**What to do.** Sign in again. If it happens immediately after signing in successfully, the
+session cookie is not reaching the server: check that `BEAM_SERVER_URL` and `BEAM_WEB_URL` are the
+real public origins and that the cookie's `Secure` flag matches your scheme. Sessions also expire
+on idle and at an absolute age.
+
+## 403 Forbidden
+
+Authenticated, but not allowed.
+
+- **JSON**: `admin access required`, from `/v1/admin/*`.
+- **Plain text**, from `/v1/auth/callback`: `This account has been disabled. Contact an
+  administrator.` The identity verified; the local account is disabled and no session is created.
+- **Plain text**, from the same-origin check on any state-changing request:
+  `Malformed Origin/Referer header` or `Cross-origin request rejected`.
+
+**What to do.** For `admin access required`, fix the claim at your identity provider and then
+**sign out and back in** — admin is recalculated only at sign-in, so nothing changes in a live
+session. For a cross-origin rejection, the request's `Origin`/`Referer` does not match
+`BEAM_WEB_URL`, `BEAM_SERVER_URL` or `BEAM_EXTRA_ALLOWED_ORIGINS`; the usual causes are a reverse
+proxy rewriting the header, or reaching Beam on a hostname it was never told about.
+
+## 404 Not Found
+
+- **JSON**: `media <id> not found`, `library <id> not found`, `user <id> not found`.
+- **Plain text**, from a stream or download URL: `File not found` — no such file record.
+- **Plain text**: **`Source video file not found`** — this one is different and worth knowing. The
+  database has the file but **the path on disk does not exist**.
+
+**What to do.** `Source video file not found` means your library and Beam's catalogue have
+diverged: a bind mount is missing, the library moved, or the file was deleted outside Beam.
+Check the mount, then rescan the library.
+
+## 416 Range Not Satisfiable
+
+Only from stream and download URLs: the requested range starts past the end of the file, the range
+is inverted, or **the file is zero bytes**, which is rejected whether or not a range was asked for.
+
+**What to do.** Check the file's size on disk first — a zero-byte file is usually a failed copy or
+a broken symlink, and no amount of reloading will fix it. Otherwise this is typically a player
+working from a stale cached length, so hard-reload; if it persists, the file changed since it was
+indexed and the library needs a rescan.
+
+## 429 Too Many Requests
+
+JSON `{"error": "Rate limit exceeded"}`, with a **`Retry-After`** header giving the number of
+seconds to wait.
+
+Only three endpoints are limited:
+
+| Class | Endpoints | Default |
+|---|---|---|
+| Auth | `/v1/auth/login`, `/v1/auth/callback` | 10 per minute |
+| Search | `/v1/media` (browse and search) | 60 per minute |
+
+The allowance is also the burst: a client starts with a full bucket that refills steadily, so the
+auth default is ten immediately and then one more every six seconds. **Streaming and download are
+deliberately never limited** — a player legitimately issues a burst of range requests, and
+limiting it would break seeking.
+
+**What to do.** Wait for `Retry-After`. Operators: raise `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` or
+`BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`. If every user shares one bucket because they arrive through a
+proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only behind a proxy that **overwrites**
+`X-Forwarded-For`, since a proxy that appends lets a client forge the header and evade the limit.
+
+## 500 Internal Server Error
+
+Always a server fault. JSON on the REST API, plain text on the stream and auth paths. Recurring
+messages include `Server state unavailable`, `Failed to look up file`, `Failed to provision user:
+…`, and `Invalid redirect URL`.
+
+**What to do.** Nothing client-side. Read the server logs around the timestamp — a 500's response
+body is deliberately terse, but the log line carries the real cause. The usual causes are
+PostgreSQL unreachable and a schema/migration mismatch. `Server state unavailable` indicates a
+wiring bug rather than a configuration problem and is worth [reporting](/help/support/).
+
+## 503 Service Unavailable
+
+Two unrelated sources:
+
+- **`/v1/health`** returns the full health object with a degraded status, and `checks` naming the
+  failing dependency.
+- **`/v1/auth/login`** returns plain text `OIDC login unavailable: …` when it cannot start a
+  sign-in flow.
+
+**What to do.** For health, read `checks` — in practice the database. For login, Beam needs
+`BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID` and `BEAM_OIDC_CLIENT_SECRET` **all three** set, and
+must be able to reach the issuer's `.well-known/openid-configuration`.
+
+## Stability
+
+To restate the thing this page most wants you to take away:
+
+- **Statuses are the contract.** Branch on status and endpoint.
+- **Messages are not.** They are diagnostic text and will change.
+- **There are no error codes** to match on, in any response.
+
+<LinkCard
+	title="API conventions"
+	description="The engineering reference for Beam's REST surface, including this error contract."
+	href="https://github.com/justin13888/beam/blob/master/docs/architecture/api.md"
+/>

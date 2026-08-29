@@ -1,0 +1,140 @@
+---
+title: Install Beam
+description: Bring up Beam and PostgreSQL with Docker or Podman Compose and reach the sign-in screen.
+---
+
+import { Aside, LinkCard, Steps, Tabs, TabItem } from "@astrojs/starlight/components";
+
+Beam runs as one server process alongside PostgreSQL. The repository ships a Compose file that
+brings both up, along with the web app.
+
+<Aside type="note" title="The default stack starts more than Beam">
+The root `compose.yaml` also pulls in the development dependencies, which include **Traefik** —
+binding host ports **80 and 443** and mounting the Docker socket read-only — and **Dex**, a test
+identity provider. If you already run something on 80 or 443, or you do not want a container with
+access to the Docker socket, bring up `compose.beam.yaml` and your own Postgres instead of the
+default `compose.yaml`.
+</Aside>
+
+<Aside type="caution" title="No release has been published yet">
+Beam has never been tagged, so there are no published container images to pull. Compose builds
+the images from the repository. The server image compiles FFmpeg from source, so **expect the
+first build to take a long time.** Later builds reuse the layer cache.
+</Aside>
+
+## Bring up the stack
+
+<Steps>
+
+1. **Clone the repository.**
+
+   ```bash
+   git clone https://github.com/justin13888/beam.git
+   cd beam
+   ```
+
+2. **Create your configuration.**
+
+   ```bash
+   cp .env.example .env
+   ```
+
+3. **Set the variables Beam cannot start without.** Edit `.env`. These are the ones that need a
+   real value on any machine other than a throwaway local test — the defaults for everything else
+   are fine to begin with.
+
+   | Variable | What it is for |
+   |---|---|
+   | `POSTGRES_PASSWORD` | The database password. Change it from the default. |
+   | `BEAM_DATABASE_URL` | How the server reaches Postgres. **Contains the password** — update it whenever you change `POSTGRES_PASSWORD`, or the server cannot connect. |
+   | `HOST_VIDEO_DIR` | The directory on the host holding your media. |
+   | `HOST_DATA_DIR` | Where Beam keeps its own writable state. |
+   | `BEAM_SERVER_URL` | The URL browsers reach the server on. |
+   | `BEAM_WEB_URL` | The URL browsers reach the web app on. |
+   | `C_STREAM_SERVER_URL` | The API URL baked into the **web app**. See the warning below. |
+   | `BEAM_OIDC_ISSUER` | Your identity provider's issuer URL. |
+   | `BEAM_OIDC_CLIENT_ID` | The client ID you registered for Beam. |
+   | `BEAM_OIDC_CLIENT_SECRET` | That client's secret. |
+   | `BEAM_OIDC_ADMIN_CLAIM` | The ID-token claim that marks a user as an admin. |
+
+   <Aside type="caution" title="C_STREAM_SERVER_URL is baked in at build time">
+   The browser talks to the API directly, so the web app needs the API's public URL compiled into
+   it. It is a **build argument**, not a runtime setting: changing it later means rebuilding the
+   web image, not just restarting the container. Leave it at `http://localhost:8000` and a browser
+   on any other machine will try to reach the API on its own loopback and fail.
+   </Aside>
+
+   The three `BEAM_OIDC_*` credentials are required together — see
+   [Identity provider and admin access](/operate/identity-and-access/) for how to register Beam
+   with your provider. Without `BEAM_OIDC_ADMIN_CLAIM`, nobody is an admin.
+
+   <Aside type="tip">
+   Leave optional variables commented out rather than setting them to an empty string. Beam
+   distinguishes "unset" from "set to empty", and an empty issuer URL reads as *OIDC is
+   configured* — see the [configuration reference](/reference/configuration/).
+   </Aside>
+
+4. **Check your configuration before starting.**
+
+   ```bash
+   ./verify-config.sh
+   ```
+
+   This is a preflight that catches the variables Beam actually reads being missing or
+   implausible.
+
+5. **Start everything.**
+
+   <Tabs syncKey="runtime">
+     <TabItem label="Podman">
+     ```bash
+     podman compose up -d
+     ```
+     </TabItem>
+     <TabItem label="Docker">
+     ```bash
+     docker compose up -d
+     ```
+     </TabItem>
+   </Tabs>
+
+6. **Confirm the server is healthy.**
+
+   ```bash
+   curl http://localhost:8000/v1/health
+   ```
+
+   A healthy server reports `"status":"healthy"` along with its version and uptime. If it reports
+   `degraded`, the `checks` object names the failing dependency — see
+   [Monitoring](/operate/monitoring/).
+
+</Steps>
+
+## Where things listen
+
+| Service | Default | Variable |
+|---|---|---|
+| Web app | `http://localhost:8080` | `WEB_HOST_PORT` |
+| Server API | `http://localhost:8000` | `BEAM_SERVER_HOST_PORT` |
+| Interactive API docs | `http://localhost:8000/openapi` | — |
+
+Open the web app and sign in. If sign-in fails, [Troubleshooting](/help/troubleshooting/) covers
+the usual causes.
+
+## Your media directory
+
+`HOST_VIDEO_DIR` is mounted into the container at `BEAM_VIDEO_DIR`. Beam's indexer never writes
+to it — it only reads. For defence in depth you can append `:ro` to that volume in
+`compose.beam.yaml` so the container cannot write there even if something tried.
+
+<LinkCard
+	title="Full configuration reference"
+	description="Every BEAM_ variable, its default and its exact semantics, in the repository."
+	href="https://github.com/justin13888/beam/blob/master/docs/operations/configuration.md"
+/>
+
+<LinkCard
+	title="Production deployment guidance"
+	description="Compose topology and what to change before exposing Beam beyond your LAN."
+	href="https://github.com/justin13888/beam/blob/master/docs/operations/deployment.md"
+/>

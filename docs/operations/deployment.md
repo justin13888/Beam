@@ -6,11 +6,12 @@ Kubernetes-native topologies are out of scope — tracked in
 ([ADR-0001](../architecture/decisions/ADR-0001-modular-monolith.md)) keeps a future split
 possible without a rewrite.
 
-Each release publishes multi-arch (`linux/amd64`, `linux/arm64`) images to
+**No release has been cut yet** — the repository has no tags and no published releases, so no
+images exist to pull today and `compose.beam.yaml` builds both from the in-repo Containerfiles.
+`beam-server/Containerfile` compiles FFmpeg from source, so expect the first `compose build` to be
+slow. Once a release is published, it publishes multi-arch (`linux/amd64`, `linux/arm64`) images to
 `ghcr.io/justin13888/beam-server` and `ghcr.io/justin13888/beam-web`, tagged `vX.Y.Z`, `X.Y`, and
-`latest` — prefer these over building locally. `compose.beam.yaml` still builds both images from the
-in-repo Containerfiles, and `beam-server/Containerfile` compiles FFmpeg from source, so a local
-`compose build` is slow. See
+`latest`, which should be preferred over building locally. See
 [ADR-0009](../architecture/decisions/ADR-0009-release-engineering.md) for how a release is cut.
 
 Building the `web` image locally requires `mise run codegen:openapi` first: it takes
