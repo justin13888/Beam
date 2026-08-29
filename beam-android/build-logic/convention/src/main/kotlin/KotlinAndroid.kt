@@ -1,4 +1,5 @@
 import com.android.build.api.dsl.CommonExtension
+import org.gradle.api.JavaVersion
 import org.gradle.api.Project
 import org.gradle.api.artifacts.VersionCatalogsExtension
 import org.gradle.kotlin.dsl.getByType
@@ -32,6 +33,11 @@ internal fun Project.configureKotlinAndroid(extension: CommonExtension) {
     // Keeps java.time and friends usable at minSdk 26 without every call site
     // having to care.
     extension.compileOptions.isCoreLibraryDesugaringEnabled = true
+    // AGP still defaults the Java tasks to 11, and Kotlin below targets 21.
+    // A mismatch is a hard error rather than a warning, so both are set here
+    // instead of being discovered once per module.
+    extension.compileOptions.sourceCompatibility = JavaVersion.VERSION_21
+    extension.compileOptions.targetCompatibility = JavaVersion.VERSION_21
 
     extension.packaging.resources.excludes += setOf(
         "/META-INF/{AL2.0,LGPL2.1}",
