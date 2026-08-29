@@ -79,7 +79,11 @@ export default defineConfig({
 			sidebar: [
 				{
 					label: "Start here",
-					items: [{ slug: "getting-started" }],
+					items: [
+						{ slug: "getting-started" },
+						{ slug: "install" },
+						{ slug: "first-run", label: "Your first library" },
+					],
 				},
 				{
 					label: "Engineering docs",

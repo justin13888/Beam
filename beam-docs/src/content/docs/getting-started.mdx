@@ -3,4 +3,49 @@ title: Getting started
 description: What Beam is, what it needs, and which path through this documentation is yours.
 ---
 
-Placeholder. Replaced with the real guide in a later commit.
+import { Aside, Card, CardGrid } from "@astrojs/starlight/components";
+
+Beam is a self-hosted media server. It indexes a directory of video files you already have,
+enriches them with metadata and artwork, and streams them to a browser — sending the original
+file's bytes rather than re-encoding them.
+
+<Aside type="caution" title="Beam is pre-alpha">
+There is no tagged release yet. Breaking changes land regularly, including database migrations
+that discard data, and the web app is the only client. Point Beam at a copy of your library
+rather than your only copy.
+</Aside>
+
+## Which half of this is yours?
+
+<CardGrid>
+	<Card title="Run a Beam server" icon="setting">
+		You have media on a machine and want to serve it. Start with
+		[Install Beam](/install/), then [Your first library](/first-run/).
+	</Card>
+	<Card title="Use a Beam server" icon="person">
+		Someone else runs the server and gave you a link. Start with
+		[Signing in](/using/signing-in/).
+	</Card>
+</CardGrid>
+
+## What you need to run a server
+
+- A machine that can run Docker or Podman with Compose.
+- PostgreSQL — the Compose file brings one up for you.
+- **An OpenID Connect identity provider.** Beam has no passwords of its own and cannot sign
+  anyone in without one. If you do not already run something like Keycloak, Authentik or
+  Authelia, budget time for it. Dex is bundled for local testing only.
+- A directory of video files that Beam can read.
+
+## What Beam deliberately does not do
+
+Knowing these up front saves evaluating Beam for a job it will not do:
+
+- **It never transcodes.** If your browser cannot decode a file, Beam will not convert it for
+  you. This is a settled design decision, not a missing feature — see
+  [When a file won't play](/using/playback-compatibility/).
+- **No HLS or DASH**, and so no adaptive bitrate switching.
+- **No native mobile, TV or desktop apps.** The web app is the only client.
+- **No password login, sign-up, or password reset.** You bring an identity provider.
+- **No Kubernetes or Helm.** One host running Compose is the supported topology.
+- **It never modifies your media.** Beam reads your library and writes nothing back to it.

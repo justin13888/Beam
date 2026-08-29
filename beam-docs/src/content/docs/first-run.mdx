@@ -1,0 +1,62 @@
+---
+title: Your first library
+description: Sign in as an admin, point Beam at a media directory, and watch it index and enrich.
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+
+With the server running, three things stand between you and playback: signing in, telling Beam
+where your media is, and letting it scan.
+
+<Steps>
+
+1. **Sign in.** Open the web app and follow the sign-in link. Beam hands you to your identity
+   provider and takes you back. There is no account to create first — Beam provisions a local
+   user record the first time it sees your identity.
+
+2. **Confirm you are an admin.** Only admins can manage libraries. Beam derives admin status
+   entirely from the ID-token claim you configured in `BEAM_OIDC_ADMIN_CLAIM`, so if the admin
+   area is missing, the claim is not reaching Beam.
+
+   <Aside type="tip">
+   Admin status is recalculated at every sign-in. After changing the claim at your identity
+   provider, **sign out and back in** — nothing changes in an existing session. See
+   [Identity provider and admin access](/operate/identity-and-access/).
+   </Aside>
+
+3. **Add a library.** Go to the Libraries page and choose **Add Library**. Give it a name and the
+   path Beam should index.
+
+   The path is the path **inside the container**, not on the host. If you mounted your media with
+   `HOST_VIDEO_DIR=/srv/media` and left `BEAM_VIDEO_DIR` at its default, then `/srv/media/movies`
+   on the host is `/videos/movies` to Beam.
+
+4. **Scan it.** Use the scan action on the library. The badge tracks it: **Scanning…** while it
+   runs, then how long ago it finished. **Not scanned** means it has never run.
+
+   Progress streams live — you do not need to refresh.
+
+5. **Wait for artwork.** Scanning and enrichment are separate. The scan finds your files and makes
+   them playable; posters, descriptions and ratings arrive afterwards as a background pipeline
+   works through the titles. A freshly scanned library looks bare for a few minutes, and that is
+   expected.
+
+   Some titles may stay bare. Without `BEAM_TMDB_API_TOKEN`, titles that would have matched TMDB
+   are simply left un-enriched — the scan does not fail. See
+   [Metadata and artwork](/operate/metadata/).
+
+</Steps>
+
+## If the scan finds nothing
+
+- Check the path is the in-container path, not the host path.
+- Check the file extensions are ones Beam indexes — see
+  [Managing libraries](/operate/libraries/).
+- Check the server can actually read the directory.
+
+[Troubleshooting](/help/troubleshooting/) has the longer list.
+
+## Next
+
+Ongoing library management — rescans, layout, and indexing several quality versions of the same
+title — is covered in [Managing libraries](/operate/libraries/).
