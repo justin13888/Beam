@@ -16,7 +16,8 @@
     "lint:fix": "biome lint --write .",
     "format:fix": "biome format --write .",
     "check:fix": "biome check --write .",
-    "typecheck": "astro check"
+    "typecheck": "astro check",
+    "og:build": "bun run scripts/build-og-image.mjs"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.10",

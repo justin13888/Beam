@@ -6,6 +6,7 @@
  * This is the only module that imports `landing.css`, and it must stay that way -- see the comment
  * at the top of that file for why the Tailwind boundary is drawn by import site.
  */
+import Seo from "../components/Seo.astro";
 import "../styles/landing.css";
 
 interface Props {
@@ -20,8 +21,7 @@ const { title, description } = Astro.props;
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<title>{title}</title>
-		<meta name="description" content={description} />
+		<Seo title={title} description={description} />
 	</head>
 	<body class="bg-surface text-white antialiased">
 		<slot />
