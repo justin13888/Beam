@@ -126,6 +126,14 @@ export default defineConfig({
 					],
 				},
 				{
+					label: "Help",
+					items: [
+						{ slug: "help/troubleshooting" },
+						{ slug: "help/faq", label: "FAQ" },
+						{ slug: "help/support", label: "Getting help" },
+					],
+				},
+				{
 					label: "Engineering docs",
 					link: "https://github.com/justin13888/beam/tree/master/docs",
 					badge: { text: "Repo", variant: "note" },
