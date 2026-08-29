@@ -1,0 +1,26 @@
+/*
+ * Brand accent for Starlight's pages.
+ *
+ * Deliberately narrow: this remaps the accent ramp and nothing else. Starlight's typography,
+ * spacing and component internals are left alone, because overriding those is what breaks on a
+ * Starlight upgrade.
+ *
+ * Plain CSS on purpose -- no Tailwind at-rules. Starlight's pages never load Tailwind (see
+ * `landing.css`), so this file has to stand on its own, and it shares `tokens.css` with the
+ * marketing pages so both halves of the site resolve to the same cyan.
+ */
+@import "./tokens.css";
+
+:root {
+	--sl-color-accent-low: oklch(30% 0.055 220);
+	--sl-color-accent: var(--beam-accent-dim);
+	--sl-color-accent-high: var(--beam-accent-bright);
+}
+
+:root[data-theme="light"] {
+	/* The bright end of the ramp is unreadable on white, so light mode walks the ramp the other
+	   way: a deep accent for text and links, a pale tint for fills. */
+	--sl-color-accent-low: oklch(93% 0.045 215);
+	--sl-color-accent: var(--beam-accent-deep);
+	--sl-color-accent-high: oklch(37% 0.082 224);
+}

@@ -28,6 +28,16 @@ export default defineConfig({
 			// silent overwrite -- Astro warns today and says it becomes a hard error in a future
 			// release, which would break docs:build and the release deploy.
 			disable404Route: true,
+			customCss: ["./src/styles/starlight.css"],
+			favicon: "/favicon.svg",
+			// Two variants because Starlight renders the logo as an <img>: the SVG cannot inherit
+			// the page's colour, so each theme needs its own baked-in stroke. `alt` is empty
+			// because the site title sits beside it and would otherwise be announced twice.
+			logo: {
+				dark: "./src/assets/beam-mark.svg",
+				light: "./src/assets/beam-mark-light.svg",
+				alt: "",
+			},
 			social: [
 				{
 					icon: "github",

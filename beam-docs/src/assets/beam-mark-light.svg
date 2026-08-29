@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Beam">
+  <title>Beam</title>
+  <!--
+    A beam: rays widening left-to-right out of a single source point, meeting a screen.
+    Colour is baked in rather than inherited because Starlight renders the logo as an <img>,
+    which isolates it from the page's currentColor. Keep the geometry in sync with the sibling
+    variant and with public/favicon.svg.
+  -->
+  <g fill="none" stroke="#0e7490" stroke-linecap="round" stroke-width="2.75">
+    <path d="M8 16h5" />
+    <path d="M8 16l12-7" opacity=".72" />
+    <path d="M8 16l12 7" opacity=".72" />
+    <path d="M23.5 7.5v17" opacity=".38" />
+  </g>
+  <circle cx="8" cy="16" r="3" fill="#0e7490" />
+</svg>
