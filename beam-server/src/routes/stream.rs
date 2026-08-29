@@ -1,186 +1,218 @@
-use crate::routes::api_error::{ApiError, obtain_state, require_auth};
-use salvo::oapi::ToResponses;
-use salvo::prelude::*;
-use std::path::PathBuf;
-use tokio::fs::File;
+//! `/v1/files/{file_id}/stream` and `/v1/files/{file_id}/download` -- direct
+//! byte delivery of an indexed source file. Beam never transcodes or remuxes
+//! server-side (ADR-0004), so both endpoints serve the file exactly as indexed
+//! and differ only in `Content-Disposition`.
+//!
+//! The Kynos migration replaced roughly three hundred lines of hand-rolled
+//! range parsing and header assembly with `Served<S, M>` over a [`ByteSource`].
+//! Three things follow from that:
+//!
+//! * `If-Range`, `If-None-Match` and `If-Modified-Since` are honoured, and a
+//!   `304` is possible. None of them existed before, so a seek re-sent bytes
+//!   the client already had.
+//! * `HEAD` is a real operation. Kynos does not synthesise one from a `GET`,
+//!   because the two are separate operations in the description.
+//! * The `ETag` is no longer `"{file_size}"`. That collided for any two files
+//!   of the same size, which made it unsafe to resume against -- exactly the
+//!   guarantee `If-Range` exists to provide.
+
+use std::path::{Path as FsPath, PathBuf};
+use std::time::SystemTime;
+
+use bytes::Bytes;
+use kynos::extract::media::MediaType;
+use kynos::http::etag::ETag;
+use kynos::prelude::*;
+use kynos::response::range::served::{Conditions, Delivery, Served};
+use kynos::response::range::source::ByteSource;
+use kynos::response::{IntoResponse, Responses};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::error;
 
-#[derive(Debug, PartialEq)]
-pub(crate) enum RangeError {
-    MissingBytesPrefix,
-    MalformedRange,
-    NonNumericBound,
-    RangeNotSatisfiable { start: u64, file_size: u64 },
+use crate::routes::api_error::{DeliveryError, SessionAuth};
+use crate::routes::tags::Playback;
+use crate::state::AppState;
+
+/// What both delivery endpoints capture.
+#[derive(Debug, Schema, PathParams)]
+pub struct FilePath {
+    /// File ID.
+    pub file_id: String,
 }
 
-/// Parse an HTTP Range header value against a known file size.
+/// One indexed file on disk, read a span at a time.
 ///
-/// Returns `Ok((start, end))` where both are inclusive byte offsets,
-/// or a `RangeError` describing the failure mode.
-pub(crate) fn parse_byte_range(
-    header_value: &str,
-    file_size: u64,
-) -> Result<(u64, u64), RangeError> {
-    if file_size == 0 {
-        return Err(RangeError::RangeNotSatisfiable {
-            start: 0,
-            file_size: 0,
-        });
+/// A trait rather than a path is what lets the tests keep a fake filesystem:
+/// `ByteSource` has two methods and neither mentions `std::fs`, so an in-memory
+/// source stands in without special runtime infrastructure. Kynos ships
+/// `InMemory(Bytes)` for exactly that.
+pub struct FileByteSource {
+    path: PathBuf,
+    length: u64,
+}
+
+impl FileByteSource {
+    /// Reads the file's metadata without reading a byte of its contents.
+    async fn open(path: PathBuf) -> Result<(Self, SystemTime, u64), DeliveryError> {
+        let metadata = tokio::fs::metadata(&path).await.map_err(|err| {
+            error!(?path, ?err, "failed to read source file metadata");
+            DeliveryError::NotFound("Source video file not found".into())
+        })?;
+
+        let length = metadata.len();
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+        Ok((Self { path, length }, modified, length))
+    }
+}
+
+impl ByteSource for FileByteSource {
+    type Error = std::io::Error;
+
+    /// Asked once, before a byte is read, so an unsatisfiable range costs no
+    /// read at all.
+    async fn complete_length(&self) -> Result<u64, Self::Error> {
+        Ok(self.length)
     }
 
-    if !header_value.starts_with("bytes=") {
-        return Err(RangeError::MissingBytesPrefix);
+    /// Reads exactly the span asked for. The whole file is never held: a client
+    /// seeking to the two-hour mark of a 40 GiB remux costs one span.
+    async fn read_span(&self, first: u64, last: u64) -> Result<Bytes, Self::Error> {
+        let mut file = tokio::fs::File::open(&self.path).await?;
+        file.seek(std::io::SeekFrom::Start(first)).await?;
+
+        let span = usize::try_from(last - first + 1).unwrap_or(0);
+        let mut buffer = vec![0u8; span];
+        file.read_exact(&mut buffer).await?;
+
+        Ok(Bytes::from(buffer))
     }
+}
 
-    let range_part = &header_value[6..]; // strip "bytes="
-    let dash_pos = range_part.find('-').ok_or(RangeError::MalformedRange)?;
-    let start_str = &range_part[..dash_pos];
-    let end_str = &range_part[dash_pos + 1..];
+/// The media type the range engine is parameterised by.
+///
+/// Beam serves whatever the indexer detected, which is decided per file and
+/// cannot be a `const`. [`MediaDelivery`] therefore overrides the header at
+/// request time and describes the range of types honestly.
+struct AnyMedia;
 
-    if start_str.is_empty() && end_str.is_empty() {
-        return Err(RangeError::MalformedRange);
+impl MediaType for AnyMedia {
+    const MEDIA_TYPE: &'static str = "application/octet-stream";
+}
+
+/// A ranged delivery whose `Content-Type` is the file's, not the type
+/// parameter's.
+///
+/// `Delivery<M>` carries its media type at the type level so it can describe
+/// itself, which is right for an operation serving one representation and wrong
+/// for a media server: Beam's content type comes from the file being read. This
+/// wrapper keeps Kynos's range engine and replaces only that header, then
+/// describes the media-type ranges Beam actually answers with.
+///
+/// Nothing here is an escape hatch. `IntoResponse` and `Responses` are the
+/// public traits every response type implements, and `delivery_responses` is
+/// public precisely so a wrapper can build on it -- the description stays
+/// accurate rather than being waived, and the `unchecked` feature stays off.
+///
+/// It is still a gap worth closing upstream: a ranged delivery whose media type
+/// is chosen at request time is a normal thing for a file server to want, and
+/// Kynos has no way to say it. Recorded in
+/// `docs/architecture/kynos-migration-readiness.md`.
+pub struct MediaDelivery {
+    inner: Delivery<AnyMedia>,
+    content_type: String,
+}
+
+impl MediaDelivery {
+    const fn new(inner: Delivery<AnyMedia>, content_type: String) -> Self {
+        Self {
+            inner,
+            content_type,
+        }
     }
+}
 
-    let (start, end) = if start_str.is_empty() {
-        // Suffix range: "bytes=-N" means the last N bytes
-        let suffix = end_str
-            .parse::<u64>()
-            .map_err(|_| RangeError::NonNumericBound)?;
-        let start = file_size.saturating_sub(suffix);
-        (start, file_size - 1)
-    } else {
-        let start = start_str
-            .parse::<u64>()
-            .map_err(|_| RangeError::NonNumericBound)?;
-        let end = if end_str.is_empty() {
-            // Open-ended range: "bytes=N-"
-            file_size - 1
-        } else {
-            let e = end_str
-                .parse::<u64>()
-                .map_err(|_| RangeError::NonNumericBound)?;
-            std::cmp::min(e, file_size - 1)
-        };
-        (start, end)
+impl IntoResponse for MediaDelivery {
+    fn into_response(self) -> kynos::http::Response {
+        let Self {
+            inner,
+            content_type,
+        } = self;
+
+        let status = inner.status();
+        let mut response = inner.into_response();
+
+        // A 304 carries no representation, so it carries no content type
+        // either -- RFC 9110 section 15.4.5.
+        if status != kynos::http::StatusCode::NOT_MODIFIED {
+            if let Ok(value) = content_type.parse() {
+                response
+                    .headers_mut()
+                    .insert(kynos::http::header::CONTENT_TYPE, value);
+            }
+        }
+
+        response
+    }
+}
+
+impl Responses for MediaDelivery {
+    /// The same 200/206/304 shape `Delivery` describes, widened to the media
+    /// types Beam can answer with.
+    ///
+    /// `video/*` and `audio/*` are media-type ranges, which OpenAPI permits as
+    /// `content` keys; `application/octet-stream` is what an unrecognised
+    /// container falls back to. Listing all three is the honest description of
+    /// "whatever the indexer detected".
+    fn responses(registry: &mut kynos::schema::registry::Registry) -> kynos::openapi::Responses {
+        use kynos::openapi::{MediaType as OpenApiMediaType, RefOr, Schema, StatusPattern};
+
+        let _ = registry;
+        let mut responses = kynos::response::range::delivery_responses("video/*");
+
+        for status in [200, 206] {
+            if let Some(RefOr::Item(response)) = responses
+                .responses
+                .get_mut(&StatusPattern::Code(status).to_string())
+            {
+                for media_type in ["audio/*", "application/octet-stream"] {
+                    response.content.insert(
+                        media_type.to_owned(),
+                        OpenApiMediaType::new(Schema::Object(Box::default())),
+                    );
+                }
+            }
+        }
+
+        responses
+    }
+}
+
+/// Resolve `file_id` to the file's on-disk path and detected content type.
+///
+/// The caller must be signed in via the `beam_session` cookie (ADR-0003) -- a
+/// `<video>` element sends that automatically, so there is no separate
+/// stream-token step. Authentication itself is `SessionAuth` in the handler
+/// signature; this only resolves the file.
+async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String), DeliveryError> {
+    let file = match state
+        .services
+        .library
+        .get_file_by_id(file_id.to_owned())
+        .await
+    {
+        Ok(Some(file)) => file,
+        Ok(None) => return Err(DeliveryError::NotFound("File not found".into())),
+        Err(err) => {
+            error!(?err, "failed to look up file");
+            return Err(DeliveryError::Internal("Failed to look up file".into()));
+        }
     };
 
-    // `start > end` is the whole check: every branch above caps `end` at
-    // `file_size - 1` (the suffix and open-ended forms set it there outright,
-    // the explicit form clamps to it), so a `start` at or past the end of the
-    // file is always greater than `end`. The `start >= file_size` clause this
-    // used to also test was therefore unreachable -- removing it removes a
-    // branch no input could ever take, rather than adding a test that could
-    // never fail.
-    if start > end {
-        return Err(RangeError::RangeNotSatisfiable { start, file_size });
-    }
-
-    Ok((start, end))
-}
-
-/// Escape a filename for use inside a `Content-Disposition` quoted-string
-/// (RFC 6266 / RFC 2616 §2.2): backslash and double-quote are backslash-escaped,
-/// and any control character (which would otherwise let a maliciously-named
-/// source file inject extra header lines) is stripped outright.
-fn sanitize_disposition_filename(name: &str) -> String {
-    name.chars()
-        .filter(|c| !c.is_control())
-        .flat_map(|c| match c {
-            '"' | '\\' => vec!['\\', c],
-            other => vec![other],
-        })
-        .collect()
-}
-
-// ── Error enums ───────────────────────────────────────────────────────────────
-
-/// Errors shared by both file-delivery endpoints (`stream_file`, `download_file`).
-#[derive(Debug, ToResponses)]
-pub enum FileDeliveryError {
-    /// Unauthorized
-    #[salvo(response(status_code = 401))]
-    Unauthorized(String),
-    /// File not found
-    #[salvo(response(status_code = 404))]
-    NotFound(String),
-    /// Bad request
-    #[salvo(response(status_code = 400))]
-    BadRequest(String),
-    /// Range not satisfiable
-    #[salvo(response(status_code = 416))]
-    RangeNotSatisfiable(String),
-    /// Internal server error
-    #[salvo(response(status_code = 500))]
-    InternalError(String),
-}
-
-#[async_trait]
-impl Writer for FileDeliveryError {
-    async fn write(self, _req: &mut Request, _depot: &mut Depot, res: &mut Response) {
-        match self {
-            Self::Unauthorized(msg) => {
-                res.status_code(StatusCode::UNAUTHORIZED);
-                res.render(Text::Plain(msg));
-            }
-            Self::NotFound(msg) => {
-                res.status_code(StatusCode::NOT_FOUND);
-                res.render(Text::Plain(msg));
-            }
-            Self::BadRequest(msg) => {
-                res.status_code(StatusCode::BAD_REQUEST);
-                res.render(Text::Plain(msg));
-            }
-            Self::RangeNotSatisfiable(msg) => {
-                res.status_code(StatusCode::RANGE_NOT_SATISFIABLE);
-                res.render(Text::Plain(msg));
-            }
-            Self::InternalError(msg) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Text::Plain(msg));
-            }
-        }
-    }
-}
-
-// ── Endpoints ─────────────────────────────────────────────────────────────────
-
-/// Resolve `file_id` (path param) to the file's on-disk path and detected
-/// content type, requiring the caller to be logged in via the
-/// `beam_session` cookie (see ADR-0003) -- a `<video>` element sends that
-/// cookie automatically, so there is no separate stream-token step anymore.
-async fn authorize_and_locate_file(
-    req: &Request,
-    depot: &Depot,
-    id: &str,
-) -> Result<(PathBuf, String), FileDeliveryError> {
-    let state = obtain_state(depot)
-        .map_err(|_| FileDeliveryError::InternalError("Server state unavailable".into()))?;
-
-    require_auth(req, state).await.map_err(|e| match e {
-        ApiError::Unauthorized(msg) => FileDeliveryError::Unauthorized(msg),
-        ApiError::BadRequest(msg) => FileDeliveryError::BadRequest(msg),
-        ApiError::NotFound(msg) => FileDeliveryError::NotFound(msg),
-        ApiError::Forbidden(msg) => FileDeliveryError::Unauthorized(msg),
-        ApiError::Internal(msg) => FileDeliveryError::InternalError(msg),
-    })?;
-
-    let file = match state.services.library.get_file_by_id(id.to_string()).await {
-        Ok(Some(f)) => f,
-        Ok(None) => {
-            return Err(FileDeliveryError::NotFound("File not found".into()));
-        }
-        Err(_) => {
-            return Err(FileDeliveryError::InternalError(
-                "Failed to look up file".into(),
-            ));
-        }
-    };
-
-    let source_video_path = PathBuf::from(&file.path);
-
-    if !source_video_path.exists() {
-        error!("Source video file not found: {:?}", source_video_path);
-        return Err(FileDeliveryError::NotFound(
+    let path = PathBuf::from(&file.path);
+    if !path.exists() {
+        error!(?path, "source video file not found");
+        return Err(DeliveryError::NotFound(
             "Source video file not found".into(),
         ));
     }
@@ -188,9 +220,59 @@ async fn authorize_and_locate_file(
     let content_type = file
         .mime_type
         .clone()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
 
-    Ok((source_video_path, content_type))
+    Ok((path, content_type))
+}
+
+/// A validator that changes whenever the bytes do.
+///
+/// Modification time and size, which is the shape nginx mints and is strong
+/// enough for `If-Range` to mean something: a re-index that rewrites a file
+/// moves its mtime, and a different file of the same size has a different one.
+/// The previous `"{file_size}"` was neither -- every 4 GiB remux shared it, so
+/// a resumed download could splice bytes from a different file.
+fn validator(modified: SystemTime, length: u64) -> ETag {
+    let stamp = modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    ETag::strong(format!("{stamp:x}-{length:x}"))
+}
+
+/// Builds the delivery both endpoints share.
+async fn deliver(
+    state: &AppState,
+    file_id: &str,
+    conditions: &Conditions,
+    attachment: bool,
+) -> Result<MediaDelivery, DeliveryError> {
+    let (path, content_type) = locate_file(state, file_id).await?;
+    let (source, modified, length) = FileByteSource::open(path.clone()).await?;
+
+    let mut served = Served::<_, AnyMedia>::new(source)
+        .etag(validator(modified, length))
+        .last_modified(modified)
+        .cache_control("public, max-age=3600");
+
+    if attachment {
+        // Kynos owns the RFC 6266 encoding, so the hand-written quote escaping
+        // this replaces is gone along with it.
+        served = served.attachment(download_filename(&path, file_id));
+    }
+
+    let delivery = served.deliver(conditions).await.map_err(|err| {
+        error!(?err, "failed to read source file span");
+        DeliveryError::Internal("Failed to read source file".into())
+    })?;
+
+    Ok(MediaDelivery::new(delivery, content_type))
+}
+
+/// The name a download is saved under.
+fn download_filename(path: &FsPath, file_id: &str) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("{file_id}.bin"))
 }
 
 /// Direct-play stream via HTTP Range. Serves the source file's bytes exactly
@@ -198,685 +280,57 @@ async fn authorize_and_locate_file(
 /// (see ADR-0004); the response `Content-Type` reflects the file's actual
 /// detected MIME type rather than assuming MP4. Rendered inline (no
 /// `Content-Disposition`) so a `<video>` element plays it in place.
-#[endpoint(
-    tags("media"),
-    parameters(("file_id" = String, description = "File ID")),
-)]
+#[kynos::get("/files/{file_id}/stream", tag = Playback, operation_id = "streamFile")]
 #[tracing::instrument(skip_all)]
 pub async fn stream_file(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), FileDeliveryError> {
-    let id: String = req.param::<String>("file_id").unwrap_or_default();
-    let (path, content_type) = authorize_and_locate_file(req, depot, &id).await?;
-    serve_file_range(&path, &content_type, None, req, res).await
+    _auth: SessionAuth,
+    Path(path): Path<FilePath>,
+    conditions: Conditions,
+    Inject(state): Inject<AppState>,
+) -> Result<MediaDelivery, DeliveryError> {
+    deliver(&state, &path.file_id, &conditions, false).await
+}
+
+/// The same fields with no body, for a player sizing the stream before it
+/// starts.
+#[kynos::head("/files/{file_id}/stream", tag = Playback, operation_id = "headStreamFile")]
+#[tracing::instrument(skip_all)]
+pub async fn head_stream_file(
+    _auth: SessionAuth,
+    Path(path): Path<FilePath>,
+    conditions: Conditions,
+    Inject(state): Inject<AppState>,
+) -> Result<MediaDelivery, DeliveryError> {
+    deliver(&state, &path.file_id, &conditions, false).await
 }
 
 /// Download the full source file as an attachment. Same auth and Range
 /// support as [`stream_file`] (so a paused/interrupted download can resume),
 /// but sets `Content-Disposition: attachment` with the original filename so
 /// the browser saves it rather than attempting inline playback.
-#[endpoint(
-    tags("media"),
-    parameters(("file_id" = String, description = "File ID")),
-)]
+#[kynos::get("/files/{file_id}/download", tag = Playback, operation_id = "downloadFile")]
 #[tracing::instrument(skip_all)]
 pub async fn download_file(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), FileDeliveryError> {
-    let id: String = req.param::<String>("file_id").unwrap_or_default();
-    let (path, content_type) = authorize_and_locate_file(req, depot, &id).await?;
-    let filename = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| format!("{id}.bin"));
-    serve_file_range(&path, &content_type, Some(filename), req, res).await
+    _auth: SessionAuth,
+    Path(path): Path<FilePath>,
+    conditions: Conditions,
+    Inject(state): Inject<AppState>,
+) -> Result<MediaDelivery, DeliveryError> {
+    deliver(&state, &path.file_id, &conditions, true).await
 }
 
-/// Serve a file with HTTP range request support, using the given content type.
-/// `attachment_filename` set to `Some(name)` sends
-/// `Content-Disposition: attachment; filename="name"` (download); `None`
-/// leaves the disposition unset, so browsers render/play the response inline.
-async fn serve_file_range(
-    file_path: &PathBuf,
-    content_type: &str,
-    attachment_filename: Option<String>,
-    req: &Request,
-    res: &mut Response,
-) -> Result<(), FileDeliveryError> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-    // Get file metadata
-    let file_metadata = match tokio::fs::metadata(file_path).await {
-        Ok(metadata) => metadata,
-        Err(err) => {
-            error!("Failed to get file metadata: {:?}", err);
-            return Err(FileDeliveryError::InternalError(
-                "Failed to get file metadata".into(),
-            ));
-        }
-    };
-
-    let file_size = file_metadata.len();
-
-    // Handle range requests
-    let range = req.headers().get("range");
-    let (start, end, status_code) = if let Some(range_header) = range {
-        let range_str = match range_header.to_str() {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(FileDeliveryError::BadRequest("Invalid range header".into()));
-            }
-        };
-
-        match parse_byte_range(range_str, file_size) {
-            Ok((start, end)) => (start, end, StatusCode::PARTIAL_CONTENT),
-            Err(RangeError::RangeNotSatisfiable { .. }) => {
-                return Err(FileDeliveryError::RangeNotSatisfiable(
-                    "Range not satisfiable".into(),
-                ));
-            }
-            Err(_) => {
-                return Err(FileDeliveryError::BadRequest(
-                    "Invalid range specification".into(),
-                ));
-            }
-        }
-    } else {
-        (0, file_size - 1, StatusCode::OK)
-    };
-
-    // Open file and seek to start position
-    let mut file = match File::open(file_path).await {
-        Ok(f) => f,
-        Err(err) => {
-            error!("Failed to open file: {:?}", err);
-            return Err(FileDeliveryError::InternalError(
-                "Failed to open file".into(),
-            ));
-        }
-    };
-
-    // Seek to start position if needed
-    if start > 0
-        && let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await
-    {
-        error!("Failed to seek in file: {:?}", err);
-        return Err(FileDeliveryError::InternalError(
-            "Failed to seek in file".into(),
-        ));
-    }
-
-    let content_length = end - start + 1;
-
-    // Build response
-    res.status_code(status_code);
-    res.headers_mut()
-        .insert("Content-Type", content_type.parse().unwrap());
-    res.headers_mut().insert(
-        "Content-Length",
-        content_length.to_string().parse().unwrap(),
-    );
-    res.headers_mut()
-        .insert("Accept-Ranges", "bytes".parse().unwrap());
-
-    if let Some(filename) = &attachment_filename {
-        let escaped = sanitize_disposition_filename(filename);
-        res.headers_mut().insert(
-            "Content-Disposition",
-            format!("attachment; filename=\"{escaped}\"")
-                .parse()
-                .unwrap(),
-        );
-    }
-
-    // Add range headers for partial content
-    if status_code == StatusCode::PARTIAL_CONTENT {
-        res.headers_mut().insert(
-            "Content-Range",
-            format!("bytes {}-{}/{}", start, end, file_size)
-                .parse()
-                .unwrap(),
-        );
-    }
-
-    // Add cache headers for better performance
-    res.headers_mut()
-        .insert("Cache-Control", "public, max-age=3600".parse().unwrap());
-    res.headers_mut()
-        .insert("ETag", format!("\"{}\"", file_size).parse().unwrap()); // Simple ETag based on file size
-
-    // Stream the range lazily in chunks to avoid buffering the entire range in memory.
-    let chunk_size = 128 * 1024usize;
-    let stream = async_stream::stream! {
-        let mut remaining = content_length as usize;
-        while remaining > 0 {
-            let to_read = chunk_size.min(remaining);
-            let mut buf = vec![0u8; to_read];
-            match file.read_exact(&mut buf).await {
-                Ok(_) => {
-                    remaining -= to_read;
-                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(buf));
-                }
-                Err(e) => {
-                    yield Err(e);
-                    break;
-                }
-            }
-        }
-    };
-    res.body(salvo::http::body::ResBody::stream(stream));
-
-    Ok(())
+/// The same fields with no body, for a client sizing the download first.
+#[kynos::head("/files/{file_id}/download", tag = Playback, operation_id = "headDownloadFile")]
+#[tracing::instrument(skip_all)]
+pub async fn head_download_file(
+    _auth: SessionAuth,
+    Path(path): Path<FilePath>,
+    conditions: Conditions,
+    Inject(state): Inject<AppState>,
+) -> Result<MediaDelivery, DeliveryError> {
+    deliver(&state, &path.file_id, &conditions, true).await
 }
 
 #[cfg(test)]
 #[path = "stream_tests.rs"]
 mod stream_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use salvo::test::ResponseExt;
-
-    /// Verify that `serve_file_range` streams a requested range correctly and does not
-    /// regress to a single-buffer approach. A 1 MB file is created and only the first
-    /// 1 024 bytes are requested; the response body must be exactly 1 024 bytes.
-    #[tokio::test]
-    async fn test_serve_file_range_body_length() {
-        use std::io::Write;
-
-        // Write 1 MB of patterned data to a temp file.
-        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
-        let data: Vec<u8> = (0u8..=255).cycle().take(1024 * 1024).collect();
-        tmp.write_all(&data).expect("write tempfile");
-        tmp.flush().expect("flush tempfile");
-
-        let file_path = PathBuf::from(tmp.path());
-
-        // Build a minimal Salvo request with a range header.
-        let mut req = salvo::Request::new();
-        req.headers_mut()
-            .insert("range", "bytes=0-1023".parse().unwrap());
-
-        let mut res = salvo::Response::new();
-        serve_file_range(&file_path, "video/mp4", None, &req, &mut res)
-            .await
-            .expect("serve_file_range should succeed");
-
-        assert_eq!(
-            res.status_code,
-            Some(salvo::http::StatusCode::PARTIAL_CONTENT)
-        );
-
-        let body = res.take_bytes(None).await.expect("collect body");
-        assert_eq!(body.len(), 1024, "response body must be exactly 1024 bytes");
-        assert_eq!(&body[..], &data[..1024], "response body content must match");
-    }
-
-    #[tokio::test]
-    async fn test_serve_file_range_attachment_sets_content_disposition() {
-        use std::io::Write;
-
-        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
-        tmp.write_all(b"hello world").expect("write tempfile");
-        tmp.flush().expect("flush tempfile");
-        let file_path = PathBuf::from(tmp.path());
-
-        let req = salvo::Request::new();
-        let mut res = salvo::Response::new();
-        serve_file_range(
-            &file_path,
-            "video/mp4",
-            Some("My Movie (2024).mkv".to_string()),
-            &req,
-            &mut res,
-        )
-        .await
-        .expect("serve_file_range should succeed");
-
-        assert_eq!(
-            res.headers()
-                .get("Content-Disposition")
-                .and_then(|v| v.to_str().ok()),
-            Some("attachment; filename=\"My Movie (2024).mkv\"")
-        );
-    }
-
-    #[test]
-    fn test_sanitize_disposition_filename_escapes_quotes_and_backslashes() {
-        assert_eq!(
-            sanitize_disposition_filename(r#"weird"name\here.mkv"#),
-            r#"weird\"name\\here.mkv"#
-        );
-    }
-
-    #[test]
-    fn test_sanitize_disposition_filename_strips_control_characters() {
-        assert_eq!(
-            sanitize_disposition_filename("evil\r\nSet-Cookie: pwned=1"),
-            "evilSet-Cookie: pwned=1"
-        );
-    }
-
-    // ── parse_byte_range unit tests ───────────────────────────────────────
-
-    #[test]
-    fn test_basic_range() {
-        assert_eq!(parse_byte_range("bytes=0-499", 1000), Ok((0, 499)));
-    }
-
-    #[test]
-    fn test_range_end_at_last_byte() {
-        assert_eq!(parse_byte_range("bytes=0-999", 1000), Ok((0, 999)));
-    }
-
-    #[test]
-    fn test_open_ended_range() {
-        assert_eq!(parse_byte_range("bytes=1000-", 5000), Ok((1000, 4999)));
-    }
-
-    #[test]
-    fn test_suffix_range() {
-        assert_eq!(parse_byte_range("bytes=-500", 1000), Ok((500, 999)));
-    }
-
-    #[test]
-    fn test_suffix_range_larger_than_file_clamps_to_start() {
-        assert_eq!(parse_byte_range("bytes=-1500", 1000), Ok((0, 999)));
-    }
-
-    #[test]
-    fn test_start_greater_than_end_is_not_satisfiable() {
-        assert_eq!(
-            parse_byte_range("bytes=500-400", 1000),
-            Err(RangeError::RangeNotSatisfiable {
-                start: 500,
-                file_size: 1000
-            })
-        );
-    }
-
-    #[test]
-    fn test_start_beyond_file_size_is_not_satisfiable() {
-        assert_eq!(
-            parse_byte_range("bytes=2000-2500", 1000),
-            Err(RangeError::RangeNotSatisfiable {
-                start: 2000,
-                file_size: 1000
-            })
-        );
-    }
-
-    #[test]
-    fn test_end_beyond_file_size_is_clamped() {
-        assert_eq!(parse_byte_range("bytes=0-2000", 1000), Ok((0, 999)));
-    }
-
-    #[test]
-    fn test_missing_bytes_prefix() {
-        assert_eq!(
-            parse_byte_range("invalid=0-100", 1000),
-            Err(RangeError::MissingBytesPrefix)
-        );
-    }
-
-    #[test]
-    fn test_non_numeric_bounds() {
-        assert_eq!(
-            parse_byte_range("bytes=abc-def", 1000),
-            Err(RangeError::NonNumericBound)
-        );
-    }
-
-    #[test]
-    fn test_no_dash_is_malformed() {
-        assert_eq!(
-            parse_byte_range("bytes=0", 1000),
-            Err(RangeError::MalformedRange)
-        );
-    }
-
-    #[test]
-    fn test_empty_range_spec_is_malformed() {
-        assert_eq!(
-            parse_byte_range("bytes=", 1000),
-            Err(RangeError::MalformedRange)
-        );
-    }
-
-    #[test]
-    fn test_zero_file_size_is_not_satisfiable() {
-        assert_eq!(
-            parse_byte_range("bytes=0-0", 0),
-            Err(RangeError::RangeNotSatisfiable {
-                start: 0,
-                file_size: 0
-            })
-        );
-    }
-
-    // ── stream_file / download_file handler tests ─────────────────────────
-
-    mod handler_tests {
-        use std::path::PathBuf;
-        use std::sync::Arc;
-
-        use beam_auth::utils::oidc_config::OidcRuntimeConfig;
-        use beam_auth::utils::{
-            models::CreateUser,
-            oidc::NotConfiguredOidcClient,
-            pending_auth_store::in_memory::InMemoryPendingAuthStore,
-            repository::{UserRepository, in_memory::InMemoryUserRepository},
-            session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
-        };
-        use salvo::prelude::*;
-        use salvo::test::TestClient;
-
-        use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
-        use crate::services::hash::HashService;
-        use crate::services::library::{LibraryError, LibraryService};
-        use crate::services::metadata::{
-            MediaConnection, MediaFilter, MediaSearchFilters, MediaSortField, MetadataError,
-            MetadataService, PageInfo, SortOrder,
-        };
-        use crate::services::notification::InMemoryNotificationService;
-        use crate::services::playback::{
-            ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackService,
-        };
-        use crate::state::{AppServices, AppState};
-        use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
-
-        // ── Stubs ─────────────────────────────────────────────────────────
-
-        #[derive(Debug)]
-        struct StubHashService;
-
-        #[async_trait::async_trait]
-        impl HashService for StubHashService {
-            fn hash_sync(&self, _: &std::path::Path) -> std::io::Result<u64> {
-                unimplemented!("not called in stream handler tests")
-            }
-            async fn hash_async(&self, _: PathBuf) -> std::io::Result<u64> {
-                unimplemented!("not called in stream handler tests")
-            }
-        }
-
-        #[derive(Debug)]
-        struct StubMetadataService;
-
-        #[async_trait::async_trait]
-        impl MetadataService for StubMetadataService {
-            async fn get_media_metadata(&self, _: &str) -> Option<crate::models::MediaMetadata> {
-                None
-            }
-            async fn search_media(
-                &self,
-                _: Option<u32>,
-                _: Option<String>,
-                _: Option<u32>,
-                _: Option<String>,
-                _: MediaSortField,
-                _: SortOrder,
-                _: MediaSearchFilters,
-            ) -> MediaConnection {
-                MediaConnection {
-                    edges: vec![],
-                    page_info: PageInfo {
-                        has_next_page: false,
-                        has_previous_page: false,
-                        start_cursor: None,
-                        end_cursor: None,
-                    },
-                }
-            }
-            async fn refresh_metadata(&self, _: MediaFilter) -> Result<(), MetadataError> {
-                Ok(())
-            }
-
-            async fn get_media_sources(
-                &self,
-                _media_id: &str,
-            ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
-                unimplemented!("not called in stream route tests")
-            }
-        }
-
-        #[derive(Debug)]
-        struct StubPlaybackService;
-
-        #[async_trait::async_trait]
-        impl PlaybackService for StubPlaybackService {
-            async fn report_progress(
-                &self,
-                _user_id: uuid::Uuid,
-                _file_id: uuid::Uuid,
-                _position_secs: f64,
-                _duration_secs: Option<f64>,
-            ) -> Result<PlaybackProgressDto, PlaybackError> {
-                unimplemented!("not called in stream handler tests")
-            }
-
-            async fn get_continue_watching(
-                &self,
-                _user_id: uuid::Uuid,
-                _limit: u32,
-            ) -> Result<Vec<ContinueWatchingItem>, PlaybackError> {
-                unimplemented!("not called in stream handler tests")
-            }
-
-            async fn get_history(
-                &self,
-                _user_id: uuid::Uuid,
-                _limit: u64,
-                _offset: u64,
-            ) -> Result<(Vec<crate::services::playback::HistoryItem>, u64), PlaybackError>
-            {
-                unimplemented!("not called in stream handler tests")
-            }
-        }
-
-        /// Library stub that always returns `Ok(None)` for file lookups so token
-        /// validation is exercised without touching the filesystem.
-        #[derive(Debug)]
-        struct NotFoundLibraryService;
-
-        #[async_trait::async_trait]
-        impl LibraryService for NotFoundLibraryService {
-            async fn get_libraries(
-                &self,
-                _: String,
-            ) -> Result<Vec<crate::models::Library>, LibraryError> {
-                unimplemented!()
-            }
-            async fn get_library_by_id(
-                &self,
-                _: String,
-            ) -> Result<Option<crate::models::Library>, LibraryError> {
-                unimplemented!()
-            }
-            async fn get_library_files(
-                &self,
-                _: String,
-            ) -> Result<Vec<crate::models::LibraryFile>, LibraryError> {
-                unimplemented!()
-            }
-            async fn create_library(
-                &self,
-                _: String,
-                _: String,
-            ) -> Result<crate::models::Library, LibraryError> {
-                unimplemented!()
-            }
-            async fn scan_library(&self, _: String) -> Result<u32, LibraryError> {
-                unimplemented!()
-            }
-            async fn delete_library(&self, _: String) -> Result<bool, LibraryError> {
-                unimplemented!()
-            }
-            async fn get_file_by_id(
-                &self,
-                _: String,
-            ) -> Result<Option<crate::models::LibraryFile>, LibraryError> {
-                Ok(None)
-            }
-        }
-
-        // ── Test helpers ──────────────────────────────────────────────────
-
-        const TEST_FILE_ID: &str = "test-file-id-123";
-
-        struct TestContext {
-            service: Service,
-            session_store: Arc<InMemorySessionStore>,
-            user_repo: Arc<InMemoryUserRepository>,
-        }
-
-        fn build_test_service() -> TestContext {
-            let session_store = Arc::new(InMemorySessionStore::default());
-            let user_repo = Arc::new(InMemoryUserRepository::default());
-
-            let notification = Arc::new(InMemoryNotificationService::new());
-            let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(
-                Arc::new(InMemoryAdminLogRepository::default()),
-            ));
-
-            let services = AppServices {
-                hash: Arc::new(StubHashService),
-                library: Arc::new(NotFoundLibraryService),
-                metadata: Arc::new(StubMetadataService),
-                notification,
-                admin_log,
-                user_repo: user_repo.clone(),
-                playback: Arc::new(StubPlaybackService),
-                genre_repo: Arc::new(
-                    beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
-                ),
-                library_repo: Arc::new(
-                    beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
-                ),
-                file_repo: Arc::new(
-                    beam_domain::repositories::file::in_memory::InMemoryFileRepository::default(),
-                ),
-                enrichment_repo: Arc::new(
-                    beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
-                ),
-                session_store: session_store.clone(),
-                oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
-                pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
-                oidc_config: OidcRuntimeConfig {
-                    web_url: "http://localhost:5173".to_string(),
-                    cookie_secure: false,
-                    admin_claim: None,
-                    admin_value: None,
-                    session_idle_days: 14,
-                    session_max_days: 60,
-                },
-            };
-
-            let config = crate::config::ServerConfig {
-                video_dir: PathBuf::from("/tmp"),
-                data_dir: PathBuf::from("/tmp"),
-                database_url: "postgres://unused:unused@localhost/unused".to_string(),
-                watch_enabled: false,
-                anilist_enabled: false,
-                cookie_secure: Some(false),
-                ..Default::default()
-            };
-
-            let state = AppState::new(
-                config,
-                services,
-                Arc::new(crate::services::health::InMemoryDependencyProbe::healthy()),
-            );
-            let router = Router::new()
-                .hoop(salvo::affix_state::inject(state))
-                .push(Router::with_path("files/{file_id}/stream").get(super::super::stream_file));
-
-            TestContext {
-                service: Service::new(router),
-                session_store,
-                user_repo,
-            }
-        }
-
-        /// Seeds a user + session directly (bypassing the OIDC login flow,
-        /// which isn't under test here) and returns a `Cookie` header value.
-        async fn seed_session_cookie(ctx: &TestContext) -> String {
-            let user = ctx
-                .user_repo
-                .create(CreateUser {
-                    oidc_issuer: "https://test.example".to_string(),
-                    oidc_subject: "subj-1".to_string(),
-                    email: Some("test@example.com".to_string()),
-                    display_name: "Test User".to_string(),
-                    avatar_url: None,
-                    is_admin: false,
-                })
-                .await
-                .expect("seed user should succeed");
-
-            let token = ctx
-                .session_store
-                .create(
-                    &SessionData {
-                        user_id: user.id.to_string(),
-                        device_hash: "test-device".to_string(),
-                        ip: "127.0.0.1".to_string(),
-                        created_at: chrono::Utc::now().timestamp(),
-                        last_active: chrono::Utc::now().timestamp(),
-                    },
-                    86400,
-                    86400,
-                )
-                .await
-                .expect("seed session should succeed");
-
-            format!("beam_session={token}")
-        }
-
-        fn stream_url(id: &str) -> String {
-            format!("http://localhost/files/{id}/stream")
-        }
-
-        // ── Tests ─────────────────────────────────────────────────────────
-
-        /// No session cookie → 401.
-        #[tokio::test]
-        async fn test_rejects_missing_session_cookie() {
-            let ctx = build_test_service();
-            let response = TestClient::get(stream_url(TEST_FILE_ID))
-                .send(&ctx.service)
-                .await;
-            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
-        }
-
-        /// A garbage cookie value (no matching session) → 401.
-        #[tokio::test]
-        async fn test_rejects_unknown_session_cookie() {
-            let ctx = build_test_service();
-            let response = TestClient::get(stream_url(TEST_FILE_ID))
-                .add_header("Cookie", "beam_session=not-a-real-session", true)
-                .send(&ctx.service)
-                .await;
-            assert_eq!(response.status_code, Some(StatusCode::UNAUTHORIZED));
-        }
-
-        /// A valid session cookie passes auth; the file not found in the
-        /// library returns 404 — confirming the handler advanced past the
-        /// session check (any auth failure would be 401, not 404).
-        #[tokio::test]
-        async fn test_valid_session_cookie_passes_auth() {
-            let ctx = build_test_service();
-            let cookie = seed_session_cookie(&ctx).await;
-            let response = TestClient::get(stream_url(TEST_FILE_ID))
-                .add_header("Cookie", cookie, true)
-                .send(&ctx.service)
-                .await;
-            assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
-        }
-    }
-}

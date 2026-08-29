@@ -6,6 +6,7 @@ pub mod api_error;
 pub mod genres;
 pub mod media;
 pub mod playback;
+pub mod stream;
 pub mod health;
 pub mod tags;
 
@@ -13,6 +14,7 @@ pub use admin::*;
 pub use genres::*;
 pub use media::*;
 pub use playback::*;
+pub use stream::*;
 pub use health::*;
 
 use kynos::prelude::*;
@@ -55,6 +57,12 @@ pub fn rest_routes() -> Router<AppState> {
             admin::list_admin_users,
             admin::update_admin_user,
             admin::get_admin_status,
+        ])
+        .mount(kynos::routes![
+            stream::stream_file,
+            stream::head_stream_file,
+            stream::download_file,
+            stream::head_download_file,
         ])
 }
 
