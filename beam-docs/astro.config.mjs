@@ -2,7 +2,6 @@
 
 import cloudflare from "@astrojs/cloudflare";
 import starlight from "@astrojs/starlight";
-import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "astro/config";
 import { ogImageUrl, site } from "./src/site";
 
@@ -15,12 +14,10 @@ export default defineConfig({
 		imageService: "compile",
 	}),
 	site: "https://beam.justinchung.net",
-	// Tailwind styles only the marketing pages under `src/pages/`, which reach it through
-	// `src/layouts/LandingLayout.astro`. Starlight's pages never import that stylesheet, so its
+	// Tailwind is wired through postcss.config.mjs rather than a Vite plugin -- see the comment
+	// there. It styles only the marketing pages under `src/pages/`, which reach it through
+	// `src/layouts/LandingLayout.astro`; Starlight's pages never import that stylesheet, so its
 	// Preflight reset cannot reach them and no `@astrojs/starlight-tailwind` shim is needed.
-	vite: {
-		plugins: [tailwindcss()],
-	},
 	integrations: [
 		starlight({
 			title: "Beam",
