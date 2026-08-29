@@ -388,6 +388,27 @@ pub struct VideoFileMetadata {
     pub probe_score: i32,
 }
 
+/// FFmpeg's descriptive name for a container, falling back to its short name.
+///
+/// `ffmpeg_next::format::format::Input::description` is unsound: it hands
+/// `AVInputFormat::long_name` straight to `CStr::from_ptr` with no null check.
+/// That field is NULL in any `CONFIG_SMALL` build of FFmpeg -- what
+/// `--enable-small` produces, and what distributions and slim container images
+/// commonly ship -- so calling it segfaults the process on the first file
+/// probed. Not an error, not a panic: a `strlen` on a null pointer.
+///
+/// Read the pointer and check it instead. `name` is a required field and is
+/// always populated, which makes it the right fallback.
+fn format_long_name(format: &ffmpeg::format::format::Input) -> String {
+    let long_name = unsafe { (*format.as_ptr()).long_name };
+    if long_name.is_null() {
+        return format.name().to_string();
+    }
+    unsafe { std::ffi::CStr::from_ptr(long_name) }
+        .to_string_lossy()
+        .into_owned()
+}
+
 impl VideoFileMetadata {
     // TODO: See if this should be async anyways vv
     /// From file path
@@ -658,7 +679,7 @@ impl VideoFileMetadata {
 
         // Get format information
         let format_name = context.format().name().to_string();
-        let format_long_name = context.format().description().to_string();
+        let format_long_name = format_long_name(&context.format());
         let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
         let bit_rate = context.bit_rate();
         let probe_score = context.probe_score();
