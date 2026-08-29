@@ -5,9 +5,7 @@
 //! every response passes through. Both are policy, and both are the kind of
 //! thing that is only noticed when it is wrong in production.
 
-use http::Method;
-use salvo::cors::Cors;
-use salvo::prelude::*;
+use kynos::middleware::cors::Cors;
 
 use crate::config::{CookieSecurityVerdict, ServerConfig};
 
@@ -50,7 +48,7 @@ pub fn check_cookie_security(config: &ServerConfig) -> Result<StartupGate, Strin
     }
 }
 
-/// The CORS handler every response passes through.
+/// The CORS policy every `/v1` response passes through.
 ///
 /// The origin is mirrored rather than allow-listed, and credentials are
 /// allowed -- which on its own would let any site read an authenticated
@@ -58,17 +56,23 @@ pub fn check_cookie_security(config: &ServerConfig) -> Result<StartupGate, Strin
 /// `middleware::enforce_same_origin`, which rejects a cross-origin request
 /// before it reaches a handler. The two are a pair; neither is sufficient
 /// alone.
-pub fn cors_handler() -> impl Handler {
+///
+/// Two things changed with the Kynos migration:
+///
+/// * Mirroring is spelled `allow_origins_matching(|_| true)` rather than
+///   `AllowOrigin::mirror_request()`. Kynos refuses `allow_any_origin()`
+///   alongside `allow_credentials()` while the router is built, because the
+///   CORS protocol forbids `Access-Control-Allow-Origin: *` on a credentialed
+///   response -- a combination Salvo would have emitted for browsers to reject.
+/// * The advertised methods are no longer listed here. Kynos derives them from
+///   the operations declared on the matched path, so preflight and the
+///   description cannot disagree. The hand-written list this replaces was
+///   already wrong: it named GET, POST, PUT, DELETE and OPTIONS but not PATCH,
+///   which `/v1/admin/users/{id}` has used since issue #85.
+pub fn cors_policy() -> Cors {
     Cors::new()
-        .allow_origin(salvo::cors::AllowOrigin::mirror_request())
-        .allow_methods(vec![
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers(vec![
+        .allow_origins_matching(|_| true)
+        .allow_headers([
             "authorization",
             "content-type",
             "accept",
@@ -77,10 +81,10 @@ pub fn cors_handler() -> impl Handler {
             // browser drops the header and every seek re-downloads.
             "range",
         ])
-        .expose_headers(vec!["accept-ranges", "content-length", "content-range"])
-        .allow_credentials(true)
-        .max_age(3600) // Cache the preflight for 1 hour to reduce noise
-        .into_handler()
+        .expose_headers(["accept-ranges", "content-length", "content-range"])
+        .allow_credentials()
+        // Cache the preflight for 1 hour to reduce noise.
+        .max_age(std::time::Duration::from_secs(3600))
 }
 
 #[cfg(test)]

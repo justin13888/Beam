@@ -1,7 +1,7 @@
-use salvo::oapi::ToSchema;
+use kynos::Schema;
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
 pub enum OutputVideoCodec {
     H264,
     H265,
@@ -23,7 +23,7 @@ impl OutputVideoCodec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
 pub enum OutputAudioCodec {
     Aac,
     Opus,
@@ -42,7 +42,7 @@ impl OutputAudioCodec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
 pub enum OutputSubtitleCodec {
     WebVTT,
 }

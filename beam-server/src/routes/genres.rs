@@ -1,35 +1,37 @@
 //! `/v1/genres` -- the distinct genre catalog used to populate the Explore
 //! page's genre filter. Follows the shared `/v1` conventions from
-//! `api_error` (uniform JSON error body, cookie-session auth).
+//! `api_error` (RFC 9457 problem bodies, cookie-session auth).
 
-use salvo::oapi::ToSchema;
-use salvo::prelude::*;
+use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::routes::api_error::{ApiError, obtain_state, require_auth};
+use crate::routes::api_error::{InternalError, SessionAuth};
+use crate::routes::tags::Media;
+use crate::state::AppState;
 
 /// The distinct genre names present in the library, sorted alphabetically.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct GenreListResponse {
     /// Genre display names, sorted alphabetically (case-insensitive).
     pub genres: Vec<String>,
 }
 
 /// List the distinct genres in the library, sorted for stable presentation.
-#[endpoint(tags("media"))]
+///
+/// Taking `SessionAuth` is what puts `BeamSession` in this operation's
+/// `security` and its 401 in `responses`; the previous `require_auth(req,
+/// state)` call did the same work where no describer could see it.
+#[kynos::get("/genres", tag = Media, operation_id = "listGenres")]
 pub async fn list_genres(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<GenreListResponse>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_auth(req, state).await?;
-
+    _auth: SessionAuth,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<GenreListResponse>, InternalError> {
     let mut genres: Vec<String> = state
         .services
         .genre_repo
         .find_all()
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(|e| InternalError::Internal(e.to_string()))?
         .into_iter()
         .map(|genre| genre.name)
         .collect();

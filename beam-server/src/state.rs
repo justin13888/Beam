@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Instant;
 
-use beam_auth::server::OidcRuntimeConfig;
+use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::{
     oidc::{DiscoveredOidcClient, NotConfiguredOidcClient, OidcClient},
     pending_auth_store::{PendingAuthStore, SqlPendingAuthStore},

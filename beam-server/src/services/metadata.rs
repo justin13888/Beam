@@ -1,5 +1,4 @@
-use salvo::oapi::ToSchema;
-use serde::Serialize;
+
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::warn;
@@ -744,49 +743,15 @@ pub enum MetadataError {
     Unsupported(String),
 }
 
+pub use crate::models::search::{
+    MediaConnection, MediaEdge, MediaSortField, MediaTypeFilter, PageInfo, SortOrder,
+};
+
 #[derive(Debug, Clone)]
 pub enum MediaFilter {
     All,
     ByMediaId(String),
     ByLibraryId(String),
-}
-
-/// Sort field options for media search
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaSortField {
-    /// Sort by title (alphabetical)
-    #[default]
-    Title,
-    /// Sort by release year
-    Year,
-    /// Sort by rating
-    Rating,
-    /// Sort by date added to library
-    DateAdded,
-    /// Sort by runtime/duration
-    Runtime,
-}
-
-/// Sort order
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SortOrder {
-    /// Ascending order
-    #[default]
-    Asc,
-    /// Descending order
-    Desc,
-}
-
-/// Media type filter
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaTypeFilter {
-    /// Movies only
-    Movie,
-    /// TV Shows only
-    Show,
 }
 
 /// Search filters for media
@@ -799,37 +764,6 @@ pub struct MediaSearchFilters {
     pub year_to: Option<u32>,
     pub query: Option<String>,
     pub min_rating: Option<u32>,
-}
-
-/// Relay-style connection for media search results
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
-pub struct MediaConnection {
-    /// List of edges containing media items and cursors
-    pub edges: Vec<MediaEdge>,
-    /// Pagination information
-    pub page_info: PageInfo,
-}
-
-/// Relay-style edge for media
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
-pub struct MediaEdge {
-    /// Cursor for this edge
-    pub cursor: String,
-    /// The media item
-    pub node: MediaMetadata,
-}
-
-/// Relay-style page info
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
-pub struct PageInfo {
-    /// Whether there is a next page
-    pub has_next_page: bool,
-    /// Whether there is a previous page
-    pub has_previous_page: bool,
-    /// Cursor of the first edge
-    pub start_cursor: Option<String>,
-    /// Cursor of the last edge
-    pub end_cursor: Option<String>,
 }
 
 #[cfg(test)]

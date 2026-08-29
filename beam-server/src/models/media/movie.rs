@@ -2,10 +2,10 @@ use crate::models::MediaStreamMetadata;
 
 use super::{ExternalIdentifiers, Ratings, Title};
 use chrono::{DateTime, Utc};
-use salvo::oapi::ToSchema;
+use kynos::Schema;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct MovieMetadata {
     /// Stable identifier for this movie (UUID).
     pub id: String,

@@ -7,7 +7,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use beam_auth::server::OidcRuntimeConfig;
+    use beam_auth::utils::oidc_config::OidcRuntimeConfig;
     use beam_auth::utils::{
         models::CreateUser,
         oidc::NotConfiguredOidcClient,

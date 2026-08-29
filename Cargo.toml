@@ -31,6 +31,29 @@ chrono = "0.4.45"
 confique = "0.4.0"
 ffmpeg-next = "8.1"
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
+# Kynos does not re-export the stream trait its `Sse` response is generic over.
+futures-core = "0.3"
+# The HTTP edge (ADR-0010). Kynos derives the OpenAPI 3.2 document from the same
+# types the server runs on, so runtime routing and the description cannot
+# disagree. `openapi32` carries `Sse`, `itemSchema` and the streaming response
+# subtree -- 3.1 has no way to describe a sequential body, so Kynos gates the
+# whole subtree on it rather than describe a stream inaccurately. Confined to
+# `beam-server`: no other crate may depend on this.
+kynos = { version = "0.1.0", features = [
+    "openapi32",
+    "macros",
+    "server",
+    "http1",
+    "http2",
+    "json",
+    "trace",
+    "cookie",
+    "compression",
+    "uuid",
+    "time-chrono",
+    "decimal-rust",
+    "docs",
+] }
 # The `metrics` facade is a no-op unless a recorder is installed
 # (BEAM_ENABLE_METRICS=true), so domain crates can emit counters freely.
 # The Prometheus exporter renders through beam-server's own /metrics route;
@@ -50,13 +73,6 @@ metrics-util = { version = "0.20.4", default-features = false, features = [
 mutants = "0.0.4"
 rand = "0.10.2"
 regex = "1.13.1"
-salvo = { version = "0.89.1", features = [
-    "oapi",
-    "cors",
-    "serve-static",
-    "affix-state",
-    "sse",
-] }
 sea-orm = { version = "1.1", features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",

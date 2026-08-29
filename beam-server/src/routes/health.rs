@@ -1,18 +1,17 @@
-use salvo::http::StatusCode;
-use salvo::oapi::ToSchema;
-use salvo::prelude::*;
-use serde::Serialize;
+use kynos::prelude::*;
+use serde::{Deserialize, Serialize};
 
+use crate::routes::tags::Health;
 use crate::state::AppState;
 
 /// Per-dependency check results reported by [`HealthStatus`].
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, Schema)]
 pub struct HealthChecks {
     /// `"ok"` when the database round-trips, otherwise `"error: <reason>"`.
     pub database: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, Schema)]
 pub struct HealthStatus {
     /// `"healthy"` when every dependency check passed, `"degraded"` otherwise.
     pub status: String,
@@ -24,6 +23,21 @@ pub struct HealthStatus {
     pub uptime_secs: u64,
 }
 
+/// The two answers a health probe can give.
+///
+/// An enum rather than a runtime status code: `Reply` keys its variants by
+/// status, so "degraded" and 503 are the same fact stated once. Both variants
+/// carry the same body because a monitor reading a 503 still wants to know
+/// *which* dependency failed.
+#[derive(Reply)]
+pub enum HealthReply {
+    #[reply(status = 200, description = "All dependencies are healthy")]
+    Healthy(HealthStatus),
+
+    #[reply(status = 503, description = "A dependency is unhealthy")]
+    Degraded(HealthStatus),
+}
+
 /// Health check endpoint.
 ///
 /// Probes the server's external dependencies (currently just the database)
@@ -31,46 +45,34 @@ pub struct HealthStatus {
 /// while any failing dependency yields `503 Service Unavailable` with a
 /// `"degraded"` status so orchestrator health checks and monitors react to a
 /// dependency outage.
-#[endpoint(
-    tags("health"),
-    responses(
-        (status_code = 200, description = "All dependencies are healthy", body = HealthStatus),
-        (status_code = 503, description = "A dependency is unhealthy", body = HealthStatus),
-    )
-)]
+///
+/// Note what is gone relative to the Salvo implementation: there is no
+/// "server state unavailable" arm. `Inject<AppState>` cannot fail, so the
+/// third branch the old handler needed -- a depot miss it reported as
+/// degraded -- is not a state this can reach.
+#[kynos::get("/health", tag = Health, operation_id = "getHealth")]
 #[tracing::instrument(skip_all)]
-pub async fn health_check(depot: &mut Depot, res: &mut Response) {
-    // The live router always injects `AppState`; a miss can only happen in a
-    // stateless context (never served) and is treated as degraded.
-    let (status, database, uptime_secs, code) = match depot.obtain::<AppState>() {
-        Ok(state) => {
-            let uptime_secs = state.uptime_secs();
-            match state.probe.check_database().await {
-                Ok(()) => ("healthy", "ok".to_string(), uptime_secs, StatusCode::OK),
-                Err(e) => (
-                    "degraded",
-                    format!("error: {e}"),
-                    uptime_secs,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                ),
-            }
-        }
-        Err(_) => (
-            "degraded",
-            "error: server state unavailable".to_string(),
-            0,
-            StatusCode::SERVICE_UNAVAILABLE,
-        ),
+pub async fn health_check(Inject(state): Inject<AppState>) -> HealthReply {
+    let uptime_secs = state.uptime_secs();
+
+    let (status, database, healthy) = match state.probe.check_database().await {
+        Ok(()) => ("healthy", "ok".to_owned(), true),
+        Err(e) => ("degraded", format!("error: {e}"), false),
     };
 
-    res.status_code(code);
-    res.render(Json(HealthStatus {
-        status: status.to_string(),
+    let body = HealthStatus {
+        status: status.to_owned(),
         checks: HealthChecks { database },
         timestamp: chrono::Utc::now().to_rfc3339(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
         uptime_secs,
-    }));
+    };
+
+    if healthy {
+        HealthReply::Healthy(body)
+    } else {
+        HealthReply::Degraded(body)
+    }
 }
 
 #[cfg(test)]
