@@ -9,9 +9,17 @@
 use crate::api::Client as GeneratedClient;
 use crate::api::{MiddlewareBackend, ReqwestBackend};
 use crate::capability::{DeviceProfile, MediaSourceView, QualityPolicy, SourceSelection};
+use crate::catalog::{
+    AdminEvent, AdminLogEntry, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
+    ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
+    LibraryFileSummary, LibrarySummary, MediaDetail, MediaPage, ServerHealth, browse_params,
+};
 use crate::clock::{Clock, SystemClock};
 use crate::error::BeamError;
 use crate::ports::kv::KeyValueStore;
+use crate::progress::{
+    ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress, ThrottleDecision,
+};
 use crate::servers::{ServerRecord, normalize_base_url, server_id_for};
 use crate::session::{SessionEvent, SessionState, UserSummary};
 use crate::transport::{SessionCookieHolder, SessionMiddleware};
@@ -65,6 +73,15 @@ struct ServerContext {
     cookie: Arc<SessionCookieHolder>,
     middleware: Arc<SessionMiddleware>,
     state: SessionState,
+    throttle: Arc<ProgressThrottle>,
+    queue: Arc<ProgressQueue>,
+    /// Titles already resolved for this server.
+    ///
+    /// The playback endpoints return bare identifiers, so every
+    /// continue-watching tile would otherwise cost a detail request on every
+    /// refresh. Held behind its own `Arc` so a lookup can be performed without
+    /// keeping the server map locked across an await.
+    metadata: Arc<RwLock<HashMap<String, MediaDetail>>>,
 }
 
 impl std::fmt::Debug for ServerContext {
@@ -431,6 +448,651 @@ impl BeamClient {
     ) -> Option<crate::upnext::UpNextEpisode> {
         next_playable_episode(&seasons, &current_episode_id)
     }
+
+    // -- catalog ----------------------------------------------------------
+
+    /// One page of the catalog, filtered and sorted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::BadRequest`] for a query the server would reject,
+    /// and propagates transport failures.
+    pub async fn browse_media(&self, query: BrowseQuery) -> Result<MediaPage, BeamError> {
+        let (server_id, client, record) = self.active_context()?;
+        let response = client
+            .beam_server_routes_media_browse_media(browse_params(&query)?)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(MediaPage::from_generated(response.into_inner(), &record))
+    }
+
+    /// Everything a detail screen shows for one title.
+    ///
+    /// The result is cached per server, because the continue-watching and
+    /// history screens resolve the same titles repeatedly.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn media_detail(&self, media_id: String) -> Result<MediaDetail, BeamError> {
+        let (server_id, client, record) = self.active_context()?;
+        let cache = self.metadata_cache(&server_id)?;
+        Self::fetch_detail(&client, &record, &cache, &media_id)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error))
+    }
+
+    /// Every genre the catalog contains, for the explore filters.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn genres(&self) -> Result<Vec<String>, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_server_routes_genres_list_genres()
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(response.into_inner().genres)
+    }
+
+    /// The next playable episode of a series after the given one.
+    ///
+    /// Resolves the series itself rather than making the caller assemble the
+    /// season list, so auto-advance is one call from the player.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn up_next_in_show(
+        &self,
+        show_id: String,
+        current_episode_id: String,
+    ) -> Result<Option<EpisodeSummary>, BeamError> {
+        let MediaDetail::Show { seasons, .. } = self.media_detail(show_id).await? else {
+            return Ok(None);
+        };
+        let as_up_next: Vec<UpNextSeason> = seasons
+            .iter()
+            .map(|season| UpNextSeason {
+                season_number: i32::try_from(season.season_number).unwrap_or(i32::MAX),
+                episodes: season
+                    .episodes
+                    .iter()
+                    .map(|episode| crate::upnext::UpNextEpisode {
+                        id: episode.id.clone(),
+                        episode_number: i32::try_from(episode.episode_number).unwrap_or(i32::MAX),
+                        file_id: episode.file_id.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        let Some(next) = next_playable_episode(&as_up_next, &current_episode_id) else {
+            return Ok(None);
+        };
+        Ok(seasons
+            .into_iter()
+            .flat_map(|season| season.episodes)
+            .find(|episode| episode.id == next.id))
+    }
+
+    // -- libraries --------------------------------------------------------
+
+    /// Every library on the server.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn libraries(&self) -> Result<Vec<LibrarySummary>, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_server_routes_admin_list_libraries()
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(response
+            .into_inner()
+            .into_iter()
+            .map(LibrarySummary::from_generated)
+            .collect())
+    }
+
+    /// One library.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn library(&self, library_id: String) -> Result<LibrarySummary, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_server_routes_admin_get_library(library_id)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(LibrarySummary::from_generated(response.into_inner()))
+    }
+
+    /// The files indexed into one library.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn library_files(
+        &self,
+        library_id: String,
+    ) -> Result<Vec<LibraryFileSummary>, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_server_routes_admin_get_library_files(library_id)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(response
+            .into_inner()
+            .into_iter()
+            .map(LibraryFileSummary::from_generated)
+            .collect())
+    }
+
+    // -- playback ---------------------------------------------------------
+
+    /// Partially-watched titles, ready to resume, newest first.
+    ///
+    /// The server returns identifiers only, so the core resolves each title's
+    /// metadata before returning -- concurrently, and against the per-server
+    /// cache, so a home screen costs one round trip per *distinct* unseen
+    /// title rather than one per tile on every refresh.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures. A title whose metadata cannot
+    /// be resolved is still returned, with `media` left `None`.
+    pub async fn continue_watching(
+        &self,
+        limit: Option<u32>,
+    ) -> Result<Vec<ContinueWatchingEntry>, BeamError> {
+        let (server_id, client, record) = self.active_context()?;
+        let params = crate::api::BeamServerRoutesPlaybackGetContinueWatchingParams {
+            limit: limit.map(i64::from),
+        };
+        let response = client
+            .beam_server_routes_playback_get_continue_watching(params)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+
+        let mut entries: Vec<ContinueWatchingEntry> = response
+            .into_inner()
+            .into_iter()
+            .map(ContinueWatchingEntry::from_generated)
+            .collect();
+
+        let cache = self.metadata_cache(&server_id)?;
+        let ids: Vec<String> = entries.iter().map(|entry| entry.media_id.clone()).collect();
+        let resolved = Self::hydrate(&client, &record, &cache, ids).await;
+        for entry in &mut entries {
+            if let Some(detail) = resolved.get(&entry.media_id) {
+                entry.media = Some(detail.summary().clone());
+                entry.episode = entry
+                    .episode_id
+                    .as_deref()
+                    .and_then(|id| find_episode(detail, id));
+            }
+        }
+        Ok(entries)
+    }
+
+    /// One page of watch history, newest first.
+    ///
+    /// Hydrated the same way as [`Self::continue_watching`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn history(
+        &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<HistoryPage, BeamError> {
+        let (server_id, client, record) = self.active_context()?;
+        let params = crate::api::BeamServerRoutesPlaybackGetHistoryParams {
+            limit: limit.map(i64::from),
+            offset: offset.map(i64::from),
+        };
+        let response = client
+            .beam_server_routes_playback_get_history(params)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?
+            .into_inner();
+
+        let total = u64::try_from(response.total).unwrap_or(0);
+        let mut items: Vec<HistoryEntry> = response
+            .items
+            .into_iter()
+            .map(HistoryEntry::from_generated)
+            .collect();
+
+        let cache = self.metadata_cache(&server_id)?;
+        let ids: Vec<String> = items.iter().map(|entry| entry.media_id.clone()).collect();
+        let resolved = Self::hydrate(&client, &record, &cache, ids).await;
+        for entry in &mut items {
+            if let Some(detail) = resolved.get(&entry.media_id) {
+                entry.media = Some(detail.summary().clone());
+                entry.episode = entry
+                    .episode_id
+                    .as_deref()
+                    .and_then(|id| find_episode(detail, id));
+            }
+        }
+        Ok(HistoryPage { items, total })
+    }
+
+    /// Report where the viewer is in a file.
+    ///
+    /// Applies the shared throttle, and persists anything that could not be
+    /// sent so a lost connection does not lose the user's place.
+    ///
+    /// `force` bypasses the interval for pause, seek-end and player release.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] only when the retry queue itself cannot
+    /// be written. A failed *send* is reported as
+    /// [`ProgressOutcome::Queued`], not as an error: the position is safe, and
+    /// a player should not surface a network blip as a playback failure.
+    pub async fn report_progress(
+        &self,
+        file_id: String,
+        position_secs: f64,
+        duration_secs: Option<f64>,
+        force: bool,
+    ) -> Result<ProgressOutcome, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let (throttle, queue) = self.with_context(&server_id, |context| {
+            (Arc::clone(&context.throttle), Arc::clone(&context.queue))
+        })?;
+
+        let (position, duration) =
+            match throttle.decide(&file_id, position_secs, duration_secs, force) {
+                ThrottleDecision::Hold {
+                    next_eligible_in_secs,
+                } => {
+                    return Ok(ProgressOutcome::Throttled {
+                        next_eligible_in_secs,
+                    });
+                }
+                ThrottleDecision::Send {
+                    position_secs,
+                    duration_secs,
+                } => (position_secs, duration_secs),
+            };
+
+        let body = crate::api::types::BeamServerRoutesPlaybackReportProgressRequest {
+            duration_secs: duration,
+            position_secs: position,
+        };
+        match client
+            .beam_server_routes_playback_report_playback_progress(file_id.clone(), &body)
+            .await
+        {
+            Ok(response) => {
+                queue.remove(&file_id).await?;
+                Ok(ProgressOutcome::Sent {
+                    position_secs: response.into_inner().position_secs,
+                })
+            }
+            Err(error) => {
+                // The throttle already recorded this as sent, so the next
+                // sample would be held back behind an interval that never
+                // produced a request. Clearing it lets the retry happen.
+                throttle.reset(&file_id);
+                queue
+                    .enqueue(QueuedProgress {
+                        file_id,
+                        position_secs: position,
+                        duration_secs: duration,
+                        captured_at_unix: self.clock.now_unix(),
+                        attempts: 0,
+                        not_before_unix: self.clock.now_unix(),
+                    })
+                    .await?;
+                let _ = self.map_error(&server_id, &error.to_string());
+                let pending = queue.len().await?;
+                Ok(ProgressOutcome::Queued {
+                    pending: u32::try_from(pending).unwrap_or(u32::MAX),
+                })
+            }
+        }
+    }
+
+    /// Send every queued position that is due.
+    ///
+    /// Called on reconnect and at app start. Returns how many were accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the queue cannot be read or written.
+    pub async fn flush_progress(&self) -> Result<u32, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let queue = self.with_context(&server_id, |context| Arc::clone(&context.queue))?;
+
+        let mut sent = 0_u32;
+        for entry in queue.ready().await? {
+            let body = crate::api::types::BeamServerRoutesPlaybackReportProgressRequest {
+                duration_secs: entry.duration_secs,
+                position_secs: entry.position_secs,
+            };
+            match client
+                .beam_server_routes_playback_report_playback_progress(entry.file_id.clone(), &body)
+                .await
+            {
+                Ok(_) => {
+                    queue.remove(&entry.file_id).await?;
+                    sent = sent.saturating_add(1);
+                }
+                Err(error) => {
+                    queue.record_failure(&entry.file_id, None).await?;
+                    // A queue drain stops at the first failure rather than
+                    // hammering an unreachable server with the whole backlog.
+                    let _ = self.map_error(&server_id, &error.to_string());
+                    break;
+                }
+            }
+        }
+        Ok(sent)
+    }
+
+    /// How many positions are waiting to be sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the queue cannot be read.
+    pub async fn pending_progress_count(&self) -> Result<u32, BeamError> {
+        let server_id = self.require_active()?;
+        let queue = self.with_context(&server_id, |context| Arc::clone(&context.queue))?;
+        Ok(u32::try_from(queue.len().await?).unwrap_or(u32::MAX))
+    }
+
+    // -- sessions ---------------------------------------------------------
+
+    /// Every device signed in as this user.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn sessions(&self) -> Result<Vec<DeviceSession>, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_auth_server_oidc_routes_oidc_list_sessions()
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(response
+            .into_inner()
+            .into_iter()
+            .map(DeviceSession::from_generated)
+            .collect())
+    }
+
+    /// Revoke one signed-in device.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn revoke_session(&self, session_id: String) -> Result<(), BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        client
+            .beam_auth_server_oidc_routes_oidc_delete_session(session_id)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(())
+    }
+
+    /// End every session for this user, on every device.
+    ///
+    /// Unlike [`Self::logout`], a failure here *is* an error: the user asked
+    /// to be signed out elsewhere, and reporting success without having done
+    /// it would be a security-relevant lie.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures.
+    pub async fn logout_everywhere(&self) -> Result<(), BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        client
+            .beam_auth_server_oidc_routes_oidc_logout_all()
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+
+        self.with_context(&server_id, |context| context.cookie.clear())?;
+        self.storage
+            .remove_secret(format!("session/{server_id}"))
+            .await?;
+        self.apply(&server_id, SessionEvent::LogoutRequested)?;
+        Ok(())
+    }
+
+    // -- administration ---------------------------------------------------
+
+    /// The admin dashboard snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn admin_status(&self) -> Result<AdminStatus, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_server_routes_admin_get_admin_status()
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(AdminStatus::from_generated(response.into_inner()))
+    }
+
+    /// One page of user accounts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn admin_users(
+        &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<AdminUserPage, BeamError> {
+        let (server_id, client, record) = self.active_context()?;
+        let params = crate::api::BeamServerRoutesAdminListAdminUsersParams {
+            limit: limit.map(i64::from),
+            offset: offset.map(i64::from),
+        };
+        let response = client
+            .beam_server_routes_admin_list_admin_users(params)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?
+            .into_inner();
+        Ok(AdminUserPage {
+            total: u64::try_from(response.total).unwrap_or(0),
+            items: response
+                .items
+                .into_iter()
+                .map(|user| AdminUser::from_generated(user, &record))
+                .collect(),
+        })
+    }
+
+    /// Block or unblock an account.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn set_user_disabled(
+        &self,
+        user_id: String,
+        disabled: bool,
+    ) -> Result<(), BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let body = crate::api::types::BeamServerModelsAdminUpdateAdminUserRequest { disabled };
+        client
+            .beam_server_routes_admin_update_admin_user(user_id, &body)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(())
+    }
+
+    /// One page of the operational log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn admin_logs(
+        &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<Vec<AdminLogEntry>, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let params = crate::api::BeamServerRoutesAdminGetAdminLogsParams {
+            limit: limit.map(i64::from),
+            offset: offset.map(i64::from),
+        };
+        let response = client
+            .beam_server_routes_admin_get_admin_logs(params)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(response
+            .into_inner()
+            .into_iter()
+            .map(AdminLogEntry::from_generated)
+            .collect())
+    }
+
+    /// How many log lines the server holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn admin_log_count(&self) -> Result<u64, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_server_routes_admin_get_admin_log_count()
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(u64::try_from(response.into_inner().count).unwrap_or(0))
+    }
+
+    /// Recent server events, newest first.
+    ///
+    /// This polls `GET /v1/admin/events` rather than subscribing to
+    /// `/v1/admin/events/stream`. The streaming endpoint declares a `200` with
+    /// no content at all -- salvo's macro cannot see the runtime `sse::stream()`
+    /// call -- and a typed event stream needs OpenAPI 3.2's `itemSchema`, which
+    /// salvo does not emit. Hand-writing that one client is not an option, so
+    /// the feed polls until the contract can describe it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn admin_events(&self, limit: Option<u32>) -> Result<Vec<AdminEvent>, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let params = crate::api::BeamServerRoutesAdminGetAdminEventsParams {
+            limit: limit.map(i64::from),
+        };
+        let response = client
+            .beam_server_routes_admin_get_admin_events(params)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(response
+            .into_inner()
+            .into_iter()
+            .map(AdminEvent::from_generated)
+            .collect())
+    }
+
+    /// Create a library from a path on the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn create_library(
+        &self,
+        name: String,
+        root_path: String,
+    ) -> Result<LibrarySummary, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let body = crate::api::types::BeamServerModelsAdminCreateLibraryRequest { name, root_path };
+        let response = client
+            .beam_server_routes_admin_create_library(&body)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(LibrarySummary::from_generated(response.into_inner()))
+    }
+
+    /// Delete a library and everything indexed into it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn delete_library(&self, library_id: String) -> Result<(), BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        client
+            .beam_server_routes_admin_delete_library(library_id)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(())
+    }
+
+    /// Rescan a library, returning how many files were added.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn scan_library(&self, library_id: String) -> Result<u32, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_server_routes_admin_scan_library(library_id)
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(u32::try_from(response.into_inner().added).unwrap_or(0))
+    }
+
+    /// Re-fetch metadata for one title.
+    ///
+    /// Evicts the core's cached copy, so the next read reflects the refresh
+    /// rather than serving what the screen was already showing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    pub async fn refresh_media_metadata(&self, media_id: String) -> Result<(), BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        client
+            .beam_server_routes_admin_refresh_media_metadata(media_id.clone())
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        if let Ok(cache) = self.metadata_cache(&server_id) {
+            cache.write().expect("metadata lock").remove(&media_id);
+        }
+        Ok(())
+    }
+
+    /// The server's own health report.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport failures.
+    pub async fn health(&self) -> Result<ServerHealth, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = client
+            .beam_server_routes_health_health_check()
+            .await
+            .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
+        Ok(ServerHealth::from_generated(response.into_inner()))
+    }
+}
+
+/// The episode with this id, wherever it sits in a series.
+fn find_episode(detail: &MediaDetail, episode_id: &str) -> Option<EpisodeSummary> {
+    let MediaDetail::Show { seasons, .. } = detail else {
+        return None;
+    };
+    seasons
+        .iter()
+        .flat_map(|season| &season.episodes)
+        .find(|episode| episode.id == episode_id)
+        .cloned()
 }
 
 impl BeamClient {
@@ -465,6 +1127,11 @@ impl BeamClient {
             SessionState::LoggedOut
         };
 
+        let queue = Arc::new(ProgressQueue::new(
+            Arc::clone(&self.storage),
+            Arc::clone(&self.clock),
+            &record.id,
+        ));
         self.servers.write().expect("servers lock").insert(
             record.id.clone(),
             ServerContext {
@@ -473,6 +1140,9 @@ impl BeamClient {
                 cookie: holder,
                 middleware,
                 state,
+                throttle: Arc::new(ProgressThrottle::new(Arc::clone(&self.clock))),
+                queue,
+                metadata: Arc::new(RwLock::new(HashMap::new())),
             },
         );
         Ok(())
@@ -510,6 +1180,85 @@ impl BeamClient {
 
     fn record_for(&self, server_id: &str) -> Result<ServerRecord, BeamError> {
         self.with_context(server_id, |context| context.record.clone())
+    }
+
+    /// The active server's id, client and record together.
+    ///
+    /// Every catalog call needs all three, and taking them in one shot keeps
+    /// the servers lock held for a single statement rather than three.
+    fn active_context(&self) -> Result<(String, GeneratedClient, ServerRecord), BeamError> {
+        let server_id = self.require_active()?;
+        let (client, record) = self.with_context(&server_id, |context| {
+            (context.client.clone(), context.record.clone())
+        })?;
+        Ok((server_id, client, record))
+    }
+
+    /// The metadata cache belonging to one server.
+    fn metadata_cache(
+        &self,
+        server_id: &str,
+    ) -> Result<Arc<RwLock<HashMap<String, MediaDetail>>>, BeamError> {
+        self.with_context(server_id, |context| Arc::clone(&context.metadata))
+    }
+
+    /// One title, from the cache when it is there and from the server when it
+    /// is not.
+    async fn fetch_detail(
+        client: &GeneratedClient,
+        record: &ServerRecord,
+        cache: &Arc<RwLock<HashMap<String, MediaDetail>>>,
+        media_id: &str,
+    ) -> Result<MediaDetail, String> {
+        if let Some(hit) = cache.read().expect("metadata lock").get(media_id) {
+            return Ok(hit.clone());
+        }
+        let response = client
+            .beam_server_routes_media_get_media_detail(media_id.to_owned())
+            .await
+            .map_err(|error| error.to_string())?;
+        let detail = MediaDetail::from_generated(response.into_inner(), record);
+        cache
+            .write()
+            .expect("metadata lock")
+            .insert(media_id.to_owned(), detail.clone());
+        Ok(detail)
+    }
+
+    /// Resolve many titles at once, de-duplicated.
+    ///
+    /// Failures are dropped rather than propagated: a continue-watching row
+    /// whose artwork could not be fetched is still a valid place to resume
+    /// from, and failing the whole screen over one of them would be worse than
+    /// showing it plainly.
+    async fn hydrate(
+        client: &GeneratedClient,
+        record: &ServerRecord,
+        cache: &Arc<RwLock<HashMap<String, MediaDetail>>>,
+        media_ids: Vec<String>,
+    ) -> HashMap<String, MediaDetail> {
+        let mut wanted: Vec<String> = media_ids;
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for media_id in wanted {
+            let client = client.clone();
+            let record = record.clone();
+            let cache = Arc::clone(cache);
+            tasks.spawn(async move {
+                let detail = Self::fetch_detail(&client, &record, &cache, &media_id).await;
+                (media_id, detail)
+            });
+        }
+
+        let mut resolved = HashMap::new();
+        while let Some(joined) = tasks.join_next().await {
+            if let Ok((media_id, Ok(detail))) = joined {
+                resolved.insert(media_id, detail);
+            }
+        }
+        resolved
     }
 
     fn require_active(&self) -> Result<String, BeamError> {

@@ -24,6 +24,11 @@ time = { version = "0.3.55", features = ["formatting", "parsing", "serde"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# Only the `rt` feature: the core needs `JoinSet` to fan out the metadata
+# lookups the playback endpoints force (they return bare identifiers), and
+# nothing else. `full` would put a multi-threaded scheduler, process and signal
+# handling into an Android `.so` that already runs on the platform's runtime.
+tokio = { version = "1.49.0", default-features = false, features = ["rt"] }
 uniffi = { version = "0.32", features = ["tokio"] }
 url = "2.5"
 

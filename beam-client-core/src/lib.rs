@@ -41,6 +41,7 @@ pub mod api {
 }
 
 pub mod capability;
+pub mod catalog;
 pub mod clock;
 pub mod error;
 pub mod ffi;
@@ -56,6 +57,12 @@ pub mod upnext;
 pub use capability::{
     AudioCodec, DecoderCapability, DeviceProfile, MediaSourceView, Playability, QualityPolicy,
     RejectedSource, RejectionReason, SourceSelection, VideoCodec, select_source,
+};
+pub use catalog::{
+    AdminEvent, AdminLogEntry, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
+    ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
+    LibraryFileSummary, LibrarySummary, MediaDetail, MediaKind, MediaPage, MediaSortField,
+    MediaSummary, MediaTypeFilter, SeasonSummary, ServerHealth, SortOrder,
 };
 pub use clock::{Clock, SystemClock};
 pub use error::{BeamError, StorageError};
