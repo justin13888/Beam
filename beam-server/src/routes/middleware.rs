@@ -120,3 +120,165 @@ mod tests {
         assert_ne!(evil, "http://localhost:5173");
     }
 }
+
+/// Subcutaneous tests for the enforcement itself.
+///
+/// The tests above cover `extract_origin` in isolation; these drive the hoop
+/// with a real `AppState` in the depot, which is the only way to reach the
+/// allow-list and the decision built on it. This is a CSRF control: when it
+/// stops working, nothing observable changes until someone exploits it.
+#[cfg(test)]
+mod enforcement_tests {
+    use salvo::prelude::*;
+    use salvo::test::TestClient;
+
+    use crate::routes::test_support::make_app_state_with;
+
+    #[handler]
+    async fn ok_handler() -> &'static str {
+        "ok"
+    }
+
+    /// A service whose only route is state-changing, behind the hoop.
+    fn service(extra_allowed_origins: Option<&str>) -> Service {
+        let extra = extra_allowed_origins.map(str::to_string);
+        let state = make_app_state_with(
+            move |config| crate::config::ServerConfig {
+                web_url: "http://localhost:5173".to_string(),
+                server_url: "http://localhost:8000".to_string(),
+                extra_allowed_origins: extra,
+                ..config
+            },
+            std::sync::Arc::new(beam_domain::services::RealClock),
+        );
+        Service::new(
+            Router::new()
+                .hoop(affix_state::inject(state))
+                .hoop(super::enforce_same_origin)
+                .push(Router::with_path("thing").post(ok_handler)),
+        )
+    }
+
+    async fn post_with_origin(service: &Service, header: &'static str, value: &str) -> StatusCode {
+        TestClient::post("http://localhost/thing")
+            .add_header(header, value.to_string(), true)
+            .send(service)
+            .await
+            .status_code
+            .unwrap_or(StatusCode::OK)
+    }
+
+    #[tokio::test]
+    async fn the_configured_web_and_server_origins_are_both_accepted() {
+        let service = service(None);
+        for origin in ["http://localhost:5173", "http://localhost:8000"] {
+            assert_eq!(
+                post_with_origin(&service, "Origin", origin).await,
+                StatusCode::OK,
+                "{origin} is one of this deployment's own origins"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_origin_is_rejected() {
+        assert_eq!(
+            post_with_origin(&service(None), "Origin", "https://evil.example").await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lookalike_host_is_rejected() {
+        // The comparison is exact equality on the extracted origin; a prefix
+        // or substring check would let this through.
+        for lookalike in [
+            "http://localhost:5173.evil.example",
+            "http://evil.example/?x=http://localhost:5173",
+            "https://localhost:5173",
+            "http://localhost:51730",
+        ] {
+            assert_eq!(
+                post_with_origin(&service(None), "Origin", lookalike).await,
+                StatusCode::FORBIDDEN,
+                "{lookalike} must not pass for an allowed origin"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn extra_allowed_origins_are_honoured_and_normalised() {
+        // Operators write these by hand, so trailing slashes and spaces are
+        // expected; an unlisted origin must still be refused.
+        let service = service(Some(" https://beam.example.com/ , https://other.example "));
+        assert_eq!(
+            post_with_origin(&service, "Origin", "https://beam.example.com").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_with_origin(&service, "Origin", "https://other.example").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_with_origin(&service, "Origin", "https://third.example").await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn referer_is_used_when_there_is_no_origin_header() {
+        let service = service(None);
+        assert_eq!(
+            post_with_origin(&service, "Referer", "http://localhost:5173/library/x?y=1").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_with_origin(&service, "Referer", "https://evil.example/x").await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_header_is_rejected_rather_than_ignored() {
+        assert_eq!(
+            post_with_origin(&service(None), "Origin", "not-a-url").await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_with_no_origin_or_referer_is_allowed() {
+        // Documented in the module header: non-browser clients send neither
+        // and never carry the cookie; SameSite=Lax is what stops the browser
+        // case. Pinned so the decision cannot change silently.
+        let status = TestClient::post("http://localhost/thing")
+            .send(&service(None))
+            .await
+            .status_code
+            .unwrap_or(StatusCode::OK);
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn safe_methods_are_never_checked() {
+        // GET/HEAD/OPTIONS/TRACE change no state, and blocking them would
+        // break cross-origin reads the CORS layer is there to allow.
+        let service = Service::new(
+            Router::new()
+                .hoop(affix_state::inject(make_app_state_with(
+                    |config| config,
+                    std::sync::Arc::new(beam_domain::services::RealClock),
+                )))
+                .hoop(super::enforce_same_origin)
+                .push(Router::with_path("thing").get(ok_handler)),
+        );
+
+        let status = TestClient::get("http://localhost/thing")
+            .add_header("Origin", "https://evil.example", true)
+            .send(&service)
+            .await
+            .status_code
+            .unwrap_or(StatusCode::OK);
+        assert_eq!(status, StatusCode::OK);
+    }
+}

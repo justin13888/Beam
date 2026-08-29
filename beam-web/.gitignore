@@ -14,5 +14,9 @@ coverage/
 
 # Generated type artifacts — regenerate locally with:
 #   cd beam-web && bun run codegen:openapi:full
-openapi.json
+#
+# `openapi.json` is deliberately NOT ignored: it is the contract between the
+# server and every client, and while it was ignored a breaking API change was
+# invisible in review. It is committed, and `mise run codegen:openapi:check`
+# fails when the regenerated spec differs, so drift shows up as a diff.
 src/api.gen.ts

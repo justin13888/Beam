@@ -140,3 +140,42 @@ pub async fn get_history(
 #[cfg(test)]
 #[path = "playback_tests.rs"]
 mod playback_tests;
+
+#[cfg(test)]
+mod parse_user_id_tests {
+    use super::*;
+
+    #[test]
+    fn a_well_formed_session_user_id_parses_to_itself() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+        assert_eq!(parse_user_id(&id.to_string()).unwrap(), id);
+    }
+
+    #[test]
+    fn a_malformed_user_id_is_an_error_not_the_nil_uuid() {
+        // Every playback row is keyed by this value. Defaulting to the nil
+        // UUID on a parse failure would pool every affected user's history
+        // and progress into one shared, unowned account.
+        for malformed in [
+            "",
+            "not-a-uuid",
+            "1234",
+            "00000000-0000-0000-0000-00000000000",
+        ] {
+            let error = parse_user_id(malformed)
+                .expect_err("a malformed session user id must not resolve to an account");
+            assert!(
+                matches!(error, ApiError::Internal(_)),
+                "for {malformed:?}: a broken session is a server-side problem, not the caller's"
+            );
+        }
+    }
+
+    #[test]
+    fn the_nil_uuid_is_only_produced_when_it_was_actually_asked_for() {
+        assert_eq!(
+            parse_user_id(&Uuid::nil().to_string()).unwrap(),
+            Uuid::nil()
+        );
+    }
+}

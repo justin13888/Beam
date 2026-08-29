@@ -19,6 +19,7 @@ pub trait AdminLogRepository: Send + Sync + std::fmt::Debug {
     async fn count(&self) -> Result<u64, DbErr>;
 }
 
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;

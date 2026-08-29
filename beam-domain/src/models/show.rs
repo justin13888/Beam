@@ -124,3 +124,40 @@ impl From<beam_entity::episode::Model> for Episode {
         }
     }
 }
+
+#[cfg(all(test, feature = "entity"))]
+mod entity_conversion_tests {
+    use super::*;
+
+    fn episode_model(runtime_mins: Option<i32>) -> beam_entity::episode::Model {
+        let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+        beam_entity::episode::Model {
+            id: Uuid::new_v4(),
+            season_id: Uuid::new_v4(),
+            episode_number: 2,
+            title: "Half Loop".to_string(),
+            description: None,
+            air_date: None,
+            runtime_mins,
+            thumbnail_url: None,
+            created_at: now,
+        }
+    }
+
+    #[test]
+    fn an_episode_runtime_in_minutes_becomes_a_duration_in_seconds() {
+        assert_eq!(
+            Episode::from(episode_model(Some(47))).runtime,
+            Some(Duration::from_secs(47 * 60))
+        );
+        assert_eq!(
+            Episode::from(episode_model(Some(1))).runtime,
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn an_unknown_episode_runtime_stays_unknown() {
+        assert_eq!(Episode::from(episode_model(None)).runtime, None);
+    }
+}

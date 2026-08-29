@@ -388,6 +388,27 @@ pub struct VideoFileMetadata {
     pub probe_score: i32,
 }
 
+/// FFmpeg's descriptive name for a container, falling back to its short name.
+///
+/// `ffmpeg_next::format::format::Input::description` is unsound: it hands
+/// `AVInputFormat::long_name` straight to `CStr::from_ptr` with no null check.
+/// That field is NULL in any `CONFIG_SMALL` build of FFmpeg -- what
+/// `--enable-small` produces, and what distributions and slim container images
+/// commonly ship -- so calling it segfaults the process on the first file
+/// probed. Not an error, not a panic: a `strlen` on a null pointer.
+///
+/// Read the pointer and check it instead. `name` is a required field and is
+/// always populated, which makes it the right fallback.
+fn format_long_name(format: &ffmpeg::format::format::Input) -> String {
+    let long_name = unsafe { (*format.as_ptr()).long_name };
+    if long_name.is_null() {
+        return format.name().to_string();
+    }
+    unsafe { std::ffi::CStr::from_ptr(long_name) }
+        .to_string_lossy()
+        .into_owned()
+}
+
 impl VideoFileMetadata {
     // TODO: See if this should be async anyways vv
     /// From file path
@@ -658,7 +679,7 @@ impl VideoFileMetadata {
 
         // Get format information
         let format_name = context.format().name().to_string();
-        let format_long_name = context.format().description().to_string();
+        let format_long_name = format_long_name(&context.format());
         let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
         let bit_rate = context.bit_rate();
         let probe_score = context.probe_score();
@@ -693,4 +714,382 @@ pub enum MetadataError {
     InvalidMetadata(String),
     #[error("Unknown error: {0}")]
     UnknownError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::probe::color::{
+        ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
+    };
+    use crate::probe::format::Disposition;
+
+    /// Matroska carries duration, bitrate, and frame counts as *tags* rather
+    /// than in the stream header, so for a large share of a real library the
+    /// header values are zero and these fallbacks are the only thing standing
+    /// between the UI and a file that claims to be 0 seconds long. That is
+    /// what the tests below are about.
+    fn tags(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn video_metadata(bit_rate: u64) -> VideoMetadata {
+        VideoMetadata {
+            bit_rate,
+            max_rate: 0,
+            delay: 0,
+            width: 1920,
+            height: 1080,
+            format: PixelFormat::YUV420P,
+            has_b_frames: false,
+            aspect_ratio: Rational::new(1, 1),
+            color_space: ColorSpace::BT709,
+            color_range: ColorRange::MPEG,
+            color_primaries: ColorPrimaries::BT709,
+            color_transfer_characteristic: ColorTransferCharacteristic::BT709,
+            chroma_location: ChromaLocation::Left,
+            references: 0,
+            intra_dc_precision: 0,
+            codec_name: "h264".to_string(),
+            profile: "High".to_string(),
+            level: "4.0".to_string(),
+        }
+    }
+
+    fn audio_metadata(bit_rate: u64, frames: usize, channels: u16) -> AudioMetadata {
+        AudioMetadata {
+            bit_rate,
+            max_rate: 0,
+            delay: 0,
+            rate: 48_000,
+            channels,
+            format: SampleFormat::F32(crate::probe::format::SampleType::Planar),
+            frames,
+            align: 0,
+            channel_layout: ChannelLayout {
+                channels,
+                description: None,
+            },
+            codec_name: "aac".to_string(),
+            profile: "LC".to_string(),
+            title: String::new(),
+            language: String::new(),
+        }
+    }
+
+    fn video_stream(
+        duration: i64,
+        frames: i64,
+        metadata: HashMap<String, String>,
+    ) -> VideoStreamMetadata {
+        VideoStreamMetadata {
+            index: 0,
+            time_base: Rational::new(1, 1000),
+            start_time: 0,
+            duration,
+            frames,
+            rate: Some(Rational::new(24_000, 1001)),
+            disposition: Disposition::default(),
+            discard: Discard::Default,
+            codec_id: CodecId::H264,
+            video: video_metadata(0),
+            metadata,
+        }
+    }
+
+    fn subtitle_stream(duration: i64, metadata: HashMap<String, String>) -> SubtitleStreamMetadata {
+        SubtitleStreamMetadata {
+            index: 2,
+            time_base: Rational::new(1, 1000),
+            start_time: 0,
+            duration,
+            disposition: Disposition::default(),
+            discard: Discard::Default,
+            codec_id: CodecId::SUBRIP,
+            metadata,
+        }
+    }
+
+    mod rationals {
+        use super::*;
+
+        #[test]
+        fn a_valid_rational_is_converted_and_reduced() {
+            // Time bases and frame rates arrive as raw numerator/denominator
+            // pairs; every duration in the probe is computed from them.
+            assert_eq!(
+                into_rational(ffmpeg::Rational(1, 1000)),
+                Ok(Ratio::new(1, 1000))
+            );
+            assert_eq!(
+                into_rational(ffmpeg::Rational(24_000, 1001)),
+                Ok(Ratio::new(24_000, 1001))
+            );
+            // `Ratio::new` reduces, so 2/4 and 1/2 are the same rational.
+            assert_eq!(into_rational(ffmpeg::Rational(2, 4)), Ok(Ratio::new(1, 2)));
+        }
+
+        #[test]
+        fn a_zero_denominator_is_reported_rather_than_dividing_by_zero() {
+            // A corrupt or still-probing stream can report 1/0. `Ratio::new`
+            // panics on a zero denominator, and a silent `0/1` default would
+            // make every duration computed from it zero.
+            assert_eq!(into_rational(ffmpeg::Rational(1, 0)), Err((1, 0)));
+            assert_eq!(into_rational(ffmpeg::Rational(0, 0)), Err((0, 0)));
+        }
+
+        #[test]
+        fn a_zero_numerator_is_a_valid_rational() {
+            assert_eq!(
+                into_rational(ffmpeg::Rational(0, 1000)),
+                Ok(Ratio::new(0, 1000))
+            );
+        }
+    }
+
+    mod duration_strings {
+        use super::*;
+
+        #[test]
+        fn a_matroska_duration_tag_is_parsed_to_seconds() {
+            assert_eq!(
+                parse_duration_string("00:45:23.000000000"),
+                Some(45.0 * 60.0 + 23.0)
+            );
+            assert_eq!(parse_duration_string("01:00:00.5"), Some(3600.5));
+            assert_eq!(parse_duration_string("00:00:00.000000000"), Some(0.0));
+        }
+
+        #[test]
+        fn hours_are_not_capped_at_a_day() {
+            // A concatenated recording can legitimately exceed 24 hours.
+            assert_eq!(parse_duration_string("30:00:00.0"), Some(30.0 * 3600.0));
+        }
+
+        #[test]
+        fn anything_that_is_not_three_colon_separated_numbers_is_rejected() {
+            for bad in [
+                "",
+                "45:23",
+                "00:45:23:00",
+                "abc",
+                "00:xx:23.0",
+                "00:45:xx",
+                "::",
+            ] {
+                assert_eq!(parse_duration_string(bad), None, "for {bad:?}");
+            }
+        }
+    }
+
+    mod bit_rate_fallback {
+        use super::*;
+
+        #[test]
+        fn the_header_bitrate_wins_when_it_is_present() {
+            let stream_tags = tags(&[("BPS", "999")]);
+            assert_eq!(video_metadata(5_000).actual_bit_rate(&stream_tags), 5_000.0);
+            assert_eq!(
+                audio_metadata(320_000, 0, 2).actual_bit_rate(&stream_tags),
+                320_000.0
+            );
+        }
+
+        #[test]
+        fn a_zero_header_bitrate_falls_back_to_the_bps_tag() {
+            let stream_tags = tags(&[("BPS", "8000000")]);
+            assert_eq!(video_metadata(0).actual_bit_rate(&stream_tags), 8_000_000.0);
+            assert_eq!(
+                audio_metadata(0, 0, 2).actual_bit_rate(&stream_tags),
+                8_000_000.0
+            );
+        }
+
+        #[test]
+        fn a_malformed_bps_tag_yields_zero_rather_than_a_panic() {
+            let stream_tags = tags(&[("BPS", "not-a-number")]);
+            assert_eq!(video_metadata(0).actual_bit_rate(&stream_tags), 0.0);
+            assert_eq!(audio_metadata(0, 0, 2).actual_bit_rate(&stream_tags), 0.0);
+        }
+
+        #[test]
+        fn no_bitrate_anywhere_is_zero() {
+            let none = HashMap::new();
+            assert_eq!(video_metadata(0).actual_bit_rate(&none), 0.0);
+            assert_eq!(audio_metadata(0, 0, 2).actual_bit_rate(&none), 0.0);
+        }
+    }
+
+    mod frame_count_fallback {
+        use super::*;
+
+        #[test]
+        fn the_header_frame_count_wins_when_it_is_present() {
+            assert_eq!(
+                video_stream(0, 1234, tags(&[("NUMBER_OF_FRAMES", "9")])).actual_frames(),
+                1234
+            );
+            assert_eq!(
+                audio_metadata(0, 1234, 2).actual_frames(&tags(&[("NUMBER_OF_FRAMES", "9")])),
+                1234
+            );
+        }
+
+        #[test]
+        fn a_zero_frame_count_falls_back_to_the_tag() {
+            assert_eq!(
+                video_stream(0, 0, tags(&[("NUMBER_OF_FRAMES", "43200")])).actual_frames(),
+                43_200
+            );
+            assert_eq!(
+                audio_metadata(0, 0, 2).actual_frames(&tags(&[("NUMBER_OF_FRAMES", "43200")])),
+                43_200
+            );
+        }
+
+        #[test]
+        fn a_malformed_or_missing_tag_yields_zero() {
+            assert_eq!(
+                video_stream(0, 0, tags(&[("NUMBER_OF_FRAMES", "lots")])).actual_frames(),
+                0
+            );
+            assert_eq!(video_stream(0, 0, HashMap::new()).actual_frames(), 0);
+            assert_eq!(audio_metadata(0, 0, 2).actual_frames(&HashMap::new()), 0);
+        }
+    }
+
+    mod duration_fallback {
+        use super::*;
+
+        const FILE_DURATION: f64 = 7200.0;
+
+        #[test]
+        fn the_stream_duration_wins_when_it_is_present() {
+            // 60_000 ticks at 1/1000 = 60 seconds.
+            let stream = video_stream(60_000, 0, tags(&[("DURATION", "01:00:00.0")]));
+            assert_eq!(stream.duration_seconds(), 60.0);
+            assert_eq!(stream.actual_duration_seconds(FILE_DURATION), 60.0);
+        }
+
+        #[test]
+        fn a_zero_stream_duration_falls_back_to_the_duration_tag() {
+            let stream = video_stream(0, 0, tags(&[("DURATION", "00:02:30.0")]));
+            assert_eq!(stream.actual_duration_seconds(FILE_DURATION), 150.0);
+
+            let subtitles = subtitle_stream(0, tags(&[("DURATION", "00:02:30.0")]));
+            assert_eq!(subtitles.actual_duration_seconds(FILE_DURATION), 150.0);
+        }
+
+        #[test]
+        fn an_unparseable_duration_tag_falls_through_to_the_file_duration() {
+            // Better a plausible container-level duration than a zero-length
+            // track the player refuses to seek in.
+            let stream = video_stream(0, 0, tags(&[("DURATION", "garbage")]));
+            assert_eq!(stream.actual_duration_seconds(FILE_DURATION), FILE_DURATION);
+
+            let subtitles = subtitle_stream(0, tags(&[("DURATION", "garbage")]));
+            assert_eq!(
+                subtitles.actual_duration_seconds(FILE_DURATION),
+                FILE_DURATION
+            );
+        }
+
+        #[test]
+        fn no_duration_anywhere_falls_through_to_the_file_duration() {
+            assert_eq!(
+                video_stream(0, 0, HashMap::new()).actual_duration_seconds(FILE_DURATION),
+                FILE_DURATION
+            );
+            assert_eq!(
+                subtitle_stream(0, HashMap::new()).actual_duration_seconds(FILE_DURATION),
+                FILE_DURATION
+            );
+        }
+    }
+
+    mod derived_descriptions {
+        use super::*;
+
+        #[test]
+        fn channel_counts_map_to_the_layout_names_users_recognise() {
+            assert_eq!(audio_metadata(0, 0, 1).channel_layout_description(), "Mono");
+            assert_eq!(
+                audio_metadata(0, 0, 2).channel_layout_description(),
+                "Stereo"
+            );
+            assert_eq!(audio_metadata(0, 0, 6).channel_layout_description(), "5.1");
+            assert_eq!(audio_metadata(0, 0, 8).channel_layout_description(), "7.1");
+            // Anything else is described generically rather than guessed at.
+            for channels in [0, 3, 4, 5, 7, 16] {
+                assert_eq!(
+                    audio_metadata(0, 0, channels).channel_layout_description(),
+                    "Multi-channel",
+                    "for {channels} channels"
+                );
+            }
+        }
+
+        #[test]
+        fn a_streams_unique_id_distinguishes_codec_and_resolution() {
+            let hd = video_stream(0, 0, HashMap::new());
+            assert_eq!(hd.unique_id(), "h264-1920x1080");
+
+            let mut sd = video_stream(0, 0, HashMap::new());
+            sd.video.width = 640;
+            sd.video.height = 480;
+            assert_ne!(hd.unique_id(), sd.unique_id());
+
+            let mut other_codec = video_stream(0, 0, HashMap::new());
+            other_codec.video.codec_name = "hevc".to_string();
+            assert_ne!(hd.unique_id(), other_codec.unique_id());
+        }
+
+        #[test]
+        fn frame_rate_is_the_streams_rational_rate() {
+            // 24000/1001 is NTSC film: a rational the probe must not round to
+            // 24, or A/V sync drifts a frame every ~17 minutes.
+            let stream = video_stream(0, 0, HashMap::new());
+            let rate = stream.frame_rate().expect("a rate was probed");
+            assert!((rate - 23.976_023_976).abs() < 1e-6, "got {rate}");
+        }
+
+        #[test]
+        fn a_stream_without_a_rate_reports_none_rather_than_zero() {
+            let mut stream = video_stream(0, 0, HashMap::new());
+            stream.rate = None;
+            assert_eq!(stream.frame_rate(), None);
+        }
+
+        #[test]
+        fn video_bit_depth_and_resolution_come_from_the_probed_format() {
+            let video = video_metadata(0);
+            assert_eq!(video.resolution(), Resolution::new(1920, 1080));
+            assert_eq!(video.bit_depth(), PixelFormat::YUV420P.bit_depth());
+        }
+    }
+
+    mod subtitle_tags {
+        use super::*;
+
+        #[test]
+        fn title_and_language_are_read_from_the_stream_tags() {
+            let subtitles = subtitle_stream(
+                1000,
+                tags(&[("title", "Forced (Alien)"), ("language", "eng")]),
+            );
+            assert_eq!(subtitles.title().as_deref(), Some("Forced (Alien)"));
+            assert_eq!(subtitles.language().as_deref(), Some("eng"));
+        }
+
+        #[test]
+        fn an_untagged_subtitle_track_reports_none_rather_than_an_empty_string() {
+            // A `Some("")` would render as a blank entry in the track picker.
+            let subtitles = subtitle_stream(1000, HashMap::new());
+            assert_eq!(subtitles.title(), None);
+            assert_eq!(subtitles.language(), None);
+        }
+    }
 }

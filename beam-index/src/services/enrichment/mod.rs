@@ -20,7 +20,7 @@ use beam_domain::repositories::{
 };
 
 use crate::services::admin_log::AdminLogService;
-use crate::services::clock::Clock;
+use beam_domain::services::Clock;
 
 /// Tunables for the enrichment sweep. All fields are independent of any
 /// concrete provider so they can be exercised with
@@ -504,7 +504,6 @@ impl MetadataEnrichmentService {
 mod tests {
     use super::*;
     use crate::services::admin_log::LocalAdminLogService;
-    use crate::services::clock::TestClock;
     use beam_domain::models::{CreateMovie, CreateShow};
     use beam_domain::providers::enrichment::test_utils::InMemoryEnrichmentProvider;
     use beam_domain::providers::enrichment::{
@@ -515,6 +514,7 @@ mod tests {
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
     use beam_domain::repositories::{MovieRepository, ShowRepository};
+    use beam_domain::services::TestClock;
 
     type Harness = (
         MetadataEnrichmentService,

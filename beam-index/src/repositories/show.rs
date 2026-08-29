@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
@@ -9,11 +11,11 @@ use beam_domain::repositories::ShowRepository;
 /// SQL-based implementation of the ShowRepository trait.
 #[derive(Debug, Clone)]
 pub struct SqlShowRepository {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 }
 
 impl SqlShowRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -24,7 +26,7 @@ impl ShowRepository for SqlShowRepository {
         use beam_entity::show;
         use sea_orm::EntityTrait;
 
-        let model = show::Entity::find_by_id(id).one(&self.db).await?;
+        let model = show::Entity::find_by_id(id).one(self.db.as_ref()).await?;
         Ok(model.map(Show::from))
     }
 
@@ -34,7 +36,7 @@ impl ShowRepository for SqlShowRepository {
 
         let model = show::Entity::find()
             .filter(show::Column::Title.eq(title))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?;
 
         Ok(model.map(Show::from))
@@ -44,7 +46,7 @@ impl ShowRepository for SqlShowRepository {
         use beam_entity::show;
         use sea_orm::EntityTrait;
 
-        let models = show::Entity::find().all(&self.db).await?;
+        let models = show::Entity::find().all(self.db.as_ref()).await?;
         Ok(models.into_iter().map(Show::from).collect())
     }
 
@@ -88,7 +90,9 @@ impl ShowRepository for SqlShowRepository {
 
         let sql = format!("SELECT * FROM shows {where_clause} {order_by}");
         let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
-        let models = show::Model::find_by_statement(stmt).all(&self.db).await?;
+        let models = show::Model::find_by_statement(stmt)
+            .all(self.db.as_ref())
+            .await?;
         Ok(models.into_iter().map(Show::from).collect())
     }
 
@@ -107,7 +111,7 @@ impl ShowRepository for SqlShowRepository {
             ..Default::default()
         };
 
-        let result = new_show.insert(&self.db).await?;
+        let result = new_show.insert(self.db.as_ref()).await?;
         Ok(Show::from(result))
     }
 
@@ -123,7 +127,7 @@ impl ShowRepository for SqlShowRepository {
         let exists = library_show::Entity::find()
             .filter(library_show::Column::LibraryId.eq(library_id))
             .filter(library_show::Column::ShowId.eq(show_id))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
             .is_some();
 
@@ -132,7 +136,7 @@ impl ShowRepository for SqlShowRepository {
                 library_id: Set(library_id),
                 show_id: Set(show_id),
             };
-            new_assoc.insert(&self.db).await?;
+            new_assoc.insert(self.db.as_ref()).await?;
         }
 
         Ok(())
@@ -150,7 +154,7 @@ impl ShowRepository for SqlShowRepository {
         let existing = season::Entity::find()
             .filter(season::Column::ShowId.eq(show_id))
             .filter(season::Column::SeasonNumber.eq(season_number as i32))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?;
 
         if let Some(model) = existing {
@@ -165,7 +169,7 @@ impl ShowRepository for SqlShowRepository {
             ..Default::default()
         };
 
-        let result = new_season.insert(&self.db).await?;
+        let result = new_season.insert(self.db.as_ref()).await?;
         Ok(Season::from(result))
     }
 
@@ -176,7 +180,7 @@ impl ShowRepository for SqlShowRepository {
         let models = season::Entity::find()
             .filter(season::Column::ShowId.eq(show_id))
             .order_by(season::Column::SeasonNumber, Order::Asc)
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(Season::from).collect())
@@ -189,7 +193,7 @@ impl ShowRepository for SqlShowRepository {
         let models = episode::Entity::find()
             .filter(episode::Column::SeasonId.eq(season_id))
             .order_by(episode::Column::EpisodeNumber, Order::Asc)
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(Episode::from).collect())
@@ -211,7 +215,7 @@ impl ShowRepository for SqlShowRepository {
             ..Default::default()
         };
 
-        let result = new_episode.insert(&self.db).await?;
+        let result = new_episode.insert(self.db.as_ref()).await?;
         Ok(Episode::from(result))
     }
 
@@ -220,7 +224,7 @@ impl ShowRepository for SqlShowRepository {
         use sea_orm::EntityTrait;
 
         let model = episode::Entity::find_by_id(episode_id)
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?;
         Ok(model.map(Episode::from))
     }
@@ -229,7 +233,9 @@ impl ShowRepository for SqlShowRepository {
         use beam_entity::season;
         use sea_orm::EntityTrait;
 
-        let model = season::Entity::find_by_id(season_id).one(&self.db).await?;
+        let model = season::Entity::find_by_id(season_id)
+            .one(self.db.as_ref())
+            .await?;
         Ok(model.map(Season::from))
     }
 
@@ -241,7 +247,10 @@ impl ShowRepository for SqlShowRepository {
         use beam_entity::show;
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-        let Some(model) = show::Entity::find_by_id(show_id).one(&self.db).await? else {
+        let Some(model) = show::Entity::find_by_id(show_id)
+            .one(self.db.as_ref())
+            .await?
+        else {
             return Ok(());
         };
 
@@ -256,7 +265,7 @@ impl ShowRepository for SqlShowRepository {
         active.imdb_id = Set(enrichment.imdb_id.clone());
         active.anilist_id = Set(enrichment.anilist_id.map(|id| id as i32));
         active.updated_at = Set(chrono::Utc::now().into());
-        active.update(&self.db).await?;
+        active.update(self.db.as_ref()).await?;
         Ok(())
     }
 
@@ -271,7 +280,7 @@ impl ShowRepository for SqlShowRepository {
         let Some(season_model) = season::Entity::find()
             .filter(season::Column::ShowId.eq(show_id))
             .filter(season::Column::SeasonNumber.eq(enrichment.season_number as i32))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
         else {
             return Ok(0);
@@ -281,14 +290,14 @@ impl ShowRepository for SqlShowRepository {
         let mut active_season: season::ActiveModel = season_model.into();
         active_season.poster_url = Set(enrichment.poster_url.clone());
         active_season.first_aired = Set(enrichment.air_date);
-        active_season.update(&self.db).await?;
+        active_season.update(self.db.as_ref()).await?;
 
         let mut updated = 0u32;
         for ep_enrichment in &enrichment.episodes {
             let Some(ep_model) = episode::Entity::find()
                 .filter(episode::Column::SeasonId.eq(season_id))
                 .filter(episode::Column::EpisodeNumber.eq(ep_enrichment.episode_number as i32))
-                .one(&self.db)
+                .one(self.db.as_ref())
                 .await?
             else {
                 continue;
@@ -310,7 +319,7 @@ impl ShowRepository for SqlShowRepository {
             if ep_enrichment.thumbnail_url.is_some() {
                 active_ep.thumbnail_url = Set(ep_enrichment.thumbnail_url.clone());
             }
-            active_ep.update(&self.db).await?;
+            active_ep.update(self.db.as_ref()).await?;
             updated += 1;
         }
 

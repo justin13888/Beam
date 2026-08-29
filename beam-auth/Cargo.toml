@@ -9,6 +9,7 @@ publish.workspace = true
 default = ["server"]
 utils = [
     "dep:async-trait",
+    "dep:beam-domain",
     "dep:base64",
     "dep:beam-entity",
     "dep:chrono",
@@ -34,16 +35,29 @@ server = [
     "oidc",
     "dep:salvo",
 ]
-test-utils = ["utils"]
+test-utils = ["utils", "beam-domain/test-utils"]
+# The feature set cargo-mutants builds this package with.
+#
+# cargo-mutants builds each package on its own, so it needs one *unqualified*
+# feature name that is valid everywhere -- and the set it selects has to compile
+# every `cfg`-gated production path, or mutants in code that was never built are
+# reported MISSED for a reason that has nothing to do with the tests.
+mutation-testing = ["server", "test-utils"]
+# Opt-in tier: runs the shared repository contracts against a real Postgres.
+# Never enabled by `rust:test`, `rust:coverage`, `mise run ci`, or the pre-push
+# hook -- see NFR-201 and ADR-0011.
+pg-integration = ["beam-test-support/pg-integration"]
 
 [dependencies]
 # Non-optional: always compiled (needed by server/oidc_routes.rs and #[tokio::test]s)
 http = { workspace = true }
+mutants = { workspace = true }
 tokio = { workspace = true }
 
 # Optional: feature-gated
 async-trait = { workspace = true, optional = true }
 base64 = { version = "0.22.1", optional = true }
+beam-domain = { path = "../beam-domain", optional = true }
 beam-entity = { path = "../beam-entity", optional = true }
 chrono = { workspace = true, features = ["serde"], optional = true }
 openidconnect = { version = "4.0.1", optional = true }
@@ -60,3 +74,18 @@ sha2 = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 tracing = { workspace = true, features = ["log"], optional = true }
 uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `test-utils` here (not only under this crate's own feature) so the domain
+# doubles are available to `#[cfg(test)]` modules: a dependency is not compiled
+# with `cfg(test)`.
+beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
+beam-test-support = { path = "../beam-test-support" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+# `mock` for the hermetic SQL-shape tests. Enabling it removes `Clone` from
+# `DatabaseConnection` for the whole build graph, which is why every store here
+# holds an `Arc<DatabaseConnection>`.
+beam-entity = { path = "../beam-entity" }
+sea-orm = { workspace = true, features = ["mock"] }
+uuid = { workspace = true }

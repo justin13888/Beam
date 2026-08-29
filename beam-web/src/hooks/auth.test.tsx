@@ -1,38 +1,31 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as factory from "@/test/factories";
+import { meUnauthenticatedHandler } from "@/test/handlers";
+import { recordRequests } from "@/test/requests";
+import { server } from "@/test/server";
 import { AuthProvider, useAuth } from "./auth";
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
-	mockGet: vi.fn(),
-	mockPost: vi.fn(),
-}));
-
-vi.mock("@/lib/apiClient", () => ({
-	apiClient: {
-		GET: mockGet,
-		POST: mockPost,
-	},
-}));
-
-const mockUser = {
-	id: "user-1",
-	email: "test@example.com",
-	is_admin: false,
-	display_name: "Test User",
-	avatar_url: null,
-};
+const mockUser = factory.user();
 
 function wrapper({ children }: { children: ReactNode }) {
 	return <AuthProvider>{children}</AuthProvider>;
 }
 
-describe("useAuth", () => {
-	beforeEach(() => {
-		mockGet.mockReset();
-		mockPost.mockReset();
+/** Replace `window.location` with a recording stand-in. jsdom's own
+ * `assign` is a no-op, and the assertion here is on the URL the hook builds. */
+function captureNavigation(pathname = "/", search = "") {
+	const assign = vi.fn();
+	Object.defineProperty(window, "location", {
+		configurable: true,
+		value: { ...window.location, pathname, search, assign },
 	});
+	return assign;
+}
 
+describe("useAuth", () => {
 	it("throws when used outside AuthProvider", () => {
 		expect(() => renderHook(() => useAuth())).toThrow(
 			"useAuth must be used within an AuthProvider",
@@ -40,7 +33,8 @@ describe("useAuth", () => {
 	});
 
 	it("starts loading, then resolves to unauthenticated when GET /v1/me is unauthorized", async () => {
-		mockGet.mockResolvedValue({ data: undefined, response: { ok: false } });
+		const requests = recordRequests();
+		server.use(meUnauthenticatedHandler);
 
 		const { result } = renderHook(() => useAuth(), { wrapper });
 		expect(result.current.isLoading).toBe(true);
@@ -49,12 +43,10 @@ describe("useAuth", () => {
 		await waitFor(() => expect(result.current.isLoading).toBe(false));
 		expect(result.current.user).toBeNull();
 		expect(result.current.isAuthenticated).toBe(false);
-		expect(mockGet).toHaveBeenCalledWith("/v1/me", { credentials: "include" });
+		expect(requests.matching("GET", "/v1/me")).toHaveLength(1);
 	});
 
 	it("resolves the user from GET /v1/me when a valid session cookie exists", async () => {
-		mockGet.mockResolvedValue({ data: mockUser, response: { ok: true } });
-
 		const { result } = renderHook(() => useAuth(), { wrapper });
 		await waitFor(() => expect(result.current.isLoading).toBe(false));
 
@@ -63,9 +55,7 @@ describe("useAuth", () => {
 	});
 
 	it("logout() calls POST /v1/logout and clears the user", async () => {
-		mockGet.mockResolvedValue({ data: mockUser, response: { ok: true } });
-		mockPost.mockResolvedValue({ data: undefined, response: { ok: true } });
-
+		const requests = recordRequests();
 		const { result } = renderHook(() => useAuth(), { wrapper });
 		await waitFor(() => expect(result.current.isLoading).toBe(false));
 		expect(result.current.isAuthenticated).toBe(true);
@@ -74,22 +64,31 @@ describe("useAuth", () => {
 			await result.current.logout();
 		});
 
-		expect(mockPost).toHaveBeenCalledWith("/v1/logout", {
-			credentials: "include",
-		});
+		expect(requests.matching("POST", "/v1/logout")).toHaveLength(1);
 		expect(result.current.user).toBeNull();
 		expect(result.current.isAuthenticated).toBe(false);
 	});
 
-	it("login() redirects the browser to the server's OIDC login endpoint with a redirect param", async () => {
-		mockGet.mockResolvedValue({ data: undefined, response: { ok: false } });
-		const assignSpy = vi.fn();
-		vi.stubGlobal("location", {
-			...window.location,
-			pathname: "/libraries",
-			search: "",
-			assign: assignSpy,
+	it("clears the user even when the logout request fails", async () => {
+		// The cookie may already be gone server-side. Leaving a stale user in
+		// memory would keep the UI showing a session the server has forgotten.
+		server.use(
+			meUnauthenticatedHandler,
+			http.post("http://localhost:8000/v1/logout", () => HttpResponse.error()),
+		);
+		const { result } = renderHook(() => useAuth(), { wrapper });
+		await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+		await act(async () => {
+			await result.current.logout();
 		});
+
+		expect(result.current.user).toBeNull();
+	});
+
+	it("login() redirects the browser to the server's OIDC login endpoint with a redirect param", async () => {
+		server.use(meUnauthenticatedHandler);
+		const assign = captureNavigation("/libraries", "");
 
 		const { result } = renderHook(() => useAuth(), { wrapper });
 		await waitFor(() => expect(result.current.isLoading).toBe(false));
@@ -98,17 +97,14 @@ describe("useAuth", () => {
 			result.current.login();
 		});
 
-		expect(assignSpy).toHaveBeenCalledWith(
+		expect(assign).toHaveBeenCalledWith(
 			"http://localhost:8000/v1/auth/login?redirect=%2Flibraries",
 		);
-
-		vi.unstubAllGlobals();
 	});
 
 	it("login(redirectTo) uses the explicit redirect target over the current location", async () => {
-		mockGet.mockResolvedValue({ data: undefined, response: { ok: false } });
-		const assignSpy = vi.fn();
-		vi.stubGlobal("location", { ...window.location, assign: assignSpy });
+		server.use(meUnauthenticatedHandler);
+		const assign = captureNavigation("/libraries", "");
 
 		const { result } = renderHook(() => useAuth(), { wrapper });
 		await waitFor(() => expect(result.current.isLoading).toBe(false));
@@ -117,10 +113,8 @@ describe("useAuth", () => {
 			result.current.login("/media/abc");
 		});
 
-		expect(assignSpy).toHaveBeenCalledWith(
+		expect(assign).toHaveBeenCalledWith(
 			"http://localhost:8000/v1/auth/login?redirect=%2Fmedia%2Fabc",
 		);
-
-		vi.unstubAllGlobals();
 	});
 });

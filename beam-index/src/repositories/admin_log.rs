@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::*;
 use uuid::Uuid;
@@ -7,11 +9,11 @@ use beam_domain::repositories::AdminLogRepository;
 
 #[derive(Debug)]
 pub struct SqlAdminLogRepository {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 }
 
 impl SqlAdminLogRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -32,7 +34,7 @@ impl AdminLogRepository for SqlAdminLogRepository {
         };
 
         let result = admin_log::Entity::insert(model)
-            .exec_with_returning(&self.db)
+            .exec_with_returning(self.db.as_ref())
             .await?;
 
         Ok(AdminLog::from(result))
@@ -46,7 +48,7 @@ impl AdminLogRepository for SqlAdminLogRepository {
             .order_by_desc(admin_log::Column::CreatedAt)
             .limit(limit)
             .offset(offset)
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(AdminLog::from).collect())
@@ -67,7 +69,7 @@ impl AdminLogRepository for SqlAdminLogRepository {
             .order_by_desc(admin_log::Column::CreatedAt)
             .limit(limit)
             .offset(offset)
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(AdminLog::from).collect())
@@ -77,6 +79,6 @@ impl AdminLogRepository for SqlAdminLogRepository {
         use beam_entity::admin_log;
         use sea_orm::EntityTrait;
 
-        admin_log::Entity::find().count(&self.db).await
+        admin_log::Entity::find().count(self.db.as_ref()).await
     }
 }

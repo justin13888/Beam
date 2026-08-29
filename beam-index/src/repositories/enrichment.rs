@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
@@ -11,11 +13,11 @@ use beam_domain::repositories::EnrichmentStateRepository;
 /// SQL-based implementation of the EnrichmentStateRepository trait.
 #[derive(Debug, Clone)]
 pub struct SqlEnrichmentStateRepository {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 }
 
 impl SqlEnrichmentStateRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -35,7 +37,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
                 query.filter(metadata_enrichment::Column::ShowId.eq(id))
             }
         };
-        if query.one(&self.db).await?.is_some() {
+        if query.one(self.db.as_ref()).await?.is_some() {
             return Ok(());
         }
 
@@ -59,7 +61,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
         };
-        row.insert(&self.db).await?;
+        row.insert(self.db.as_ref()).await?;
         Ok(())
     }
 
@@ -107,7 +109,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             )
             .order_by(metadata_enrichment::Column::NextAttemptAt, Order::Asc)
             .limit(limit as u64)
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(EnrichmentState::from).collect())
@@ -124,7 +126,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
         if let Some(model) = metadata_enrichment::Entity::find_by_id(id)
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
         {
             let mut active: metadata_enrichment::ActiveModel = model.into();
@@ -136,7 +138,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             active.force_refresh = Set(false);
             active.last_error = Set(None);
             active.updated_at = Set(now.into());
-            active.update(&self.db).await?;
+            active.update(self.db.as_ref()).await?;
         }
         Ok(())
     }
@@ -151,7 +153,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
         if let Some(model) = metadata_enrichment::Entity::find_by_id(id)
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
         {
             let mut active: metadata_enrichment::ActiveModel = model.into();
@@ -160,7 +162,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             active.next_attempt_at = Set(None);
             active.enriched_at = Set(None);
             active.updated_at = Set(now.into());
-            active.update(&self.db).await?;
+            active.update(self.db.as_ref()).await?;
         }
         Ok(())
     }
@@ -176,7 +178,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
         if let Some(model) = metadata_enrichment::Entity::find_by_id(id)
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
         {
             let mut active: metadata_enrichment::ActiveModel = model.into();
@@ -185,7 +187,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             active.next_attempt_at = Set(Some(next_attempt_at.into()));
             active.last_error = Set(Some(error.to_string()));
             active.updated_at = Set(Utc::now().into());
-            active.update(&self.db).await?;
+            active.update(self.db.as_ref()).await?;
         }
         Ok(())
     }
@@ -195,7 +197,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
         if let Some(model) = metadata_enrichment::Entity::find_by_id(id)
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
         {
             let mut active: metadata_enrichment::ActiveModel = model.into();
@@ -203,7 +205,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             active.last_error = Set(Some(error.to_string()));
             active.next_attempt_at = Set(None);
             active.updated_at = Set(now.into());
-            active.update(&self.db).await?;
+            active.update(self.db.as_ref()).await?;
         }
         Ok(())
     }
@@ -225,7 +227,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
                 query.filter(metadata_enrichment::Column::ShowId.eq(id))
             }
         };
-        let Some(model) = query.one(&self.db).await? else {
+        let Some(model) = query.one(self.db.as_ref()).await? else {
             return Ok(false);
         };
 
@@ -238,7 +240,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         if rematch {
             active.matched_ref = Set(None);
         }
-        active.update(&self.db).await?;
+        active.update(self.db.as_ref()).await?;
         Ok(true)
     }
 
@@ -246,7 +248,9 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         use beam_entity::metadata_enrichment;
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-        let models = metadata_enrichment::Entity::find().all(&self.db).await?;
+        let models = metadata_enrichment::Entity::find()
+            .all(self.db.as_ref())
+            .await?;
         let count = models.len() as u64;
         for model in models {
             let mut active: metadata_enrichment::ActiveModel = model.into();
@@ -258,7 +262,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             if rematch {
                 active.matched_ref = Set(None);
             }
-            active.update(&self.db).await?;
+            active.update(self.db.as_ref()).await?;
         }
         Ok(count)
     }
@@ -273,7 +277,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         let count_for = |status: metadata_enrichment::EnrichmentStatus| {
             metadata_enrichment::Entity::find()
                 .filter(metadata_enrichment::Column::Status.eq(status))
-                .count(&self.db)
+                .count(self.db.as_ref())
         };
 
         Ok(EnrichmentStatusCounts {

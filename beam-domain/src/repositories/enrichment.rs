@@ -68,6 +68,7 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
     async fn count_by_status(&self) -> Result<EnrichmentStatusCounts, DbErr>;
 }
 
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;

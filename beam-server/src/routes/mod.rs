@@ -169,3 +169,7 @@ pub fn create_docs_router() -> Router {
     // OpenAPI spec unchanged.
     Router::new().push(Router::with_path("v1").push(rest_routes(None)))
 }
+
+#[cfg(test)]
+#[path = "contract_tests.rs"]
+mod contract_tests;

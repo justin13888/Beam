@@ -1,44 +1,14 @@
-//! Subcutaneous, zero-dependency tests for the token-bucket rate limiter.
-//!
-//! Each test hoops a [`RateLimiter`] onto a trivial handler and drives it with
-//! `salvo::test::TestClient`, advancing an injected [`TestClock`] instead of
-//! sleeping. No Postgres, Redis, or wall-clock waits.
-
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use confique::Config as _;
 use salvo::http::header::RETRY_AFTER;
 use salvo::prelude::*;
 use salvo::test::{ResponseExt, TestClient};
 
-use super::{Clock, RateLimiter};
+use super::RateLimiter;
 use crate::routes::api_error::ApiErrorBody;
-
-/// Manually-advanced monotonic clock. `now` only moves via [`TestClock::advance`].
-#[derive(Debug)]
-struct TestClock {
-    now: Mutex<Instant>,
-}
-
-impl TestClock {
-    fn new() -> Self {
-        Self {
-            now: Mutex::new(Instant::now()),
-        }
-    }
-
-    fn advance(&self, delta: Duration) {
-        let mut now = self.now.lock().unwrap();
-        *now += delta;
-    }
-}
-
-impl Clock for TestClock {
-    fn now(&self) -> Instant {
-        *self.now.lock().unwrap()
-    }
-}
+use beam_domain::services::TestClock;
 
 #[handler]
 async fn ok_handler() -> &'static str {
@@ -144,6 +114,76 @@ async fn blocked_client_recovers_after_clock_advances() {
         get(&service, None).await.status_code,
         Some(StatusCode::OK),
         "a full token should have refilled after 60s"
+    );
+}
+
+#[tokio::test]
+async fn a_partial_wait_refills_proportionally_rather_than_wholesale() {
+    // The refill is `elapsed * refill_per_sec`. The existing recovery test
+    // waits a full window, where the result is clamped to capacity either way
+    // -- so it cannot tell that multiplication from an addition. Waiting for
+    // *part* of a window is what distinguishes them: 30s at 10/minute is
+    // exactly 5 tokens, not 10.
+    let Harness { service, clock } = harness(10, false);
+
+    for i in 0..10 {
+        assert_eq!(
+            get(&service, None).await.status_code,
+            Some(StatusCode::OK),
+            "burst request {i} is within capacity"
+        );
+    }
+    assert_eq!(
+        get(&service, None).await.status_code,
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+
+    clock.advance(Duration::from_secs(30));
+
+    for i in 0..5 {
+        assert_eq!(
+            get(&service, None).await.status_code,
+            Some(StatusCode::OK),
+            "half a window refills half the budget; request {i} of 5"
+        );
+    }
+    assert_eq!(
+        get(&service, None).await.status_code,
+        Some(StatusCode::TOO_MANY_REQUESTS),
+        "the sixth request is past what 30 seconds bought"
+    );
+}
+
+#[tokio::test]
+async fn retry_after_reflects_the_wait_for_a_whole_token() {
+    // A client that honours `Retry-After` must not come back to another 429.
+    // At 1/minute an exhausted bucket needs the full 60 seconds.
+    let Harness { service, clock } = harness(1, false);
+    assert_eq!(get(&service, None).await.status_code, Some(StatusCode::OK));
+
+    let res = get(&service, None).await;
+    assert_eq!(res.status_code, Some(StatusCode::TOO_MANY_REQUESTS));
+    let retry_after: u64 = res
+        .headers()
+        .get(RETRY_AFTER)
+        .expect("a 429 must say when to come back")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(retry_after, 60);
+
+    clock.advance(Duration::from_secs(retry_after - 1));
+    assert_eq!(
+        get(&service, None).await.status_code,
+        Some(StatusCode::TOO_MANY_REQUESTS),
+        "one second early is still too early"
+    );
+    clock.advance(Duration::from_secs(1));
+    assert_eq!(
+        get(&service, None).await.status_code,
+        Some(StatusCode::OK),
+        "waiting exactly as long as instructed must work"
     );
 }
 

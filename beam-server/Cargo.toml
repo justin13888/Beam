@@ -12,6 +12,9 @@ beam-domain = { path = "../beam-domain" }
 beam-entity = { path = "../beam-entity" }
 beam-index = { path = "../beam-index" }
 beam-migration = { path = "../beam-migration" }
+# Only for the enrichment-provider decision's error type; the client itself is
+# built by beam-index.
+cameo = { version = "0.2.0", default-features = false, features = ["tmdb", "anilist"] }
 http = { workspace = true }
 async-stream = "0.3"
 async-trait = { workspace = true }
@@ -23,6 +26,7 @@ dotenvy = "0.15.7"
 eyre = "0.6.12"
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+mutants = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 rust_decimal = "1.39.0"
@@ -44,7 +48,15 @@ beam-domain = { path = "../beam-domain", features = ["test-utils"] }
 beam-index = { path = "../beam-index", features = ["test-utils"] }
 metrics-util = { workspace = true }
 mockall = "0.14.0"
+proptest = "1.9.0"
 
 [features]
 test-utils = ["beam-domain/test-utils", "beam-index/test-utils"]
 vendored-ffmpeg = ["beam-index/vendored-ffmpeg"]
+# The feature set cargo-mutants builds this package with.
+#
+# cargo-mutants builds each package on its own, so it needs one *unqualified*
+# feature name that is valid everywhere -- and the set it selects has to compile
+# every `cfg`-gated production path, or mutants in code that was never built are
+# reported MISSED for a reason that has nothing to do with the tests.
+mutation-testing = ["vendored-ffmpeg", "test-utils"]

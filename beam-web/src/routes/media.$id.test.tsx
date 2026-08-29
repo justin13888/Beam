@@ -1,50 +1,36 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Toaster } from "sonner";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpResponse, http } from "msw";
+import { describe, expect, it, vi } from "vitest";
+import type { components } from "@/api.gen";
+import * as factory from "@/test/factories";
+import { BASE_URL } from "@/test/handlers";
+import { renderRoute, waitForRouter } from "@/test/harness";
+import { recordRequests } from "@/test/requests";
+import { server } from "@/test/server";
 
-const { mockGet, mockPost, mockPut, videoPlayerCalls } = vi.hoisted(() => ({
-	mockGet: vi.fn(),
-	mockPost: vi.fn(),
-	mockPut: vi.fn(),
-	videoPlayerCalls: [] as Record<string, unknown>[],
-}));
-
-vi.mock("@/lib/apiClient", () => ({
-	apiClient: {
-		GET: mockGet,
-		POST: mockPost,
-		PUT: mockPut,
-	},
-}));
-
-vi.mock("@tanstack/react-router", () => ({
-	createFileRoute: (_path: string) => (opts: Record<string, unknown>) => opts,
-	ErrorComponent: () => null,
-}));
-
-vi.mock("@/hooks/auth", () => ({
-	useAuth: () => ({ isAuthenticated: true, user: null }),
-}));
-
-// Vidstack pulls in player CSS/runtime that jsdom has no business loading --
-// the player itself is not under test here. The stub records the props each
-// render so tests can assert which stream URL the page selected.
+// Vidstack needs a real media element, which jsdom does not provide. This is a
+// stand-in for a *collaborator*, not for the subject: `VideoPlayer`'s own
+// behaviour is tested directly in `src/components/VideoPlayer.test.ts`. The
+// stub records the `src` so these tests can assert which stream the page chose.
 vi.mock("@/components/VideoPlayer", () => ({
-	VideoPlayer: (props: Record<string, unknown>) => {
-		videoPlayerCalls.push(props);
-		return (
-			<div data-testid="video-player" data-src={props.src as string}>
-				{props.title as string}
-			</div>
-		);
-	},
+	VideoPlayer: (props: Record<string, unknown>) => (
+		<div data-testid="video-player" data-src={props.src as string}>
+			{props.title as string}
+		</div>
+	),
 }));
 
-import { EpisodeList, MediaDetailPage } from "./media.$id";
+const { EpisodeList } = await import("./media.$id");
 
-const playableEpisode = {
+type EpisodeMetadata =
+	components["schemas"]["beam_server.models.media.show.EpisodeMetadata"];
+type MediaSource =
+	components["schemas"]["beam_server.models.media.source.MediaSource"];
+type ShowMetadata =
+	components["schemas"]["beam_server.models.media.show.ShowMetadata"];
+
+const playableEpisode: EpisodeMetadata = {
 	id: "ep-1",
 	episode_number: 1,
 	title: "Pilot",
@@ -52,7 +38,7 @@ const playableEpisode = {
 	file_id: "file-1",
 };
 
-const filelessEpisode = {
+const filelessEpisode: EpisodeMetadata = {
 	id: "ep-2",
 	episode_number: 2,
 	title: "Lost Media",
@@ -60,9 +46,9 @@ const filelessEpisode = {
 	file_id: null,
 };
 
-const show = {
+const show: ShowMetadata = factory.show({
 	id: "show-1",
-	title: { original: "Test Show" },
+	title: { original: "Test Show", localized: null, alternatives: [] },
 	seasons: [
 		{
 			season_number: 1,
@@ -71,7 +57,60 @@ const show = {
 			episodes: [playableEpisode, filelessEpisode],
 		},
 	],
-};
+});
+
+const movie = factory.movie({
+	id: "movie-1",
+	title: { original: "Blade Runner", localized: null, alternatives: [] },
+	year: 1982,
+	description: "A blade runner must pursue replicants.",
+	poster_url: "https://posters.test/blade-runner.jpg",
+	file_id: "file-hd",
+});
+
+function source(fileId: string, height: number, codec: string): MediaSource {
+	return {
+		file_id: fileId,
+		stream_url: `/v1/files/${fileId}/stream`,
+		download_url: `/v1/files/${fileId}/download`,
+		mime_type: "video/mp4",
+		video: {
+			height,
+			codec,
+			width: height * 2,
+			bit_rate: null,
+			hdr_format: null,
+		},
+		size_bytes: 1024,
+		audio_tracks: [],
+	};
+}
+
+/** Serve the media document and its sources. */
+function serveMedia(
+	metadata:
+		| components["schemas"]["beam_server.models.media.MediaMetadata"]
+		| null,
+	sources: MediaSource[] = [],
+) {
+	server.use(
+		http.get(`${BASE_URL}/v1/media/:id`, () =>
+			metadata
+				? HttpResponse.json(metadata)
+				: HttpResponse.json(
+						{ message: "Not found", code: "not_found" },
+						{ status: 404 },
+					),
+		),
+		http.get(`${BASE_URL}/v1/media/:id/sources`, () =>
+			HttpResponse.json(sources),
+		),
+	);
+}
+
+function currentStreamSrc(): string | null {
+	return screen.getByTestId("video-player").getAttribute("data-src");
+}
 
 describe("EpisodeList", () => {
 	it("renders a file-less episode as a disabled row labelled 'No file'", () => {
@@ -126,100 +165,21 @@ describe("EpisodeList", () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
-// Page-level tests: movie vs show rendering + source selection.
-// ---------------------------------------------------------------------------
-
-type Source = {
-	file_id: string;
-	stream_url: string;
-	download_url: string;
-	mime_type?: string | null;
-	video?: { height: number; codec: string } | null;
-};
-
-function source(fileId: string, height: number, codec: string): Source {
-	return {
-		file_id: fileId,
-		stream_url: `/v1/files/${fileId}/stream`,
-		download_url: `/v1/files/${fileId}/download`,
-		mime_type: "video/mp4",
-		video: { height, codec },
-	};
-}
-
-const movieMetadata = {
-	Movie: {
-		id: "movie-1",
-		title: { original: "Blade Runner" },
-		year: 1982,
-		description: "A blade runner must pursue replicants.",
-		poster_url: "https://posters.test/blade-runner.jpg",
-		file_id: "file-hd",
-		genres: [],
-		streams: [],
-	},
-};
-
-/** Routes mocked GET calls by path. `sources` is served per playable-id
- * request; `continueWatching` backs the resume banner. */
-function mockApi({
-	sources = [] as Source[],
-	continueWatching = [] as unknown[],
-} = {}) {
-	mockGet.mockImplementation(async (path: string) => {
-		switch (path) {
-			case "/v1/media/{id}/sources":
-				return { data: sources, error: undefined, response: { status: 200 } };
-			case "/v1/continue-watching":
-				return { data: continueWatching, error: undefined };
-			default:
-				return {
-					data: undefined,
-					error: { message: `unexpected ${path}` },
-					response: { status: 200 },
-				};
-		}
-	});
-}
-
-function renderPage(
-	metadata: unknown,
-	fileIdParam: string | undefined = undefined,
-) {
-	const queryClient = new QueryClient({
-		defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-	});
-	return render(
-		<QueryClientProvider client={queryClient}>
-			{/* biome-ignore lint/suspicious/noExplicitAny: test passes structural fixtures */}
-			<MediaDetailPage metadata={metadata as any} fileIdParam={fileIdParam} />
-			<Toaster />
-		</QueryClientProvider>,
-	);
-}
-
-function currentStreamSrc(): string | null {
-	return screen.getByTestId("video-player").getAttribute("data-src");
-}
-
-describe("MediaDetailPage (movie)", () => {
-	beforeEach(() => {
-		mockGet.mockReset();
-		videoPlayerCalls.length = 0;
-	});
-
-	it("renders the movie title, year, and description", async () => {
-		mockApi({ sources: [source("file-hd", 1080, "h264")] });
-		renderPage(movieMetadata);
+describe("/media/$id (movie)", () => {
+	it("loads the media document through the route loader and renders it", async () => {
+		const requests = recordRequests();
+		serveMedia({ Movie: movie }, [source("file-hd", 1080, "h264")]);
+		renderRoute("/media/movie-1");
 
 		expect(
-			screen.getByRole("heading", { name: "Blade Runner" }),
+			await screen.findByRole("heading", { name: "Blade Runner" }),
 		).toBeInTheDocument();
 		expect(screen.getByText("1982")).toBeInTheDocument();
 		expect(
 			screen.getByText("A blade runner must pursue replicants."),
 		).toBeInTheDocument();
+		// The loader fetched by id, not by some other path.
+		expect(requests.matching("GET", "/v1/media/movie-1")).toHaveLength(1);
 		// The player streams the movie's primary file.
 		await waitFor(() =>
 			expect(currentStreamSrc()).toBe(
@@ -229,15 +189,12 @@ describe("MediaDetailPage (movie)", () => {
 	});
 
 	it("shows the source picker only when 2+ sources exist", async () => {
-		mockApi({
-			sources: [
-				source("file-hd", 1080, "h264"),
-				source("file-sd", 480, "h264"),
-			],
-		});
-		renderPage(movieMetadata);
+		serveMedia({ Movie: movie }, [
+			source("file-hd", 1080, "h264"),
+			source("file-sd", 480, "h264"),
+		]);
+		renderRoute("/media/movie-1");
 
-		// Two quality labels means a <select> with two <option>s.
 		const select = await screen.findByRole("combobox");
 		const options = Array.from(select.querySelectorAll("option")).map(
 			(o) => o.textContent,
@@ -246,22 +203,20 @@ describe("MediaDetailPage (movie)", () => {
 	});
 
 	it("hides the source picker when there is only one source", async () => {
-		mockApi({ sources: [source("file-hd", 1080, "h264")] });
-		renderPage(movieMetadata);
+		serveMedia({ Movie: movie }, [source("file-hd", 1080, "h264")]);
+		renderRoute("/media/movie-1");
 
 		await waitFor(() => expect(currentStreamSrc()).toContain("file-hd"));
 		expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
 	});
 
 	it("switches the stream URL passed to the player when a source is selected", async () => {
-		mockApi({
-			sources: [
-				source("file-hd", 1080, "h264"),
-				source("file-sd", 480, "h264"),
-			],
-		});
+		serveMedia({ Movie: movie }, [
+			source("file-hd", 1080, "h264"),
+			source("file-sd", 480, "h264"),
+		]);
 		const user = userEvent.setup();
-		renderPage(movieMetadata);
+		renderRoute("/media/movie-1");
 
 		await waitFor(() =>
 			expect(currentStreamSrc()).toBe(
@@ -279,13 +234,11 @@ describe("MediaDetailPage (movie)", () => {
 	});
 
 	it("deep-links to the file named by ?fileId= instead of the primary file", async () => {
-		mockApi({
-			sources: [
-				source("file-hd", 1080, "h264"),
-				source("file-sd", 480, "h264"),
-			],
-		});
-		renderPage(movieMetadata, "file-sd");
+		serveMedia({ Movie: movie }, [
+			source("file-hd", 1080, "h264"),
+			source("file-sd", 480, "h264"),
+		]);
+		renderRoute("/media/movie-1?fileId=file-sd");
 
 		await waitFor(() =>
 			expect(currentStreamSrc()).toBe(
@@ -293,20 +246,31 @@ describe("MediaDetailPage (movie)", () => {
 			),
 		);
 	});
+
+	it("ignores a non-string fileId rather than deep-linking to it", async () => {
+		// `validateSearch` narrows the raw search object; a repeated parameter
+		// arrives as an array and must fall back to the primary file.
+		serveMedia({ Movie: movie }, [
+			source("file-hd", 1080, "h264"),
+			source("file-sd", 480, "h264"),
+		]);
+		renderRoute("/media/movie-1?fileId=a&fileId=b");
+
+		await waitFor(() =>
+			expect(currentStreamSrc()).toBe(
+				"http://localhost:8000/v1/files/file-hd/stream",
+			),
+		);
+	});
 });
 
-describe("MediaDetailPage (show)", () => {
-	beforeEach(() => {
-		mockGet.mockReset();
-		videoPlayerCalls.length = 0;
-	});
-
+describe("/media/$id (show)", () => {
 	it("renders the season/episode structure and prompts to pick an episode", async () => {
-		mockApi();
-		renderPage({ Show: show });
+		serveMedia({ Show: show });
+		renderRoute("/media/show-1");
 
 		expect(
-			screen.getByRole("heading", { name: "Test Show" }),
+			await screen.findByRole("heading", { name: "Test Show" }),
 		).toBeInTheDocument();
 		expect(screen.getByText("Season 1")).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: /Pilot/ })).toBeInTheDocument();
@@ -316,23 +280,42 @@ describe("MediaDetailPage (show)", () => {
 	});
 
 	it("fetches the episode's sources and plays it when an episode is selected", async () => {
-		mockApi({ sources: [source("file-1", 720, "h264")] });
+		const requests = recordRequests();
+		serveMedia({ Show: show }, [source("file-1", 720, "h264")]);
 		const user = userEvent.setup();
-		renderPage({ Show: show });
+		renderRoute("/media/show-1");
 
-		await user.click(screen.getByRole("button", { name: /Pilot/ }));
+		await user.click(await screen.findByRole("button", { name: /Pilot/ }));
 
-		// The sources query fires for the episode's playable id.
+		// The sources query fires for the episode's playable id, not the show's.
 		await waitFor(() =>
-			expect(mockGet).toHaveBeenCalledWith(
-				"/v1/media/{id}/sources",
-				expect.objectContaining({ params: { path: { id: "ep-1" } } }),
+			expect(requests.matching("GET", "/v1/media/ep-1/sources")).toHaveLength(
+				1,
 			),
 		);
 		await waitFor(() =>
 			expect(currentStreamSrc()).toBe(
 				"http://localhost:8000/v1/files/file-1/stream",
 			),
+		);
+	});
+
+	it("renders the route's error component when the media document fails to load", async () => {
+		server.use(
+			http.get(`${BASE_URL}/v1/media/:id`, () =>
+				HttpResponse.json(
+					{ message: "boom", code: "internal" },
+					{ status: 500 },
+				),
+			),
+		);
+		renderRoute("/media/movie-1");
+		await waitForRouter();
+
+		await waitFor(() =>
+			expect(
+				screen.getByText(/Failed to load media metadata/),
+			).toBeInTheDocument(),
 		);
 	});
 });

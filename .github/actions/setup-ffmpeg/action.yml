@@ -7,12 +7,18 @@ description: >
 runs:
   using: composite
   steps:
+    # The key includes the runner image version. This build is `--enable-shared`
+    # against the image's own libx264/libx265/libvpx/libass/openssl, so a cached
+    # /opt/ffmpeg is only valid for the image it was built on. When the image
+    # updates those .so files underneath a restored cache, the result is not a
+    # build failure but a SIGSEGV the first time anything decodes -- ffprobe
+    # keeps demuxing happily, which makes it look like the caller's bug.
     - name: Cache FFmpeg 8.1 build
       id: cache-ffmpeg
       uses: actions/cache@v4
       with:
         path: /opt/ffmpeg
-        key: ffmpeg-8.1-ubuntu-latest-v1
+        key: ffmpeg-8.1-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-v2
 
     - name: Install FFmpeg build dependencies
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'

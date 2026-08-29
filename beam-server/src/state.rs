@@ -11,8 +11,8 @@ use beam_auth::utils::{
     session_store::{PgSessionStore, SessionStore},
 };
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
+use beam_domain::services::{Clock, RealClock};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
-use beam_index::services::clock::RealClock;
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
 
@@ -41,9 +41,13 @@ pub struct AppStateInner {
     /// Deep-health dependency probe backing `GET /v1/health`.
     pub probe: Arc<dyn DependencyProbe>,
     /// Monotonic process-start instant, captured when the state is built.
-    /// Surfaced as `uptime_secs` by the health endpoint and reused by a later
-    /// admin status endpoint.
+    /// Surfaced as `uptime_secs` by the health endpoint and by the admin
+    /// status endpoint.
     pub start_instant: Instant,
+    /// The clock `uptime_secs` measures against. Injected so a test can move
+    /// time: with `Instant::now()` read directly, uptime is always ~0 and no
+    /// assertion about it can fail.
+    clock: Arc<dyn Clock>,
 }
 
 impl AppState {
@@ -52,19 +56,33 @@ impl AppState {
         services: AppServices,
         probe: Arc<dyn DependencyProbe>,
     ) -> Self {
+        Self::with_clock(config, services, probe, Arc::new(RealClock))
+    }
+
+    pub fn with_clock(
+        config: ServerConfig,
+        services: AppServices,
+        probe: Arc<dyn DependencyProbe>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
                 config,
                 services,
                 probe,
-                start_instant: Instant::now(),
+                start_instant: clock.monotonic(),
+                clock,
             }),
         }
     }
 
     /// Whole seconds elapsed since the process built its state.
     pub fn uptime_secs(&self) -> u64 {
-        self.inner.start_instant.elapsed().as_secs()
+        self.inner
+            .clock
+            .monotonic()
+            .saturating_duration_since(self.inner.start_instant)
+            .as_secs()
     }
 }
 
@@ -113,7 +131,7 @@ impl AppServices {
     /// indexer) are unaffected by these extra return values.
     pub async fn new(
         config: &ServerConfig,
-        db: DatabaseConnection,
+        db: Arc<DatabaseConnection>,
     ) -> eyre::Result<(Self, Arc<LocalIndexService>, Arc<MetadataEnrichmentService>)> {
         let hash_config = HashConfig::default();
 
@@ -214,34 +232,7 @@ impl AppServices {
             .with_enrichment_repo(enrichment_repo.clone()),
         );
 
-        // Real cameo client when at least TMDB or AniList is configured;
-        // NoopEnrichmentProvider (every sweep a fast no-op) otherwise -- e.g.
-        // a fresh dev environment with no TMDB_API_TOKEN set. A build failure
-        // is only tolerated (warn + disable enrichment) when the enrichment
-        // knobs were left implicit; an explicitly-set BEAM_METADATA_LANGUAGE
-        // that fails the build (cameo validates the BCP-47 tag at
-        // construction) fails startup instead -- an explicit knob must never
-        // be silently ignored on a headless server, matching the fail-fast
-        // precedent of `validate_values` and the cookie-Secure verdict.
-        let enrichment_provider: Arc<dyn EnrichmentProvider> =
-            match beam_index::providers::cameo::build_client(CameoWiringConfig {
-                tmdb_api_token: config.tmdb_api_token.clone(),
-                anilist_enabled: config.anilist_enabled,
-                metadata_language: config.metadata_language.clone(),
-            }) {
-                Ok(Some(client)) => Arc::new(CameoEnrichmentProvider::new(client)),
-                Ok(None) => Arc::new(NoopEnrichmentProvider),
-                Err(e) if config.metadata_language.is_some() => {
-                    return Err(eyre::eyre!(
-                        "failed to build cameo client with BEAM_METADATA_LANGUAGE={:?}: {e}",
-                        config.metadata_language.as_deref().unwrap_or_default(),
-                    ));
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to build cameo client; metadata enrichment disabled");
-                    Arc::new(NoopEnrichmentProvider)
-                }
-            };
+        let enrichment_provider = build_enrichment_provider(config)?;
 
         let enrichment_service = Arc::new(
             MetadataEnrichmentService::new(
@@ -298,3 +289,60 @@ impl AppServices {
         Ok((services, index_service, enrichment_service))
     }
 }
+
+/// Decide which [`EnrichmentProvider`] the configuration asks for.
+///
+/// Extracted from [`AppServices::new`] so the decision can be tested: inside
+/// the constructor it sat behind a live database connection, so the whole
+/// tree -- including the deliberate asymmetry between an implicit and an
+/// explicit `BEAM_METADATA_LANGUAGE` -- was unreachable from any test.
+///
+/// A real cameo client is built when at least TMDB or AniList is configured;
+/// [`NoopEnrichmentProvider`] (every sweep a fast no-op) otherwise -- e.g. a
+/// fresh dev environment with no TMDB token set. A build failure is only
+/// tolerated (warn + disable enrichment) when the enrichment knobs were left
+/// implicit; an explicitly-set `BEAM_METADATA_LANGUAGE` that fails the build
+/// (cameo validates the BCP-47 tag at construction) fails startup instead --
+/// an explicit knob must never be silently ignored on a headless server,
+/// matching the fail-fast precedent of `validate_values` and the
+/// cookie-Secure verdict.
+pub(crate) fn build_enrichment_provider(
+    config: &ServerConfig,
+) -> eyre::Result<Arc<dyn EnrichmentProvider>> {
+    let built = beam_index::providers::cameo::build_client(CameoWiringConfig {
+        tmdb_api_token: config.tmdb_api_token.clone(),
+        anilist_enabled: config.anilist_enabled,
+        metadata_language: config.metadata_language.clone(),
+    });
+    provider_from_build(built, config.metadata_language.as_deref())
+}
+
+/// The decision [`build_enrichment_provider`] makes about a build outcome,
+/// separated from making the client.
+///
+/// Split out because the interesting branch -- a build failure with the
+/// language knob left *implicit* -- cannot be produced through
+/// `build_client` today: the language tag is the only input it validates. As
+/// one function the two cases were indistinguishable to any test, so nothing
+/// could tell the fail-fast path from the warn-and-continue one.
+pub(crate) fn provider_from_build(
+    built: Result<Option<cameo::CameoClient>, cameo::CameoClientError>,
+    metadata_language: Option<&str>,
+) -> eyre::Result<Arc<dyn EnrichmentProvider>> {
+    match built {
+        Ok(Some(client)) => Ok(Arc::new(CameoEnrichmentProvider::new(client))),
+        Ok(None) => Ok(Arc::new(NoopEnrichmentProvider)),
+        Err(e) if metadata_language.is_some() => Err(eyre::eyre!(
+            "failed to build cameo client with BEAM_METADATA_LANGUAGE={:?}: {e}",
+            metadata_language.unwrap_or_default(),
+        )),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build cameo client; metadata enrichment disabled");
+            Ok(Arc::new(NoopEnrichmentProvider))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod state_tests;

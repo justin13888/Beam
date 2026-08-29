@@ -188,9 +188,11 @@ jobs:
       - uses: ./.github/actions/install-rust-build-deps
       - uses: ./.github/actions/setup-ffmpeg
 
-      # The 65% line gate is calibrated against a measured ~67.5% (see
-      # docs/testing.md). Ratchet it up over time; do not relax it to make a
-      # red pull request pass.
+      # Gates lines, regions, and functions. Regions stand in for branches:
+      # cargo-llvm-cov's --branch needs nightly, and rust-toolchain.toml pins
+      # stable. Thresholds are calibrated a few points under measured (see
+      # mise.toml and docs/testing.md). Ratchet them up over time; do not relax
+      # one to make a red pull request pass.
       - run: mise run rust:coverage
 
       - name: Upload coverage report
@@ -200,10 +202,49 @@ jobs:
           path: lcov.info
           retention-days: 7
 
+  rust-test-pg:
+    name: Rust Postgres integration tier
+    needs: [changes, ffmpeg]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BEAM_CARGO_FEATURES: ""
+      # Same engine and credentials as compose.dependencies.yaml, so the tier
+      # behaves identically locally and here.
+      BEAM_TEST_DATABASE_URL: postgres://beam:password@localhost:5432/beam
+    services:
+      postgres:
+        image: postgres:18.0
+        env:
+          POSTGRES_USER: beam
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: beam
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U beam"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+
+      # Deliberately outside `mise run ci` and the pre-push hook: this is the one
+      # tier that needs infrastructure, and NFR-201 says the default run must not.
+      - run: mise run rust:test:pg
+
   openapi:
     name: Generate OpenAPI artifacts
     needs: [changes, ffmpeg]
-    if: needs.changes.outputs.ts == 'true'
+    # Also on Rust changes: the spec is generated from the server's route
+    # annotations, so a Rust-only change is exactly how it drifts.
+    if: needs.changes.outputs.ts == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     env:
       BEAM_CARGO_FEATURES: ""
@@ -218,6 +259,11 @@ jobs:
       - uses: ./.github/actions/bun-install
 
       - run: mise run codegen:openapi
+
+      # `beam-web/openapi.json` is committed, and it is the contract every
+      # client is generated from. Fail when it no longer matches what the
+      # server serves.
+      - run: mise run codegen:openapi:check
 
       - name: Upload OpenAPI artifacts
         uses: actions/upload-artifact@v4
@@ -321,6 +367,7 @@ jobs:
       - rust-deny
       - rust-clippy
       - rust-test
+      - rust-test-pg
       - openapi
       - ts-check
       - ts-typecheck

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::{
@@ -10,6 +12,7 @@ use thiserror::Error;
 use tracing::debug;
 use uuid::Uuid;
 
+use beam_domain::services::{Clock, RealClock};
 use beam_entity::session::{ActiveModel as SessionActiveModel, Column, Entity as SessionEntity};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -52,7 +55,7 @@ pub async fn get_and_touch(
         return Ok(None);
     };
 
-    if Utc::now().timestamp() - session.last_active > SESSION_TOUCH_THROTTLE_SECS {
+    if store.now().timestamp() - session.last_active > SESSION_TOUCH_THROTTLE_SECS {
         let _ = store.touch(token, idle_ttl_secs).await;
     }
 
@@ -133,6 +136,14 @@ pub trait SessionStore: Send + Sync + std::fmt::Debug {
     /// owning user (so one user can never revoke another's session by
     /// guessing an id). Returns `true` if a session was deleted.
     async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool>;
+
+    /// The store's own view of the current time.
+    ///
+    /// Every expiry this store enforces is relative to it, so a caller that
+    /// needs to reason about the same timeline -- notably
+    /// [`get_and_touch`]'s throttle -- must read it here rather than from the
+    /// wall clock, or the two disagree whenever the clock is injected.
+    fn now(&self) -> chrono::DateTime<Utc>;
 }
 
 /// Generates an opaque, random 32-byte URL-safe base64 session token.
@@ -172,17 +183,29 @@ fn to_session_data(model: &beam_entity::session::Model) -> SessionData {
 /// expiries).
 #[derive(Debug, Clone)]
 pub struct PgSessionStore {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
+    /// Source of every timestamp and expiry this store writes or compares.
+    /// Injected so the idle/absolute TTL rules can be driven by advancing a
+    /// clock instead of by sleeping for the length of a session.
+    clock: Arc<dyn Clock>,
 }
 
 impl PgSessionStore {
-    pub fn new(db: DatabaseConnection) -> Self {
-        Self { db }
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+        Self::with_clock(db, Arc::new(RealClock))
+    }
+
+    pub fn with_clock(db: Arc<DatabaseConnection>, clock: Arc<dyn Clock>) -> Self {
+        Self { db, clock }
     }
 }
 
 #[async_trait]
 impl SessionStore for PgSessionStore {
+    fn now(&self) -> chrono::DateTime<Utc> {
+        self.clock.now()
+    }
+
     async fn create(
         &self,
         data: &SessionData,
@@ -190,7 +213,7 @@ impl SessionStore for PgSessionStore {
         absolute_ttl_secs: u64,
     ) -> Result<String> {
         let token = generate_session_token();
-        let now = Utc::now();
+        let now = self.clock.now();
         let idle_expires_at = now + chrono::Duration::seconds(idle_ttl_secs as i64);
         let absolute_expires_at = now + chrono::Duration::seconds(absolute_ttl_secs as i64);
 
@@ -205,7 +228,7 @@ impl SessionStore for PgSessionStore {
             idle_expires_at: Set(idle_expires_at.into()),
             absolute_expires_at: Set(absolute_expires_at.into()),
         };
-        active_model.insert(&self.db).await?;
+        active_model.insert(self.db.as_ref()).await?;
 
         debug!("Created session for user {}", data.user_id);
         Ok(token)
@@ -214,13 +237,13 @@ impl SessionStore for PgSessionStore {
     async fn get(&self, token: &str) -> Result<Option<SessionData>> {
         let Some(model) = SessionEntity::find()
             .filter(Column::TokenHash.eq(hash_token(token)))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
         else {
             return Ok(None);
         };
 
-        let now = Utc::now();
+        let now = self.clock.now();
         if model.idle_expires_at < now || model.absolute_expires_at < now {
             return Ok(None);
         }
@@ -231,20 +254,20 @@ impl SessionStore for PgSessionStore {
     async fn touch(&self, token: &str, idle_ttl_secs: u64) -> Result<()> {
         let Some(model) = SessionEntity::find()
             .filter(Column::TokenHash.eq(hash_token(token)))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
         else {
             return Ok(());
         };
 
-        let now = Utc::now();
+        let now = self.clock.now();
         let requested_idle_expiry = now + chrono::Duration::seconds(idle_ttl_secs as i64);
         // Never slide the idle deadline past the absolute ceiling.
         let idle_expires_at = requested_idle_expiry.min(model.absolute_expires_at.into());
         let mut active_model: SessionActiveModel = model.into();
         active_model.last_active = Set(now.into());
         active_model.idle_expires_at = Set(idle_expires_at.into());
-        active_model.update(&self.db).await?;
+        active_model.update(self.db.as_ref()).await?;
 
         Ok(())
     }
@@ -252,7 +275,7 @@ impl SessionStore for PgSessionStore {
     async fn delete(&self, token: &str) -> Result<()> {
         SessionEntity::delete_many()
             .filter(Column::TokenHash.eq(hash_token(token)))
-            .exec(&self.db)
+            .exec(self.db.as_ref())
             .await?;
         debug!("Deleted session");
         Ok(())
@@ -262,7 +285,7 @@ impl SessionStore for PgSessionStore {
         let user_uuid: Uuid = user_id.parse()?;
         let result: DeleteResult = SessionEntity::delete_many()
             .filter(Column::UserId.eq(user_uuid))
-            .exec(&self.db)
+            .exec(self.db.as_ref())
             .await?;
 
         debug!(
@@ -274,12 +297,12 @@ impl SessionStore for PgSessionStore {
 
     async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
         let user_uuid: Uuid = user_id.parse()?;
-        let now = Utc::now();
+        let now = self.clock.now();
         let models = SessionEntity::find()
             .filter(Column::UserId.eq(user_uuid))
             .filter(Column::IdleExpiresAt.gt(now))
             .filter(Column::AbsoluteExpiresAt.gt(now))
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models
@@ -294,13 +317,14 @@ impl SessionStore for PgSessionStore {
         let result: DeleteResult = SessionEntity::delete_many()
             .filter(Column::Id.eq(id))
             .filter(Column::UserId.eq(user_uuid))
-            .exec(&self.db)
+            .exec(self.db.as_ref())
             .await?;
         Ok(result.rows_affected > 0)
     }
 }
 
 /// In-memory session store for use in tests and offline scenarios.
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
@@ -315,13 +339,27 @@ pub mod in_memory {
         absolute_expires_at: chrono::DateTime<Utc>,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     pub struct InMemorySessionStore {
         // Keyed by hashed token, matching the Postgres store's lookup shape.
         sessions: Mutex<HashMap<String, StoredSession>>,
+        clock: Arc<dyn Clock>,
+    }
+
+    impl Default for InMemorySessionStore {
+        fn default() -> Self {
+            Self::new(Arc::new(RealClock))
+        }
     }
 
     impl InMemorySessionStore {
+        pub fn new(clock: Arc<dyn Clock>) -> Self {
+            Self {
+                sessions: Mutex::new(HashMap::new()),
+                clock,
+            }
+        }
+
         /// Locks the session map, recovering from a poisoned lock rather
         /// than panicking -- one panicked holder must not permanently take
         /// down every session operation. The map is consistent after every
@@ -335,6 +373,10 @@ pub mod in_memory {
 
     #[async_trait]
     impl SessionStore for InMemorySessionStore {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.clock.now()
+        }
+
         async fn create(
             &self,
             data: &SessionData,
@@ -342,12 +384,21 @@ pub mod in_memory {
             absolute_ttl_secs: u64,
         ) -> Result<String> {
             let token = generate_session_token();
-            let now = Utc::now();
+            let now = self.clock.now();
+            // `created_at`/`last_active` belong to the store, not the caller:
+            // the Postgres store stamps them from its own clock and ignores
+            // whatever the caller put in the struct. Echoing the caller's
+            // values back here instead made the two disagree.
+            let data = SessionData {
+                created_at: now.timestamp(),
+                last_active: now.timestamp(),
+                ..data.clone()
+            };
             self.lock_sessions().insert(
                 hash_token(&token),
                 StoredSession {
                     id: Uuid::new_v4().to_string(),
-                    data: data.clone(),
+                    data,
                     idle_expires_at: now + chrono::Duration::seconds(idle_ttl_secs as i64),
                     absolute_expires_at: now + chrono::Duration::seconds(absolute_ttl_secs as i64),
                 },
@@ -356,7 +407,7 @@ pub mod in_memory {
         }
 
         async fn get(&self, token: &str) -> Result<Option<SessionData>> {
-            let now = Utc::now();
+            let now = self.clock.now();
             Ok(self
                 .sessions
                 .lock()
@@ -367,7 +418,7 @@ pub mod in_memory {
         }
 
         async fn touch(&self, token: &str, idle_ttl_secs: u64) -> Result<()> {
-            let now = Utc::now();
+            let now = self.clock.now();
             if let Some(session) = self.lock_sessions().get_mut(&hash_token(token)) {
                 session.data.last_active = now.timestamp();
                 session.idle_expires_at = (now + chrono::Duration::seconds(idle_ttl_secs as i64))
@@ -396,10 +447,18 @@ pub mod in_memory {
         }
 
         async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
+            // Expired sessions are filtered out here, matching the Postgres
+            // store: this list is what the profile page offers for revocation,
+            // and an already-dead session in it is a confusing no-op button.
+            let now = self.clock.now();
             let sessions = self.lock_sessions();
             Ok(sessions
                 .values()
-                .filter(|s| s.data.user_id == user_id)
+                .filter(|s| {
+                    s.data.user_id == user_id
+                        && s.idle_expires_at > now
+                        && s.absolute_expires_at > now
+                })
                 .map(|s| (s.id.clone(), s.data.clone()))
                 .collect())
         }
@@ -419,4 +478,67 @@ pub mod in_memory {
             }
         }
     }
+}
+
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory_fixture {
+    use std::sync::Arc;
+
+    use beam_domain::services::TestClock;
+
+    use super::SessionStore;
+    use super::in_memory::InMemorySessionStore;
+    use crate::utils::contract::fixture::SessionStoreFixture;
+
+    /// The hermetic instantiation of the shared `SessionStore` contract.
+    pub struct InMemoryFixture {
+        store: InMemorySessionStore,
+        clock: Arc<TestClock>,
+    }
+
+    impl InMemoryFixture {
+        pub fn new() -> Self {
+            // Deliberately not the epoch. `get_and_touch` computes
+            // `now - last_active`, and at time zero that is indistinguishable
+            // from `now + last_active` -- a mutated `+` would pass every test.
+            let clock = Arc::new(TestClock::starting_at(
+                chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid instant"),
+            ));
+            Self {
+                store: InMemorySessionStore::new(clock.clone()),
+                clock,
+            }
+        }
+    }
+
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStoreFixture for InMemoryFixture {
+        fn store(&self) -> &dyn SessionStore {
+            &self.store
+        }
+
+        fn clock(&self) -> &TestClock {
+            &self.clock
+        }
+
+        async fn new_user(&self) -> uuid::Uuid {
+            uuid::Uuid::new_v4()
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    async fn setup() -> super::in_memory_fixture::InMemoryFixture {
+        super::in_memory_fixture::InMemoryFixture::new()
+    }
+
+    crate::session_store_contract!(setup);
 }

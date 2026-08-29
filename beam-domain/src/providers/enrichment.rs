@@ -223,6 +223,7 @@ impl EnrichmentProvider for NoopEnrichmentProvider {
     async fn invalidate(&self, _id: &ExternalMediaRef) {}
 }
 
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     use super::*;
@@ -418,6 +419,106 @@ pub mod test_utils {
                 .lock()
                 .unwrap()
                 .push(id.as_str().to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod external_media_ref {
+        use super::*;
+
+        #[test]
+        fn a_reference_splits_into_provider_and_native_id() {
+            let reference = ExternalMediaRef::parse("tmdb:603").expect("a valid reference");
+            assert_eq!(reference.provider(), "tmdb");
+            assert_eq!(reference.native(), "603");
+            assert_eq!(reference.as_str(), "tmdb:603");
+            // The canonical string is what is persisted in `matched_ref` and
+            // parsed back on the next enrichment sweep, so it must round-trip.
+            assert_eq!(reference.to_string(), "tmdb:603");
+            assert_eq!(
+                ExternalMediaRef::parse(&reference.to_string()),
+                Some(reference)
+            );
+        }
+
+        #[test]
+        fn a_native_id_may_itself_contain_colons() {
+            // Only the first colon separates provider from id; an id with its
+            // own colons must survive intact.
+            let reference = ExternalMediaRef::parse("custom:a:b:c").expect("valid");
+            assert_eq!(reference.provider(), "custom");
+            assert_eq!(reference.native(), "a:b:c");
+        }
+
+        #[test]
+        fn a_string_without_a_colon_is_not_a_reference() {
+            // Accepting it would produce a reference whose provider is the
+            // whole string and whose id is empty -- a lookup that silently
+            // matches nothing.
+            assert_eq!(ExternalMediaRef::parse("603"), None);
+            assert_eq!(ExternalMediaRef::parse(""), None);
+        }
+
+        #[test]
+        fn empty_halves_are_still_reported_as_empty_rather_than_guessed_at() {
+            let leading = ExternalMediaRef::parse(":603").expect("has a colon");
+            assert_eq!(leading.provider(), "");
+            assert_eq!(leading.native(), "603");
+
+            let trailing = ExternalMediaRef::parse("tmdb:").expect("has a colon");
+            assert_eq!(trailing.provider(), "tmdb");
+            assert_eq!(trailing.native(), "");
+        }
+    }
+
+    mod noop_provider {
+        use super::*;
+
+        fn query() -> MediaQuery {
+            MediaQuery {
+                title: "Arrival".to_string(),
+                year: Some(2016),
+            }
+        }
+
+        #[test]
+        fn it_reports_no_configured_providers() {
+            assert!(NoopEnrichmentProvider.available_providers().is_empty());
+        }
+
+        #[tokio::test]
+        async fn every_lookup_says_not_configured_rather_than_no_results() {
+            // The distinction matters: "no results" would let the enrichment
+            // sweep mark titles `unmatched` and stop retrying them, so
+            // configuring a provider later would never revisit them. "not
+            // configured" is a transient failure the sweep leaves pending.
+            let provider = NoopEnrichmentProvider;
+            let reference = ExternalMediaRef::parse("tmdb:603").unwrap();
+
+            assert!(matches!(
+                provider.search_movies(&query()).await,
+                Err(EnrichmentError::NotConfigured)
+            ));
+            assert!(matches!(
+                provider.search_shows(&query()).await,
+                Err(EnrichmentError::NotConfigured)
+            ));
+            assert!(matches!(
+                provider.movie_enrichment(&reference).await,
+                Err(EnrichmentError::NotConfigured)
+            ));
+            assert!(matches!(
+                provider.show_enrichment(&reference).await,
+                Err(EnrichmentError::NotConfigured)
+            ));
+            assert!(matches!(
+                provider.season_enrichment(&reference, 1).await,
+                Err(EnrichmentError::NotConfigured)
+            ));
         }
     }
 }

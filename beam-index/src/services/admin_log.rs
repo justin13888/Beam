@@ -98,39 +98,58 @@ impl AdminLogService for LocalAdminLogService {
     }
 }
 
-/// No-op admin log service for tests that don't care about logging
-#[derive(Debug)]
-pub struct NoOpAdminLogService;
+/// Test doubles. Gated behind `test-utils` so downstream crates can depend on
+/// them without them reaching a release build.
+///
+/// Collected into one module rather than left as loose `#[cfg(...)]` items so a
+/// single `#[mutants::skip]` covers the lot: cargo-mutants recognises only the
+/// literal `#[cfg(test)]` and would otherwise mutate these bodies and report the
+/// scaffolding as untested product behaviour. `mise run check:mutants-skip-fakes`
+/// enforces the attribute.
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory {
+    use super::*;
 
-#[async_trait]
-impl AdminLogService for NoOpAdminLogService {
-    async fn log(
-        &self,
-        _level: AdminLogLevel,
-        _category: AdminLogCategory,
-        _message: String,
-        _details: Option<Value>,
-    ) -> Result<()> {
-        Ok(())
-    }
+    /// No-op admin log service for tests that don't care about logging
+    #[derive(Debug)]
+    pub struct NoOpAdminLogService;
 
-    async fn get_logs(&self, _limit: u32, _offset: u32) -> Result<Vec<AdminLog>> {
-        Ok(vec![])
-    }
+    #[async_trait]
+    impl AdminLogService for NoOpAdminLogService {
+        async fn log(
+            &self,
+            _level: AdminLogLevel,
+            _category: AdminLogCategory,
+            _message: String,
+            _details: Option<Value>,
+        ) -> Result<()> {
+            Ok(())
+        }
 
-    async fn get_logs_by_category(
-        &self,
-        _category: AdminLogCategory,
-        _limit: u32,
-        _offset: u32,
-    ) -> Result<Vec<AdminLog>> {
-        Ok(vec![])
-    }
+        async fn get_logs(&self, _limit: u32, _offset: u32) -> Result<Vec<AdminLog>> {
+            Ok(vec![])
+        }
 
-    async fn count(&self) -> Result<u64> {
-        Ok(0)
+        async fn get_logs_by_category(
+            &self,
+            _category: AdminLogCategory,
+            _limit: u32,
+            _offset: u32,
+        ) -> Result<Vec<AdminLog>> {
+            Ok(vec![])
+        }
+
+        async fn count(&self) -> Result<u64> {
+            Ok(0)
+        }
     }
 }
+
+// Re-exported at the module root so the double keeps the path it had before it
+// moved into `in_memory`.
+#[cfg(any(test, feature = "test-utils"))]
+pub use in_memory::NoOpAdminLogService;
 
 #[cfg(test)]
 mod tests {

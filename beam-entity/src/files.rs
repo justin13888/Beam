@@ -33,11 +33,27 @@ pub struct Model {
 
     pub scanned_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
-    pub file_status: String,
+    pub file_status: FileStatus,
 
     /// Filesystem modification time, used with `file_size` as the cheap
     /// change-detection gate before an XXH3 rehash.
     pub mtime: Option<DateTimeWithTimeZone>,
+}
+
+/// The `file_status` column is a Postgres enum type, not text (see
+/// `m20260209_000001_create_schema`). Modelling it as a bare `String` binds the
+/// parameter as `text`, which Postgres refuses to assign to an enum column --
+/// so every file insert and update failed at runtime while every hermetic test
+/// passed. Declared as a `DeriveActiveEnum` it is bound with the right type.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "file_status")]
+pub enum FileStatus {
+    #[sea_orm(string_value = "known")]
+    Known,
+    #[sea_orm(string_value = "changed")]
+    Changed,
+    #[sea_orm(string_value = "unknown")]
+    Unknown,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

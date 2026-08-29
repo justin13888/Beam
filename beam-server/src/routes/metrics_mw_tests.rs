@@ -13,11 +13,10 @@ use std::sync::Arc;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-use salvo::http::Method;
 use salvo::prelude::*;
 use salvo::test::{ResponseExt, TestClient};
 
-use super::{HttpMetrics, classify_route};
+use super::HttpMetrics;
 use crate::routes::rate_limit::{RateLimiter, RealClock};
 use crate::routes::{create_router, test_support};
 
@@ -26,57 +25,10 @@ async fn ok_handler() -> &'static str {
     "ok"
 }
 
-// ─── classify_route ─────────────────────────────────────────────────────────
-
-#[test]
-fn classify_route_covers_every_class_and_falls_back_to_other() {
-    let get = Method::GET;
-    let cases = [
-        ("/v1/health", "health"),
-        ("/v1/media", "media_browse"),
-        (
-            "/v1/media/22222222-2222-2222-2222-222222222222",
-            "media_detail",
-        ),
-        (
-            "/v1/media/22222222-2222-2222-2222-222222222222/sources",
-            "media_sources",
-        ),
-        ("/v1/genres", "genres"),
-        ("/v1/files/abc/stream", "stream"),
-        ("/v1/files/abc/download", "download"),
-        ("/v1/files/abc/progress", "progress"),
-        ("/v1/continue-watching", "continue_watching"),
-        ("/v1/history", "history"),
-        ("/v1/libraries", "libraries"),
-        ("/v1/libraries/abc", "libraries"),
-        ("/v1/libraries/abc/files", "libraries"),
-        ("/v1/admin/libraries", "admin"),
-        ("/v1/admin/logs/count", "admin"),
-        ("/v1/auth/login", "auth"),
-        ("/v1/auth/callback", "auth"),
-        ("/v1/me", "session"),
-        ("/v1/logout", "session"),
-        ("/v1/logout-all", "session"),
-        ("/v1/sessions", "session"),
-        ("/v1/sessions/abc", "session"),
-        // Fallbacks: unknown subpaths and non-v1 prefixes must never emit a
-        // raw (unbounded) path.
-        ("/v1/unknown", "other"),
-        ("/v1/media/x/y/z", "other"),
-        ("/v2/health", "other"),
-        ("/metrics", "other"),
-        ("/", "other"),
-    ];
-
-    for (path, expected) in cases {
-        assert_eq!(
-            classify_route(&get, path),
-            expected,
-            "path {path} misclassified"
-        );
-    }
-}
+// `classify_route` is not tested by a second copy of the route table here --
+// that copy drifted in lockstep with the source and could not fail when a
+// route was added. It is constrained instead by the contract tests in
+// `contract_tests.rs`, which derive the route table from the router itself.
 
 // ─── /metrics endpoint mounting ─────────────────────────────────────────────
 

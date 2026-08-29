@@ -80,7 +80,7 @@ pub async fn require_auth(req: &Request, state: &AppState) -> Result<Authenticat
         .map(|c| c.value().to_string())
         .ok_or_else(|| ApiError::Unauthorized("Missing session cookie".to_string()))?;
 
-    let idle_ttl_secs = state.config.session_idle_days * 24 * 60 * 60;
+    let idle_ttl_secs = state.config.session_idle_ttl_secs();
     let session = get_and_touch(state.services.session_store.as_ref(), &token, idle_ttl_secs)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?

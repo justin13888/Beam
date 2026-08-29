@@ -45,26 +45,12 @@ use salvo::prelude::*;
 
 use crate::routes::api_error::ApiErrorBody;
 
-/// A monotonic time source, abstracted so the limiter can be driven
-/// deterministically in tests without any wall-clock wait.
-///
-/// This is intentionally a *minimal, local* seam (not `beam-index`'s richer
-/// `Clock`, which would pull that crate into `beam-server`): the limiter only
-/// needs a monotonic `Instant`.
-pub trait Clock: Send + Sync + std::fmt::Debug {
-    /// The current monotonic instant.
-    fn now(&self) -> Instant;
-}
-
-/// Production clock backed by [`Instant::now`].
-#[derive(Debug, Default, Clone)]
-pub struct RealClock;
-
-impl Clock for RealClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-}
+// The limiter measures elapsed intervals, so it reads the *monotonic* half of
+// the workspace's one canonical time seam. It previously declared a second,
+// local `Clock` trait; that duplicated the seam (and its test double) for no
+// gain now that `Clock` lives in `beam-domain`, which `beam-server` already
+// depends on.
+pub use beam_domain::services::{Clock, RealClock};
 
 /// One client's bucket: `tokens` available as of `last_refill`.
 #[derive(Debug)]
@@ -165,7 +151,7 @@ impl RateLimiter {
 
     /// Account for one request from `key` and decide whether to allow it.
     fn check(&self, key: &str) -> Decision {
-        let now = self.clock.now();
+        let now = self.clock.monotonic();
         let mut buckets = self.buckets.lock().expect("rate-limit mutex poisoned");
 
         if let Some(bucket) = buckets.get_mut(key) {

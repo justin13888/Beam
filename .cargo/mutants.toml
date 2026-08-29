@@ -1,0 +1,145 @@
+# cargo-mutants configuration.
+#
+# Read from `.cargo/mutants.toml` ONLY -- cargo-mutants joins that exact path and
+# has no repo-root fallback, so a `mutants.toml` beside Cargo.toml is silently
+# ignored. Parsed with deny_unknown_fields: a typo'd key is a hard error, not a
+# warning.
+#
+# Only tree-invariant facts belong here. Anything that varies per invocation --
+# the FFmpeg feature selection, job count, sharding, filters -- is passed by the
+# `rust:mutants*` tasks in mise.toml, which stay the single source of truth for
+# what CI, the hooks, and humans run (ADR-0009). See docs/testing.md and
+# ADR-0011.
+
+# --- Test selection ---------------------------------------------------------
+
+# Run the whole workspace's tests against every mutant, rather than only the
+# tests of the package the mutant lives in (the default). Two independent
+# reasons, both load-bearing:
+#
+#  1. Signal correctness. This architecture deliberately exercises beam-domain
+#     and beam-index logic through beam-server's subcutaneous
+#     salvo::test::TestClient tests (AGENTS.md, NFR-204). Under the default, a
+#     beam-domain mutant killed only by a beam-server route test is reported as
+#     MISSED -- manufacturing a large backlog of phantom gaps on day one and
+#     destroying trust in the tool before it has said anything true.
+#
+#  2. Feature-flag validity. Per mutant cargo-mutants runs
+#     `cargo test --package=beam-domain@0.1.0 ...`, and
+#     `--features beam-index/vendored-ffmpeg` is rejected there ("none of the
+#     selected packages contains these features"), so every mutant outside
+#     beam-index and beam-server would come back unviable. With test_workspace
+#     the invocation is `cargo test --workspace`, where that syntax is valid.
+#
+# The cost is bounded: the suite is hermetic and runs in seconds, and a
+# beam-domain mutant already forces a rebuild of beam-index and beam-server no
+# matter which tests are then run.
+test_workspace = true
+
+# Use nextest rather than `cargo test`.
+#
+# cargo-mutants only needs to know whether at least one test fails. nextest runs
+# each test in its own process and stops the run at the first failure, so a
+# caught mutant finishes in milliseconds instead of executing the remaining ~360
+# tests in the same binary. Most mutants are expected to be caught, so this is
+# where most of the wall-clock saving comes from.
+#
+# The usual objection -- nextest cannot run doctests -- costs nothing here: this
+# workspace has none.
+test_tool = "nextest"
+
+# --- Build directories ------------------------------------------------------
+
+# Copy target/ into each scratch build directory.
+#
+# The default (false) starts every build dir empty, so each one does a full
+# clean build of salvo, sea-orm/sqlx, rustls, openidconnect and ffmpeg-next
+# before testing its first mutant -- once per parallel job. Locally that is
+# worse than it sounds: BEAM_CARGO_FEATURES defaults to the statically vendored
+# FFmpeg (ADR-0007), whose build script compiles all of FFmpeg from source, so
+# `--jobs 4` would compile FFmpeg four times.
+#
+# This works only because `gitignore` is left at its default of false: the copy
+# walker honours .gitignore when that is true, and target/ is gitignored, so the
+# two settings would cancel out. The flip side is that node_modules/ is copied
+# too; on a reflink-capable filesystem that is nearly free, and elsewhere
+# `cargo mutants --gitignore=true` overrides it (the two flags are mutually
+# exclusive on the command line).
+copy_target = true
+
+# --- Timeouts ---------------------------------------------------------------
+
+# Floor on the auto-derived test timeout (baseline duration x 5).
+#
+# The hermetic suite finishes in seconds, so the derived timeout would be a
+# handful of seconds -- far too tight once several build dirs compete for the
+# same cores, and it would report flaky TIMEOUTs where the truth is MISSED or
+# CAUGHT. 60s sits well above any observed run and still kills a genuinely hung
+# mutant quickly.
+#
+# Mutants will hang in this tree. beam-index/src/runtime.rs and
+# beam-server/src/db.rs contain debounce and retry loops whose exit conditions
+# are mutable; a mutant that removes the bound never terminates.
+minimum_test_timeout = 60.0
+
+# --- Lints ------------------------------------------------------------------
+
+# Cap rustc lints at `warn` inside mutated builds.
+#
+# A mutant that replaces a body with a constant routinely produces
+# unused_variables, unreachable_code or unused_mut. If anything in the
+# environment denies warnings -- actions-rust-lang/setup-rust-toolchain sets
+# RUSTFLAGS="-D warnings" unless given `rustflags: ""`, which every job in
+# ci.yml does -- those mutants come back "unviable" and silently vanish from the
+# denominator. This makes the result independent of the ambient RUSTFLAGS rather
+# than dependent on remembering to override it.
+cap_lints = true
+
+# --- File filters -----------------------------------------------------------
+
+exclude_globs = [
+    # Pure DDL: sea-orm-migration up/down bodies, with no unit tests by design
+    # (docs/testing.md). The only thing that can validate a migration is running
+    # it against a real Postgres, which the hermetic suite deliberately does not
+    # do (NFR-201), so every mutant here would be MISSED and none actionable.
+    "beam-migration/**/*.rs",
+
+    # Pure data shapes: sea-orm Model/ActiveModel/Relation/ActiveModelBehavior.
+    # No business logic, no tests by design.
+    "beam-entity/**/*.rs",
+
+    # Test scaffolding for the opt-in `pg-integration` tier: a dev-dependency
+    # of the crates that own repositories, reaching no production target.
+    # Mutating it reports on the harness rather than on the product -- the same
+    # reason the `test-utils` doubles carry `#[mutants::skip]`.
+    "beam-test-support/**/*.rs",
+
+    # The process entry point. `main` composes already-tested pieces, and
+    # `wait_for_shutdown_signal` waits on real SIGTERM/ctrl-c -- which cannot
+    # be delivered in-process without killing the test runner. Everything here
+    # that *can* be decided by a test has been extracted to `bootstrap.rs`
+    # (the cookie-security gate, CORS assembly) and `db.rs` (the retry
+    # policy), where it is covered; keeping the file in scope would only ever
+    # report `main -> Ok(())` as a permanent survivor.
+    "beam-server/src/main.rs",
+]
+
+# --- Name filters -----------------------------------------------------------
+
+exclude_re = [
+    # Debug and Display formatting is not behaviour this project asserts on.
+    "impl Debug",
+    "impl Display for .*Error>?::fmt",
+]
+
+# --- Deliberately not set yet -----------------------------------------------
+#
+# error_values = ["::sea_orm::DbErr::Custom(\"mutated\".into())"]
+#
+#   Generates Err(...) mutants for the Result-returning repository and service
+#   methods -- "does anything notice if this always fails?", which is exactly
+#   NFR-205 and the highest-value addition available here. It also roughly
+#   doubles the Result-mutant count, with most of the new ones unviable outside
+#   the sea-orm-touching crates, and every unviable mutant still costs one
+#   incremental build. Enable once the workspace caught rate is above 90%,
+#   adding one entry per error type as the crates are covered.

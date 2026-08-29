@@ -602,3 +602,134 @@ mod tests {
         assert!(!ColorTransferCharacteristic::BT709.is_hdr());
     }
 }
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    /// A description is what an operator reads in the admin file list and what
+    /// a support request quotes. The property that matters is that distinct
+    /// values stay distinguishable -- a single shared or empty string makes
+    /// every file look the same.
+    fn all_distinct_and_non_empty<T: std::fmt::Debug>(
+        variants: &[T],
+        describe: impl Fn(&T) -> &'static str,
+    ) {
+        let mut seen: std::collections::HashMap<&'static str, String> =
+            std::collections::HashMap::new();
+        for variant in variants {
+            let description = describe(variant);
+            assert!(
+                !description.is_empty(),
+                "{variant:?} has no description at all"
+            );
+            if let Some(previous) = seen.insert(description, format!("{variant:?}")) {
+                // Two variants may deliberately share a label (several
+                // "Reserved" code points do); anything else is a collision.
+                assert_eq!(
+                    description, "Reserved",
+                    "{variant:?} and {previous} both describe as {description:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn color_primaries_describe_themselves_distinctly() {
+        all_distinct_and_non_empty(
+            &[
+                ColorPrimaries::Reserved0,
+                ColorPrimaries::BT709,
+                ColorPrimaries::Unspecified,
+                ColorPrimaries::Reserved,
+                ColorPrimaries::BT470M,
+                ColorPrimaries::BT470BG,
+                ColorPrimaries::SMPTE170M,
+                ColorPrimaries::SMPTE240M,
+                ColorPrimaries::Film,
+                ColorPrimaries::BT2020,
+            ],
+            ColorPrimaries::description,
+        );
+        // Two the UI actually distinguishes: SDR vs the wide-gamut one.
+        assert_eq!(ColorPrimaries::BT709.description(), "BT.709");
+        assert_eq!(ColorPrimaries::BT2020.description(), "BT.2020");
+    }
+
+    #[test]
+    fn transfer_characteristics_describe_themselves_distinctly() {
+        all_distinct_and_non_empty(
+            &[
+                ColorTransferCharacteristic::Reserved0,
+                ColorTransferCharacteristic::BT709,
+                ColorTransferCharacteristic::Unspecified,
+                ColorTransferCharacteristic::Reserved,
+                ColorTransferCharacteristic::GAMMA22,
+                ColorTransferCharacteristic::GAMMA28,
+                ColorTransferCharacteristic::SMPTE2084,
+                ColorTransferCharacteristic::AribStdB67,
+            ],
+            ColorTransferCharacteristic::description,
+        );
+        // The two that decide whether a file is presented as HDR.
+        assert_eq!(
+            ColorTransferCharacteristic::SMPTE2084.description(),
+            "SMPTE-2084 (PQ)"
+        );
+        assert_eq!(
+            ColorTransferCharacteristic::AribStdB67.description(),
+            "HLG (Hybrid Log-Gamma)"
+        );
+    }
+
+    #[test]
+    fn chroma_locations_describe_themselves_distinctly() {
+        all_distinct_and_non_empty(
+            &[
+                ChromaLocation::Left,
+                ChromaLocation::Center,
+                ChromaLocation::TopLeft,
+                ChromaLocation::Top,
+                ChromaLocation::BottomLeft,
+                ChromaLocation::Bottom,
+                ChromaLocation::Unspecified,
+            ],
+            ChromaLocation::description,
+        );
+        assert_eq!(ChromaLocation::TopLeft.description(), "Top Left");
+    }
+
+    #[test]
+    fn only_gpu_surface_formats_count_as_hardware() {
+        // `is_hardware` distinguishes a decoded frame living in GPU memory
+        // from a normal planar format. Claiming every format is hardware --
+        // or none is -- would misreport every file in the admin view.
+        for hardware in [
+            PixelFormat::VAAPI,
+            PixelFormat::DXVA2_VLD,
+            PixelFormat::VDPAU,
+            PixelFormat::VIDEOTOOLBOX,
+            PixelFormat::D3D11,
+            PixelFormat::CUDA,
+            PixelFormat::QSV,
+            PixelFormat::VULKAN,
+        ] {
+            assert!(hardware.is_hardware(), "{hardware:?}");
+            assert_eq!(
+                hardware.bit_depth(),
+                None,
+                "{hardware:?} is an opaque GPU surface with no software bit depth"
+            );
+        }
+
+        for software in [
+            PixelFormat::YUV420P,
+            PixelFormat::YUV422P,
+            PixelFormat::YUV444P,
+            PixelFormat::None,
+            PixelFormat::Other(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGB24),
+        ] {
+            assert!(!software.is_hardware(), "{software:?}");
+        }
+    }
+}

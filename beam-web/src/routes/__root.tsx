@@ -20,18 +20,39 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
 			<Header />
 			<Outlet />
 			<Toaster theme="dark" position="top-right" richColors />
-			<TanStackDevtools
-				config={{
-					position: "bottom-right",
-				}}
-				plugins={[
-					{
-						name: "Tanstack Router",
-						render: <TanStackRouterDevtoolsPanel />,
-					},
-					TanStackQueryDevtools,
-				]}
-			/>
+			<DevtoolsPanel />
 		</>
 	),
 });
+
+/**
+ * Devtools, mounted only when running under the dev server.
+ *
+ * They were previously unconditional, so the panel and both plugins shipped in
+ * the production bundle -- and, less visibly, they made the root route
+ * unmountable outside a browser: the devtools core throws "Devtools is not
+ * mounted" when React tears the tree down, which is the first thing any test
+ * of a real router does.
+ *
+ * The condition is `MODE === "development"` rather than `DEV`, which is merely
+ * "not a production build" and so is also true under the test runner.
+ */
+function DevtoolsPanel() {
+	if (import.meta.env.MODE !== "development") {
+		return null;
+	}
+	return (
+		<TanStackDevtools
+			config={{
+				position: "bottom-right",
+			}}
+			plugins={[
+				{
+					name: "Tanstack Router",
+					render: <TanStackRouterDevtoolsPanel />,
+				},
+				TanStackQueryDevtools,
+			]}
+		/>
+	);
+}

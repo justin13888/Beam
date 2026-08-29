@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_library_absolute_path_inside_video_dir_is_accepted() {
+    async fn test_create_library_propagates_validator_success_for_absolute_path() {
         let video_dir = PathBuf::from("/media/videos");
         let service = LocalLibraryService::new(
             Arc::new(InMemoryLibraryRepository::default()),
@@ -201,13 +201,13 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "absolute path inside video_dir should be accepted: {:?}",
+            "a successful validation should be passed through: {:?}",
             result.err()
         );
     }
 
     #[tokio::test]
-    async fn test_create_library_relative_path_inside_video_dir_is_accepted() {
+    async fn test_create_library_propagates_validator_success_for_relative_path() {
         let video_dir = PathBuf::from("/media/videos");
         let service = LocalLibraryService::new(
             Arc::new(InMemoryLibraryRepository::default()),
@@ -224,13 +224,13 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "relative path inside video_dir should be accepted: {:?}",
+            "a successful validation should be passed through: {:?}",
             result.err()
         );
     }
 
     #[tokio::test]
-    async fn test_create_library_path_outside_video_dir_returns_validation_error() {
+    async fn test_create_library_propagates_validator_validation_error() {
         let video_dir = PathBuf::from("/media/videos");
         let service = LocalLibraryService::new(
             Arc::new(InMemoryLibraryRepository::default()),
@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_library_path_not_found_returns_path_not_found_error() {
+    async fn test_create_library_propagates_validator_path_not_found_error() {
         let video_dir = PathBuf::from("/media/videos");
         let service = LocalLibraryService::new(
             Arc::new(InMemoryLibraryRepository::default()),
@@ -674,5 +674,160 @@ mod tests {
         let events = notif_ref.published_events();
         assert_eq!(events.len(), 1);
         assert!(events[0].message.contains("Movies"));
+    }
+}
+
+// ── OsPathValidator: real containment ─────────────────────────────────────────
+//
+// The tests above drive LocalLibraryService through InMemoryPathValidator, which
+// can only ever return the outcome the test configured. Directory containment --
+// the actual security control -- lives in OsPathValidator, and is only meaningful
+// against a real filesystem, so these use TempDir rather than a fake.
+#[cfg(test)]
+mod os_path_validator {
+    use crate::services::library::{LibraryError, OsPathValidator, PathValidator};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    /// A root with `movies/` and `shows/` inside it. Returns the canonicalized root,
+    /// because macOS puts TempDir under a symlinked /var and the validator returns
+    /// canonical paths.
+    fn root_with_children() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().expect("temp dir");
+        let root = tmp.path().canonicalize().expect("canonical root");
+        fs::create_dir(root.join("movies")).expect("movies");
+        fs::create_dir(root.join("shows")).expect("shows");
+        (tmp, root)
+    }
+
+    fn validate(requested: &Path, root: &Path) -> Result<PathBuf, LibraryError> {
+        OsPathValidator.validate_library_path(requested, root)
+    }
+
+    #[test]
+    fn absolute_path_inside_root_is_accepted_and_canonicalized() {
+        let (_tmp, root) = root_with_children();
+        let got = validate(&root.join("movies"), &root).expect("inside root");
+        assert_eq!(got, root.join("movies"));
+    }
+
+    #[test]
+    fn relative_path_is_resolved_against_root() {
+        let (_tmp, root) = root_with_children();
+        let got = validate(Path::new("movies"), &root).expect("inside root");
+        assert_eq!(got, root.join("movies"));
+    }
+
+    #[test]
+    fn root_itself_is_accepted() {
+        let (_tmp, root) = root_with_children();
+        let got = validate(&root, &root).expect("root is within root");
+        assert_eq!(got, root);
+    }
+
+    #[test]
+    fn dot_dot_traversal_out_of_root_is_rejected() {
+        let (_tmp, root) = root_with_children();
+        // Resolves to root's parent, which exists -- so this gets past the
+        // canonicalize step and must be caught by the containment check itself.
+        let err = validate(Path::new("movies/../.."), &root).expect_err("escapes root");
+        assert!(
+            matches!(err, LibraryError::Validation(_)),
+            "expected Validation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn dot_dot_that_stays_inside_root_is_accepted() {
+        let (_tmp, root) = root_with_children();
+        let got = validate(Path::new("movies/../shows"), &root).expect("still inside root");
+        assert_eq!(got, root.join("shows"));
+    }
+
+    #[test]
+    fn absolute_path_outside_root_is_rejected() {
+        let (_tmp, root) = root_with_children();
+        let outside = TempDir::new().expect("other temp dir");
+        let err = validate(outside.path(), &root).expect_err("outside root");
+        assert!(
+            matches!(err, LibraryError::Validation(_)),
+            "expected Validation, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_pointing_outside_root_is_rejected() {
+        let (_tmp, root) = root_with_children();
+        let outside = TempDir::new().expect("other temp dir");
+        let outside_real = outside.path().canonicalize().expect("canonical");
+        std::os::unix::fs::symlink(&outside_real, root.join("escape")).expect("symlink");
+
+        // The bare path is inside root; only canonicalization reveals the escape.
+        // This is the case a naive starts_with on the *requested* path would miss.
+        let err = validate(Path::new("escape"), &root).expect_err("symlink escapes root");
+        assert!(
+            matches!(err, LibraryError::Validation(_)),
+            "expected Validation, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_staying_inside_root_is_accepted() {
+        let (_tmp, root) = root_with_children();
+        std::os::unix::fs::symlink(root.join("shows"), root.join("link")).expect("symlink");
+        let got = validate(Path::new("link"), &root).expect("resolves inside root");
+        assert_eq!(got, root.join("shows"));
+    }
+
+    #[test]
+    fn sibling_directory_sharing_a_name_prefix_is_rejected() {
+        // The classic prefix bug: "/videos-evil" starts with the *string* "/videos"
+        // but is not inside it. Path::starts_with compares whole components, so this
+        // is already correct -- the test exists to keep it that way.
+        let tmp = TempDir::new().expect("temp dir");
+        let base = tmp.path().canonicalize().expect("canonical");
+        let root = base.join("videos");
+        let evil = base.join("videos-evil");
+        fs::create_dir(&root).expect("videos");
+        fs::create_dir(&evil).expect("videos-evil");
+
+        let err = validate(&evil, &root).expect_err("sibling is not inside root");
+        assert!(
+            matches!(err, LibraryError::Validation(_)),
+            "expected Validation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nonexistent_path_is_path_not_found_not_validation() {
+        let (_tmp, root) = root_with_children();
+        let err = validate(Path::new("no-such-dir"), &root).expect_err("does not exist");
+        assert!(
+            matches!(err, LibraryError::PathNotFound(_)),
+            "expected PathNotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nonexistent_root_is_path_not_found() {
+        let tmp = TempDir::new().expect("temp dir");
+        let missing_root = tmp.path().join("not-created");
+        let err = validate(Path::new("anything"), &missing_root).expect_err("root missing");
+        assert!(
+            matches!(err, LibraryError::PathNotFound(_)),
+            "expected PathNotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_inside_root_is_accepted() {
+        // The validator checks containment, not that the target is a directory.
+        let (_tmp, root) = root_with_children();
+        fs::write(root.join("movies/note.txt"), b"x").expect("write");
+        let got = validate(Path::new("movies/note.txt"), &root).expect("inside root");
+        assert_eq!(got, root.join("movies/note.txt"));
     }
 }

@@ -14,6 +14,52 @@ import {
 } from "@vidstack/react/player/layouts/default";
 import { useRef } from "react";
 
+/** The slice of Vidstack's player instance this wrapper's callbacks read. */
+export interface PlayerLike {
+	currentTime: number;
+	duration: number;
+}
+
+/**
+ * The wrapper's own behaviour, separated from the JSX that wires it up.
+ *
+ * Vidstack's `<MediaPlayer>` cannot be driven in jsdom -- it needs a real
+ * media element -- so inline callbacks on it are untestable by construction.
+ * Pulled out here they are ordinary functions over a `{currentTime, duration}`
+ * pair, which is all they ever touched.
+ */
+export function playerHandlers({
+	startTime = 0,
+	onProgress,
+	onEnded,
+}: {
+	startTime?: number;
+	onProgress?: (currentTime: number, duration: number) => void;
+	onEnded?: (duration: number) => void;
+}) {
+	return {
+		/** Seek to the resume position once the source can play. A zero or
+		 * negative `startTime` means "from the beginning" and must not seek --
+		 * assigning `currentTime = 0` on some providers restarts a stream that
+		 * had already begun buffering elsewhere. */
+		canPlay(player: PlayerLike | null) {
+			if (startTime > 0 && player) {
+				player.currentTime = startTime;
+			}
+		},
+		/** Report progress. Skipped entirely when there is no player yet. */
+		timeUpdate(player: PlayerLike | null) {
+			if (player) {
+				onProgress?.(player.currentTime, player.duration);
+			}
+		},
+		/** Report completion, defaulting to 0 when the duration never resolved. */
+		ended(player: PlayerLike | null) {
+			onEnded?.(player?.duration ?? 0);
+		},
+	};
+}
+
 export interface VideoPlayerProps {
 	title: string;
 	src: string;
@@ -52,6 +98,7 @@ export function VideoPlayer({
 	className,
 }: VideoPlayerProps) {
 	const player = useRef<MediaPlayerInstance>(null);
+	const handlers = playerHandlers({ startTime, onProgress, onEnded });
 
 	return (
 		<MediaPlayer
@@ -66,17 +113,9 @@ export function VideoPlayer({
 			autoPlay={autoPlay}
 			playsInline
 			className={className}
-			onCanPlay={() => {
-				if (startTime > 0 && player.current) {
-					player.current.currentTime = startTime;
-				}
-			}}
-			onTimeUpdate={() => {
-				if (player.current) {
-					onProgress?.(player.current.currentTime, player.current.duration);
-				}
-			}}
-			onEnded={() => onEnded?.(player.current?.duration ?? 0)}
+			onCanPlay={() => handlers.canPlay(player.current)}
+			onTimeUpdate={() => handlers.timeUpdate(player.current)}
+			onEnded={() => handlers.ended(player.current)}
 			onError={onError}
 		>
 			<MediaProvider>

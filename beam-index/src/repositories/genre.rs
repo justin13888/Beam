@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
@@ -9,11 +11,11 @@ use beam_domain::repositories::genre::slugify;
 /// SQL-based implementation of the GenreRepository trait.
 #[derive(Debug, Clone)]
 pub struct SqlGenreRepository {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 }
 
 impl SqlGenreRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 
@@ -26,7 +28,7 @@ impl SqlGenreRepository {
             let slug = slugify(name);
             let existing = genre::Entity::find()
                 .filter(genre::Column::Slug.eq(slug.clone()))
-                .one(&self.db)
+                .one(self.db.as_ref())
                 .await?;
             let id = match existing {
                 Some(model) => model.id,
@@ -36,7 +38,7 @@ impl SqlGenreRepository {
                         name: Set(name.clone()),
                         slug: Set(slug),
                     };
-                    new_genre.insert(&self.db).await?.id
+                    new_genre.insert(self.db.as_ref()).await?.id
                 }
             };
             ids.push(id);
@@ -55,7 +57,7 @@ impl GenreRepository for SqlGenreRepository {
 
         movie_genre::Entity::delete_many()
             .filter(movie_genre::Column::MovieId.eq(movie_id))
-            .exec(&self.db)
+            .exec(self.db.as_ref())
             .await?;
 
         for genre_id in ids {
@@ -63,7 +65,7 @@ impl GenreRepository for SqlGenreRepository {
                 movie_id: Set(movie_id),
                 genre_id: Set(genre_id),
             }
-            .insert(&self.db)
+            .insert(self.db.as_ref())
             .await?;
         }
 
@@ -78,7 +80,7 @@ impl GenreRepository for SqlGenreRepository {
 
         show_genre::Entity::delete_many()
             .filter(show_genre::Column::ShowId.eq(show_id))
-            .exec(&self.db)
+            .exec(self.db.as_ref())
             .await?;
 
         for genre_id in ids {
@@ -86,7 +88,7 @@ impl GenreRepository for SqlGenreRepository {
                 show_id: Set(show_id),
                 genre_id: Set(genre_id),
             }
-            .insert(&self.db)
+            .insert(self.db.as_ref())
             .await?;
         }
 
@@ -97,7 +99,7 @@ impl GenreRepository for SqlGenreRepository {
         use beam_entity::genre;
         use sea_orm::EntityTrait;
 
-        let models = genre::Entity::find().all(&self.db).await?;
+        let models = genre::Entity::find().all(self.db.as_ref()).await?;
         Ok(models.into_iter().map(Genre::from).collect())
     }
 }

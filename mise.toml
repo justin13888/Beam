@@ -13,6 +13,17 @@ hk = "1.50.0"
 "github:convco/convco" = "0.7.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 "github:taiki-e/cargo-llvm-cov" = "0.8.7"
+# Mutation testing (ADR-0011). Advisory only -- see the `rust:mutants*` tasks and
+# docs/testing.md; `ci-ok` in .github/workflows/ci.yml must never depend on them.
+#
+# cargo-mutants publishes prebuilt binaries for x86_64 only (linux-gnu, apple-
+# darwin, pc-windows-msvc). On an aarch64 host, override in a gitignored
+# mise.local.toml with `"cargo:cargo-mutants" = "27.1.0"` to build from source.
+"github:sourcefrog/cargo-mutants" = "27.1.0"
+# .cargo/mutants.toml sets `test_tool = "nextest"`, so nextest is a hard runtime
+# requirement of `cargo mutants` here, not an optional speedup. nextest tags its
+# releases as `cargo-nextest-<semver>`, which is the version string mise wants.
+"github:nextest-rs/nextest" = "cargo-nextest-0.9.143"
 # Rust is deliberately absent: rust-toolchain.toml pins 1.91.0 and is honored by
 # rustup, rust-analyzer, and CI's setup-rust-toolchain action. Duplicating the
 # pin here would create a second source of truth for the same thing.
@@ -34,6 +45,13 @@ RUST_BACKTRACE = "1"
 # `env.` lets the caller win, and `default` only fires when it is unset -- an
 # explicitly empty value stays empty.
 BEAM_CARGO_FEATURES = "{{ env.BEAM_CARGO_FEATURES | default(value='beam-index/vendored-ffmpeg,beam-server/vendored-ffmpeg') }}"
+# cargo-mutants builds each package separately, so it needs one *unqualified*
+# feature name that every mutated package accepts. Each of the four declares
+# `mutation-testing` as the set that compiles all of its `cfg`-gated production
+# paths -- otherwise mutants in code the build never compiled come back MISSED
+# for a reason that has nothing to do with the tests. Override on a host with
+# the system FFmpeg development libraries.
+BEAM_MUTANTS_FEATURES = "{{ env.BEAM_MUTANTS_FEATURES | default(value='mutation-testing') }}"
 
 [hooks]
 # Installs .git/hooks/{pre-commit,commit-msg,pre-push} pointing at hk. Safe to
@@ -76,11 +94,52 @@ description = "Run the Rust test suite"
 run = 'cargo test --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"}'
 
 [tasks."rust:coverage"]
-description = "Run Rust tests with coverage and enforce the line threshold"
+description = "Run Rust tests with coverage and enforce the line/region/function thresholds"
+# --fail-under-regions is this project's branch-coverage gate. cargo-llvm-cov's
+# --branch is nightly-only (it needs -Z coverage-options=branch) and
+# rust-toolchain.toml pins stable 1.91.0, so it is simply unavailable. LLVM
+# regions are a superset of branches -- every match arm and every && / ||
+# short-circuit gets its own counter -- which makes region coverage the honest
+# stable-toolchain proxy, and the number that correlates with mutation score.
+#
+# Thresholds sit a few points under the last measured value, the same calibration
+# convention beam-web/vitest.config.ts documents. Measured 2026-08-28 on a clean
+# workspace, after the hardening in this branch: regions 84.35%, functions
+# 76.76%, lines 84.27%. Ratchet them up as the suite matures; never relax one to
+# make a red pull request pass.
 run = [
-    'cargo llvm-cov --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} --lcov --output-path lcov.info --fail-under-lines 65',
+    'cargo llvm-cov --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} --lcov --output-path lcov.info --fail-under-lines 81 --fail-under-regions 81 --fail-under-functions 73',
     "cargo llvm-cov report --summary-only",
 ]
+
+[tasks."rust:test:pg"]
+description = "Opt-in tier: run the repository contracts against a real Postgres"
+# Deliberately NOT part of `ci`, `rust:test`, `rust:coverage`, or the pre-push
+# hook: it is the one tier that needs infrastructure, and NFR-201 says the
+# default run must not. Bring the database up first:
+#   docker compose -f compose.dependencies.yaml up -d
+# and point BEAM_TEST_DATABASE_URL at it. Unset, the tier fails loudly rather
+# than skipping -- a tier that silently passes when it did not run is worse
+# than one that does not run.
+# `--package beam-index` means BEAM_CARGO_FEATURES' workspace-qualified names
+# do not apply; the vendored-ffmpeg toggle is spelled unqualified here instead.
+# (`BEAM_MUTANTS_FEATURES` carries the same unqualified name for cargo-mutants.)
+run = '''
+features="pg-integration"
+case "${BEAM_CARGO_FEATURES:-}" in
+    *vendored-ffmpeg*) features="$features,vendored-ffmpeg" ;;
+esac
+cargo test --package beam-index --features "$features" --test pg_integration
+cargo test --package beam-auth --features "pg-integration,test-utils" --test pg_integration
+'''
+
+[tasks."rust:coverage:report"]
+description = "Report per-file line/region/function coverage with no threshold (calibration)"
+# No gate: this is what you calibrate rust:coverage's thresholds against, and
+# what you read between mutation runs to pick the next target. Region coverage
+# is the column to watch -- if a batch of new tests does not move it, those
+# tests are re-covering already-covered lines and will not kill any mutants.
+run = 'cargo llvm-cov --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} --show-missing-lines'
 
 [tasks."rust:deny"]
 description = "Audit dependencies for advisories, licenses, bans, and sources"
@@ -89,6 +148,119 @@ run = "cargo deny check"
 [tasks."rust:lockfile"]
 description = "Fail if Cargo.lock is out of date with the manifests"
 run = "cargo metadata --locked --format-version 1 > /dev/null"
+
+# ---------------------------------------------------------------------------
+# Mutation testing
+#
+# Advisory, never a merge gate: `ci-ok` in .github/workflows/ci.yml does not
+# depend on any of these, and neither `ci` nor the pre-push hook runs them. A
+# surviving mutant is a prompt to harden the code, not a broken build. See
+# docs/testing.md and ADR-0011.
+#
+# Tree-invariant configuration (test_workspace, nextest, copy_target, timeouts,
+# exclusions) lives in .cargo/mutants.toml. Only per-invocation choices belong
+# here, so that file stays honest about what is a property of the tree.
+#
+# BEAM_MUTANTS_JOBS is the number of parallel scratch build directories. Each is
+# a full copy of the tree including target/, so it trades disk and RAM for wall
+# clock -- do not scale it with nproc. 2 suits a 4-vCPU CI runner (cargo already
+# saturates those cores); 4 suits a large workstation.
+# ---------------------------------------------------------------------------
+
+[tasks."rust:mutants:list"]
+description = "List the mutants cargo-mutants would generate (parses only, never builds)"
+# Free -- syn parses the tree and nothing is compiled. This is how you size a run
+# before committing hours to it, and how you confirm the exclusions in
+# .cargo/mutants.toml are taking effect.
+run = 'cargo mutants --list ${BEAM_MUTANTS_FEATURES:+--features "$BEAM_MUTANTS_FEATURES"}'
+
+[tasks."rust:mutants"]
+description = "Mutation-test the whole workspace (hours -- prefer :diff or :crate)"
+run = 'cargo mutants --workspace ${BEAM_MUTANTS_FEATURES:+--features "$BEAM_MUTANTS_FEATURES"} --jobs "${BEAM_MUTANTS_JOBS:-2}"'
+
+[tasks."rust:mutants:diff"]
+description = "Mutation-test only the Rust code this branch changed"
+# The diff must be merge-base..HEAD (three dots). cargo-mutants matches it
+# against the *new* side, so a two-dot diff describes a tree that is not the one
+# on disk and it exits 5. Only code under test is matched, never test code, so a
+# test-only change legitimately yields no mutants.
+run = '''
+set -eu
+base=${MUTANTS_BASE:-$(git merge-base HEAD origin/master 2>/dev/null || true)}
+if [ -z "$base" ]; then
+    echo "origin/master not available and MUTANTS_BASE unset" >&2
+    exit 1
+fi
+diff_file=$(mktemp)
+trap 'rm -f "$diff_file"' EXIT
+git diff "$base"...HEAD -- '*.rs' > "$diff_file"
+if [ ! -s "$diff_file" ]; then
+    echo "no Rust changes since $base; nothing to mutate"
+    exit 0
+fi
+cargo mutants --in-diff "$diff_file" \
+    ${BEAM_MUTANTS_FEATURES:+--features "$BEAM_MUTANTS_FEATURES"} \
+    --jobs "${BEAM_MUTANTS_JOBS:-2}"
+'''
+
+[tasks."rust:mutants:crate"]
+description = "Mutation-test one crate, e.g. mise run rust:mutants:crate beam-domain"
+# This is the task the hardening loop actually runs. --iterate skips everything
+# caught or unviable last time, which makes second and later passes cheap;
+# finish with one run without it, because --iterate assumes your edits never
+# reduced coverage and only a clean run proves the crate.
+#
+# Selection is by *path* (--file) rather than --package, so the mutant set can
+# be narrowed to one crate's sources while `test_workspace = true` still runs
+# the whole suite against each mutant. That matters here because this
+# architecture deliberately exercises beam-domain and beam-index logic through
+# beam-server's subcutaneous tests; testing only the mutated package's own tests
+# would report a large phantom backlog of MISSED mutants.
+#
+# cargo-mutants *builds* each package on its own regardless, which is why the
+# feature name it is given must be unqualified and valid everywhere -- see
+# BEAM_MUTANTS_FEATURES above.
+usage = '''
+arg "<crate>" help="Workspace crate to mutate (beam-auth|beam-domain|beam-index|beam-server)"
+flag "--iterate" help="Skip mutants caught or unviable in the previous run"
+'''
+run = '''
+set -eu
+iterate=""
+if [ "${usage_iterate:-false}" = "true" ]; then
+    iterate="--iterate"
+fi
+# shellcheck disable=SC2086
+cargo mutants --file "$usage_crate/**/*.rs" $iterate \
+    ${BEAM_MUTANTS_FEATURES:+--features "$BEAM_MUTANTS_FEATURES"} \
+    --jobs "${BEAM_MUTANTS_JOBS:-2}"
+'''
+
+[tasks."rust:mutants:shard"]
+description = "Run one shard of the full mutation suite, e.g. rust:mutants:shard 3/16"
+# k is 0-based. The sharding method is left at cargo-mutants' default of `slice`
+# rather than round-robin: slice hands each shard a contiguous run of mutants,
+# which in this workspace means one crate at a time and therefore maximal
+# incremental-build locality. Rebuilds dominate the cost, so that is worth more
+# than round-robin's better-balanced shard durations.
+#
+# --baseline=skip drops one clean build+test per shard, which the nightly
+# workflow can afford only because a separate job proves the tree green first.
+# It also removes the measured test duration the timeout would be derived from
+# -- cargo-mutants falls back to a 300s constant -- so --timeout must be given
+# explicitly alongside it.
+usage = '''
+arg "<shard>" help="Shard as k/n with k 0-based, e.g. 3/16"
+'''
+run = '''
+set -eu
+cargo mutants --workspace \
+    --shard "$usage_shard" \
+    --baseline=skip \
+    --timeout 60 \
+    ${BEAM_MUTANTS_FEATURES:+--features "$BEAM_MUTANTS_FEATURES"} \
+    --jobs "${BEAM_MUTANTS_JOBS:-2}"
+'''
 
 # ---------------------------------------------------------------------------
 # TypeScript / web
@@ -144,6 +316,24 @@ run = [
     'cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > beam-web/openapi.json',
     "bun run --filter beam-web codegen:openapi",
 ]
+
+[tasks."codegen:openapi:check"]
+description = "Fail when the committed OpenAPI spec differs from the one the router generates"
+# `beam-web/openapi.json` is committed so a change to the wire contract is a
+# reviewable diff rather than an invisible regeneration. This is the guard that
+# keeps it honest.
+run = '''
+set -eu
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > "$tmp"
+if ! diff -u beam-web/openapi.json "$tmp"; then
+    echo
+    echo "beam-web/openapi.json is stale. Run: mise run codegen:openapi" >&2
+    exit 1
+fi
+echo "OpenAPI spec matches the router"
+'''
 
 # ---------------------------------------------------------------------------
 # Commit hygiene
@@ -218,6 +408,60 @@ fi
 exit "$status"
 '''
 
+[tasks."check:mutants-skip-fakes"]
+description = "Assert every test-utils-gated item is also marked #[mutants::skip]"
+# cargo-mutants decides what not to mutate by looking for the *literal*
+# attribute `#[cfg(test)]`. Against `#[cfg(any(test, feature = "test-utils"))]`
+# its parse of the nested meta fails, it takes the error branch, and the item is
+# NOT excluded -- so the InMemory*/Fake*/TestClock doubles get mutated like
+# production code. Under `cargo test` the `test` arm of the cfg is active, so
+# those mutants compile and run: they are viable, they fill the report with
+# meaningless survivors, and the ones that are killed inflate the caught rate
+# with kills that prove nothing about product behaviour.
+#
+# An `exclude_re` in .cargo/mutants.toml cannot fix this safely. It matches on
+# names, the doubles are interleaved with real logic in the same files, and this
+# workspace has had un-gated production types whose names begin with `InMemory`.
+# A silent, name-based exemption of real code is the one failure mode a mutation
+# setup must not have, so the exclusion is explicit and per-item instead.
+#
+# The rule: `#[mutants::skip]` immediately above the cfg attribute. `use` items
+# are exempt -- attribute macros are not accepted on them and re-exports
+# generate no mutants.
+run = '''
+set -eu
+status=0
+# `git ls-files` still lists a file deleted in the working tree; skip those so
+# the guard reflects the tree as it is, not as it was committed.
+for file in $(git ls-files '*.rs'); do
+    [ -f "$file" ] || continue
+    awk -v f="$file" '
+      {
+          line = $0
+          sub(/^[ \t]+/, "", line)
+          if (line == "#[cfg(any(test, feature = \"test-utils\"))]") {
+              if ((getline nxt) > 0) {
+                  n = nxt
+                  sub(/^[ \t]+/, "", n)
+                  if (n !~ /^(pub )?use / && prev != "#[mutants::skip]") {
+                      printf "%s:%d: test-only item is not marked #[mutants::skip]\n", f, NR - 1
+                      bad = 1
+                  }
+                  prev = n
+                  next
+              }
+          }
+          prev = line
+      }
+      END { exit bad }
+    ' "$file" || status=1
+done
+if [ "$status" -eq 0 ]; then
+    echo "every test-utils-gated item is marked #[mutants::skip]"
+fi
+exit "$status"
+'''
+
 # ---------------------------------------------------------------------------
 # Aggregate
 # ---------------------------------------------------------------------------
@@ -231,6 +475,8 @@ depends = [
     "rust:deny",
     "rust:lockfile",
     "check:ffmpeg-version",
+    "check:mutants-skip-fakes",
+    "codegen:openapi:check",
     "ts:check",
     "ts:typecheck",
     "ts:test",

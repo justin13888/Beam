@@ -18,3 +18,7 @@ pub use movie::SqlMovieRepository;
 pub use playback_progress::SqlPlaybackProgressRepository;
 pub use show::SqlShowRepository;
 pub use stream::SqlMediaStreamRepository;
+
+#[cfg(test)]
+#[path = "sql_shape_tests.rs"]
+mod sql_shape_tests;

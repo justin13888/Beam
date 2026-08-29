@@ -56,14 +56,30 @@ fn committed_fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Per-build cache directory for live-synthesised fixtures.
+/// Cache directory for live-synthesised fixtures.
+///
+/// Under the build's `target/` rather than the system temp directory. The
+/// fixtures are build artifacts -- they are produced by the FFmpeg this build
+/// links -- so they belong with the other build artifacts: `cargo clean`
+/// removes them, they cannot outlive a toolchain change into a later run, and
+/// they do not consume a shared (often `tmpfs`, often small) `/tmp`.
 fn synth_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join("beam-index-probe-fixtures");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join("probe-fixtures");
     std::fs::create_dir_all(&dir).expect("create synth fixture dir");
     dir
 }
 
 /// Serialises fixture synthesis so parallel tests generate each file once.
+///
+/// This and [`FFMPEG_INIT`] are deliberately process-global. `ffmpeg::init`
+/// mutates process-wide state and must run exactly once whatever the test
+/// order; encoding is expensive and produces a file whose content depends only
+/// on the codec, so doing it per test would buy nothing but wall-clock. The
+/// synthesised path is published by an atomic rename, so a test never observes
+/// a half-written fixture.
 static SYNTH_LOCK: Mutex<()> = Mutex::new(());
 
 /// Return the path to a live-synthesised fixture, generating it exactly once

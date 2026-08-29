@@ -20,6 +20,7 @@ ffmpeg-next = { workspace = true }
 # Facade only: every counter is a no-op unless beam-server installed a
 # recorder (BEAM_ENABLE_METRICS=true).
 metrics = { workspace = true }
+mutants = { workspace = true }
 notify = "6"
 num = { version = "0.4.3", features = ["serde"] }
 num_cpus = "1.17.0"
@@ -37,14 +38,31 @@ walkdir = { workspace = true }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
+# `test-utils` here (not just under the crate's own `test-utils` feature) so the
+# domain-level doubles -- `TestClock`, builders -- are available to this crate's
+# own `#[cfg(test)]` modules: a dependency is not compiled with `cfg(test)`.
+beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
+beam-test-support = { path = "../beam-test-support" }
 futures = "0.3.31"
 metrics-util = { workspace = true }
 mockall = "0.14.0"
+sea-orm = { workspace = true, features = ["mock"] }
 tempfile = "3.23.0"
 
 [features]
+# Opt-in tier: runs the shared repository contracts against a real Postgres.
+# Never enabled by `rust:test`, `rust:coverage`, `mise run ci`, or the pre-push
+# hook -- see NFR-201 and ADR-0011.
+pg-integration = ["beam-test-support/pg-integration"]
 test-utils = ["dep:mockall", "beam-domain/test-utils"]
 vendored-ffmpeg = ["ffmpeg-next/build"]
+# The feature set cargo-mutants builds this package with.
+#
+# cargo-mutants builds each package on its own, so it needs one *unqualified*
+# feature name that is valid everywhere -- and the set it selects has to compile
+# every `cfg`-gated production path, or mutants in code that was never built are
+# reported MISSED for a reason that has nothing to do with the tests.
+mutation-testing = ["vendored-ffmpeg", "test-utils"]
 
 [dependencies.mockall]
 version = "0.14.0"

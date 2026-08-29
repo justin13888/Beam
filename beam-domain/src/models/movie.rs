@@ -105,3 +105,56 @@ impl From<beam_entity::movie_entry::Model> for MovieEntry {
         }
     }
 }
+
+#[cfg(all(test, feature = "entity"))]
+mod entity_conversion_tests {
+    use super::*;
+
+    fn model(runtime_mins: Option<i32>) -> beam_entity::movie::Model {
+        let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+        beam_entity::movie::Model {
+            id: Uuid::new_v4(),
+            title: "Arrival".to_string(),
+            title_localized: None,
+            description: None,
+            year: Some(2016),
+            release_date: None,
+            runtime_mins,
+            poster_url: None,
+            backdrop_url: None,
+            tmdb_id: Some(329_865),
+            imdb_id: None,
+            tvdb_id: None,
+            anilist_id: None,
+            rating_tmdb: None,
+            rating_imdb: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn a_runtime_in_minutes_becomes_a_duration_in_seconds() {
+        // The stored column is minutes and the domain type is a `Duration`;
+        // getting the conversion wrong shows a 116-minute film as under two
+        // minutes (or over a hundred hours) in every UI that renders it.
+        assert_eq!(
+            Movie::from(model(Some(116))).runtime,
+            Some(Duration::from_secs(116 * 60))
+        );
+        assert_eq!(
+            Movie::from(model(Some(1))).runtime,
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn a_zero_runtime_is_a_zero_duration_not_an_absent_one() {
+        assert_eq!(Movie::from(model(Some(0))).runtime, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn an_unknown_runtime_stays_unknown() {
+        assert_eq!(Movie::from(model(None)).runtime, None);
+    }
+}

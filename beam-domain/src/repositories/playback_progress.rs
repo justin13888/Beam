@@ -40,27 +40,55 @@ pub trait PlaybackProgressRepository: Send + Sync + std::fmt::Debug {
     async fn count_by_user(&self, user_id: Uuid) -> Result<u64, DbErr>;
 }
 
+/// Test doubles. Gated behind `test-utils` so downstream crates can depend on
+/// them without them reaching a release build. See
+/// [`crate::services::clock::in_memory`] for why the `#[mutants::skip]` is
+/// required.
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::services::Clock;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
-    #[derive(Debug, Default)]
+    /// In-memory stand-in for the SQL repository.
+    ///
+    /// Takes the same [`Clock`] the real repository takes, so `updated_at`
+    /// ordering is driven by an advanced [`crate::services::TestClock`] rather
+    /// than by wall-clock time -- which is what lets the shared contract in
+    /// [`super::contract`] assert ordering without sleeping.
+    #[derive(Debug)]
     pub struct InMemoryPlaybackProgressRepository {
-        pub rows: Mutex<HashMap<Uuid, PlaybackProgress>>,
+        rows: Mutex<HashMap<Uuid, PlaybackProgress>>,
+        clock: Arc<dyn Clock>,
+    }
+
+    impl InMemoryPlaybackProgressRepository {
+        pub fn new(clock: Arc<dyn Clock>) -> Self {
+            Self {
+                rows: Mutex::new(HashMap::new()),
+                clock,
+            }
+        }
+    }
+
+    impl Default for InMemoryPlaybackProgressRepository {
+        fn default() -> Self {
+            Self::new(Arc::new(crate::services::RealClock))
+        }
     }
 
     #[async_trait]
     impl PlaybackProgressRepository for InMemoryPlaybackProgressRepository {
         async fn upsert(&self, upsert: UpsertPlaybackProgress) -> Result<PlaybackProgress, DbErr> {
             let completed = upsert.is_completed();
+            let now = self.clock.now();
             let mut rows = self.rows.lock().unwrap();
             let existing = rows
                 .values_mut()
                 .find(|r| r.user_id == upsert.user_id && r.file_id == upsert.file_id);
 
-            let now = chrono::Utc::now();
             if let Some(row) = existing {
                 row.position_secs = upsert.position_secs;
                 row.duration_secs = upsert.duration_secs;
@@ -148,165 +176,71 @@ pub mod in_memory {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "test-utils"))]
+pub use in_memory::InMemoryPlaybackProgressRepository;
+
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory_fixture {
+    use std::sync::Arc;
+
+    use uuid::Uuid;
+
     use super::in_memory::InMemoryPlaybackProgressRepository;
-    use super::*;
+    use crate::repositories::PlaybackProgressRepository;
+    use crate::repositories::contract::fixture::PlaybackProgressFixture;
+    use crate::services::TestClock;
 
-    fn upsert(
-        user_id: Uuid,
-        file_id: Uuid,
-        position_secs: f64,
-        duration_secs: Option<f64>,
-    ) -> UpsertPlaybackProgress {
-        UpsertPlaybackProgress {
-            user_id,
-            file_id,
-            position_secs,
-            duration_secs,
+    /// The hermetic instantiation of the shared contract. The in-memory store
+    /// enforces no referential integrity, so a fresh v4 UUID is a valid
+    /// identifier; the Postgres fixture in `beam-index` inserts real rows for
+    /// the same calls.
+    pub struct InMemoryFixture {
+        repo: InMemoryPlaybackProgressRepository,
+        clock: Arc<TestClock>,
+    }
+
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            Self::new()
         }
     }
 
-    #[tokio::test]
-    async fn upsert_creates_then_updates_same_row() {
-        let repo = InMemoryPlaybackProgressRepository::default();
-        let user_id = Uuid::new_v4();
-        let file_id = Uuid::new_v4();
-
-        let first = repo
-            .upsert(upsert(user_id, file_id, 10.0, Some(100.0)))
-            .await
-            .unwrap();
-        let second = repo
-            .upsert(upsert(user_id, file_id, 20.0, Some(100.0)))
-            .await
-            .unwrap();
-
-        assert_eq!(first.id, second.id);
-        assert_eq!(second.position_secs, 20.0);
-        assert_eq!(repo.rows.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn upsert_marks_completed_past_threshold() {
-        let repo = InMemoryPlaybackProgressRepository::default();
-        let user_id = Uuid::new_v4();
-        let file_id = Uuid::new_v4();
-
-        let row = repo
-            .upsert(upsert(user_id, file_id, 98.0, Some(100.0)))
-            .await
-            .unwrap();
-        assert!(row.completed);
-    }
-
-    #[tokio::test]
-    async fn find_in_progress_by_user_excludes_completed_and_other_users() {
-        let repo = InMemoryPlaybackProgressRepository::default();
-        let user_id = Uuid::new_v4();
-        let other_user = Uuid::new_v4();
-
-        repo.upsert(upsert(user_id, Uuid::new_v4(), 10.0, Some(100.0)))
-            .await
-            .unwrap();
-        repo.upsert(upsert(user_id, Uuid::new_v4(), 99.0, Some(100.0)))
-            .await
-            .unwrap(); // completed
-        repo.upsert(upsert(other_user, Uuid::new_v4(), 10.0, Some(100.0)))
-            .await
-            .unwrap();
-
-        let in_progress = repo.find_in_progress_by_user(user_id, 10).await.unwrap();
-        assert_eq!(in_progress.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn find_in_progress_by_user_orders_most_recent_first() {
-        let repo = InMemoryPlaybackProgressRepository::default();
-        let user_id = Uuid::new_v4();
-        let file_a = Uuid::new_v4();
-        let file_b = Uuid::new_v4();
-
-        repo.upsert(upsert(user_id, file_a, 10.0, Some(100.0)))
-            .await
-            .unwrap();
-        // Ensure a distinguishable, later `updated_at` for file_b.
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        repo.upsert(upsert(user_id, file_b, 10.0, Some(100.0)))
-            .await
-            .unwrap();
-
-        let in_progress = repo.find_in_progress_by_user(user_id, 10).await.unwrap();
-        assert_eq!(in_progress[0].file_id, file_b);
-        assert_eq!(in_progress[1].file_id, file_a);
-    }
-
-    #[tokio::test]
-    async fn find_in_progress_by_user_respects_limit() {
-        let repo = InMemoryPlaybackProgressRepository::default();
-        let user_id = Uuid::new_v4();
-        for _ in 0..5 {
-            repo.upsert(upsert(user_id, Uuid::new_v4(), 10.0, Some(100.0)))
-                .await
-                .unwrap();
+    impl InMemoryFixture {
+        pub fn new() -> Self {
+            let clock = Arc::new(TestClock::new());
+            Self {
+                repo: InMemoryPlaybackProgressRepository::new(clock.clone()),
+                clock,
+            }
         }
-        let in_progress = repo.find_in_progress_by_user(user_id, 2).await.unwrap();
-        assert_eq!(in_progress.len(), 2);
     }
 
-    #[tokio::test]
-    async fn find_page_by_user_includes_completed_ordered_desc() {
-        let repo = InMemoryPlaybackProgressRepository::default();
-        let user_id = Uuid::new_v4();
-        let file_a = Uuid::new_v4();
-        let file_b = Uuid::new_v4();
-
-        // `file_a` in-progress, `file_b` completed and updated later.
-        repo.upsert(upsert(user_id, file_a, 10.0, Some(100.0)))
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        repo.upsert(upsert(user_id, file_b, 99.0, Some(100.0)))
-            .await
-            .unwrap();
-
-        let page = repo.find_page_by_user(user_id, 50, 0).await.unwrap();
-        assert_eq!(page.len(), 2, "completed rows are included in history");
-        assert_eq!(page[0].file_id, file_b, "most recent first");
-        assert!(page[0].completed);
-        assert_eq!(page[1].file_id, file_a);
-    }
-
-    #[tokio::test]
-    async fn find_page_by_user_slices_by_limit_and_offset() {
-        let repo = InMemoryPlaybackProgressRepository::default();
-        let user_id = Uuid::new_v4();
-        for _ in 0..5 {
-            repo.upsert(upsert(user_id, Uuid::new_v4(), 10.0, Some(100.0)))
-                .await
-                .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    #[async_trait::async_trait]
+    impl PlaybackProgressFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn PlaybackProgressRepository {
+            &self.repo
         }
-        let page = repo.find_page_by_user(user_id, 2, 2).await.unwrap();
-        assert_eq!(page.len(), 2);
+
+        fn clock(&self) -> &TestClock {
+            &self.clock
+        }
+
+        async fn new_user(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+
+        async fn new_file(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    async fn setup() -> super::in_memory_fixture::InMemoryFixture {
+        super::in_memory_fixture::InMemoryFixture::new()
     }
 
-    #[tokio::test]
-    async fn count_by_user_counts_all_rows_for_user_only() {
-        let repo = InMemoryPlaybackProgressRepository::default();
-        let user_id = Uuid::new_v4();
-        let other_user = Uuid::new_v4();
-
-        repo.upsert(upsert(user_id, Uuid::new_v4(), 10.0, Some(100.0)))
-            .await
-            .unwrap();
-        repo.upsert(upsert(user_id, Uuid::new_v4(), 99.0, Some(100.0)))
-            .await
-            .unwrap(); // completed, still counted
-        repo.upsert(upsert(other_user, Uuid::new_v4(), 10.0, Some(100.0)))
-            .await
-            .unwrap();
-
-        assert_eq!(repo.count_by_user(user_id).await.unwrap(), 2);
-    }
+    crate::playback_progress_repository_contract!(setup);
 }

@@ -11,11 +11,11 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as LoginRouteImport } from './routes/login'
-import { Route as LibrariesRouteImport } from './routes/libraries'
 import { Route as HistoryRouteImport } from './routes/history'
 import { Route as ExploreRouteImport } from './routes/explore'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as LibrariesIndexRouteImport } from './routes/libraries.index'
 import { Route as MediaIdRouteImport } from './routes/media.$id'
 import { Route as LibrariesIdRouteImport } from './routes/libraries.$id'
 
@@ -27,11 +27,6 @@ const ProfileRoute = ProfileRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LibrariesRoute = LibrariesRouteImport.update({
-  id: '/libraries',
-  path: '/libraries',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HistoryRoute = HistoryRouteImport.update({
@@ -54,15 +49,20 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LibrariesIndexRoute = LibrariesIndexRouteImport.update({
+  id: '/libraries/',
+  path: '/libraries/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const MediaIdRoute = MediaIdRouteImport.update({
   id: '/media/$id',
   path: '/media/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LibrariesIdRoute = LibrariesIdRouteImport.update({
-  id: '/$id',
-  path: '/$id',
-  getParentRoute: () => LibrariesRoute,
+  id: '/libraries/$id',
+  path: '/libraries/$id',
+  getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -70,22 +70,22 @@ export interface FileRoutesByFullPath {
   '/admin': typeof AdminRoute
   '/explore': typeof ExploreRoute
   '/history': typeof HistoryRoute
-  '/libraries': typeof LibrariesRouteWithChildren
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
+  '/libraries/': typeof LibrariesIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/explore': typeof ExploreRoute
   '/history': typeof HistoryRoute
-  '/libraries': typeof LibrariesRouteWithChildren
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
+  '/libraries': typeof LibrariesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -93,11 +93,11 @@ export interface FileRoutesById {
   '/admin': typeof AdminRoute
   '/explore': typeof ExploreRoute
   '/history': typeof HistoryRoute
-  '/libraries': typeof LibrariesRouteWithChildren
   '/login': typeof LoginRoute
   '/profile': typeof ProfileRoute
   '/libraries/$id': typeof LibrariesIdRoute
   '/media/$id': typeof MediaIdRoute
+  '/libraries/': typeof LibrariesIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -106,33 +106,33 @@ export interface FileRouteTypes {
     | '/admin'
     | '/explore'
     | '/history'
-    | '/libraries'
     | '/login'
     | '/profile'
     | '/libraries/$id'
     | '/media/$id'
+    | '/libraries/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/admin'
     | '/explore'
     | '/history'
-    | '/libraries'
     | '/login'
     | '/profile'
     | '/libraries/$id'
     | '/media/$id'
+    | '/libraries'
   id:
     | '__root__'
     | '/'
     | '/admin'
     | '/explore'
     | '/history'
-    | '/libraries'
     | '/login'
     | '/profile'
     | '/libraries/$id'
     | '/media/$id'
+    | '/libraries/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -140,10 +140,11 @@ export interface RootRouteChildren {
   AdminRoute: typeof AdminRoute
   ExploreRoute: typeof ExploreRoute
   HistoryRoute: typeof HistoryRoute
-  LibrariesRoute: typeof LibrariesRouteWithChildren
   LoginRoute: typeof LoginRoute
   ProfileRoute: typeof ProfileRoute
+  LibrariesIdRoute: typeof LibrariesIdRoute
   MediaIdRoute: typeof MediaIdRoute
+  LibrariesIndexRoute: typeof LibrariesIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -160,13 +161,6 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/libraries': {
-      id: '/libraries'
-      path: '/libraries'
-      fullPath: '/libraries'
-      preLoaderRoute: typeof LibrariesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/history': {
@@ -197,6 +191,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/libraries/': {
+      id: '/libraries/'
+      path: '/libraries'
+      fullPath: '/libraries/'
+      preLoaderRoute: typeof LibrariesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/media/$id': {
       id: '/media/$id'
       path: '/media/$id'
@@ -206,35 +207,24 @@ declare module '@tanstack/react-router' {
     }
     '/libraries/$id': {
       id: '/libraries/$id'
-      path: '/$id'
+      path: '/libraries/$id'
       fullPath: '/libraries/$id'
       preLoaderRoute: typeof LibrariesIdRouteImport
-      parentRoute: typeof LibrariesRoute
+      parentRoute: typeof rootRouteImport
     }
   }
 }
-
-interface LibrariesRouteChildren {
-  LibrariesIdRoute: typeof LibrariesIdRoute
-}
-
-const LibrariesRouteChildren: LibrariesRouteChildren = {
-  LibrariesIdRoute: LibrariesIdRoute,
-}
-
-const LibrariesRouteWithChildren = LibrariesRoute._addFileChildren(
-  LibrariesRouteChildren,
-)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   ExploreRoute: ExploreRoute,
   HistoryRoute: HistoryRoute,
-  LibrariesRoute: LibrariesRouteWithChildren,
   LoginRoute: LoginRoute,
   ProfileRoute: ProfileRoute,
+  LibrariesIdRoute: LibrariesIdRoute,
   MediaIdRoute: MediaIdRoute,
+  LibrariesIndexRoute: LibrariesIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
@@ -8,11 +10,11 @@ use beam_domain::repositories::FileRepository;
 /// SQL-based implementation of the FileRepository trait.
 #[derive(Debug, Clone)]
 pub struct SqlFileRepository {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 }
 
 impl SqlFileRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -23,7 +25,7 @@ impl FileRepository for SqlFileRepository {
         use beam_entity::files;
         use sea_orm::EntityTrait;
 
-        let model = files::Entity::find_by_id(id).one(&self.db).await?;
+        let model = files::Entity::find_by_id(id).one(self.db.as_ref()).await?;
         Ok(model.map(MediaFile::from))
     }
 
@@ -33,7 +35,7 @@ impl FileRepository for SqlFileRepository {
 
         let model = files::Entity::find()
             .filter(files::Column::FilePath.eq(path))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?;
 
         Ok(model.map(MediaFile::from))
@@ -45,7 +47,7 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::HashXxh3.eq(hash as i64))
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(MediaFile::from).collect())
@@ -57,7 +59,7 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::LibraryId.eq(library_id))
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(MediaFile::from).collect())
@@ -69,7 +71,7 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::MovieEntryId.eq(movie_entry_id))
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(MediaFile::from).collect())
@@ -81,7 +83,7 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::EpisodeId.eq(episode_id))
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(MediaFile::from).collect())
@@ -116,11 +118,11 @@ impl FileRepository for SqlFileRepository {
             episode_id: Set(episode_id),
             scanned_at: Set(now.into()),
             updated_at: Set(now.into()),
-            file_status: Set(create.status.to_string()),
+            file_status: Set(create.status.into()),
             mtime: Set(create.mtime.map(|d| d.into())),
         };
 
-        let result = new_file.insert(&self.db).await?;
+        let result = new_file.insert(self.db.as_ref()).await?;
         Ok(MediaFile::from(result))
     }
 
@@ -152,7 +154,7 @@ impl FileRepository for SqlFileRepository {
             active_model.container_format = Set(Some(container));
         }
         if let Some(status) = update.status {
-            active_model.file_status = Set(status.to_string());
+            active_model.file_status = Set(status.into());
         }
 
         if let Some(content) = update.content {
@@ -170,7 +172,7 @@ impl FileRepository for SqlFileRepository {
 
         active_model.updated_at = Set(chrono::Utc::now().into());
 
-        let result = active_model.update(&self.db).await?;
+        let result = active_model.update(self.db.as_ref()).await?;
         Ok(MediaFile::from(result))
     }
 
@@ -178,7 +180,9 @@ impl FileRepository for SqlFileRepository {
         use beam_entity::files;
         use sea_orm::EntityTrait;
 
-        files::Entity::delete_by_id(id).exec(&self.db).await?;
+        files::Entity::delete_by_id(id)
+            .exec(self.db.as_ref())
+            .await?;
         Ok(())
     }
 
@@ -192,7 +196,7 @@ impl FileRepository for SqlFileRepository {
 
         let result = files::Entity::delete_many()
             .filter(files::Column::Id.is_in(ids))
-            .exec(&self.db)
+            .exec(self.db.as_ref())
             .await?;
 
         Ok(result.rows_affected)
@@ -202,6 +206,6 @@ impl FileRepository for SqlFileRepository {
         use beam_entity::files;
         use sea_orm::{EntityTrait, PaginatorTrait};
 
-        files::Entity::find().count(&self.db).await
+        files::Entity::find().count(self.db.as_ref()).await
     }
 }

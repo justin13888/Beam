@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
@@ -9,11 +11,11 @@ use beam_domain::repositories::MovieRepository;
 /// SQL-based implementation of the MovieRepository trait.
 #[derive(Debug, Clone)]
 pub struct SqlMovieRepository {
-    db: DatabaseConnection,
+    db: Arc<DatabaseConnection>,
 }
 
 impl SqlMovieRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 }
@@ -24,7 +26,7 @@ impl MovieRepository for SqlMovieRepository {
         use beam_entity::movie;
         use sea_orm::EntityTrait;
 
-        let model = movie::Entity::find_by_id(id).one(&self.db).await?;
+        let model = movie::Entity::find_by_id(id).one(self.db.as_ref()).await?;
         Ok(model.map(Movie::from))
     }
 
@@ -34,7 +36,7 @@ impl MovieRepository for SqlMovieRepository {
 
         let model = movie::Entity::find()
             .filter(movie::Column::Title.eq(title))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?;
 
         Ok(model.map(Movie::from))
@@ -44,7 +46,7 @@ impl MovieRepository for SqlMovieRepository {
         use beam_entity::movie;
         use sea_orm::EntityTrait;
 
-        let models = movie::Entity::find().all(&self.db).await?;
+        let models = movie::Entity::find().all(self.db.as_ref()).await?;
         Ok(models.into_iter().map(Movie::from).collect())
     }
 
@@ -95,7 +97,9 @@ impl MovieRepository for SqlMovieRepository {
 
         let sql = format!("SELECT * FROM movies {where_clause} {order_by}");
         let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
-        let models = movie::Model::find_by_statement(stmt).all(&self.db).await?;
+        let models = movie::Model::find_by_statement(stmt)
+            .all(self.db.as_ref())
+            .await?;
         Ok(models.into_iter().map(Movie::from).collect())
     }
 
@@ -115,7 +119,7 @@ impl MovieRepository for SqlMovieRepository {
             ..Default::default()
         };
 
-        let result = new_movie.insert(&self.db).await?;
+        let result = new_movie.insert(self.db.as_ref()).await?;
         Ok(Movie::from(result))
     }
 
@@ -134,7 +138,7 @@ impl MovieRepository for SqlMovieRepository {
             created_at: Set(now.into()),
         };
 
-        let result = new_entry.insert(&self.db).await?;
+        let result = new_entry.insert(self.db.as_ref()).await?;
         Ok(MovieEntry::from(result))
     }
 
@@ -144,7 +148,7 @@ impl MovieRepository for SqlMovieRepository {
 
         let models = movie_entry::Entity::find()
             .filter(movie_entry::Column::MovieId.eq(movie_id))
-            .all(&self.db)
+            .all(self.db.as_ref())
             .await?;
 
         Ok(models.into_iter().map(MovieEntry::from).collect())
@@ -155,7 +159,7 @@ impl MovieRepository for SqlMovieRepository {
         use sea_orm::EntityTrait;
 
         let model = movie_entry::Entity::find_by_id(entry_id)
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?;
         Ok(model.map(MovieEntry::from))
     }
@@ -172,7 +176,7 @@ impl MovieRepository for SqlMovieRepository {
         let exists = library_movie::Entity::find()
             .filter(library_movie::Column::LibraryId.eq(library_id))
             .filter(library_movie::Column::MovieId.eq(movie_id))
-            .one(&self.db)
+            .one(self.db.as_ref())
             .await?
             .is_some();
 
@@ -181,7 +185,7 @@ impl MovieRepository for SqlMovieRepository {
                 library_id: Set(library_id),
                 movie_id: Set(movie_id),
             };
-            new_assoc.insert(&self.db).await?;
+            new_assoc.insert(self.db.as_ref()).await?;
         }
 
         Ok(())
@@ -195,7 +199,10 @@ impl MovieRepository for SqlMovieRepository {
         use beam_entity::movie;
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
-        let Some(model) = movie::Entity::find_by_id(movie_id).one(&self.db).await? else {
+        let Some(model) = movie::Entity::find_by_id(movie_id)
+            .one(self.db.as_ref())
+            .await?
+        else {
             return Ok(());
         };
 
@@ -213,7 +220,7 @@ impl MovieRepository for SqlMovieRepository {
         active.anilist_id = Set(enrichment.anilist_id.map(|id| id as i32));
         active.rating_tmdb = Set(enrichment.rating);
         active.updated_at = Set(chrono::Utc::now().into());
-        active.update(&self.db).await?;
+        active.update(self.db.as_ref()).await?;
         Ok(())
     }
 }

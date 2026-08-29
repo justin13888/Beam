@@ -1,9 +1,17 @@
 import { fileURLToPath, URL } from "node:url";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-	plugins: [viteReact()],
+	// The router plugin regenerates `routeTree.gen.ts` from the files in
+	// `src/routes`. It runs here as well as in `vite.config.ts` so the tree the
+	// tests mount is the one the route files describe -- without it a renamed
+	// or added route silently keeps testing the previous tree.
+	plugins: [
+		tanstackRouter({ target: "react", autoCodeSplitting: true }),
+		viteReact(),
+	],
 	resolve: {
 		alias: {
 			"@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -33,18 +41,18 @@ export default defineConfig({
 				"src/main.tsx",
 				"src/test/**",
 			],
-			// Calibrated against a measured honest baseline of ~68.6% lines /
-			// ~59.4% branches / ~57.6% functions / ~65.6% statements, once the
-			// route components (explore, admin, history, profile, libraries,
-			// media detail, library detail) gained subcutaneous component
-			// tests behind router/query harnesses. Thresholds sit ~3 points
+			// Calibrated against a measured baseline of ~82.6% lines / ~73.9%
+			// branches / ~75.4% functions / ~79.1% statements, taken once the
+			// suite stopped mocking the router and the API client away and
+			// started driving a real memory router with MSW at the network
+			// boundary (see `src/test/harness.tsx`). Thresholds sit ~3 points
 			// under the measured numbers so unrelated diffs don't flap the
 			// gate. Ratchet up over time, don't relax to pass a PR.
 			thresholds: {
-				lines: 65,
-				functions: 54,
-				branches: 56,
-				statements: 62,
+				lines: 79,
+				functions: 72,
+				branches: 70,
+				statements: 76,
 			},
 		},
 	},
