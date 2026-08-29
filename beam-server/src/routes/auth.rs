@@ -1,151 +1,53 @@
 //! OIDC BFF endpoints (see ADR-0003): `login`/`callback` drive the
 //! Authorization Code + PKCE round-trip, `me`/`logout`/`logout-all`/
 //! `sessions`/`sessions/{id}` operate on the resulting `beam_session`
-//! cookie -- the sole credential beam-server now issues. beam-server mounts
-//! `login`/`callback` under `/v1/auth/*` and the rest at the top level
-//! (`/v1/me`, `/v1/logout`, ...), matching the final ratified shape now that
-//! the legacy password endpoints are gone.
+//! cookie -- the sole credential beam-server issues. `login`/`callback` are
+//! mounted under `/v1/auth/*` and the rest at the top level (`/v1/me`,
+//! `/v1/logout`, ...).
 //!
 //! The browser never sees an IdP token; `beam_session` is the only
 //! credential it holds, set as an httpOnly, `SameSite=Lax` cookie.
+//!
+//! This module lived in `beam-auth` until the Kynos migration. ADR-0010
+//! requires the HTTP adapter to sit in `beam-server` so `beam-auth` stays
+//! transport-independent, and moving it is what let that crate drop its
+//! framework dependency entirely.
+//!
+//! Two shapes changed with the framework. Sessions are resolved by
+//! `SessionAuth` in the signature rather than a `require_web_session` helper in
+//! the body, so the requirement reaches the document. And dependencies arrive
+//! through `Inject<T>`, so the `MissingDependency` marker and its 500 -- which
+//! existed only because `depot.obtain::<T>()` could fail at run time -- are
+//! gone: a missing dependency is now a compile error.
 
-use async_trait::async_trait;
-use chrono::Utc;
-use salvo::http::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
-use salvo::oapi::{ToResponses, ToSchema};
-use salvo::prelude::*;
-use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
+
+use beam_auth::utils::admin_claim::admin_claim_matches;
+use beam_auth::utils::models::CreateUser;
+use beam_auth::utils::oidc::{OidcClient, OidcError};
+use beam_auth::utils::oidc_config::OidcRuntimeConfig;
+use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
+use beam_auth::utils::repository::UserRepository;
+use beam_auth::utils::session_store::{SessionData, SessionStore};
+use chrono::Utc;
+use kynos::prelude::*;
+use kynos::response::cookie::{Cookie, SameSite};
+use kynos::response::headers::WithHeaders;
+use kynos::response::status::{NoContent, Redirect};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::utils::admin_claim::admin_claim_matches;
-use crate::utils::models::CreateUser;
-use crate::utils::oidc::{OidcClient, OidcError};
-use crate::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
-use crate::utils::repository::UserRepository;
-use crate::utils::session_store::{SessionData, SessionStore, get_and_touch};
+use crate::routes::api_error::{SESSION_COOKIE, SessionAuth};
+use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
-const SESSION_COOKIE: &str = "beam_session";
 const STATE_TTL_SECS: u64 = 600; // 10 minutes to complete the round trip
 
-/// Runtime configuration the OIDC routes need beyond what a single service
-/// trait naturally carries -- injected into the depot alongside the
-/// `Arc<dyn ...>` services.
-#[derive(Debug, Clone)]
-pub struct OidcRuntimeConfig {
-    /// Base URL of the web client; the callback redirects here on success.
-    pub web_url: String,
-    /// Whether to mark cookies `Secure` (derived from the deployment's
-    /// scheme; `false` only makes sense for plain-HTTP local dev).
-    pub cookie_secure: bool,
-    /// Name of the ID-token claim that grants admin (see `admin_claim`).
-    /// `None` -> nobody is granted admin at login, and any existing admin is
-    /// demoted at their next login (issue #85).
-    pub admin_claim: Option<String>,
-    /// Expected value for `admin_claim`. `None` -> the claim must assert
-    /// boolean `true`; `Some(v)` -> the claim must equal `v` or (if an array)
-    /// contain `v`.
-    pub admin_value: Option<String>,
-    pub session_idle_days: u64,
-    pub session_max_days: u64,
-}
+// ── Wire types ───────────────────────────────────────────────────────────────
 
-/// Seconds in a day. Named because the conversion appeared inline at three
-/// call sites, where a `* 24 * 60 * 60` typed as `* 24 + 60 * 60` produces a
-/// session that expires in about a minute and a half instead of two weeks --
-/// a difference no type checks and, until this was extracted, no test could
-/// reach.
-const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
-
-impl OidcRuntimeConfig {
-    /// How long a session survives without activity, in seconds.
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn idle_ttl_secs(&self) -> u64 {
-        self.session_idle_days * SECONDS_PER_DAY
-    }
-
-    /// Hard ceiling on session lifetime from creation, in seconds.
-    pub fn absolute_ttl_secs(&self) -> u64 {
-        self.session_max_days * SECONDS_PER_DAY
-    }
-}
-
-fn device_hash_from_request(req: &Request) -> String {
-    let user_agent = req
-        .headers()
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    crate::utils::hex::encode_lower(&Sha256::digest(user_agent.as_bytes()))
-}
-
-fn extract_client_ip(req: &Request) -> String {
-    if let Some(forwarded_for) = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        && let Some(first) = forwarded_for.split(',').next()
-    {
-        return first.trim().to_string();
-    }
-    if let Some(real_ip) = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        return real_ip.to_string();
-    }
-    "unknown".to_string()
-}
-
-fn build_cookie(
-    name: &'static str,
-    value: String,
-    path: &'static str,
-    secure: bool,
-    max_age: CookieDuration,
-) -> Cookie<'static> {
-    Cookie::build((name, value))
-        .path(path)
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .secure(secure)
-        .max_age(max_age)
-        .build()
-}
-
-/// Sanitizes a client-supplied post-login redirect target: must be a
-/// same-origin-relative path (leading `/`, not `//...` or `/\...` --  both
-/// of which some browsers treat as protocol-relative and would send the
-/// user off-site). Anything else falls back to `/`.
-fn sanitize_redirect_path(raw: Option<&str>) -> String {
-    match raw {
-        Some(path)
-            if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") =>
-        {
-            path.to_string()
-        }
-        _ => "/".to_string(),
-    }
-}
-
-/// Picks a display name when the IdP doesn't release a `name` claim: the
-/// local part of the email if one is available, else a subject-derived
-/// placeholder. Real IdPs (including Dex) send `name`, so this is a rare
-/// fallback, not the common case.
-fn derive_display_name(name: Option<&str>, email: Option<&str>, subject: &str) -> String {
-    if let Some(name) = name
-        && !name.is_empty()
-    {
-        return name.to_string();
-    }
-    if let Some(local_part) = email.and_then(|e| e.split('@').next())
-        && !local_part.is_empty()
-    {
-        return local_part.to_string();
-    }
-    format!("user-{subject}")
-}
-
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct MeResponse {
     pub id: String,
     pub email: Option<String>,
@@ -158,7 +60,7 @@ pub struct MeResponse {
 /// /sessions`. `id` is an opaque row identifier for revocation via `DELETE
 /// /sessions/{id}` -- never the session credential itself, which is hashed
 /// at rest and cannot be recovered.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct SessionSummary {
     pub id: String,
     pub device_hash: String,
@@ -167,157 +69,240 @@ pub struct SessionSummary {
     pub last_active: i64,
 }
 
-#[derive(ToResponses)]
-pub enum OidcCallbackError {
-    /// The state/nonce/PKCE round-trip failed verification.
-    #[salvo(response(status_code = 400))]
+/// Where the browser is sent back to after a successful login.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct LoginQuery {
+    /// Path to return to after login.
+    pub redirect: Option<String>,
+}
+
+/// What the IdP sends back to `/v1/auth/callback`.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct CallbackQuery {
+    pub state: Option<String>,
+    pub code: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+/// What `/v1/sessions/{id}` captures.
+#[derive(Debug, Schema, PathParams)]
+pub struct SessionPath {
+    /// Session id, from `GET /sessions`.
+    pub id: String,
+}
+
+/// The cookies these endpoints read for themselves.
+///
+/// `beam_session` is read by `SessionAuth` everywhere else; `logout` takes it
+/// here instead because it is deliberately callable without a valid session --
+/// signing out of an already-expired session should succeed, not 401.
+#[derive(Debug, Schema, CookieParams)]
+pub struct AuthCookies {
+    /// The CSRF state cookie set when the login round-trip began.
+    pub beam_oidc_state: Option<String>,
+    /// The session credential, when the caller holds one.
+    pub beam_session: Option<String>,
+}
+
+// ── Response header groups ───────────────────────────────────────────────────
+
+/// A `Set-Cookie` this operation writes.
+///
+/// Kynos has no per-handler cookie jar: `SetCookies` is an interceptor for a
+/// fixed cookie, and a session credential is minted per request. A header group
+/// is the sanctioned way to say it, and it puts `Set-Cookie` in the operation's
+/// declared response headers -- which the Salvo implementation never did.
+#[derive(Schema, HeaderParams)]
+pub struct SetCookie {
+    #[header(rename = "Set-Cookie")]
+    set_cookie: String,
+}
+
+impl SetCookie {
+    fn new(cookie: &Cookie) -> Result<Self, AuthError> {
+        let encoded = cookie
+            .encode()
+            .ok_or_else(|| AuthError::Internal("could not encode session cookie".into()))?;
+        let set_cookie = encoded
+            .to_str()
+            .map_err(|_| AuthError::Internal("session cookie is not valid header text".into()))?
+            .to_owned();
+        Ok(Self { set_cookie })
+    }
+}
+
+// ── Errors ───────────────────────────────────────────────────────────────────
+
+/// What the login round-trip can answer with.
+///
+/// 401 is absent: the operations that need a session take `SessionAuth`, which
+/// contributes it. `SessionNotFound` is the one exception and lives in
+/// [`SessionActionError`] -- see the note there.
+#[derive(Debug, thiserror::Error, kynos::ApiError)]
+pub enum AuthError {
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/bad-request",
+        title = "Bad request"
+    )]
     BadRequest(String),
+
     /// The identity is valid but the local account is disabled (issue #85).
-    #[salvo(response(status_code = 403))]
+    #[error("{0}")]
+    #[problem(
+        status = 403,
+        type = "https://beam.justinchung.net/reference/errors/forbidden",
+        title = "Forbidden"
+    )]
     Forbidden(String),
-    /// Internal server error
-    #[salvo(response(status_code = 500))]
-    InternalError(String),
+
+    /// OIDC is not configured, or discovery failed. Distinct from a 500: the
+    /// server is working, the identity provider is not reachable.
+    #[error("{0}")]
+    #[problem(
+        status = 503,
+        type = "https://beam.justinchung.net/reference/errors/oidc-unavailable",
+        title = "Login unavailable"
+    )]
+    Unavailable(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
 }
 
-#[async_trait]
-impl Writer for OidcCallbackError {
-    async fn write(self, _req: &mut Request, _depot: &mut Depot, res: &mut Response) {
-        match self {
-            Self::BadRequest(msg) => {
-                res.status_code(StatusCode::BAD_REQUEST);
-                res.render(Text::Plain(msg));
-            }
-            Self::Forbidden(msg) => {
-                res.status_code(StatusCode::FORBIDDEN);
-                res.render(Text::Plain(msg));
-            }
-            Self::InternalError(msg) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Text::Plain(msg));
-            }
-        }
-    }
-}
-
-#[derive(ToResponses)]
-pub enum OidcAuthError {
-    /// Missing or invalid session
-    #[salvo(response(status_code = 401))]
+/// Revoking a session by id.
+///
+/// Keeps its own 401 because the status carries meaning here that
+/// `SessionAuth`'s does not: a session id that does not exist and one that
+/// belongs to somebody else answer identically and deliberately, so a caller
+/// cannot enumerate other people's sessions.
+#[derive(Debug, thiserror::Error, kynos::ApiError)]
+pub enum SessionActionError {
+    #[error("{0}")]
+    #[problem(
+        status = 401,
+        type = "https://beam.justinchung.net/reference/errors/unauthorized",
+        title = "Unauthorized"
+    )]
     Unauthorized(String),
-    /// Internal server error
-    #[salvo(response(status_code = 500))]
-    InternalError(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
 }
 
-#[async_trait]
-impl Writer for OidcAuthError {
-    async fn write(self, _req: &mut Request, _depot: &mut Depot, res: &mut Response) {
-        match self {
-            Self::Unauthorized(msg) => {
-                res.status_code(StatusCode::UNAUTHORIZED);
-                res.render(Text::Plain(msg));
-            }
-            Self::InternalError(msg) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Text::Plain(msg));
-            }
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn device_hash(user_agent: Option<&str>) -> String {
+    format!("{:x}", Sha256::digest(user_agent.unwrap_or("").as_bytes()))
+}
+
+/// The client address, as the deployment's proxy reports it.
+fn client_ip(forwarded_for: Option<&str>, real_ip: Option<&str>) -> String {
+    if let Some(first) = forwarded_for.and_then(|value| value.split(',').next()) {
+        let first = first.trim();
+        if !first.is_empty() {
+            return first.to_owned();
         }
     }
+    real_ip.map_or_else(|| "unknown".to_owned(), str::to_owned)
 }
 
-/// Marker for a dependency the router wiring failed to inject; converts
-/// into a 500 for whichever error type the handler returns.
-struct MissingDependency;
+/// The proxy-supplied headers the session record stores.
+#[derive(Debug, Schema, HeaderParams)]
+pub struct ClientHeaders {
+    #[header(rename = "User-Agent")]
+    pub user_agent: Option<String>,
+    #[header(rename = "X-Forwarded-For")]
+    pub x_forwarded_for: Option<String>,
+    #[header(rename = "X-Real-IP")]
+    pub x_real_ip: Option<String>,
+}
 
-impl From<MissingDependency> for OidcAuthError {
-    fn from(_: MissingDependency) -> Self {
-        Self::InternalError("Server state unavailable".to_string())
+fn build_cookie(
+    name: &str,
+    value: String,
+    path: &str,
+    secure: bool,
+    max_age: Duration,
+) -> Cookie {
+    let cookie = Cookie::new(name.to_owned(), value)
+        .path(path.to_owned())
+        .http_only()
+        .same_site(SameSite::Lax)
+        .max_age(max_age);
+
+    if secure { cookie.secure() } else { cookie }
+}
+
+/// A cookie that clears the one it names.
+fn clearing_cookie(name: &str, path: &str) -> Cookie {
+    Cookie::removal(name.to_owned()).path(path.to_owned())
+}
+
+/// Sanitizes a client-supplied post-login redirect target: must be a
+/// same-origin-relative path (leading `/`, not `//...` or `/\...` -- both
+/// of which some browsers treat as protocol-relative and would send the
+/// user off-site). Anything else falls back to `/`.
+fn sanitize_redirect_path(raw: Option<&str>) -> String {
+    match raw {
+        Some(path)
+            if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") =>
+        {
+            path.to_owned()
+        }
+        _ => "/".to_owned(),
     }
 }
 
-impl From<MissingDependency> for OidcCallbackError {
-    fn from(_: MissingDependency) -> Self {
-        Self::InternalError("Server state unavailable".to_string())
+/// Picks a display name when the IdP doesn't release a `name` claim: the
+/// local part of the email if one is available, else a subject-derived
+/// placeholder. Real IdPs (including Dex) send `name`, so this is a rare
+/// fallback, not the common case.
+fn derive_display_name(name: Option<&str>, email: Option<&str>, subject: &str) -> String {
+    if let Some(name) = name
+        && !name.is_empty()
+    {
+        return name.to_owned();
     }
+    if let Some(local_part) = email.and_then(|e| e.split('@').next())
+        && !local_part.is_empty()
+    {
+        return local_part.to_owned();
+    }
+    format!("user-{subject}")
 }
 
-/// Fetches an injected dependency from the depot. Every `T` used here is
-/// wired in by the host's router setup, so a miss is a router wiring bug --
-/// surfaced as a 500 rather than a handler panic.
-fn obtain_dep<T: Send + Sync + 'static>(depot: &Depot) -> Result<&T, MissingDependency> {
-    depot.obtain::<T>().map_err(|_| {
-        tracing::error!(
-            dependency = std::any::type_name::<T>(),
-            "dependency missing from depot -- router wiring bug"
-        );
-        MissingDependency
-    })
-}
-
-/// Resolves the current user from the `beam_session` cookie, sliding the
-/// idle expiry forward (throttled via [`get_and_touch`]).
-async fn require_web_session(
-    req: &Request,
-    depot: &Depot,
-) -> Result<(String, String), OidcAuthError> {
-    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?;
-    let config = obtain_dep::<OidcRuntimeConfig>(depot)?;
-
-    let token = req
-        .cookie(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| OidcAuthError::Unauthorized("Missing session cookie".into()))?;
-
-    let idle_ttl_secs = config.idle_ttl_secs();
-    let session = get_and_touch(session_store.as_ref(), &token, idle_ttl_secs)
-        .await
-        .map_err(|e| OidcAuthError::InternalError(e.to_string()))?
-        .ok_or_else(|| OidcAuthError::Unauthorized("Invalid or expired session".into()))?;
-
-    Ok((session.user_id, token))
-}
+// ── Endpoints ────────────────────────────────────────────────────────────────
 
 /// Begins an Authorization Code + PKCE flow and redirects the browser to
 /// the IdP. `redirect` (query param) is where the callback sends the
 /// browser back to on success; sanitized to a same-origin-relative path.
-#[endpoint(
-    tags("auth"),
-    parameters(("redirect" = Option<String>, Query, description = "Path to return to after login")),
-    responses(
-        (status_code = 302, description = "Redirect to the identity provider's authorization endpoint"),
-        (status_code = 500, description = "Server state unavailable, or the IdP returned an invalid authorization URL"),
-        (status_code = 503, description = "OIDC is not configured or the provider is unreachable"),
-    )
-)]
-pub async fn oidc_login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let deps = (
-        obtain_dep::<Arc<dyn OidcClient>>(depot),
-        obtain_dep::<Arc<dyn PendingAuthStore>>(depot),
-        obtain_dep::<OidcRuntimeConfig>(depot),
-    );
-    let (Ok(oidc_client), Ok(pending_auth_store), Ok(config)) = deps else {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Text::Plain("Server state unavailable"));
-        return;
-    };
-    let (oidc_client, pending_auth_store, config) = (
-        oidc_client.clone(),
-        pending_auth_store.clone(),
-        config.clone(),
-    );
+#[kynos::get("/auth/login", tag = Auth, operation_id = "oidcLogin")]
+pub async fn oidc_login(
+    Query(query): Query<LoginQuery>,
+    Inject(oidc_client): Inject<Arc<dyn OidcClient>>,
+    Inject(pending_auth_store): Inject<Arc<dyn PendingAuthStore>>,
+    Inject(config): Inject<OidcRuntimeConfig>,
+) -> Result<WithHeaders<Redirect<302>, SetCookie>, AuthError> {
+    let redirect_path = sanitize_redirect_path(query.redirect.as_deref());
 
-    let redirect_path = sanitize_redirect_path(req.query::<String>("redirect").as_deref());
-    let begin = match oidc_client.begin_auth() {
-        Ok(begin) => begin,
-        Err(e) => {
-            res.status_code(StatusCode::SERVICE_UNAVAILABLE);
-            res.render(Text::Plain(format!("OIDC login unavailable: {e}")));
-            return;
-        }
-    };
+    let begin = oidc_client
+        .begin_auth()
+        .map_err(|e| AuthError::Unavailable(format!("OIDC login unavailable: {e}")))?;
 
-    if let Err(e) = pending_auth_store
+    pending_auth_store
         .create(
             &PendingAuth {
                 state: begin.state.clone(),
@@ -328,72 +313,52 @@ pub async fn oidc_login(req: &mut Request, depot: &mut Depot, res: &mut Response
             STATE_TTL_SECS,
         )
         .await
-    {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Text::Plain(format!("Failed to start OIDC login: {e}")));
-        return;
-    }
+        .map_err(|e| AuthError::Internal(format!("Failed to start OIDC login: {e}")))?;
 
-    res.add_cookie(build_cookie(
+    let cookie = build_cookie(
         STATE_COOKIE,
         begin.state,
         "/v1/auth",
         config.cookie_secure,
-        CookieDuration::seconds(STATE_TTL_SECS as i64),
-    ));
+        Duration::from_secs(STATE_TTL_SECS),
+    );
 
-    let Ok(location) = begin.auth_url.parse() else {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Text::Plain(
-            "OIDC provider returned an invalid authorization URL",
-        ));
-        return;
-    };
-    res.status_code(StatusCode::FOUND);
-    res.headers_mut().insert("Location", location);
+    Ok(WithHeaders::new(
+        Redirect::to(begin.auth_url),
+        SetCookie::new(&cookie)?,
+    ))
 }
 
 /// Completes the Authorization Code + PKCE exchange, JIT-provisions or
 /// looks up the user, mints a session, and redirects back into the web app.
-#[endpoint(
-    tags("auth"),
-    parameters(
-        ("state" = Option<String>, Query),
-        ("code" = Option<String>, Query),
-        ("error" = Option<String>, Query),
-        ("error_description" = Option<String>, Query),
-    ),
-)]
+#[kynos::get("/auth/callback", tag = Auth, operation_id = "oidcCallback")]
 pub async fn oidc_callback(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), OidcCallbackError> {
-    let oidc_client = obtain_dep::<Arc<dyn OidcClient>>(depot)?.clone();
-    let pending_auth_store = obtain_dep::<Arc<dyn PendingAuthStore>>(depot)?.clone();
-    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?.clone();
-    let user_repo = obtain_dep::<Arc<dyn UserRepository>>(depot)?.clone();
-    let config = obtain_dep::<OidcRuntimeConfig>(depot)?.clone();
-
-    if let Some(error) = req.query::<String>("error") {
-        let description = req.query::<String>("error_description").unwrap_or_default();
-        return Err(OidcCallbackError::BadRequest(format!(
+    Query(query): Query<CallbackQuery>,
+    Cookies(cookies): Cookies<AuthCookies>,
+    Headers(headers): Headers<ClientHeaders>,
+    Inject(oidc_client): Inject<Arc<dyn OidcClient>>,
+    Inject(pending_auth_store): Inject<Arc<dyn PendingAuthStore>>,
+    Inject(session_store): Inject<Arc<dyn SessionStore>>,
+    Inject(user_repo): Inject<Arc<dyn UserRepository>>,
+    Inject(config): Inject<OidcRuntimeConfig>,
+) -> Result<WithHeaders<Redirect<302>, SetCookie>, AuthError> {
+    if let Some(error) = query.error {
+        let description = query.error_description.unwrap_or_default();
+        return Err(AuthError::BadRequest(format!(
             "IdP returned error: {error} {description}"
         )));
     }
 
-    let state_cookie = req
-        .cookie(STATE_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| OidcCallbackError::BadRequest("Missing state cookie".into()))?;
-    res.remove_cookie(STATE_COOKIE);
+    let state_cookie = cookies
+        .beam_oidc_state
+        .ok_or_else(|| AuthError::BadRequest("Missing state cookie".into()))?;
 
-    let query_state = req
-        .query::<String>("state")
-        .ok_or_else(|| OidcCallbackError::BadRequest("Missing state parameter".into()))?;
+    let query_state = query
+        .state
+        .ok_or_else(|| AuthError::BadRequest("Missing state parameter".into()))?;
 
     if state_cookie != query_state {
-        return Err(OidcCallbackError::BadRequest(
+        return Err(AuthError::BadRequest(
             "State mismatch between cookie and callback".into(),
         ));
     }
@@ -401,21 +366,21 @@ pub async fn oidc_callback(
     let pending = pending_auth_store
         .consume(&query_state)
         .await
-        .map_err(|e| OidcCallbackError::InternalError(e.to_string()))?
+        .map_err(|e| AuthError::Internal(e.to_string()))?
         .ok_or_else(|| {
-            OidcCallbackError::BadRequest("Unknown, already-used, or expired login attempt".into())
+            AuthError::BadRequest("Unknown, already-used, or expired login attempt".into())
         })?;
 
-    let code = req
-        .query::<String>("code")
-        .ok_or_else(|| OidcCallbackError::BadRequest("Missing code parameter".into()))?;
+    let code = query
+        .code
+        .ok_or_else(|| AuthError::BadRequest("Missing code parameter".into()))?;
 
     let identity = oidc_client
         .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
         .await
         .map_err(|e| match e {
-            OidcError::NonceMismatch => OidcCallbackError::BadRequest("Nonce mismatch".to_string()),
-            other => OidcCallbackError::BadRequest(format!("Login failed: {other}")),
+            OidcError::NonceMismatch => AuthError::BadRequest("Nonce mismatch".to_owned()),
+            other => AuthError::BadRequest(format!("Login failed: {other}")),
         })?;
 
     // Admin is derived solely from a configured ID-token claim asserted by the
@@ -437,7 +402,7 @@ pub async fn oidc_callback(
     let user = match user_repo
         .find_by_oidc_identity(&identity.issuer, &identity.subject)
         .await
-        .map_err(|e| OidcCallbackError::InternalError(e.to_string()))?
+        .map_err(|e| AuthError::Internal(e.to_string()))?
     {
         Some(existing) => {
             // A disabled account is blocked at the door: no session is minted
@@ -445,21 +410,21 @@ pub async fn oidc_callback(
             // already-provisioned account can be disabled -- JIT-provisioned
             // new users below are always created enabled.
             if existing.disabled {
-                return Err(OidcCallbackError::Forbidden(
-                    "This account has been disabled. Contact an administrator.".to_string(),
+                return Err(AuthError::Forbidden(
+                    "This account has been disabled. Contact an administrator.".to_owned(),
                 ));
             }
             if existing.is_admin != is_admin {
                 user_repo
                     .set_admin(existing.id, is_admin)
                     .await
-                    .map_err(|e| OidcCallbackError::InternalError(e.to_string()))?;
+                    .map_err(|e| AuthError::Internal(e.to_string()))?;
             }
             if existing.display_name != display_name || existing.avatar_url != identity.picture {
                 user_repo
                     .update_oidc_profile(existing.id, display_name, identity.picture.clone())
                     .await
-                    .map_err(|e| OidcCallbackError::InternalError(e.to_string()))?;
+                    .map_err(|e| AuthError::Internal(e.to_string()))?;
             }
             existing
         }
@@ -473,20 +438,19 @@ pub async fn oidc_callback(
                 is_admin,
             })
             .await
-            .map_err(|e| {
-                OidcCallbackError::InternalError(format!("Failed to provision user: {e}"))
-            })?,
+            .map_err(|e| AuthError::Internal(format!("Failed to provision user: {e}")))?,
     };
 
-    let device_hash = device_hash_from_request(req);
-    let ip = extract_client_ip(req);
     let idle_ttl_secs = config.idle_ttl_secs();
     let absolute_ttl_secs = config.absolute_ttl_secs();
 
     let session_data = SessionData {
         user_id: user.id.to_string(),
-        device_hash,
-        ip,
+        device_hash: device_hash(headers.user_agent.as_deref()),
+        ip: client_ip(
+            headers.x_forwarded_for.as_deref(),
+            headers.x_real_ip.as_deref(),
+        ),
         created_at: Utc::now().timestamp(),
         last_active: Utc::now().timestamp(),
     };
@@ -494,44 +458,38 @@ pub async fn oidc_callback(
     let token = session_store
         .create(&session_data, idle_ttl_secs, absolute_ttl_secs)
         .await
-        .map_err(|e| OidcCallbackError::InternalError(e.to_string()))?;
+        .map_err(|e| AuthError::Internal(e.to_string()))?;
 
-    res.add_cookie(build_cookie(
+    let cookie = build_cookie(
         SESSION_COOKIE,
         token,
         "/",
         config.cookie_secure,
-        CookieDuration::seconds(absolute_ttl_secs as i64),
-    ));
-
-    let redirect_path = pending.redirect_path.unwrap_or_else(|| "/".to_string());
-    res.status_code(StatusCode::FOUND);
-    res.headers_mut().insert(
-        "Location",
-        format!("{}{}", config.web_url, redirect_path)
-            .parse()
-            .map_err(|_| OidcCallbackError::InternalError("Invalid redirect URL".into()))?,
+        Duration::from_secs(absolute_ttl_secs),
     );
 
-    Ok(())
+    let redirect_path = pending.redirect_path.unwrap_or_else(|| "/".to_owned());
+
+    Ok(WithHeaders::new(
+        Redirect::to(format!("{}{}", config.web_url, redirect_path)),
+        SetCookie::new(&cookie)?,
+    ))
 }
 
 /// Returns the currently authenticated user (via the `beam_session` cookie).
-#[endpoint(tags("auth"))]
+#[kynos::get("/me", tag = Auth, operation_id = "getCurrentUser")]
 pub async fn oidc_me(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<MeResponse>, OidcAuthError> {
-    let user_repo = obtain_dep::<Arc<dyn UserRepository>>(depot)?.clone();
-    let (user_id, _token) = require_web_session(req, depot).await?;
+    auth: SessionAuth,
+    Inject(user_repo): Inject<Arc<dyn UserRepository>>,
+) -> Result<Json<MeResponse>, SessionActionError> {
+    let user_uuid = Uuid::parse_str(&auth.0.user_id)
+        .map_err(|e| SessionActionError::Internal(e.to_string()))?;
 
-    let user_uuid =
-        Uuid::parse_str(&user_id).map_err(|e| OidcAuthError::InternalError(e.to_string()))?;
     let user = user_repo
         .find_by_id(user_uuid)
         .await
-        .map_err(|e| OidcAuthError::InternalError(e.to_string()))?
-        .ok_or_else(|| OidcAuthError::Unauthorized("User no longer exists".into()))?;
+        .map_err(|e| SessionActionError::Internal(e.to_string()))?
+        .ok_or_else(|| SessionActionError::Unauthorized("User no longer exists".into()))?;
 
     Ok(Json(MeResponse {
         id: user.id.to_string(),
@@ -543,53 +501,52 @@ pub async fn oidc_me(
 }
 
 /// Logs out the current session (deletes it and clears the cookie).
-#[endpoint(
-    tags("auth"),
-    responses((status_code = 204, description = "Session deleted and cookie cleared"))
-)]
-pub async fn oidc_logout(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    if let Some(token) = req.cookie(SESSION_COOKIE).map(|c| c.value().to_string())
-        && let Ok(session_store) = obtain_dep::<Arc<dyn SessionStore>>(depot)
-    {
+///
+/// Deliberately not `SessionAuth`-gated: signing out of a session that has
+/// already expired should succeed rather than answer 401, so the cookie is read
+/// directly and a miss is a no-op.
+#[kynos::post("/logout", tag = Auth, operation_id = "logout")]
+pub async fn oidc_logout(
+    Cookies(cookies): Cookies<AuthCookies>,
+    Inject(session_store): Inject<Arc<dyn SessionStore>>,
+) -> Result<WithHeaders<NoContent, SetCookie>, AuthError> {
+    if let Some(token) = cookies.beam_session {
         let _ = session_store.delete(&token).await;
     }
-    res.remove_cookie(SESSION_COOKIE);
-    res.status_code(StatusCode::NO_CONTENT);
+
+    Ok(WithHeaders::new(
+        NoContent,
+        SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))?,
+    ))
 }
 
 /// Logs out every active session for the current user.
-#[endpoint(tags("auth"))]
+#[kynos::post("/logout-all", tag = Auth, operation_id = "logoutAll")]
 pub async fn oidc_logout_all(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), OidcAuthError> {
-    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?.clone();
-    let (user_id, _token) = require_web_session(req, depot).await?;
-
+    auth: SessionAuth,
+    Inject(session_store): Inject<Arc<dyn SessionStore>>,
+) -> Result<WithHeaders<NoContent, SetCookie>, AuthError> {
     session_store
-        .delete_all_for_user(&user_id)
+        .delete_all_for_user(&auth.0.user_id)
         .await
-        .map_err(|e| OidcAuthError::InternalError(e.to_string()))?;
+        .map_err(|e| AuthError::Internal(e.to_string()))?;
 
-    res.remove_cookie(SESSION_COOKIE);
-    res.status_code(StatusCode::NO_CONTENT);
-    Ok(())
+    Ok(WithHeaders::new(
+        NoContent,
+        SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))?,
+    ))
 }
 
 /// Lists every active session for the current user.
-#[endpoint(tags("auth"))]
+#[kynos::get("/sessions", tag = Auth, operation_id = "listSessions")]
 pub async fn oidc_list_sessions(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<Vec<SessionSummary>>, OidcAuthError> {
-    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?.clone();
-    let (user_id, _token) = require_web_session(req, depot).await?;
-
+    auth: SessionAuth,
+    Inject(session_store): Inject<Arc<dyn SessionStore>>,
+) -> Result<Json<Vec<SessionSummary>>, SessionActionError> {
     let sessions = session_store
-        .list_for_user(&user_id)
+        .list_for_user(&auth.0.user_id)
         .await
-        .map_err(|e| OidcAuthError::InternalError(e.to_string()))?;
+        .map_err(|e| SessionActionError::Internal(e.to_string()))?;
 
     Ok(Json(
         sessions
@@ -608,282 +565,137 @@ pub async fn oidc_list_sessions(
 /// Revokes a specific session by its listing id, scoped to the current user
 /// (returns 401 for a session that doesn't exist or belongs to someone
 /// else, never distinguishing the two).
-#[endpoint(
-    tags("auth"),
-    parameters(("id" = String, description = "Session id, from GET /sessions")),
-)]
+#[kynos::delete("/sessions/{id}", tag = Auth, operation_id = "deleteSession")]
 pub async fn oidc_delete_session(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), OidcAuthError> {
-    let session_store = obtain_dep::<Arc<dyn SessionStore>>(depot)?.clone();
-    let (user_id, current_token) = require_web_session(req, depot).await?;
-
-    let id: String = req.param::<String>("id").unwrap_or_default();
+    auth: SessionAuth,
+    Path(path): Path<SessionPath>,
+    Cookies(cookies): Cookies<AuthCookies>,
+    Inject(session_store): Inject<Arc<dyn SessionStore>>,
+) -> Result<SessionRevoked, SessionActionError> {
     let deleted = session_store
-        .delete_by_id(&id, &user_id)
+        .delete_by_id(&path.id, &auth.0.user_id)
         .await
-        .map_err(|e| OidcAuthError::InternalError(e.to_string()))?;
+        .map_err(|e| SessionActionError::Internal(e.to_string()))?;
 
     if !deleted {
-        return Err(OidcAuthError::Unauthorized("Session not found".to_string()));
+        return Err(SessionActionError::Unauthorized(
+            "Session not found".to_owned(),
+        ));
     }
 
     // Revoking the session the caller is currently using should also clear
     // their cookie, rather than leaving a dead cookie around.
     //
     // Whether that happened is decided by re-reading the caller's own token:
-    // this used to compare the request cookie to `current_token`, which is
-    // *derived from that same cookie* and so was always equal -- revoking any
-    // other device signed the caller out of the one they were holding.
-    if session_store
-        .get(&current_token)
-        .await
-        .map_err(|e| OidcAuthError::InternalError(e.to_string()))?
-        .is_none()
-    {
-        res.remove_cookie(SESSION_COOKIE);
+    // this used to compare the request cookie to a value *derived from that
+    // same cookie* and so was always equal -- revoking any other device signed
+    // the caller out of the one they were holding.
+    let still_valid = match cookies.beam_session {
+        Some(token) => session_store
+            .get(&token)
+            .await
+            .map_err(|e| SessionActionError::Internal(e.to_string()))?
+            .is_some(),
+        None => false,
+    };
+
+    if still_valid {
+        Ok(SessionRevoked::Kept(NoContent))
+    } else {
+        let cleared = SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))
+            .map_err(|_| SessionActionError::Internal("could not clear session cookie".into()))?;
+        Ok(SessionRevoked::SignedOut(WithHeaders::new(
+            NoContent, cleared,
+        )))
     }
-
-    res.status_code(StatusCode::NO_CONTENT);
-    Ok(())
 }
 
-/// Assembles the OIDC routes as a standalone router, at the paths this
-/// module's own tests exercise. beam-server does *not* use this -- it
-/// mounts the handlers above individually, split between `/v1/auth/*`
-/// (login/callback) and top-level `/v1/*` (me/logout/sessions), matching
-/// the final ratified endpoint shape now that no legacy routes remain to
-/// coexist with.
+/// Whether revoking a session also signed the caller out of this device.
+///
+/// Both arms are 204, which `Reply` forbids -- it keys variants by status --
+/// so this is a hand-written `IntoResponse`/`Responses` pair. The two differ
+/// only in whether `Set-Cookie` is present, which is a header, not a status.
+pub enum SessionRevoked {
+    /// The caller's own session survived; nothing to clear.
+    Kept(NoContent),
+    /// The caller revoked the session they were holding.
+    SignedOut(WithHeaders<NoContent, SetCookie>),
+}
+
+impl kynos::response::IntoResponse for SessionRevoked {
+    fn into_response(self) -> kynos::http::Response {
+        match self {
+            Self::Kept(inner) => inner.into_response(),
+            Self::SignedOut(inner) => inner.into_response(),
+        }
+    }
+}
+
+impl kynos::response::Responses for SessionRevoked {
+    /// The optional-header shape: 204 either way, with `Set-Cookie` marked as
+    /// present only sometimes.
+    fn responses(registry: &mut kynos::schema::registry::Registry) -> kynos::openapi::Responses {
+        <WithHeaders<NoContent, SetCookie> as kynos::response::Responses>::responses(registry)
+    }
+}
+
 #[cfg(test)]
-pub fn oidc_routes() -> Router {
-    Router::new()
-        .push(Router::with_path("login").get(oidc_login))
-        .push(Router::with_path("callback").get(oidc_callback))
-        .push(Router::with_path("me").get(oidc_me))
-        .push(Router::with_path("logout").post(oidc_logout))
-        .push(Router::with_path("logout-all").post(oidc_logout_all))
-        .push(Router::with_path("sessions").get(oidc_list_sessions))
-        .push(Router::with_path("sessions/{id}").delete(oidc_delete_session))
-}
+#[path = "auth_tests.rs"]
+mod auth_tests;
 
-/// Tests for the pure helpers in this module. The subcutaneous route tests
-/// live in `oidc_routes_tests.rs`; these reach the private functions those
-/// routes are built from, several of which are security controls whose failure
-/// mode is silent.
 #[cfg(test)]
 mod helper_tests {
     use super::*;
 
-    mod redirect_sanitisation {
-        use super::*;
+    #[test]
+    fn a_relative_path_is_kept() {
+        assert_eq!(sanitize_redirect_path(Some("/library/42")), "/library/42");
+    }
 
-        /// This is an open-redirect defence. Anything it lets through becomes
-        /// a `Location` header after a successful login, so an attacker who
-        /// can get a victim to click `/login?redirect=...` picks where the
-        /// authenticated user lands.
-        #[test]
-        fn a_same_origin_path_is_preserved_exactly() {
-            for path in [
-                "/",
-                "/libraries",
-                "/media/abc-123?fileId=def",
-                "/a/deep/path#fragment",
-                "/path with spaces",
-            ] {
-                assert_eq!(sanitize_redirect_path(Some(path)), path);
-            }
-        }
-
-        #[test]
-        fn an_absolute_url_is_refused() {
-            for hostile in [
-                "https://evil.example/",
-                "http://evil.example/",
-                "javascript:alert(1)",
-                "data:text/html,<script>alert(1)</script>",
-                "//evil.example/",
-                "/\\evil.example/",
-                "\\\\evil.example",
-                "evil.example",
-                "",
-            ] {
-                assert_eq!(
-                    sanitize_redirect_path(Some(hostile)),
-                    "/",
-                    "{hostile:?} escaped the same-origin check"
-                );
-            }
-        }
-
-        #[test]
-        fn a_protocol_relative_path_is_refused_in_both_slash_forms() {
-            // `//host` and `/\host` are both read as protocol-relative by at
-            // least one shipping browser; either would leave the site.
-            assert_eq!(sanitize_redirect_path(Some("//evil.example/x")), "/");
-            assert_eq!(sanitize_redirect_path(Some("/\\evil.example/x")), "/");
-            // But a single slash followed by anything else is fine, including
-            // a path that merely starts with a backslash later on.
-            assert_eq!(sanitize_redirect_path(Some("/a\\b")), "/a\\b");
-        }
-
-        #[test]
-        fn no_redirect_at_all_lands_on_the_root() {
-            assert_eq!(sanitize_redirect_path(None), "/");
+    /// Both of these are read as protocol-relative by some browsers, which
+    /// would send the user to another origin carrying their session.
+    #[test]
+    fn a_protocol_relative_path_falls_back_to_root() {
+        for hostile in ["//evil.example.com", "/\\evil.example.com"] {
+            assert_eq!(sanitize_redirect_path(Some(hostile)), "/");
         }
     }
 
-    mod display_name_fallback {
-        use super::*;
-
-        #[test]
-        fn the_name_claim_wins_when_the_idp_sends_one() {
-            assert_eq!(
-                derive_display_name(Some("Ada Lovelace"), Some("ada@example.com"), "sub-1"),
-                "Ada Lovelace"
-            );
-        }
-
-        #[test]
-        fn an_empty_name_claim_is_treated_as_absent() {
-            // An IdP that sends `"name": ""` would otherwise leave the user
-            // with a blank name everywhere in the UI.
-            assert_eq!(
-                derive_display_name(Some(""), Some("ada@example.com"), "sub-1"),
-                "ada"
-            );
-        }
-
-        #[test]
-        fn the_email_local_part_is_the_next_choice() {
-            assert_eq!(
-                derive_display_name(None, Some("ada@example.com"), "sub-1"),
-                "ada"
-            );
-        }
-
-        #[test]
-        fn an_email_with_an_empty_local_part_falls_through_to_the_subject() {
-            assert_eq!(
-                derive_display_name(None, Some("@example.com"), "sub-1"),
-                "user-sub-1"
-            );
-        }
-
-        #[test]
-        fn with_neither_claim_the_subject_is_the_placeholder() {
-            assert_eq!(derive_display_name(None, None, "sub-1"), "user-sub-1");
-        }
+    #[test]
+    fn an_absolute_url_falls_back_to_root() {
+        assert_eq!(sanitize_redirect_path(Some("https://evil.example.com")), "/");
+        assert_eq!(sanitize_redirect_path(None), "/");
     }
 
-    mod session_ttls {
-        use super::*;
-
-        fn config(idle_days: u64, max_days: u64) -> OidcRuntimeConfig {
-            OidcRuntimeConfig {
-                web_url: "http://localhost:5173".to_string(),
-                cookie_secure: false,
-                admin_claim: None,
-                admin_value: None,
-                session_idle_days: idle_days,
-                session_max_days: max_days,
-            }
-        }
-
-        #[test]
-        fn days_are_converted_to_seconds_not_to_something_that_merely_looks_large() {
-            // 14 days is 1_209_600 seconds. A mistyped conversion yields a
-            // number in the hundreds or thousands -- still non-zero, still
-            // "works", and signs everyone out within minutes.
-            assert_eq!(config(14, 60).idle_ttl_secs(), 1_209_600);
-            assert_eq!(config(14, 60).absolute_ttl_secs(), 5_184_000);
-            assert_eq!(config(1, 1).idle_ttl_secs(), 86_400);
-            assert_eq!(config(1, 1).absolute_ttl_secs(), 86_400);
-        }
-
-        #[test]
-        fn the_idle_and_absolute_windows_are_read_from_their_own_settings() {
-            let config = config(3, 90);
-            assert_eq!(config.idle_ttl_secs(), 3 * 86_400);
-            assert_eq!(config.absolute_ttl_secs(), 90 * 86_400);
-        }
+    #[test]
+    fn the_forwarded_chain_yields_its_first_entry() {
+        assert_eq!(
+            client_ip(Some("203.0.113.7, 70.41.3.18"), Some("10.0.0.1")),
+            "203.0.113.7"
+        );
     }
 
-    mod request_fingerprinting {
-        use super::*;
+    #[test]
+    fn the_real_ip_header_is_the_fallback() {
+        assert_eq!(client_ip(None, Some("10.0.0.1")), "10.0.0.1");
+        assert_eq!(client_ip(None, None), "unknown");
+    }
 
-        fn request_with(headers: &[(&'static str, &'static str)]) -> Request {
-            let mut builder = salvo::test::TestClient::get("http://0.0.0.0/");
-            for (name, value) in headers {
-                builder = builder.add_header(*name, *value, true);
-            }
-            builder.build()
-        }
+    #[test]
+    fn a_name_claim_wins_over_the_email_local_part() {
+        assert_eq!(
+            derive_display_name(Some("Ada Lovelace"), Some("ada@example.com"), "sub"),
+            "Ada Lovelace"
+        );
+    }
 
-        #[test]
-        fn the_device_hash_is_a_digest_of_the_user_agent_not_the_agent_itself() {
-            let firefox = device_hash_from_request(&request_with(&[("user-agent", "Firefox/1")]));
-            let chrome = device_hash_from_request(&request_with(&[("user-agent", "Chrome/1")]));
-
-            assert_ne!(firefox, chrome, "different clients must hash differently");
-            assert_eq!(firefox.len(), 64, "a SHA-256 digest is 64 hex characters");
-            assert!(
-                !firefox.contains("Firefox"),
-                "the raw agent must not be stored"
-            );
-            // Stable: the same client returning must match its existing row.
-            assert_eq!(
-                firefox,
-                device_hash_from_request(&request_with(&[("user-agent", "Firefox/1")]))
-            );
-        }
-
-        #[test]
-        fn a_client_that_sends_no_user_agent_still_gets_a_hash() {
-            let hash = device_hash_from_request(&request_with(&[]));
-            assert_eq!(hash.len(), 64);
-            assert!(!hash.is_empty());
-        }
-
-        #[test]
-        fn the_client_ip_prefers_the_first_forwarded_hop() {
-            // The first entry is the originating client; the rest are proxies.
-            assert_eq!(
-                extract_client_ip(&request_with(&[(
-                    "x-forwarded-for",
-                    "203.0.113.7, 198.51.100.1, 10.0.0.1"
-                )])),
-                "203.0.113.7"
-            );
-            assert_eq!(
-                extract_client_ip(&request_with(&[("x-forwarded-for", "  203.0.113.7  ")])),
-                "203.0.113.7",
-                "surrounding whitespace is not part of the address"
-            );
-        }
-
-        #[test]
-        fn x_real_ip_is_the_fallback_when_there_is_no_forwarded_chain() {
-            assert_eq!(
-                extract_client_ip(&request_with(&[("x-real-ip", "203.0.113.9")])),
-                "203.0.113.9"
-            );
-        }
-
-        #[test]
-        fn forwarded_for_wins_over_real_ip_when_both_are_present() {
-            assert_eq!(
-                extract_client_ip(&request_with(&[
-                    ("x-forwarded-for", "203.0.113.7"),
-                    ("x-real-ip", "198.51.100.1"),
-                ])),
-                "203.0.113.7"
-            );
-        }
+    #[test]
+    fn an_absent_name_falls_back_to_the_email_local_part_then_the_subject() {
+        assert_eq!(
+            derive_display_name(None, Some("ada@example.com"), "sub"),
+            "ada"
+        );
+        assert_eq!(derive_display_name(Some(""), None, "sub"), "user-sub");
+        assert_eq!(derive_display_name(None, None, "sub"), "user-sub");
     }
 }
-
-#[cfg(test)]
-#[path = "oidc_routes_tests.rs"]
-mod oidc_routes_tests;

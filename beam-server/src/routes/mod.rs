@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod api_error;
+pub mod auth;
 pub mod genres;
 pub mod media;
 pub mod playback;
@@ -11,6 +12,7 @@ pub mod health;
 pub mod tags;
 
 pub use admin::*;
+pub use auth::*;
 pub use genres::*;
 pub use media::*;
 pub use playback::*;
@@ -63,6 +65,15 @@ pub fn rest_routes() -> Router<AppState> {
             stream::head_stream_file,
             stream::download_file,
             stream::head_download_file,
+        ])
+        .mount(kynos::routes![
+            auth::oidc_login,
+            auth::oidc_callback,
+            auth::oidc_me,
+            auth::oidc_logout,
+            auth::oidc_logout_all,
+            auth::oidc_list_sessions,
+            auth::oidc_delete_session,
         ])
 }
 

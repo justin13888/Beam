@@ -36,6 +36,7 @@ rust_decimal = "1.42.1"
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tempfile = "3.27.0"
 thiserror = { workspace = true }
 tokio = { workspace = true }
