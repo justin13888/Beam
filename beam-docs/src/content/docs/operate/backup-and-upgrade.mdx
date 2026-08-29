@@ -1,0 +1,47 @@
+---
+title: Backups and upgrades
+description: What to back up, what is safe to lose, and what a pre-alpha upgrade can do to your database.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+## What to back up
+
+| Back up | Why |
+|---|---|
+| The **PostgreSQL database** | Users, sessions, libraries, the indexed catalogue, enrichment results, and everyone's watch progress |
+| **`BEAM_DATA_DIR`** | Beam's own writable state |
+
+**You do not need to back up your media for Beam's sake.** Beam never writes to your library, so
+nothing it does can damage it. Back your media up because it is irreplaceable, not because Beam
+is a risk to it.
+
+The single thing that genuinely hurts to lose is **watch progress and history** — everything else
+in the database can be rebuilt by rescanning.
+
+## Upgrades
+
+Beam applies schema migrations automatically at startup unless you set `BEAM_AUTO_MIGRATE=false`
+and run them yourself.
+
+<Aside type="danger" title="Pre-alpha upgrades can destroy data">
+Beam is pre-alpha and has no released versions. Migrations at this stage are permitted to be
+destructive — an upgrade may discard indexed data, and in the worst case require you to start the
+catalogue again.
+
+**Take a database dump before every upgrade:**
+
+```bash
+podman compose exec postgres pg_dump -U beam beam > beam-backup.sql
+```
+
+Do not upgrade a Beam instance you depend on without one.
+</Aside>
+
+Re-indexing is cheap, and your media is untouched. Treat the catalogue as reproducible and the
+database dump as the thing that protects the parts that are not.
+
+## Rolling back
+
+There is no supported downgrade path. Migrations are not reversible, so rolling back means
+restoring the dump you took before upgrading — which is the other reason to take one.

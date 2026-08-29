@@ -1,0 +1,133 @@
+---
+title: Managing libraries
+description: Add and scan library roots, and lay your media out so Beam classifies it correctly.
+---
+
+import { Aside, FileTree, LinkCard } from "@astrojs/starlight/components";
+
+A library is a directory Beam indexes. You can have several.
+
+## Beam never writes to your media
+
+The indexer only ever reads. It does not rename, move, delete, or write sidecar files, and it
+never creates artwork next to your videos — enrichment data lives in Beam's database.
+
+The Compose file does not mount your media read-only by default. If you want that guarantee
+enforced by the container runtime rather than by Beam's behaviour, add `:ro` to the media volume
+in `compose.beam.yaml`.
+
+## Adding and scanning
+
+Use **Add Library** on the Libraries page. The path is the path **inside the container**.
+
+Each library shows its scan state: **Scanning…** while one runs, otherwise how long ago the last
+one finished, or **Not scanned**. Progress streams live.
+
+Scans are incremental — a file whose size and modification time are unchanged is skipped, so a
+rescan of a large library is far cheaper than the first one. A filesystem watcher also picks up
+changes as they happen, so routine additions usually need no manual scan.
+
+Scanning and enrichment are independent: a scan makes files playable, and metadata arrives
+separately. See [Metadata and artwork](/operate/metadata/).
+
+## Which files get indexed
+
+Beam indexes these extensions, case-insensitively:
+
+```
+mp4  mkv  avi  mov  webm  m4v  ts
+m2ts flv  wmv  3gp  ogv   mpg  mpeg
+```
+
+Anything else — including `.iso`, `.vob`, `.mts`, and `.divx` — is not playable through Beam.
+
+<Aside type="note">
+Beam records a row for **every** file under a library root, not just video. A `.srt`, `.nfo` or
+`.jpg` is stored as an unknown file so that duplicate detection still covers it. Unknown files
+never appear as playable titles, so this is harmless — just don't be surprised by the file counts.
+</Aside>
+
+## How Beam decides what a file is
+
+The rule is simple, and worth knowing exactly, because everything else follows from it:
+
+> A filename containing an **`SxxEyy`** marker is a **TV episode**. Everything else is a **movie**.
+
+Beam then cleans the name: `.` and `_` become spaces, `[...]` and `{...}` groups are dropped, a
+standalone `19xx`/`20xx` token becomes the year, and the title is truncated at the first
+release-noise token — resolutions, sources, codecs, and edition tags such as `1080p`, `WEB-DL`,
+`BluRay`, `x265`, `AAC`, `Atmos`, `PROPER`, `EXTENDED`, `REMUX`.
+
+So `Movie.Name.2019.2160p.WEB-DL.x265-GROUP.mkv` indexes as *Movie Name* (2019).
+
+### Recognised episode markers
+
+Only `SxxEyy`, case-insensitive, with any number of digits: `S01E02`, `s1e2`, `S2025E100`.
+
+**Not** recognised — these all classify as movies:
+
+- `1x02`
+- `Season 1 Episode 2`
+- `E02` on its own
+- date-based names like `2024.01.15`
+- absolute numbering like `Show - 01`
+- multi-episode `S01E01E02` (only the first pair is read)
+
+### Directory layout for TV
+
+A show's title comes from the **immediate parent directory** of the episode file — and only that
+directory.
+
+<Aside type="danger" title="Season subfolders do not work">
+Because the show name is read from the immediate parent folder, the common
+`Show Name/Season 01/` layout makes Beam create a show called **"Season 01"**.
+
+Put episodes directly in a folder named after the show:
+
+```
+Breaking Bad/Breaking Bad.S01E01.mkv    ✅  show: "Breaking Bad"
+Breaking Bad/Season 01/…S01E01.mkv      ❌  show: "Season 01"
+```
+</Aside>
+
+<FileTree>
+- videos
+  - movies
+    - Movie.Name.2019.1080p.BluRay.x264.mkv
+    - Another.Film.2021.2160p.WEB-DL.x265.mkv
+  - shows
+    - Breaking Bad
+      - Breaking.Bad.S01E01.1080p.mkv
+      - Breaking.Bad.S01E02.1080p.mkv
+</FileTree>
+
+An episode file with no parent directory becomes part of a show called *Unknown Show*.
+
+## Multiple versions of a title
+
+Movies are grouped by their **cleaned title**. Index two files that clean to the same title and
+Beam treats them as two sources of one movie, and viewers get a picker labelled with each one's
+resolution and codec.
+
+This is how Beam serves constrained connections: put a smaller re-encode beside the original.
+It is also the fix when a file will not play in a browser — add an H.264/AAC MP4 version.
+
+Two limits to know:
+
+- **The year is not part of the grouping key.** Two different films that clean to the same title
+  will merge into one entry, whichever years they carry.
+- **Episodes cannot have multiple versions.** An episode is unique per show, season and episode
+  number, so a second file for the same episode fails to index and is recorded as a scan failure.
+  To change an episode's quality, replace the file.
+
+## When a scan reports failures
+
+A file is recorded as failed when Beam cannot probe it or cannot store it. The usual causes are a
+corrupt or truncated file, a permissions problem, or — for episodes — a second file for an episode
+that already exists. The rest of the scan continues regardless; one bad file never aborts it.
+
+<LinkCard
+	title="Indexing requirements"
+	description="The normative FR-2xx requirements this behaviour implements."
+	href="https://github.com/justin13888/beam/blob/master/docs/requirements/functional.md"
+/>

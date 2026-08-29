@@ -104,6 +104,21 @@ export default defineConfig({
 					],
 				},
 				{
+					label: "Running Beam",
+					items: [
+						{ slug: "operate/libraries" },
+						{ slug: "operate/identity-and-access" },
+						{ slug: "operate/metadata", label: "Metadata and artwork" },
+						{ slug: "operate/monitoring", label: "Monitoring and logs" },
+						{ slug: "operate/backup-and-upgrade" },
+						{ slug: "operate/production" },
+					],
+				},
+				{
+					label: "Reference",
+					items: [{ slug: "reference/configuration" }],
+				},
+				{
 					label: "Engineering docs",
 					link: "https://github.com/justin13888/beam/tree/master/docs",
 					badge: { text: "Repo", variant: "note" },
