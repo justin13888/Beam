@@ -300,7 +300,11 @@ jobs:
     if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     steps:
+      # Starlight's lastUpdated reads git history; a shallow clone renders wrong
+      # "Last updated" dates rather than failing, so the error would ship silently.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
       - run: mise run docs:build

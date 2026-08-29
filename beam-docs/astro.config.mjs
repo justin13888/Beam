@@ -49,6 +49,14 @@ export default defineConfig({
 				{ tag: "meta", attrs: { name: "theme-color", content: "#0b1220" } },
 			],
 			favicon: "/favicon.svg",
+			// Starlight appends the entry's filePath, which is relative to the Astro project
+			// root, so the base URL has to reach beam-docs/ rather than the repo root.
+			editLink: {
+				baseUrl: "https://github.com/justin13888/beam/edit/master/beam-docs/",
+			},
+			// Read from git history, so CI and the release deploy must check out full history --
+			// a shallow clone silently renders wrong dates rather than failing the build.
+			lastUpdated: true,
 			// Two variants because Starlight renders the logo as an <img>: the SVG cannot inherit
 			// the page's colour, so each theme needs its own baked-in stroke. `alt` is empty
 			// because the site title sits beside it and would otherwise be announced twice.
