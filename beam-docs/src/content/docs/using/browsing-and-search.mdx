@@ -20,7 +20,7 @@ The Explore view searches and filters across everything you can see. Filters ava
 | Genre | Any genre present in your library |
 | Year | A range, from and to |
 | Minimum rating | 6, 7, 8 or 9 out of 10 |
-| Sort by | Title, year or rating |
+| Sort by | Title or year (a rating sort is offered but currently falls back to title) |
 | Order | Ascending or descending |
 
 Filters are reflected in the URL, so a filtered view is a link you can bookmark or share with
@@ -38,7 +38,8 @@ Two things it does not do:
 - It only finds titles that have been **indexed**. If something is missing, the library may need
   a scan; ask an administrator, or see [Managing libraries](/operate/libraries/) if that is you.
 
-## What you will not see
+## What search does not cover
 
-Beam never exposes filesystem paths through its API, so you cannot search by filename or
-directory, and a title's page will not tell you where the file lives on disk.
+Search matches the **title** Beam derived when it indexed the file, not the filename or the folder
+it sits in. If a title looks wrong, that is the derived title rather than a search problem — see
+[Managing libraries](/operate/libraries/#how-beam-decides-what-a-file-is).

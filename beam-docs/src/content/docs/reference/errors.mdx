@@ -100,10 +100,13 @@ Check the mount, then rescan the library.
 
 ## 416 Range Not Satisfiable
 
-Only from stream and download URLs, when the requested byte range starts past the end of the file.
+Only from stream and download URLs: the requested range starts past the end of the file, the range
+is inverted, or **the file is zero bytes**, which is rejected whether or not a range was asked for.
 
-**What to do.** Usually a player working from a stale cached length — hard-reload the page. If it
-persists, the file changed on disk since it was indexed. Rescan the library.
+**What to do.** Check the file's size on disk first — a zero-byte file is usually a failed copy or
+a broken symlink, and no amount of reloading will fix it. Otherwise this is typically a player
+working from a stale cached length, so hard-reload; if it persists, the file changed since it was
+indexed and the library needs a rescan.
 
 ## 429 Too Many Requests
 

@@ -51,9 +51,10 @@ library that was indexed without one.
 
 ## Tuning
 
-`BEAM_ENRICH_BATCH_SIZE` and `BEAM_ENRICH_INTERVAL_SECS` control throughput, and
-`BEAM_METADATA_LANGUAGE` selects the language of returned metadata. Raising throughput too far
-risks provider rate limits, which cost you more time than the smaller batch would have.
+`BEAM_ENRICH_BATCH_SIZE` and `BEAM_ENRICH_INTERVAL_SECS` control throughput.
+`BEAM_METADATA_LANGUAGE` selects the language of returned metadata **from TMDB only** — AniList has
+no equivalent setting. Raising throughput too far risks provider rate limits, which cost you more
+time than the smaller batch would have.
 
 ## Artwork and viewer privacy
 

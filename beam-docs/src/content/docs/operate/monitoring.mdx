@@ -29,8 +29,9 @@ Scan and enrichment progress is pushed to these views as it happens rather than 
 in-progress scan updates live.
 
 <Aside type="note">
-The event log is an in-memory ring buffer of recent events. It is for watching what is happening
-now, not an audit trail — it does not survive a restart. Use the container's logs for history.
+The **Logs** tab is backed by the database and survives a restart. The live event feed behind the
+progress indicators is a separate in-memory ring buffer of recent events, which does not — so a
+scan that finished before the last restart is in the Logs tab but not in the live feed.
 </Aside>
 
 ## Logs

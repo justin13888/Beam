@@ -6,7 +6,15 @@ description: Bring up Beam and PostgreSQL with Docker or Podman Compose and reac
 import { Aside, LinkCard, Steps, Tabs, TabItem } from "@astrojs/starlight/components";
 
 Beam runs as one server process alongside PostgreSQL. The repository ships a Compose file that
-brings up both.
+brings both up, along with the web app.
+
+<Aside type="note" title="The default stack starts more than Beam">
+The root `compose.yaml` also pulls in the development dependencies, which include **Traefik** —
+binding host ports **80 and 443** and mounting the Docker socket read-only — and **Dex**, a test
+identity provider. If you already run something on 80 or 443, or you do not want a container with
+access to the Docker socket, bring up `compose.beam.yaml` and your own Postgres instead of the
+default `compose.yaml`.
+</Aside>
 
 <Aside type="caution" title="No release has been published yet">
 Beam has never been tagged, so there are no published container images to pull. Compose builds
@@ -38,14 +46,23 @@ first build to take a long time.** Later builds reuse the layer cache.
    | Variable | What it is for |
    |---|---|
    | `POSTGRES_PASSWORD` | The database password. Change it from the default. |
+   | `BEAM_DATABASE_URL` | How the server reaches Postgres. **Contains the password** — update it whenever you change `POSTGRES_PASSWORD`, or the server cannot connect. |
    | `HOST_VIDEO_DIR` | The directory on the host holding your media. |
    | `HOST_DATA_DIR` | Where Beam keeps its own writable state. |
    | `BEAM_SERVER_URL` | The URL browsers reach the server on. |
    | `BEAM_WEB_URL` | The URL browsers reach the web app on. |
+   | `C_STREAM_SERVER_URL` | The API URL baked into the **web app**. See the warning below. |
    | `BEAM_OIDC_ISSUER` | Your identity provider's issuer URL. |
    | `BEAM_OIDC_CLIENT_ID` | The client ID you registered for Beam. |
    | `BEAM_OIDC_CLIENT_SECRET` | That client's secret. |
    | `BEAM_OIDC_ADMIN_CLAIM` | The ID-token claim that marks a user as an admin. |
+
+   <Aside type="caution" title="C_STREAM_SERVER_URL is baked in at build time">
+   The browser talks to the API directly, so the web app needs the API's public URL compiled into
+   it. It is a **build argument**, not a runtime setting: changing it later means rebuilding the
+   web image, not just restarting the container. Leave it at `http://localhost:8000` and a browser
+   on any other machine will try to reach the API on its own loopback and fail.
+   </Aside>
 
    The three `BEAM_OIDC_*` credentials are required together — see
    [Identity provider and admin access](/operate/identity-and-access/) for how to register Beam

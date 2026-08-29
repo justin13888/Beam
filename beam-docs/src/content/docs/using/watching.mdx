@@ -29,10 +29,13 @@ resolution and codec, read from the file itself:
 
 A file whose video stream Beam could not probe is listed as **Original**.
 
-The highest-quality option is selected by default. Switch to a smaller one when your connection
-cannot keep up — this is how Beam handles constrained bandwidth. It has no adaptive streaming and
-will never switch for you, because there is no transcoder generating alternatives on the fly:
-every option in that list is a file that already exists on the server.
+One of them is selected for you, but **not the best one** — the sources come back in no
+particular order, so check the picker rather than assuming you got the highest quality.
+
+Switch to a smaller one when your connection cannot keep up: this is how Beam handles constrained
+bandwidth. It has no adaptive streaming and will never switch for you, because there is no
+transcoder generating alternatives on the fly. Every option in that list is a file that already
+exists on the server.
 
 <Aside type="caution" title="Movies only">
 Multiple sources work for movies. **TV episodes cannot have more than one file**: an episode is

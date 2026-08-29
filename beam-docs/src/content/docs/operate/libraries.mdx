@@ -53,10 +53,13 @@ The rule is simple, and worth knowing exactly, because everything else follows f
 
 > A filename containing an **`SxxEyy`** marker is a **TV episode**. Everything else is a **movie**.
 
-Beam then cleans the name: `.` and `_` become spaces, `[...]` and `{...}` groups are dropped, a
-standalone `19xx`/`20xx` token becomes the year, and the title is truncated at the first
-release-noise token — resolutions, sources, codecs, and edition tags such as `1080p`, `WEB-DL`,
-`BluRay`, `x265`, `AAC`, `Atmos`, `PROPER`, `EXTENDED`, `REMUX`.
+Beam then cleans the name: `.` and `_` become spaces, `[...]` and `{...}` groups are dropped, and
+the title is truncated at the first release-noise token — resolutions, sources, codecs, and edition
+tags such as `1080p`, `WEB-DL`, `BluRay`, `x265`, `AAC`, `Atmos`, `PROPER`, `EXTENDED`, `REMUX`.
+
+For a **movie**, a standalone `19xx`/`20xx` token becomes the year. For an **episode**, only a year
+in parentheses counts, so `Show.2019.S01E02.mkv` yields a show titled *Show 2019* with no year —
+write `Show (2019)` as the folder name instead.
 
 So `Movie.Name.2019.2160p.WEB-DL.x265-GROUP.mkv` indexes as *Movie Name* (2019).
 
@@ -71,7 +74,9 @@ Only `SxxEyy`, case-insensitive, with any number of digits: `S01E02`, `s1e2`, `S
 - `E02` on its own
 - date-based names like `2024.01.15`
 - absolute numbering like `Show - 01`
-- multi-episode `S01E01E02` (only the first pair is read)
+
+A multi-episode file such as `S01E01E02` *is* recognised, but only as the first episode of the
+pair — the second number is ignored.
 
 ### Directory layout for TV
 
@@ -122,9 +127,13 @@ Two limits to know:
 
 ## When a scan reports failures
 
-A file is recorded as failed when Beam cannot probe it or cannot store it. The usual causes are a
-corrupt or truncated file, a permissions problem, or — for episodes — a second file for an episode
+A file is recorded as failed when Beam cannot read its size, cannot hash it, or cannot store the
+result — a permissions problem, unreadable storage, or, for episodes, a second file for an episode
 that already exists. The rest of the scan continues regardless; one bad file never aborts it.
+
+A file Beam *can* read but cannot probe is **not** a failure. It is indexed with unknown status and
+counted as added, so a corrupt or truncated video shows up as an unplayable unknown file rather
+than in the scan's failure count.
 
 <LinkCard
 	title="Indexing requirements"
