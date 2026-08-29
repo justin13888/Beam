@@ -7,9 +7,11 @@ import { server } from "./server";
 // check and then the page's own query have both round-tripped through MSW.
 // Testing Library's 1s default is enough on an idle machine and not enough on
 // a loaded one, which showed up as three tests that passed alone and failed in
-// the full run. Five seconds still fails fast on a genuine break -- the
-// alternative, sprinkling per-call timeouts, hides the reason.
-configure({ asyncUtilTimeout: 5_000 });
+// the full run. Five seconds was not enough either: under CPU contention a
+// batch of tests lands at 5.1-5.8s and fails together, and CI runners are
+// slower than a dev machine. Fifteen still fails fast on a genuine break --
+// the alternative, sprinkling per-call timeouts, hides the reason.
+configure({ asyncUtilTimeout: 15_000 });
 
 // Browser APIs jsdom does not implement. These are environment gaps, not
 // doubles for anything beam-web owns: without them a component that merely
