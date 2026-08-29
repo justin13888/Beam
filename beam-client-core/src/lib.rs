@@ -31,10 +31,15 @@ pub mod api {
     include!(concat!(env!("OUT_DIR"), "/beam_api.rs"));
 }
 
+pub mod capability;
 pub mod error;
 pub mod ports;
 pub mod trust;
 
+pub use capability::{
+    AudioCodec, DecoderCapability, DeviceProfile, MediaSourceView, Playability, QualityPolicy,
+    RejectedSource, RejectionReason, SourceSelection, VideoCodec, select_source,
+};
 pub use error::{BeamError, StorageError};
 pub use ports::kv::KeyValueStore;
 pub use trust::CertificateDetails;
