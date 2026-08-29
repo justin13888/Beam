@@ -27,6 +27,14 @@ hk = "1.50.0"
 # Rust is deliberately absent: rust-toolchain.toml pins 1.91.0 and is honored by
 # rustup, rust-analyzer, and CI's setup-rust-toolchain action. Duplicating the
 # pin here would create a second source of truth for the same thing.
+#
+# Android client toolchain (ADR-0011). The JDK is pinned here rather than left
+# to the host because AGP is strict about it; Gradle itself is not pinned here
+# because the checked-in wrapper already pins it, and a second pin would be the
+# duplication ADR-0009 exists to prevent.
+java = "temurin-21"
+ktlint = "1.8.0"
+"cargo:cargo-ndk" = "4.1.2"
 
 [env]
 # Wrap the git hooks in `mise x` so contributors who have not activated mise in
@@ -34,6 +42,12 @@ hk = "1.50.0"
 HK_MISE = "1"
 CARGO_TERM_COLOR = "always"
 RUST_BACKTRACE = "1"
+# The Android SDK is not a mise tool: the registry only reaches it through a
+# third-party vfox plugin, and it has no NDK entry at all. `android:sdk`
+# bootstraps it with Google's own sdkmanager instead, into this directory.
+# Overridable so CI images and contributors with an existing SDK are honored.
+ANDROID_SDK_ROOT = "{{ env.ANDROID_SDK_ROOT | default(value=env.HOME ~ '/.local/share/android-sdk') }}"
+ANDROID_HOME = "{{ env.ANDROID_SDK_ROOT | default(value=env.HOME ~ '/.local/share/android-sdk') }}"
 # Local dev statically vendors an LGPL-only FFmpeg (ADR-0007) so the workspace
 # builds on hosts without FFmpeg development libraries. CI sets this to "" in
 # the job environment because .github/actions/setup-ffmpeg provides a system
@@ -337,6 +351,86 @@ if ! diff -u beam-web/openapi.json "$tmp"; then
     exit 1
 fi
 echo "OpenAPI spec matches the router"
+'''
+
+# ---------------------------------------------------------------------------
+# Android client (ADR-0011)
+#
+# The Android SDK is bootstrapped with Google's own sdkmanager rather than
+# pinned as a mise tool: mise's registry reaches the SDK only through a
+# third-party vfox plugin and carries no NDK entry at all, so a bootstrap task
+# is both the smaller dependency and the only one that can pin exact package
+# versions. It stays a mise task, so ADR-0009 still holds -- CI, the hooks, and
+# a human all run the same command.
+# ---------------------------------------------------------------------------
+
+[tasks."android:sdk"]
+description = "Bootstrap the Android SDK, NDK, and emulator image into $ANDROID_SDK_ROOT"
+run = '''
+set -eu
+
+cmdline_tools_zip="commandlinetools-linux-16111833_latest.zip"
+cmdline_tools_sha1="e025545c62a8e64c7559119566a569fb1dec5f60"
+sdkmanager="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+if [ ! -x "$sdkmanager" ]; then
+    echo "Bootstrapping Android command-line tools into $ANDROID_SDK_ROOT"
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL -o "$tmp/tools.zip" \
+        "https://dl.google.com/android/repository/$cmdline_tools_zip"
+    got=$(sha1sum "$tmp/tools.zip" | cut -d" " -f1)
+    if [ "$got" != "$cmdline_tools_sha1" ]; then
+        echo "checksum mismatch for $cmdline_tools_zip:" >&2
+        echo "  expected $cmdline_tools_sha1" >&2
+        echo "  got      $got" >&2
+        exit 1
+    fi
+    unzip -q "$tmp/tools.zip" -d "$tmp"
+    mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+    rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+    mv "$tmp/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+fi
+
+# Accepting the SDK licences is a legal act. This task never performs it on a
+# developer's behalf, and deliberately has no flag that would: accept them
+# once, interactively, and re-run.
+if [ ! -d "$ANDROID_SDK_ROOT/licenses" ]; then
+    echo "Android SDK licences have not been accepted." >&2
+    echo >&2
+    echo "Review and accept them once, then re-run this task:" >&2
+    echo >&2
+    echo "    \"$sdkmanager\" --licenses" >&2
+    exit 1
+fi
+
+"$sdkmanager" --install \
+    "platform-tools" \
+    "platforms;android-37" \
+    "build-tools;37.0.0" \
+    "ndk;30.0.16138531" \
+    "emulator" \
+    "system-images;android-37.1;google_apis_ps16k;x86_64"
+'''
+
+[tasks."android:avd"]
+description = "Create the beam-phone emulator AVD (idempotent)"
+depends = ["android:sdk"]
+run = '''
+set -eu
+avdmanager="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/avdmanager"
+image="system-images;android-37.1;google_apis_ps16k;x86_64"
+
+if "$avdmanager" list avd 2>/dev/null | grep -q "Name: beam-phone"; then
+    echo "AVD beam-phone already exists"
+else
+    echo "no" | "$avdmanager" create avd --name beam-phone --package "$image" --device pixel_7
+fi
+if "$avdmanager" list avd 2>/dev/null | grep -q "Name: beam-tablet"; then
+    echo "AVD beam-tablet already exists"
+else
+    echo "no" | "$avdmanager" create avd --name beam-tablet --package "$image" --device pixel_tablet
+fi
 '''
 
 # ---------------------------------------------------------------------------
