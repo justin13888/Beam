@@ -1,3 +1,16 @@
 [toolchain]
 channel = "1.91.0"
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
+# beam-client-core cross-compiles to these for the Android client (#67).
+# Listing them here rather than in a build script means rustup, CI's
+# setup-rust-toolchain action, and a contributor's first `cargo build` all
+# agree on the target set without a separate install step.
+#
+# armeabi-v7a is included even though 32-bit ARM is a shrinking share: Play
+# requires a 64-bit build, not a 64-bit-only one, and omitting it silently
+# drops older devices from the release.
+targets = [
+    "aarch64-linux-android",
+    "armv7-linux-androideabi",
+    "x86_64-linux-android",
+]
