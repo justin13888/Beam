@@ -23,6 +23,11 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: "Beam",
+			// src/pages/404.astro serves this instead. Both routes are entirely static segments,
+			// so leaving Starlight's injected 404 in place is a real collision rather than a
+			// silent overwrite -- Astro warns today and says it becomes a hard error in a future
+			// release, which would break docs:build and the release deploy.
+			disable404Route: true,
 			social: [
 				{
 					icon: "github",
