@@ -54,7 +54,10 @@ jobs:
               - '**/*.js'
               - '**/*.mjs'
               - '**/*.cjs'
-              - '**/*.astro'
+              # beam-docs' .astro files are covered by the docs filter and the docs-build
+              # job; matching them here would drag every landing-page tweak through the
+              # Rust/FFmpeg OpenAPI build that ts-typecheck depends on.
+              - 'beam-web/**/*.astro'
               - '**/tsconfig*.json'
               - 'biome.json'
               - '**/package.json'
