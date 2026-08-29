@@ -1,0 +1,21 @@
+---
+import { site } from "../../site";
+---
+
+<footer class="mt-24 border-t border-white/10">
+	<div
+		class="mx-auto flex max-w-5xl flex-col gap-4 px-6 py-10 text-sm text-white/50 sm:flex-row sm:items-center sm:justify-between"
+	>
+		<p>Beam is free software, licensed AGPL-3.0.</p>
+		<div class="flex flex-wrap gap-x-6 gap-y-2">
+			<a class="transition-colors hover:text-white" href="/getting-started/">Documentation</a>
+			<a class="transition-colors hover:text-white" href={site.repo}>GitHub</a>
+			<a class="transition-colors hover:text-white" href={`${site.repo}/issues`}>
+				Report an issue
+			</a>
+			<a class="transition-colors hover:text-white" href={`${site.repo}/tree/master/docs`}>
+				Engineering docs
+			</a>
+		</div>
+	</div>
+</footer>

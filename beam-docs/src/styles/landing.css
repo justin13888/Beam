@@ -22,7 +22,14 @@
 @source "../layouts";
 @source "../components";
 
-@theme inline {
+/*
+ * Deliberately NOT `@theme inline`, unlike beam-web/src/styles.css. With `inline` Tailwind
+ * substitutes the var() reference literally, and an alpha modifier on the result silently
+ * degrades: `bg-surface-raised/40` emitted a fully opaque colour and `hover:border-brand/50`
+ * emitted no rule at all. Without `inline` the utilities resolve through color-mix() at runtime
+ * and opacity works.
+ */
+@theme {
 	--color-brand: var(--beam-accent);
 	--color-brand-bright: var(--beam-accent-bright);
 	--color-brand-dim: var(--beam-accent-dim);

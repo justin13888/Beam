@@ -119,8 +119,10 @@ via the BFF session cookie, and plays media with a client-side player (Vidstack)
 requests directly against `beam-server`.
 
 **beam-docs**
-Documentation site tooling/build for user- and operator-facing docs (distinct from this
-`docs/architecture` tree, which targets engineers working on the codebase itself).
+Astro/Starlight site publishing Beam's public landing page and its end-user and operator
+documentation, deployed at <https://beam.justinchung.net> (distinct from this `docs/` tree, which
+targets engineers working on the codebase itself — see [`components.md`](components.md) for the
+division of responsibility).
 
 ## Deployment scale and non-goals
 
