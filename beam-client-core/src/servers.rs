@@ -45,7 +45,7 @@ pub fn normalize_base_url(input: &str) -> Result<Url, BeamError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(BeamError::InvalidServerUrl {
-            message: "Enter your server's address".to_owned(),
+            detail: "Enter your server's address".to_owned(),
         });
     }
 
@@ -59,17 +59,17 @@ pub fn normalize_base_url(input: &str) -> Result<Url, BeamError> {
     };
 
     let mut url = Url::parse(&candidate).map_err(|error| BeamError::InvalidServerUrl {
-        message: format!("That does not look like an address ({error})"),
+        detail: format!("That does not look like an address ({error})"),
     })?;
 
     if !matches!(url.scheme(), "http" | "https") {
         return Err(BeamError::InvalidServerUrl {
-            message: format!("{} addresses are not supported", url.scheme()),
+            detail: format!("{} addresses are not supported", url.scheme()),
         });
     }
     if url.host_str().is_none_or(str::is_empty) {
         return Err(BeamError::InvalidServerUrl {
-            message: "That address has no host".to_owned(),
+            detail: "That address has no host".to_owned(),
         });
     }
 
@@ -127,13 +127,13 @@ impl ServerRecord {
     pub fn absolute_url(&self, relative: &str) -> Result<String, BeamError> {
         let base = Url::parse(&format!("{}/", self.base_url)).map_err(|error| {
             BeamError::InvalidServerUrl {
-                message: format!("stored server URL is unusable: {error}"),
+                detail: format!("stored server URL is unusable: {error}"),
             }
         })?;
         base.join(relative.trim_start_matches('/'))
             .map(|url| url.to_string())
             .map_err(|error| BeamError::InvalidServerUrl {
-                message: format!("could not resolve {relative}: {error}"),
+                detail: format!("could not resolve {relative}: {error}"),
             })
     }
 }

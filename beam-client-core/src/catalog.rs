@@ -1056,7 +1056,7 @@ pub fn browse_params(
     let first = match query.first {
         Some(0) => {
             return Err(BeamError::BadRequest {
-                message: "a page size of zero would return nothing".to_owned(),
+                detail: "a page size of zero would return nothing".to_owned(),
             });
         }
         Some(value) => Some(i64::from(value)),

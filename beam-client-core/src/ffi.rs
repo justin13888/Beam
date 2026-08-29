@@ -392,7 +392,7 @@ impl BeamClient {
             .expect("profile lock")
             .clone()
             .ok_or_else(|| BeamError::BadRequest {
-                message: "the device profile has not been set".to_owned(),
+                detail: "the device profile has not been set".to_owned(),
             })?;
 
         crate::capability::select_source(&sources, &profile, &policy).map_err(|rejections| {
@@ -400,7 +400,7 @@ impl BeamClient {
                 || "This title has no playable files".to_owned(),
                 |first| first.detail.clone(),
             );
-            BeamError::NotFound { message: detail }
+            BeamError::NotFound { detail: detail }
         })
     }
 
@@ -1106,7 +1106,7 @@ impl BeamClient {
         let http = reqwest::Client::builder()
             .build()
             .map_err(|error| BeamError::Network {
-                message: format!("could not build an HTTP client: {error}"),
+                detail: format!("could not build an HTTP client: {error}"),
                 retryable: false,
             })?;
         let backend = MiddlewareBackend::with_middlewares(
@@ -1115,7 +1115,7 @@ impl BeamClient {
         );
         let client = GeneratedClient::with_backend(Arc::new(backend), &record.base_url).map_err(
             |error| BeamError::InvalidServerUrl {
-                message: error.to_string(),
+                detail: error.to_string(),
             },
         )?;
 
@@ -1289,7 +1289,7 @@ impl BeamClient {
             return BeamError::SessionExpired;
         }
         BeamError::Network {
-            message: message.to_owned(),
+            detail: message.to_owned(),
             retryable: true,
         }
     }
@@ -1312,7 +1312,7 @@ impl BeamClient {
 
     async fn persist_record(&self, record: &ServerRecord) -> Result<(), BeamError> {
         let encoded = serde_json::to_string(record).map_err(|error| BeamError::Storage {
-            message: error.to_string(),
+            detail: error.to_string(),
         })?;
         self.storage
             .put(format!("servers/{}", record.id), encoded)
@@ -1329,7 +1329,7 @@ impl BeamClient {
             .cloned()
             .collect();
         let encoded = serde_json::to_string(&ids).map_err(|error| BeamError::Storage {
-            message: error.to_string(),
+            detail: error.to_string(),
         })?;
         self.storage
             .put(SERVER_INDEX_KEY.to_owned(), encoded)

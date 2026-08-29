@@ -198,7 +198,7 @@ impl ProgressQueue {
         }
         let encoded =
             serde_json::to_string(entries).map_err(|error| StorageError::Unavailable {
-                message: format!("could not encode the progress queue: {error}"),
+                detail: format!("could not encode the progress queue: {error}"),
             })?;
         self.storage.put(self.key(), encoded).await
     }

@@ -23,10 +23,10 @@ pub enum BeamError {
     },
 
     /// The supplied base URL is not a usable HTTP(S) origin.
-    #[error("invalid server URL: {message}")]
+    #[error("invalid server URL: {detail}")]
     InvalidServerUrl {
         /// Why the URL was rejected.
-        message: String,
+        detail: String,
     },
 
     /// There is no session for this server; the caller should sign in.
@@ -43,24 +43,24 @@ pub enum BeamError {
 
     /// Authenticated, but not permitted. Typically a non-admin calling an
     /// admin route.
-    #[error("forbidden: {message}")]
+    #[error("forbidden: {detail}")]
     Forbidden {
         /// The server's explanation.
-        message: String,
+        detail: String,
     },
 
     /// The resource does not exist, or was removed by a rescan.
-    #[error("not found: {message}")]
+    #[error("not found: {detail}")]
     NotFound {
         /// The server's explanation.
-        message: String,
+        detail: String,
     },
 
     /// The server rejected the request as malformed.
-    #[error("bad request: {message}")]
+    #[error("bad request: {detail}")]
     BadRequest {
         /// The server's explanation.
-        message: String,
+        detail: String,
     },
 
     /// Rate limited. `beam-server` applies this to the browse/search class and
@@ -72,19 +72,19 @@ pub enum BeamError {
     },
 
     /// The server failed to handle an otherwise valid request.
-    #[error("server error {status}: {message}")]
+    #[error("server error {status}: {detail}")]
     Server {
         /// The HTTP status code.
         status: u16,
         /// The server's explanation, where it sent one.
-        message: String,
+        detail: String,
     },
 
     /// The request never produced a response.
-    #[error("network error: {message}")]
+    #[error("network error: {detail}")]
     Network {
         /// A human-readable cause.
-        message: String,
+        detail: String,
         /// Whether retrying the identical request could plausibly succeed.
         /// Drives whether the progress queue enqueues or drops.
         retryable: bool,
@@ -101,17 +101,17 @@ pub enum BeamError {
     },
 
     /// A response did not match the contract the client was generated from.
-    #[error("malformed response: {message}")]
+    #[error("malformed response: {detail}")]
     Protocol {
         /// What could not be decoded.
-        message: String,
+        detail: String,
     },
 
     /// Persistence provided by the foreign side failed.
-    #[error("storage error: {message}")]
+    #[error("storage error: {detail}")]
     Storage {
         /// The foreign side's explanation.
-        message: String,
+        detail: String,
     },
 }
 
@@ -139,24 +139,24 @@ impl BeamError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum StorageError {
     /// Storage could not be reached (disk full, database closed, and so on).
-    #[error("storage unavailable: {message}")]
+    #[error("storage unavailable: {detail}")]
     Unavailable {
         /// The foreign side's explanation.
-        message: String,
+        detail: String,
     },
 
     /// Storage refused the operation, typically a locked keystore.
-    #[error("storage denied: {message}")]
+    #[error("storage denied: {detail}")]
     Denied {
         /// The foreign side's explanation.
-        message: String,
+        detail: String,
     },
 }
 
 impl From<StorageError> for BeamError {
     fn from(error: StorageError) -> Self {
         Self::Storage {
-            message: error.to_string(),
+            detail: error.to_string(),
         }
     }
 }
@@ -169,14 +169,14 @@ mod tests {
     fn retryability_follows_the_transport_verdict() {
         assert!(
             BeamError::Network {
-                message: "connection reset".to_owned(),
+                detail: "connection reset".to_owned(),
                 retryable: true,
             }
             .is_retryable()
         );
         assert!(
             !BeamError::Network {
-                message: "invalid URL".to_owned(),
+                detail: "invalid URL".to_owned(),
                 retryable: false,
             }
             .is_retryable()
@@ -189,7 +189,7 @@ mod tests {
             assert!(
                 BeamError::Server {
                     status,
-                    message: String::new(),
+                    detail: String::new(),
                 }
                 .is_retryable(),
                 "{status} should be retryable"
@@ -199,7 +199,7 @@ mod tests {
         assert!(
             !BeamError::Server {
                 status: 418,
-                message: String::new(),
+                detail: String::new(),
             }
             .is_retryable()
         );
@@ -217,7 +217,7 @@ mod tests {
         assert!(!BeamError::Unauthenticated.is_retryable());
         assert!(
             !BeamError::NotFound {
-                message: String::new()
+                detail: String::new()
             }
             .is_retryable()
         );
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn storage_failures_widen_into_the_core_taxonomy() {
         let widened: BeamError = StorageError::Denied {
-            message: "keystore locked".to_owned(),
+            detail: "keystore locked".to_owned(),
         }
         .into();
         assert!(matches!(widened, BeamError::Storage { .. }));

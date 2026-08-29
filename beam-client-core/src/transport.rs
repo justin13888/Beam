@@ -125,21 +125,21 @@ impl Middleware for SessionMiddleware {
 /// and the JSON one is tried first with the raw text as the fallback.
 #[must_use]
 pub fn classify(status: u16, body: &str, retry_after_secs: Option<u64>) -> BeamError {
-    let message = extract_message(body);
+    let detail = extract_message(body);
     match status {
-        400 => BeamError::BadRequest { message },
+        400 => BeamError::BadRequest { detail },
         // The caller decides between Unauthenticated and SessionExpired: only
         // it knows whether a session was in place when this was sent.
         401 => BeamError::Unauthenticated,
-        403 => BeamError::Forbidden { message },
-        404 => BeamError::NotFound { message },
+        403 => BeamError::Forbidden { detail },
+        404 => BeamError::NotFound { detail },
         429 => BeamError::RateLimited {
             // beam-server sends Retry-After, but a proxy in between may not.
             retry_after_secs: retry_after_secs.unwrap_or(60),
         },
         other => BeamError::Server {
             status: other,
-            message,
+            detail,
         },
     }
 }
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(
             error,
             BeamError::NotFound {
-                message: "Media not found".to_owned()
+                detail: "Media not found".to_owned()
             }
         );
     }
@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(
             error,
             BeamError::Forbidden {
-                message: "Admin access required".to_owned()
+                detail: "Admin access required".to_owned()
             }
         );
     }
@@ -225,9 +225,9 @@ mod tests {
     fn an_empty_body_still_produces_a_usable_message() {
         let error = classify(500, "", None);
         match error {
-            BeamError::Server { status, message } => {
+            BeamError::Server { status, detail } => {
                 assert_eq!(status, 500);
-                assert!(!message.is_empty());
+                assert!(!detail.is_empty());
             }
             other => panic!("expected a server error, got {other:?}"),
         }
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(
             error,
             BeamError::BadRequest {
-                message: r#"{"detail":"nope"}"#.to_owned()
+                detail: r#"{"detail":"nope"}"#.to_owned()
             }
         );
     }
@@ -274,9 +274,9 @@ mod tests {
     #[test]
     fn an_unmapped_status_is_preserved_rather_than_flattened() {
         match classify(418, "teapot", None) {
-            BeamError::Server { status, message } => {
+            BeamError::Server { status, detail } => {
                 assert_eq!(status, 418);
-                assert_eq!(message, "teapot");
+                assert_eq!(detail, "teapot");
             }
             other => panic!("expected a server error, got {other:?}"),
         }

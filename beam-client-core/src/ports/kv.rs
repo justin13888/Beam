@@ -129,7 +129,7 @@ mod in_memory {
             };
             if fails {
                 return Err(StorageError::Unavailable {
-                    message: "in-memory store configured to fail".to_owned(),
+                    detail: "in-memory store configured to fail".to_owned(),
                 });
             }
             Ok(())
