@@ -26,12 +26,16 @@ role.
 | `/v1/files/{fileId}/download` | GET | Full-file download (attachment) |
 | `/v1/files/{fileId}/progress` | PUT | Report playback position |
 | `/v1/continue-watching` | GET | Resume list for the current user |
+| `/v1/history` | GET | Watch history for the current user |
+| `/v1/genres` | GET | Genre list for filtering |
 | `/v1/auth/login`, `/v1/auth/callback` | GET | OIDC login redirect and callback |
 | `/v1/me` | GET | Current user |
 | `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions |
 | `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List / revoke own sessions |
 | `/v1/admin/libraries`, `/v1/admin/libraries/{id}`, `/v1/admin/libraries/{id}/scan` | POST, DELETE, POST | Library management and scan trigger |
 | `/v1/admin/media/{id}/refresh` | POST | Re-trigger enrichment for a title |
+| `/v1/admin/users`, `/v1/admin/users/{id}` | GET, PATCH | List users; enable/disable one |
+| `/v1/admin/status` | GET | Catalog counts and enrichment breakdown |
 | `/v1/admin/logs`, `/v1/admin/logs/count` | GET | Admin log view |
 | `/v1/admin/events` | GET | Recent admin events (JSON) |
 | `/v1/admin/events/stream` | GET | Admin event stream (SSE) |
@@ -54,9 +58,24 @@ values (`hevc`/`h264`/`av1` → `H265`/`H264`/`AV1`; `aac`/`opus`; anything unre
   Cursors are opaque server-generated tokens; cursor pagination is used because indexing and
   enrichment continuously mutate the result set, where offset pagination would skip or duplicate
   items.
-- **Errors:** every non-2xx response uses one uniform JSON body, `{"error": "<message>"}`, with the
-  HTTP status code (`400`, `401`, `403`, `404`, `500`) carrying the semantics. Handlers return
-  `500` (never panic) when injected state is missing.
+- **Errors:** there are **no machine-readable error codes**. The HTTP status carries the semantics
+  and the body carries a free-form, unstable message — often an interpolated internal error — so
+  clients branch on status plus endpoint, never on message text. **Three body shapes exist**, chosen
+  by endpoint rather than by status. The `/v1` REST routes (`media`, `genres`, `libraries`,
+  `continue-watching`, `history`, `files/{id}/progress`, `admin/*`) and the rate limiter render JSON
+  `{"error": "<message>"}` (`ApiError`/`ApiErrorBody` in `routes/api_error.rs`, `RateLimiter` in
+  `routes/rate_limit.rs`). The file-delivery routes (`FileDeliveryError`, `routes/stream.rs`), the
+  OIDC routes (`OidcCallbackError`/`OidcAuthError`, `beam-auth/src/server/oidc_routes.rs`) and the
+  same-origin hoop (`routes/middleware.rs`) render `text/plain`. `GET /v1/health` renders the full
+  `HealthStatus` JSON on both `200` and `503`. Statuses in use: `400`, `401`, `403`, `404`, `416`
+  (stream/download range), `429` (rate limiter, with `Retry-After`), `500`, and `503` (health, and
+  `/v1/auth/login` when OIDC is unconfigured). On the file-delivery path a forbidden condition is
+  reported as `401`, not `403` (`routes/stream.rs`). A request matching no route at all is answered
+  by Salvo's default catcher, whose shape (nested `{"error":{"code",…}}`, or HTML by `Accept`) is
+  none of the three above; a wrong method on a real path returns `405`. Handlers return `500` (never
+  panic) when injected state is missing. This bullet is the contract; `beam-docs`'
+  [`reference/errors`](https://beam.justinchung.net/reference/errors/) is its public explanation,
+  and a change to any error enum is not complete until both are updated.
 
 ## OpenAPI docs and codegen
 

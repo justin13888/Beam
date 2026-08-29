@@ -116,7 +116,14 @@ export default defineConfig({
 				},
 				{
 					label: "Reference",
-					items: [{ slug: "reference/configuration" }],
+					items: [
+						{ slug: "reference/configuration" },
+						{
+							slug: "reference/errors",
+							badge: { text: "Unstable", variant: "caution" },
+						},
+						{ slug: "reference/api" },
+					],
 				},
 				{
 					label: "Engineering docs",

@@ -1,0 +1,61 @@
+---
+title: API
+description: Beam's REST API, where its OpenAPI specification lives, and how it authenticates.
+---
+
+import { Aside, LinkCard } from "@astrojs/starlight/components";
+
+Beam exposes one versioned REST API under `/v1`. The web app is built entirely on it, and it is
+designed so that other clients could be too.
+
+## Interactive documentation
+
+A running server serves browsable API docs:
+
+```
+http://<your-server>:8000/openapi
+```
+
+The OpenAPI document itself is at `/api-doc/openapi.json`. It is generated from the server's own
+handler definitions rather than maintained by hand, so it cannot drift from the implementation.
+
+## Authentication
+
+The API authenticates with the **session cookie** and nothing else.
+
+- No API keys, no bearer tokens, no personal access tokens.
+- **No credential is ever accepted in a URL or query string**, including on stream and download
+  URLs. That is deliberate: URLs end up in logs, history and referrer headers.
+- The browser never receives an OIDC token. Beam performs the whole flow server-side.
+
+The practical consequence for anything scripted: you cannot obtain a long-lived token. A client
+has to complete a browser sign-in and hold the resulting cookie.
+
+## Real-time updates
+
+Administrative events — scan progress, enrichment outcomes — are delivered over **Server-Sent
+Events** at `/v1/admin/events/stream`, authenticated by the same session cookie. There are no
+WebSockets.
+
+Missed events are not replayed. A client that reconnects should re-fetch current state rather than
+assume continuity.
+
+## Errors
+
+There are no machine-readable error codes, and error responses come in more than one body shape.
+Read [the error reference](/reference/errors/) before writing any client error handling.
+
+## Other clients
+
+<Aside type="note">
+No client other than the web app exists today. The API is designed not to require server-side
+changes to support one — native mobile, TV and desktop clients are tracked under
+[#78](https://github.com/justin13888/beam/issues/78) — but nothing is built, and the API is
+pre-alpha and may change without a deprecation period.
+</Aside>
+
+<LinkCard
+	title="API architecture and conventions"
+	description="Pagination, versioning, codegen and the error contract, in the repository."
+	href="https://github.com/justin13888/beam/blob/master/docs/architecture/api.md"
+/>
