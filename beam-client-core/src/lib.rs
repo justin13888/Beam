@@ -43,10 +43,12 @@ pub mod api {
 pub mod capability;
 pub mod clock;
 pub mod error;
+pub mod paging;
 pub mod ports;
 pub mod progress;
 pub mod servers;
 pub mod session;
+pub mod transport;
 pub mod trust;
 pub mod upnext;
 
@@ -56,6 +58,7 @@ pub use capability::{
 };
 pub use clock::{Clock, SystemClock};
 pub use error::{BeamError, StorageError};
+pub use paging::{CursorPager, PageAdvance};
 pub use ports::kv::KeyValueStore;
 pub use progress::{ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress};
 pub use servers::{ServerRecord, normalize_base_url, server_id_for};
