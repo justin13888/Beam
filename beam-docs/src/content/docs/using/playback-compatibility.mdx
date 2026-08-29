@@ -34,17 +34,20 @@ Chrome support noticeably different sets of codecs, and Firefox differs again.
 ## What you can do
 
 1. **Try another browser.** Costs a minute and resolves a good share of cases.
-2. **Check for another source.** If the title offers a picker, another version may be in a format
-   your browser handles — see [Watching](/using/watching/).
+2. **Check for another source.** If a movie offers a source picker, another version may be in a
+   format your browser handles — see [Watching](/using/watching/). Episodes never offer one.
 3. **Download it and use a desktop player.** VLC and mpv play essentially anything. Beam hands you
    the original file, so it will play there even when the browser refuses — see
    [Downloading for offline](/using/downloads/).
 4. **Ask your administrator to index a compatible version.**
 
 <Aside type="tip" title="If you run the server">
-The fix is to add a browser-friendly version of the file to your library alongside the original.
-Beam indexes both as sources of the same title and lets viewers choose. Practically, that means
-H.264 video with AAC audio in an MP4 container, which every current browser plays. See
+For a **movie**, add a browser-friendly version alongside the original: Beam indexes both as
+sources of the same title and lets viewers choose. Practically that means H.264 video with AAC
+audio in an MP4 container, which every current browser plays.
+
+For a **TV episode** this does not work — an episode can only have one file, so a second one is
+rejected during the scan. Replace the file instead. See
 [Managing libraries](/operate/libraries/#multiple-versions).
 </Aside>
 
