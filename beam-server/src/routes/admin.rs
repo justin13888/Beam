@@ -3,11 +3,20 @@
 //! operational logs/events). Tightens gap G8 from the pre-REST GraphQL
 //! surface, where library create/scan/delete were only `AuthGuard`-gated
 //! (any signed-in user, not just admins).
+//!
+//! The admin gate is `AdminAuth` -- `Scoped<SessionCookie, Admin>` -- taken in
+//! the handler signature. Under Salvo it was a `require_admin(req, state)` call
+//! in the body, which no describer could see, so the emitted document said
+//! nothing about who may call these.
 
-use std::convert::Infallible;
+use std::time::Duration;
 
 use async_stream::stream;
-use salvo::prelude::*;
+use kynos::prelude::*;
+use kynos::response::headers::WithHeaders;
+use kynos::response::status::NoContent;
+use kynos::response::stream::sse::{Event, KeepAlive, Sse};
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::models::{
@@ -15,95 +24,143 @@ use crate::models::{
     AdminUserDto, AdminUserListResponse, CreateLibraryRequest, EnrichmentQueueCounts, Library,
     LibraryFile, RecentScanDto, ScanLibraryResponse, UpdateAdminUserRequest,
 };
-use crate::routes::api_error::{ApiError, obtain_state, require_admin, require_auth};
+use crate::routes::api_error::{AdminAuth, InternalError, MutationError, SessionAuth};
+use crate::routes::tags::Admin;
 use crate::services::library::LibraryError;
 use crate::services::metadata::{MediaFilter, MetadataError};
+use crate::state::AppState;
 
-impl From<MetadataError> for ApiError {
+impl From<MetadataError> for MutationError {
     fn from(err: MetadataError) -> Self {
         match err {
-            MetadataError::MediaNotFound => ApiError::NotFound(err.to_string()),
-            MetadataError::Unsupported(msg) => ApiError::BadRequest(msg),
-            MetadataError::InternalError(msg) => ApiError::Internal(msg),
+            MetadataError::MediaNotFound => Self::NotFound(err.to_string()),
+            MetadataError::Unsupported(msg) => Self::BadRequest(msg),
+            MetadataError::InternalError(msg) => Self::Internal(msg),
         }
     }
 }
 
-impl From<LibraryError> for ApiError {
+impl From<LibraryError> for MutationError {
     fn from(err: LibraryError) -> Self {
         match err {
-            LibraryError::LibraryNotFound => ApiError::NotFound(err.to_string()),
-            LibraryError::InvalidId => ApiError::BadRequest(err.to_string()),
-            LibraryError::PathNotFound(_) | LibraryError::Validation(_) => {
-                ApiError::BadRequest(err.to_string())
-            }
-            LibraryError::UserNotFound | LibraryError::Db(_) => ApiError::Internal(err.to_string()),
+            LibraryError::LibraryNotFound => Self::NotFound(err.to_string()),
+            LibraryError::InvalidId
+            | LibraryError::PathNotFound(_)
+            | LibraryError::Validation(_) => Self::BadRequest(err.to_string()),
+            LibraryError::UserNotFound | LibraryError::Db(_) => Self::Internal(err.to_string()),
         }
     }
+}
+
+/// What `/v1/libraries/{id}` and its subresources capture.
+#[derive(Debug, Schema, PathParams)]
+pub struct LibraryPath {
+    /// Library id (UUID).
+    pub id: String,
+}
+
+/// What `/v1/admin/media/{id}/refresh` captures.
+#[derive(Debug, Schema, PathParams)]
+pub struct MediaPath {
+    /// Media id (movie or show UUID).
+    pub id: String,
+}
+
+/// What `/v1/admin/users/{id}` captures.
+#[derive(Debug, Schema, PathParams)]
+pub struct UserPath {
+    /// User id (UUID).
+    pub id: uuid::Uuid,
+}
+
+/// How the admin log list is paged.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct LogsQuery {
+    /// Max entries to return (default 50).
+    pub limit: Option<u32>,
+    /// Number of entries to skip.
+    pub offset: Option<u32>,
+}
+
+/// How the admin event snapshot is bounded.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct EventsQuery {
+    /// Max events to return (default 100, max 1000).
+    #[schema(maximum = 1000)]
+    pub limit: Option<u32>,
+}
+
+/// How the admin user list is paged.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct UsersQuery {
+    /// Max users to return (default 50, clamped to 1..=100).
+    #[schema(minimum = 1, maximum = 100)]
+    pub limit: Option<u64>,
+    /// Number of users to skip.
+    pub offset: Option<u64>,
 }
 
 // ── Library reads (any authenticated user) ─────────────────────────────────
 
-#[endpoint(tags("admin"))]
+/// Every library the caller can see.
+#[kynos::get("/libraries", tag = Admin, operation_id = "listLibraries")]
 pub async fn list_libraries(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<Vec<Library>>, ApiError> {
-    let state = obtain_state(depot)?;
-    let user = require_auth(req, state).await?;
-    let libraries = state.services.library.get_libraries(user.user_id).await?;
+    auth: SessionAuth,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<Vec<Library>>, MutationError> {
+    let libraries = state
+        .services
+        .library
+        .get_libraries(auth.0.user_id.clone())
+        .await?;
     Ok(Json(libraries))
 }
 
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("id" = String, description = "Library id (UUID)"),
-    ),
-)]
-pub async fn get_library(req: &mut Request, depot: &mut Depot) -> Result<Json<Library>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_auth(req, state).await?;
-    let id: String = req.param::<String>("id").unwrap_or_default();
-    match state.services.library.get_library_by_id(id.clone()).await? {
+/// One library by id.
+#[kynos::get("/libraries/{id}", tag = Admin, operation_id = "getLibrary")]
+pub async fn get_library(
+    _auth: SessionAuth,
+    Path(path): Path<LibraryPath>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<Library>, MutationError> {
+    match state
+        .services
+        .library
+        .get_library_by_id(path.id.clone())
+        .await?
+    {
         Some(library) => Ok(Json(library)),
-        None => Err(ApiError::NotFound(format!("library {id} not found"))),
+        None => Err(MutationError::NotFound(format!(
+            "library {} not found",
+            path.id
+        ))),
     }
 }
 
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("id" = String, description = "Library id (UUID)"),
-    ),
+/// The files indexed under one library.
+#[kynos::get(
+    "/libraries/{id}/files",
+    tag = Admin,
+    operation_id = "getLibraryFiles"
 )]
 pub async fn get_library_files(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<Vec<LibraryFile>>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_auth(req, state).await?;
-    let id: String = req.param::<String>("id").unwrap_or_default();
-    let files = state.services.library.get_library_files(id).await?;
+    _auth: SessionAuth,
+    Path(path): Path<LibraryPath>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<Vec<LibraryFile>>, MutationError> {
+    let files = state.services.library.get_library_files(path.id).await?;
     Ok(Json(files))
 }
 
 // ── Library mutations (admin only) ──────────────────────────────────────────
 
-#[endpoint(
-    tags("admin"),
-        request_body = CreateLibraryRequest,
-)]
+/// Register a new library root.
+#[kynos::post("/admin/libraries", tag = Admin, operation_id = "createLibrary")]
 pub async fn create_library(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<Library>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
-    let body: CreateLibraryRequest = req
-        .parse_json()
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    _auth: AdminAuth,
+    Inject(state): Inject<AppState>,
+    Json(body): Json<CreateLibraryRequest>,
+) -> Result<Json<Library>, MutationError> {
     let library = state
         .services
         .library
@@ -112,20 +169,18 @@ pub async fn create_library(
     Ok(Json(library))
 }
 
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("id" = String, description = "Library id (UUID)"),
-    ),
+/// Rescan a library root, indexing anything new.
+#[kynos::post(
+    "/admin/libraries/{id}/scan",
+    tag = Admin,
+    operation_id = "scanLibrary"
 )]
 pub async fn scan_library(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<ScanLibraryResponse>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
-    let id: String = req.param::<String>("id").unwrap_or_default();
-    let added = state.services.library.scan_library(id).await?;
+    _auth: AdminAuth,
+    Path(path): Path<LibraryPath>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<ScanLibraryResponse>, MutationError> {
+    let added = state.services.library.scan_library(path.id).await?;
     Ok(Json(ScanLibraryResponse { added }))
 }
 
@@ -133,181 +188,195 @@ pub async fn scan_library(
 /// worker sweep (FR-603). Does not rematch against a different external
 /// title -- see `MetadataService::refresh_metadata`'s `MediaFilter::ByMediaId`
 /// semantics.
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("id" = String, description = "Media id (movie or show UUID)"),
-    ),
+#[kynos::post(
+    "/admin/media/{id}/refresh",
+    tag = Admin,
+    operation_id = "refreshMediaMetadata"
 )]
 pub async fn refresh_media_metadata(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
-    let id: String = req.param::<String>("id").unwrap_or_default();
+    _auth: AdminAuth,
+    Path(path): Path<MediaPath>,
+    Inject(state): Inject<AppState>,
+) -> Result<NoContent, MutationError> {
     state
         .services
         .metadata
-        .refresh_metadata(MediaFilter::ByMediaId(id))
+        .refresh_metadata(MediaFilter::ByMediaId(path.id))
         .await?;
-    res.status_code(StatusCode::NO_CONTENT);
-    Ok(())
+    Ok(NoContent)
 }
 
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("id" = String, description = "Library id (UUID)"),
-    ),
+/// Remove a library and everything indexed under it.
+#[kynos::delete(
+    "/admin/libraries/{id}",
+    tag = Admin,
+    operation_id = "deleteLibrary"
 )]
 pub async fn delete_library(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
-    let id: String = req.param::<String>("id").unwrap_or_default();
-    let deleted = state.services.library.delete_library(id.clone()).await?;
-    if deleted {
-        res.status_code(StatusCode::NO_CONTENT);
-        Ok(())
+    _auth: AdminAuth,
+    Path(path): Path<LibraryPath>,
+    Inject(state): Inject<AppState>,
+) -> Result<NoContent, MutationError> {
+    if state.services.library.delete_library(path.id.clone()).await? {
+        Ok(NoContent)
     } else {
-        Err(ApiError::NotFound(format!("library {id} not found")))
+        Err(MutationError::NotFound(format!(
+            "library {} not found",
+            path.id
+        )))
     }
 }
 
 // ── Admin logs (admin only) ─────────────────────────────────────────────────
 
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("limit" = Option<u32>, Query, description = "Max entries to return (default 50)"),
-        ("offset" = Option<u32>, Query, description = "Number of entries to skip"),
-    ),
-)]
+/// A page of the operational log.
+#[kynos::get("/admin/logs", tag = Admin, operation_id = "getAdminLogs")]
 pub async fn get_admin_logs(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<Vec<AdminLogEntryDto>>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
-    let limit = req.query::<u32>("limit").unwrap_or(50);
-    let offset = req.query::<u32>("offset").unwrap_or(0);
+    _auth: AdminAuth,
+    Query(query): Query<LogsQuery>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<Vec<AdminLogEntryDto>>, InternalError> {
     let logs = state
         .services
         .admin_log
-        .get_logs(limit, offset)
+        .get_logs(query.limit.unwrap_or(50), query.offset.unwrap_or(0))
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
     Ok(Json(logs.into_iter().map(AdminLogEntryDto::from).collect()))
 }
 
-#[endpoint(tags("admin"))]
+/// How many operational log entries exist.
+#[kynos::get(
+    "/admin/logs/count",
+    tag = Admin,
+    operation_id = "getAdminLogCount"
+)]
 pub async fn get_admin_log_count(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<AdminLogCountResponse>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
+    _auth: AdminAuth,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<AdminLogCountResponse>, InternalError> {
     let count = state
         .services
         .admin_log
         .count()
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
     Ok(Json(AdminLogCountResponse { count }))
 }
 
 // ── Admin events: snapshot + SSE live stream (admin only) ───────────────────
 
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("limit" = Option<u32>, Query, description = "Max events to return (default 100, max 1000)"),
-    ),
-)]
+/// The most recent admin events, as a snapshot.
+#[kynos::get("/admin/events", tag = Admin, operation_id = "getAdminEvents")]
 pub async fn get_admin_events(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<Vec<AdminEventDto>>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
-    let limit = (req.query::<u32>("limit").unwrap_or(100) as usize).min(1000);
+    _auth: AdminAuth,
+    Query(query): Query<EventsQuery>,
+    Inject(state): Inject<AppState>,
+) -> Json<Vec<AdminEventDto>> {
+    let limit = (query.limit.unwrap_or(100) as usize).min(1000);
     let events = state.services.notification.recent_events(limit);
-    Ok(Json(events.into_iter().map(AdminEventDto::from).collect()))
+    Json(events.into_iter().map(AdminEventDto::from).collect())
+}
+
+/// Headers an SSE response needs to survive an intermediary.
+///
+/// Kynos's `Sse` sets `Content-Type` and nothing else, so these are Beam's to
+/// supply. Without `X-Accel-Buffering` an nginx in front of the server buffers
+/// the stream and the admin dashboard updates in bursts minutes apart; without
+/// `Cache-Control` an intermediary may serve a replay of the first events to a
+/// reconnecting client.
+#[derive(Schema, HeaderParams)]
+pub struct StreamHeaders {
+    #[header(rename = "Cache-Control")]
+    cache_control: String,
+
+    #[header(rename = "X-Accel-Buffering")]
+    accel_buffering: String,
 }
 
 /// Live stream of admin events over Server-Sent Events, replacing the old
 /// GraphQL-subscription-over-websocket transport with a plain HTTP stream a
 /// browser's `EventSource` can consume directly.
-#[endpoint(tags("admin"))]
+///
+/// This is the one operation that forces the whole document to OpenAPI 3.2:
+/// `Sse<S>` describes itself with `itemSchema`, and the JSON in each event's
+/// `data` field with `contentMediaType`/`contentSchema`. Under Salvo this
+/// endpoint's `200` was emitted with no content type and no schema at all.
+///
+/// Authentication resolves before the stream is committed -- `AdminAuth` is an
+/// extractor, so a 401 or 403 is a normal response rather than an error
+/// arriving after a 200 is already on the wire.
+#[kynos::get(
+    "/admin/events/stream",
+    tag = Admin,
+    operation_id = "streamAdminEvents"
+)]
 pub async fn stream_admin_events(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
-
+    _auth: AdminAuth,
+    Inject(state): Inject<AppState>,
+) -> WithHeaders<Sse<impl futures_core::Stream<Item = Result<Event<AdminEventDto>, Infallible>>>, StreamHeaders>
+{
     let mut receiver = state.services.notification.subscribe();
-    let event_stream = stream! {
+
+    let events = stream! {
         loop {
             match receiver.recv().await {
-                Ok(event) => {
-                    let dto = AdminEventDto::from(event);
-                    match SseEvent::default().json(dto) {
-                        Ok(sse_event) => yield Ok::<_, Infallible>(sse_event),
-                        Err(e) => tracing::warn!(error = %e, "failed to serialize admin event for SSE"),
-                    }
-                }
+                Ok(event) => yield Ok(Event::new(AdminEventDto::from(event))),
+                // The sender is gone: the process is shutting down.
                 Err(RecvError::Closed) => break,
+                // A slow consumer fell behind the broadcast buffer. Beam owns
+                // retention policy, and the policy is "skip and keep going":
+                // these are advisory operational events, and a dashboard that
+                // died because it blinked is worse than one that missed a row.
                 Err(RecvError::Lagged(skipped)) => {
-                    tracing::warn!("admin events SSE stream lagged, skipped {} events", skipped);
+                    tracing::warn!(skipped, "admin events SSE stream lagged");
                 }
             }
         }
     };
-    salvo::sse::stream(res, event_stream);
-    Ok(())
+
+    WithHeaders::new(
+        Sse::new(events).keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .comment("still connected"),
+        ),
+        StreamHeaders {
+            cache_control: "no-cache".to_owned(),
+            accel_buffering: "no".to_owned(),
+        },
+    )
 }
+
+/// The error type an admin event stream cannot produce.
+///
+/// Named rather than `!` so the `Sse` bound has something concrete to resolve:
+/// the loop above either yields an event or ends, and there is no third case.
+pub type Infallible = std::convert::Infallible;
 
 // ── Admin user management (admin only, issue #85) ───────────────────────────
 
 /// Paginated list of every account, for the admin users tab. `is_admin` in
 /// each row is informational/read-only: it is derived from the IdP-asserted
 /// admin claim at every login, never editable locally.
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("limit" = Option<u64>, Query, description = "Max users to return (default 50, clamped to 1..=100)"),
-        ("offset" = Option<u64>, Query, description = "Number of users to skip"),
-    ),
-)]
+#[kynos::get("/admin/users", tag = Admin, operation_id = "listAdminUsers")]
 pub async fn list_admin_users(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<AdminUserListResponse>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
+    _auth: AdminAuth,
+    Query(query): Query<UsersQuery>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<AdminUserListResponse>, InternalError> {
+    let internal = |e: sea_orm::DbErr| InternalError::Internal(e.to_string());
 
-    let limit = req.query::<u64>("limit").unwrap_or(50).clamp(1, 100);
-    let offset = req.query::<u64>("offset").unwrap_or(0);
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
 
     let items = state
         .services
         .user_repo
         .list_page(limit, offset)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let total = state
-        .services
-        .user_repo
-        .count()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(internal)?;
+    let total = state.services.user_repo.count().await.map_err(internal)?;
 
     Ok(Json(AdminUserListResponse {
         items: items.into_iter().map(AdminUserDto::from).collect(),
@@ -324,40 +393,26 @@ pub async fn list_admin_users(
 /// from the IdP-asserted admin claim and recomputed on every login, so a
 /// local toggle would be silently overwritten at the user's next login --
 /// admin grants/revocations belong at the IdP (issue #85).
-#[endpoint(
-    tags("admin"),
-    parameters(
-        ("id" = String, description = "User id (UUID)"),
-    ),
-    request_body = UpdateAdminUserRequest,
-)]
+#[kynos::patch("/admin/users/{id}", tag = Admin, operation_id = "updateAdminUser")]
 pub async fn update_admin_user(
-    req: &mut Request,
-    depot: &mut Depot,
-    res: &mut Response,
-) -> Result<(), ApiError> {
-    let state = obtain_state(depot)?;
-    let caller = require_admin(req, state).await?;
-
-    let id_raw: String = req.param::<String>("id").unwrap_or_default();
-    let user_id = uuid::Uuid::parse_str(&id_raw)
-        .map_err(|_| ApiError::BadRequest(format!("invalid user id: {id_raw}")))?;
-    let body: UpdateAdminUserRequest = req
-        .parse_json()
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    auth: AdminAuth,
+    Path(path): Path<UserPath>,
+    Inject(state): Inject<AppState>,
+    Json(body): Json<UpdateAdminUserRequest>,
+) -> Result<NoContent, MutationError> {
+    let internal = |e: sea_orm::DbErr| MutationError::Internal(e.to_string());
 
     let target = state
         .services
         .user_repo
-        .find_by_id(user_id)
+        .find_by_id(path.id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::NotFound(format!("user {id_raw} not found")))?;
+        .map_err(internal)?
+        .ok_or_else(|| MutationError::NotFound(format!("user {} not found", path.id)))?;
 
-    if body.disabled && target.id.to_string() == caller.user_id {
-        return Err(ApiError::BadRequest(
-            "cannot disable your own account".to_string(),
+    if body.disabled && target.id.to_string() == auth.0.user_id {
+        return Err(MutationError::BadRequest(
+            "cannot disable your own account".to_owned(),
         ));
     }
 
@@ -366,7 +421,7 @@ pub async fn update_admin_user(
         .user_repo
         .set_disabled(target.id, body.disabled)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(internal)?;
 
     if body.disabled {
         // Revoke every live session so the disable takes effect immediately,
@@ -376,11 +431,10 @@ pub async fn update_admin_user(
             .session_store
             .delete_all_for_user(&target.id.to_string())
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            .map_err(|e| MutationError::Internal(e.to_string()))?;
     }
 
-    res.status_code(StatusCode::NO_CONTENT);
-    Ok(())
+    Ok(NoContent)
 }
 
 // ── Admin system status (admin only, issue #85) ─────────────────────────────
@@ -392,29 +446,16 @@ const RECENT_SCANS_LIMIT: u32 = 10;
 /// Operational snapshot for the admin system-status tab: process uptime and
 /// version, entity counts, the metadata-enrichment queue state, and recent
 /// library-scan history.
-#[endpoint(tags("admin"))]
+#[kynos::get("/admin/status", tag = Admin, operation_id = "getAdminStatus")]
 pub async fn get_admin_status(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<AdminStatusResponse>, ApiError> {
-    let state = obtain_state(depot)?;
-    require_admin(req, state).await?;
-
-    let internal = |e: sea_orm::DbErr| ApiError::Internal(e.to_string());
+    _auth: AdminAuth,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<AdminStatusResponse>, InternalError> {
+    let internal = |e: sea_orm::DbErr| InternalError::Internal(e.to_string());
 
     let users = state.services.user_repo.count().await.map_err(internal)?;
-    let libraries = state
-        .services
-        .library_repo
-        .count()
-        .await
-        .map_err(internal)?;
-    let files = state
-        .services
-        .file_repo
-        .count_all()
-        .await
-        .map_err(internal)?;
+    let libraries = state.services.library_repo.count().await.map_err(internal)?;
+    let files = state.services.file_repo.count_all().await.map_err(internal)?;
     let enrichment = state
         .services
         .enrichment_repo
@@ -430,11 +471,11 @@ pub async fn get_admin_status(
             0,
         )
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
 
     Ok(Json(AdminStatusResponse {
         uptime_secs: state.uptime_secs(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
         counts: AdminStatusCounts {
             users,
             libraries,

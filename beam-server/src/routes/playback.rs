@@ -1,28 +1,38 @@
-//! `/v1/files/{file_id}/progress` and `/v1/continue-watching` (FR-507,
-//! FR-508). The reporting user is always derived from the session cookie,
-//! never from the request body -- one user can never overwrite another's
-//! progress.
+//! `/v1/files/{file_id}/progress`, `/v1/continue-watching` and `/v1/history`
+//! (FR-507, FR-508). The reporting user is always derived from the session
+//! cookie, never from the request body -- one user can never overwrite
+//! another's progress.
 
-use salvo::oapi::ToSchema;
-use salvo::prelude::*;
+use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::routes::api_error::{ApiError, obtain_state, require_auth};
-use crate::services::playback::{
-    ContinueWatchingItem, HistoryItem, PlaybackError, PlaybackProgressDto,
-};
+use crate::models::playback::{ContinueWatchingItem, HistoryItem, PlaybackProgressDto};
+use crate::routes::api_error::{InternalError, MutationError, SessionAuth};
+use crate::routes::tags::Playback;
+use crate::services::playback::PlaybackError;
+use crate::state::AppState;
 
-impl From<PlaybackError> for ApiError {
+impl From<PlaybackError> for MutationError {
     fn from(err: PlaybackError) -> Self {
         match err {
-            PlaybackError::FileNotFound => ApiError::NotFound(err.to_string()),
-            PlaybackError::Db(_) => ApiError::Internal(err.to_string()),
+            PlaybackError::FileNotFound => Self::NotFound(err.to_string()),
+            PlaybackError::Db(_) => Self::Internal(err.to_string()),
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+impl From<PlaybackError> for InternalError {
+    /// `get_continue_watching` and `get_history` never look up one file, so
+    /// `FileNotFound` is unreachable for them -- but it is still mapped rather
+    /// than panicked on, because an unreachable arm that lies is worse than one
+    /// that is merely unused.
+    fn from(err: PlaybackError) -> Self {
+        Self::Internal(err.to_string())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct ReportProgressRequest {
     pub position_secs: f64,
     pub duration_secs: Option<f64>,
@@ -33,7 +43,7 @@ pub struct ReportProgressRequest {
 /// fewer than the requested `limit` when a row's underlying file was removed
 /// by a rescan (those stale rows are skipped here but still counted in
 /// `total`).
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct HistoryResponse {
     pub items: Vec<HistoryItem>,
     pub total: u64,
@@ -44,96 +54,118 @@ pub struct HistoryResponse {
 const HISTORY_MAX_LIMIT: u64 = 100;
 const HISTORY_DEFAULT_LIMIT: u64 = 50;
 
-fn parse_user_id(user_id: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(user_id)
-        .map_err(|_| ApiError::Internal("invalid user id in session".to_string()))
+/// What `/v1/files/{file_id}/progress` captures.
+#[derive(Debug, Schema, PathParams)]
+pub struct FilePath {
+    /// File id (UUID).
+    pub file_id: Uuid,
 }
 
-#[endpoint(
-    tags("playback"),
-    parameters(("file_id" = String, description = "File id (UUID)")),
-    request_body = ReportProgressRequest,
+/// How `GET /v1/continue-watching` is bounded.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct ContinueWatchingQuery {
+    /// Max items to return (default 20).
+    pub limit: Option<u32>,
+}
+
+/// How `GET /v1/history` is paged.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct HistoryQuery {
+    /// Max items to return (default 50, max 100).
+    #[schema(minimum = 1, maximum = 100)]
+    pub limit: Option<u64>,
+    /// Number of items to skip (default 0).
+    pub offset: Option<u64>,
+}
+
+/// Resolves the session's user id.
+///
+/// Kept fallible rather than defaulting: every playback row is keyed by this
+/// value, so resolving a malformed id to the nil UUID would pool every affected
+/// user's history and progress into one shared, unowned account.
+fn parse_user_id(user_id: &str) -> Result<Uuid, InternalError> {
+    Uuid::parse_str(user_id)
+        .map_err(|_| InternalError::Internal("invalid user id in session".to_owned()))
+}
+
+/// Record how far through a file the caller has watched.
+#[kynos::put(
+    "/files/{file_id}/progress",
+    tag = Playback,
+    operation_id = "reportPlaybackProgress"
 )]
 pub async fn report_playback_progress(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<PlaybackProgressDto>, ApiError> {
-    let state = obtain_state(depot)?;
-    let user = require_auth(req, state).await?;
-    let user_id = parse_user_id(&user.user_id)?;
-
-    let file_id: String = req.param::<String>("file_id").unwrap_or_default();
-    let file_id = Uuid::parse_str(&file_id)
-        .map_err(|_| ApiError::BadRequest("invalid file id".to_string()))?;
-
-    let body: ReportProgressRequest = req
-        .parse_json()
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    auth: SessionAuth,
+    Path(path): Path<FilePath>,
+    Inject(state): Inject<AppState>,
+    Json(body): Json<ReportProgressRequest>,
+) -> Result<Json<PlaybackProgressDto>, MutationError> {
+    let user_id = parse_user_id(&auth.0.user_id)?;
 
     let progress = state
         .services
         .playback
-        .report_progress(user_id, file_id, body.position_secs, body.duration_secs)
+        .report_progress(
+            user_id,
+            path.file_id,
+            body.position_secs,
+            body.duration_secs,
+        )
         .await?;
 
     Ok(Json(progress))
 }
 
-#[endpoint(
-    tags("playback"),
-    parameters(("limit" = Option<u32>, Query, description = "Max items to return (default 20)")),
+/// The caller's partially-watched files, most recently updated first.
+#[kynos::get(
+    "/continue-watching",
+    tag = Playback,
+    operation_id = "getContinueWatching"
 )]
 pub async fn get_continue_watching(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<Vec<ContinueWatchingItem>>, ApiError> {
-    let state = obtain_state(depot)?;
-    let user = require_auth(req, state).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    auth: SessionAuth,
+    Query(query): Query<ContinueWatchingQuery>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<Vec<ContinueWatchingItem>>, InternalError> {
+    let user_id = parse_user_id(&auth.0.user_id)?;
 
-    let limit = req.query::<u32>("limit").unwrap_or(20);
     let items = state
         .services
         .playback
-        .get_continue_watching(user_id, limit)
+        .get_continue_watching(user_id, query.limit.unwrap_or(20))
         .await?;
+
     Ok(Json(items))
 }
 
-/// `GET /v1/history?limit=&offset=` — chronological watch history (completed
-/// and in-progress), most-recently-updated first. `limit` defaults to 50 and
-/// is clamped to 1..=100; `offset` defaults to 0. The response carries `total`
-/// (all history rows for the user) so a single request paginates without a
-/// separate count endpoint. Note that `items.len()` can be below `limit` when
-/// stale rows (files removed by a rescan) are skipped, while `total` still
-/// counts them.
-#[endpoint(
-    tags("playback"),
-    parameters(
-        ("limit" = Option<u32>, Query, description = "Max items to return (default 50, max 100)"),
-        ("offset" = Option<u32>, Query, description = "Number of items to skip (default 0)"),
-    ),
-)]
+/// Chronological watch history (completed and in-progress), most-recently-
+/// updated first.
+///
+/// `limit` defaults to 50 and is clamped to 1..=100; `offset` defaults to 0.
+/// The response carries `total` (all history rows for the user) so a single
+/// request paginates without a separate count endpoint. Note that `items.len()`
+/// can be below `limit` when stale rows (files removed by a rescan) are
+/// skipped, while `total` still counts them.
+#[kynos::get("/history", tag = Playback, operation_id = "getHistory")]
 pub async fn get_history(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> Result<Json<HistoryResponse>, ApiError> {
-    let state = obtain_state(depot)?;
-    let user = require_auth(req, state).await?;
-    let user_id = parse_user_id(&user.user_id)?;
+    auth: SessionAuth,
+    Query(query): Query<HistoryQuery>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<HistoryResponse>, InternalError> {
+    let user_id = parse_user_id(&auth.0.user_id)?;
 
-    let limit = req
-        .query::<u64>("limit")
+    let limit = query
+        .limit
         .unwrap_or(HISTORY_DEFAULT_LIMIT)
         .clamp(1, HISTORY_MAX_LIMIT);
-    let offset = req.query::<u64>("offset").unwrap_or(0);
+    let offset = query.offset.unwrap_or(0);
 
     let (items, total) = state
         .services
         .playback
         .get_history(user_id, limit, offset)
         .await?;
+
     Ok(Json(HistoryResponse { items, total }))
 }
 
@@ -164,10 +196,7 @@ mod parse_user_id_tests {
         ] {
             let error = parse_user_id(malformed)
                 .expect_err("a malformed session user id must not resolve to an account");
-            assert!(
-                matches!(error, ApiError::Internal(_)),
-                "for {malformed:?}: a broken session is a server-side problem, not the caller's"
-            );
+            let InternalError::Internal(_) = error;
         }
     }
 
