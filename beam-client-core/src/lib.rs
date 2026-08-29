@@ -32,17 +32,23 @@ pub mod api {
 }
 
 pub mod capability;
+pub mod clock;
 pub mod error;
 pub mod ports;
+pub mod progress;
 pub mod trust;
+pub mod upnext;
 
 pub use capability::{
     AudioCodec, DecoderCapability, DeviceProfile, MediaSourceView, Playability, QualityPolicy,
     RejectedSource, RejectionReason, SourceSelection, VideoCodec, select_source,
 };
+pub use clock::{Clock, SystemClock};
 pub use error::{BeamError, StorageError};
 pub use ports::kv::KeyValueStore;
+pub use progress::{ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress};
 pub use trust::CertificateDetails;
+pub use upnext::{UpNextEpisode, UpNextSeason, next_playable_episode};
 
 uniffi::setup_scaffolding!();
 
