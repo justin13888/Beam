@@ -31,6 +31,16 @@ pub mod api {
     include!(concat!(env!("OUT_DIR"), "/beam_api.rs"));
 }
 
+pub mod error;
+pub mod ports;
+pub mod trust;
+
+pub use error::{BeamError, StorageError};
+pub use ports::kv::KeyValueStore;
+pub use trust::CertificateDetails;
+
+uniffi::setup_scaffolding!();
+
 #[cfg(test)]
 mod tests {
     use super::api::types::*;
