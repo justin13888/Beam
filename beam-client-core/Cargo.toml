@@ -28,4 +28,4 @@ default-features = false
 features = ["charset", "http2", "json", "rustls-tls-manual-roots-no-provider"]
 
 [build-dependencies]
-spargen = "0.3.0"
+spargen = "0.4.0"
