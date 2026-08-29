@@ -1,0 +1,31 @@
+[package]
+name = "beam-client-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# "lib" alongside "cdylib" is load-bearing: without it `cargo test` and
+# `cargo llvm-cov` cannot link the crate, so the workspace gates would skip it.
+crate-type = ["cdylib", "lib"]
+
+# The runtime dependency contract the generated client requires. spargen audits
+# this manifest against its tested floors and fails with E023 before rustc runs,
+# so these versions are not free-floating -- see `spargen deps`.
+[dependencies]
+bytes = "1.12.1"
+secrecy = "0.10.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+time = { version = "0.3.55", features = ["formatting", "parsing", "serde"] }
+
+# rustls with `ring`, deliberately not `aws-lc-rs`: aws-lc-rs needs cmake and a
+# per-ABI C toolchain, which does not cross-compile cleanly to Android.
+[dependencies.reqwest]
+version = "0.12.28"
+default-features = false
+features = ["charset", "http2", "json", "rustls-tls-manual-roots-no-provider"]
+
+[build-dependencies]
+spargen = "0.3.0"

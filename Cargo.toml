@@ -1,5 +1,14 @@
 [workspace]
-members = ["beam-auth", "beam-domain", "beam-index", "beam-server", "beam-migration", "beam-entity", "beam-test-support"]
+members = [
+    "beam-auth",
+    "beam-client-core",
+    "beam-domain",
+    "beam-index",
+    "beam-server",
+    "beam-migration",
+    "beam-entity",
+    "beam-test-support",
+]
 resolver = "3"
 
 # Beam ships as one product -- a server binary and a web image built from the
@@ -61,8 +70,8 @@ sea-orm-migration = { version = "1.1", features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",
 ] }
-serde = "1.0.228"
-serde_json = "1.0.149"
+serde = "1.0.229"
+serde_json = "1.0.151"
 thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.41"

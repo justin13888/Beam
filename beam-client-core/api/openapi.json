@@ -1,0 +1,3984 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Beam Server API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/admin/events": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.get_admin_events",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max events to return (default 100, max 1000)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/beam_server.models.admin.AdminEventDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/events/stream": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Live stream of admin events over Server-Sent Events, replacing the old",
+        "description": "GraphQL-subscription-over-websocket transport with a plain HTTP stream a\n\nbrowser's `EventSource` can consume directly.",
+        "operationId": "beam_server.routes.admin.stream_admin_events",
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/libraries": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.create_library",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/beam_server.models.admin.CreateLibraryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.models.library.Library"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/libraries/{id}": {
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.delete_library",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Library id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/libraries/{id}/scan": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.scan_library",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Library id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.models.admin.ScanLibraryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/logs": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.get_admin_logs",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries to return (default 50)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Number of entries to skip",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/beam_server.models.admin.AdminLogEntryDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/logs/count": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.get_admin_log_count",
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.models.admin.AdminLogCountResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/media/{id}/refresh": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Force a specific movie/show to re-run metadata enrichment on the next",
+        "description": "worker sweep (FR-603). Does not rematch against a different external\n\ntitle -- see `MetadataService::refresh_metadata`'s `MediaFilter::ByMediaId`\n\nsemantics.",
+        "operationId": "beam_server.routes.admin.refresh_media_metadata",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media id (movie or show UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/status": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Operational snapshot for the admin system-status tab: process uptime and",
+        "description": "version, entity counts, the metadata-enrichment queue state, and recent\n\nlibrary-scan history.",
+        "operationId": "beam_server.routes.admin.get_admin_status",
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.models.admin.AdminStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/users": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Paginated list of every account, for the admin users tab. `is_admin` in",
+        "description": "each row is informational/read-only: it is derived from the IdP-asserted\n\nadmin claim at every login, never editable locally.",
+        "operationId": "beam_server.routes.admin.list_admin_users",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max users to return (default 50, clamped to 1..=100)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Number of users to skip",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.models.admin.AdminUserListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/users/{id}": {
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Sets a user's `disabled` moderation flag. Disabling immediately revokes",
+        "description": "every session of the target (they cannot act again until re-enabled) and\n\nblocks future logins at the OIDC callback. An admin cannot disable their\n\nown account (400).\n\n\n\n`disabled` is deliberately the only mutable field: `is_admin` is derived\n\nfrom the IdP-asserted admin claim and recomputed on every login, so a\n\nlocal toggle would be silently overwritten at the user's next login --\n\nadmin grants/revocations belong at the IdP (issue #85).",
+        "operationId": "beam_server.routes.admin.update_admin_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/beam_server.models.admin.UpdateAdminUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Completes the Authorization Code + PKCE exchange, JIT-provisions or",
+        "description": "looks up the user, mints a session, and redirects back into the web app.",
+        "operationId": "beam_auth.server.oidc_routes.oidc_callback",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "error_description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "400": {
+            "description": "The state/nonce/PKCE round-trip failed verification.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The identity is valid but the local account is disabled (issue #85).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/login": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Begins an Authorization Code + PKCE flow and redirects the browser to",
+        "description": "the IdP. `redirect` (query param) is where the callback sends the\n\nbrowser back to on success; sanitized to a same-origin-relative path.",
+        "operationId": "beam_auth.server.oidc_routes.oidc_login",
+        "parameters": [
+          {
+            "name": "redirect",
+            "in": "query",
+            "description": "Path to return to after login",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to the identity provider's authorization endpoint"
+          },
+          "500": {
+            "description": "Server state unavailable, or the IdP returned an invalid authorization URL"
+          },
+          "503": {
+            "description": "OIDC is not configured or the provider is unreachable"
+          }
+        }
+      }
+    },
+    "/v1/continue-watching": {
+      "get": {
+        "tags": [
+          "playback"
+        ],
+        "operationId": "beam_server.routes.playback.get_continue_watching",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items to return (default 20)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/beam_server.services.playback.ContinueWatchingItem"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files/{file_id}/download": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Download the full source file as an attachment. Same auth and Range",
+        "description": "support as [`stream_file`] (so a paused/interrupted download can resume),\n\nbut sets `Content-Disposition: attachment` with the original filename so\n\nthe browser saves it rather than attempting inline playback.",
+        "operationId": "beam_server.routes.stream.download_file",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "File ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "Range not satisfiable",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files/{file_id}/progress": {
+      "put": {
+        "tags": [
+          "playback"
+        ],
+        "operationId": "beam_server.routes.playback.report_playback_progress",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "File id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/beam_server.routes.playback.ReportProgressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.services.playback.PlaybackProgressDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files/{file_id}/stream": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Direct-play stream via HTTP Range. Serves the source file's bytes exactly",
+        "description": "as indexed on disk -- Beam never transcodes or remuxes media server-side\n\n(see ADR-0004); the response `Content-Type` reflects the file's actual\n\ndetected MIME type rather than assuming MP4. Rendered inline (no\n\n`Content-Disposition`) so a `<video>` element plays it in place.",
+        "operationId": "beam_server.routes.stream.stream_file",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "File ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "Range not satisfiable",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/genres": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "List the distinct genres in the library, sorted for stable presentation.",
+        "operationId": "beam_server.routes.genres.list_genres",
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.routes.genres.GenreListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Health check endpoint.",
+        "description": "Probes the server's external dependencies (currently just the database)\n\nrather than reporting a static liveness value: a healthy result is `200`,\n\nwhile any failing dependency yields `503 Service Unavailable` with a\n\n`\"degraded\"` status so orchestrator health checks and monitors react to a\n\ndependency outage.",
+        "operationId": "beam_server.routes.health.health_check",
+        "responses": {
+          "200": {
+            "description": "All dependencies are healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.routes.health.HealthStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.routes.health.HealthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/history": {
+      "get": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "`GET /v1/history?limit=&offset=` — chronological watch history (completed",
+        "description": "and in-progress), most-recently-updated first. `limit` defaults to 50 and\n\nis clamped to 1..=100; `offset` defaults to 0. The response carries `total`\n\n(all history rows for the user) so a single request paginates without a\n\nseparate count endpoint. Note that `items.len()` can be below `limit` when\n\nstale rows (files removed by a rescan) are skipped, while `total` still\n\ncounts them.",
+        "operationId": "beam_server.routes.playback.get_history",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items to return (default 50, max 100)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Number of items to skip (default 0)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.routes.playback.HistoryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/libraries": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.list_libraries",
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/beam_server.models.library.Library"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/libraries/{id}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.get_library",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Library id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.models.library.Library"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/libraries/{id}/files": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "beam_server.routes.admin.get_library_files",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Library id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/beam_server.models.library.file.LibraryFile"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Logs out the current session (deletes it and clears the cookie).",
+        "operationId": "beam_auth.server.oidc_routes.oidc_logout",
+        "responses": {
+          "204": {
+            "description": "Session deleted and cookie cleared"
+          }
+        }
+      }
+    },
+    "/v1/logout-all": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Logs out every active session for the current user.",
+        "operationId": "beam_auth.server.oidc_routes.oidc_logout_all",
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "401": {
+            "description": "Missing or invalid session",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Returns the currently authenticated user (via the `beam_session` cookie).",
+        "operationId": "beam_auth.server.oidc_routes.oidc_me",
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_auth.server.oidc_routes.MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid session",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Browse/search the media library with cursor-based pagination, sorting, and",
+        "description": "filtering.",
+        "operationId": "beam_server.routes.media.browse_media",
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "description": "Number of items to return from the start",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Cursor to start after",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "last",
+            "in": "query",
+            "description": "Number of items to return from the end",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Cursor to start before",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "description": "Sort field",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/beam_server.services.metadata.MediaSortField"
+                }
+              ]
+            }
+          },
+          {
+            "name": "sort_order",
+            "in": "query",
+            "description": "Sort order",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/beam_server.services.metadata.SortOrder"
+                }
+              ]
+            }
+          },
+          {
+            "name": "media_type",
+            "in": "query",
+            "description": "Filter by media type",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/beam_server.services.metadata.MediaTypeFilter"
+                }
+              ]
+            }
+          },
+          {
+            "name": "genre",
+            "in": "query",
+            "description": "Filter by genre",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "year",
+            "in": "query",
+            "description": "Filter by year (exact match)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          {
+            "name": "year_from",
+            "in": "query",
+            "description": "Filter by year range (start)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          {
+            "name": "year_to",
+            "in": "query",
+            "description": "Filter by year range (end)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "description": "Search query for title",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "min_rating",
+            "in": "query",
+            "description": "Filter by minimum rating (0-100)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.services.metadata.MediaConnection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/{id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Fetch a single media item's full metadata by id.",
+        "operationId": "beam_server.routes.media.get_media_detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media id (movie or show UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/beam_server.models.media.MediaMetadata"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/{id}/sources": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "List the playable/downloadable source files for a playable media id.",
+        "description": "Accepts a movie id or an episode id (both are \"playable\" ids). A show id is\n\nrejected with 400 -- shows have no files of their own, so callers request\n\nsources for the show's individual episode ids instead. An episode with no\n\nfiles yet returns an empty array (a valid, \"not yet playable\" response).",
+        "operationId": "beam_server.routes.media.get_media_sources",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Playable media id: a movie UUID or an episode UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/beam_server.models.media.source.MediaSource"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Lists every active session for the current user.",
+        "operationId": "beam_auth.server.oidc_routes.oidc_list_sessions",
+        "responses": {
+          "200": {
+            "description": "Response with json format data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/beam_auth.server.oidc_routes.SessionSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid session",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}": {
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Revokes a specific session by its listing id, scoped to the current user",
+        "description": "(returns 401 for a session that doesn't exist or belongs to someone\n\nelse, never distinguishing the two).",
+        "operationId": "beam_auth.server.oidc_routes.oidc_delete_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id, from GET /sessions",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ok"
+          },
+          "401": {
+            "description": "Missing or invalid session",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "beam_auth.server.oidc_routes.MeResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "is_admin",
+          "display_name"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_admin": {
+            "type": "boolean"
+          }
+        }
+      },
+      "beam_auth.server.oidc_routes.SessionSummary": {
+        "type": "object",
+        "description": "One of the current user's active sessions, as returned by `GET\n/sessions`. `id` is an opaque row identifier for revocation via `DELETE\n/sessions/{id}` -- never the session credential itself, which is hashed\nat rest and cannot be recovered.",
+        "required": [
+          "id",
+          "device_hash",
+          "ip",
+          "created_at",
+          "last_active"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "device_hash": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "ip": {
+            "type": "string"
+          },
+          "last_active": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "beam_server.models.admin.AdminEventCategoryDto": {
+        "type": "string",
+        "enum": [
+          "library_scan",
+          "system"
+        ]
+      },
+      "beam_server.models.admin.AdminEventDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "timestamp",
+          "level",
+          "category",
+          "message"
+        ],
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/beam_server.models.admin.AdminEventCategoryDto"
+          },
+          "id": {
+            "type": "string"
+          },
+          "level": {
+            "$ref": "#/components/schemas/beam_server.models.admin.AdminEventLevelDto"
+          },
+          "library_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "library_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "beam_server.models.admin.AdminEventLevelDto": {
+        "type": "string",
+        "enum": [
+          "info",
+          "warning",
+          "error"
+        ]
+      },
+      "beam_server.models.admin.AdminLogCountResponse": {
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.admin.AdminLogEntryDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "level",
+          "category",
+          "message",
+          "created_at"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "details": {},
+          "id": {
+            "type": "string"
+          },
+          "level": {
+            "$ref": "#/components/schemas/beam_server.models.admin.AdminLogLevelDto"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "beam_server.models.admin.AdminLogLevelDto": {
+        "type": "string",
+        "enum": [
+          "info",
+          "warning",
+          "error"
+        ]
+      },
+      "beam_server.models.admin.AdminStatusCounts": {
+        "type": "object",
+        "required": [
+          "users",
+          "libraries",
+          "files"
+        ],
+        "properties": {
+          "files": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "libraries": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "users": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.admin.AdminStatusResponse": {
+        "type": "object",
+        "required": [
+          "uptime_secs",
+          "version",
+          "counts",
+          "enrichment",
+          "recent_scans"
+        ],
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/beam_server.models.admin.AdminStatusCounts"
+          },
+          "enrichment": {
+            "$ref": "#/components/schemas/beam_server.models.admin.EnrichmentQueueCounts"
+          },
+          "recent_scans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.admin.RecentScanDto"
+            },
+            "description": "Most recent `library_scan` admin log entries, newest first."
+          },
+          "uptime_secs": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Whole seconds since the server process built its state.",
+            "minimum": 0.0
+          },
+          "version": {
+            "type": "string",
+            "description": "Server crate version (`CARGO_PKG_VERSION`)."
+          }
+        }
+      },
+      "beam_server.models.admin.AdminUserDto": {
+        "type": "object",
+        "description": "One user row in the admin users tab. `is_admin` is informational and\nread-only here: admin is derived from the IdP-asserted claim on every\nlogin, so there is deliberately no endpoint to change it.",
+        "required": [
+          "id",
+          "display_name",
+          "is_admin",
+          "disabled",
+          "created_at"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "disabled": {
+            "type": "boolean",
+            "description": "Local moderation switch (see `PATCH /v1/admin/users/{id}`): a disabled\nuser cannot log in and their sessions are revoked on disable."
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_admin": {
+            "type": "boolean"
+          }
+        }
+      },
+      "beam_server.models.admin.AdminUserListResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.admin.AdminUserDto"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Total number of users across all pages.",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.admin.CreateLibraryRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "root_path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "root_path": {
+            "type": "string"
+          }
+        }
+      },
+      "beam_server.models.admin.EnrichmentQueueCounts": {
+        "type": "object",
+        "description": "Metadata-enrichment queue overview: row counts per state.",
+        "required": [
+          "pending",
+          "enriched",
+          "unmatched",
+          "failed"
+        ],
+        "properties": {
+          "enriched": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "unmatched": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.admin.RecentScanDto": {
+        "type": "object",
+        "description": "One recent library-scan admin log entry, slimmed to what the system\nstatus tab renders.",
+        "required": [
+          "level",
+          "message",
+          "timestamp"
+        ],
+        "properties": {
+          "level": {
+            "$ref": "#/components/schemas/beam_server.models.admin.AdminLogLevelDto"
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "beam_server.models.admin.ScanLibraryResponse": {
+        "type": "object",
+        "required": [
+          "added"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.admin.UpdateAdminUserRequest": {
+        "type": "object",
+        "description": "Body of `PATCH /v1/admin/users/{id}`. `disabled` is the only mutable\nfield: `is_admin` is IdP-claim-driven (recomputed at every login), so a\nlocal toggle would be silently overwritten and is deliberately absent.",
+        "required": [
+          "disabled"
+        ],
+        "properties": {
+          "disabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "beam_server.models.library.Library": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "size"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_scan_file_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Number of files found in the last scan"
+          },
+          "last_scan_finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the last scan finished"
+          },
+          "last_scan_started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the last scan started"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "uint32",
+            "description": "Number of media items in the library",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.library.file.FileContentType": {
+        "type": "string",
+        "description": "The kind of content a media file represents",
+        "enum": [
+          "Movie",
+          "Episode",
+          "Unclassified"
+        ]
+      },
+      "beam_server.models.library.file.FileIndexStatus": {
+        "type": "string",
+        "description": "File indexing status",
+        "enum": [
+          "Known",
+          "Changed",
+          "Unknown"
+        ]
+      },
+      "beam_server.models.library.file.LibraryFile": {
+        "type": "object",
+        "description": "A media file within a library",
+        "required": [
+          "id",
+          "library_id",
+          "path",
+          "size_bytes",
+          "hash",
+          "status",
+          "content_type",
+          "scanned_at",
+          "updated_at"
+        ],
+        "properties": {
+          "container_format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Container format (e.g. \"mp4\", \"mkv\")"
+          },
+          "content_type": {
+            "$ref": "#/components/schemas/beam_server.models.library.file.FileContentType"
+          },
+          "duration_secs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Duration in seconds"
+          },
+          "hash": {
+            "type": "string",
+            "description": "Content hash (XXH3) as a decimal string. Identifies the file's content\nfor caching and duplicate detection."
+          },
+          "id": {
+            "type": "string"
+          },
+          "library_id": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "MIME type (e.g. \"video/mp4\")"
+          },
+          "path": {
+            "type": "string",
+            "description": "Filesystem path of the file"
+          },
+          "scanned_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this file was first scanned"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "File size in bytes"
+          },
+          "status": {
+            "$ref": "#/components/schemas/beam_server.models.library.file.FileIndexStatus"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this file was last updated"
+          }
+        }
+      },
+      "beam_server.models.media.ExternalIdentifiers": {
+        "type": "object",
+        "properties": {
+          "imdb_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IMDb ID (e.g., tt1234567)"
+          },
+          "tmdb_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "description": "TMDb ID (e.g., 12345)",
+            "minimum": 0.0
+          },
+          "tvdb_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "description": "TVDb ID (e.g., 12345)",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.media.MediaMetadata": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "Show"
+            ],
+            "properties": {
+              "Show": {
+                "$ref": "#/components/schemas/beam_server.models.media.show.ShowMetadata"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "Movie"
+            ],
+            "properties": {
+              "Movie": {
+                "$ref": "#/components/schemas/beam_server.models.media.movie.MovieMetadata"
+              }
+            }
+          }
+        ],
+        "description": "Media metadata"
+      },
+      "beam_server.models.media.Ratings": {
+        "type": "object",
+        "properties": {
+          "tmdb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "description": "TMDB rating as a percentage (0-100)",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.media.Title": {
+        "type": "object",
+        "required": [
+          "original"
+        ],
+        "properties": {
+          "alternatives": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Alternative titles, if any"
+          },
+          "localized": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Localized title, if available and different from original"
+          },
+          "original": {
+            "type": "string",
+            "description": "Original title"
+          }
+        }
+      },
+      "beam_server.models.media.codec.OutputAudioCodec": {
+        "type": "string",
+        "enum": [
+          "Aac",
+          "Opus",
+          "Unknown"
+        ]
+      },
+      "beam_server.models.media.codec.OutputSubtitleCodec": {
+        "type": "string",
+        "enum": [
+          "WebVTT"
+        ]
+      },
+      "beam_server.models.media.codec.OutputVideoCodec": {
+        "type": "string",
+        "enum": [
+          "H264",
+          "H265",
+          "AV1",
+          "UNKNOWN"
+        ]
+      },
+      "beam_server.models.media.format.Resolution": {
+        "type": "object",
+        "required": [
+          "width",
+          "height"
+        ],
+        "properties": {
+          "height": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "width": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.media.movie.MovieMetadata": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "genres",
+          "streams"
+        ],
+        "properties": {
+          "backdrop_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional URL to the movie's backdrop image"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional description of the movie"
+          },
+          "duration": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Duration of the video file in seconds"
+          },
+          "file_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Identifier of the primary streamable file, if any."
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Movie genres"
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier for this movie (UUID)."
+          },
+          "identifiers": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/beam_server.models.media.ExternalIdentifiers"
+              }
+            ]
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional URL to the movie's poster image"
+          },
+          "ratings": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/beam_server.models.media.Ratings"
+              }
+            ]
+          },
+          "release_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Release date of the movie"
+          },
+          "runtime": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "description": "Runtime of the movie in minutes",
+            "minimum": 0.0
+          },
+          "streams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.media.stream.MediaStreamMetadata"
+            },
+            "description": "List of unique streams associated with this movie"
+          },
+          "title": {
+            "$ref": "#/components/schemas/beam_server.models.media.Title"
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "description": "Year the movie was released",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.media.show.EpisodeMetadata": {
+        "type": "object",
+        "required": [
+          "id",
+          "episode_number",
+          "title",
+          "streams"
+        ],
+        "properties": {
+          "air_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional air date of the episode in YYYY-MM-DD format"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional description of the episode"
+          },
+          "duration": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "episode_number": {
+            "type": "integer",
+            "format": "uint32",
+            "description": "Episode number within the season",
+            "minimum": 0.0
+          },
+          "file_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Identifier of the streamable file backing this episode, if any."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier for this episode (UUID)."
+          },
+          "streams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.media.stream.MediaStreamMetadata"
+            },
+            "description": "List of unique streams associated with this episode"
+          },
+          "thumbnail_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional URL to the episode's thumbnail image"
+          },
+          "title": {
+            "type": "string",
+            "description": "Title of the episode"
+          }
+        }
+      },
+      "beam_server.models.media.show.SeasonMetadata": {
+        "type": "object",
+        "required": [
+          "season_number",
+          "dates",
+          "episodes",
+          "genres"
+        ],
+        "properties": {
+          "dates": {
+            "$ref": "#/components/schemas/beam_server.models.media.show.ShowDates"
+          },
+          "episode_runtime": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "description": "Runtime of episodes in minutes",
+            "minimum": 0.0
+          },
+          "episodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.media.show.EpisodeMetadata"
+            },
+            "description": "List of episodes in the season"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Show genres"
+          },
+          "identifiers": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/beam_server.models.media.ExternalIdentifiers"
+              }
+            ]
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional URL to the season's poster image"
+          },
+          "ratings": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/beam_server.models.media.Ratings"
+              }
+            ]
+          },
+          "season_number": {
+            "type": "integer",
+            "format": "uint32",
+            "description": "Season number",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.media.show.ShowDates": {
+        "type": "object",
+        "properties": {
+          "first_aired": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "First air date"
+          },
+          "last_aired": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Last air date"
+          }
+        }
+      },
+      "beam_server.models.media.show.ShowMetadata": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "seasons"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional description of the show"
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier for this show (UUID)."
+          },
+          "seasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.media.show.SeasonMetadata"
+            },
+            "description": "List of seasons in the show"
+          },
+          "title": {
+            "$ref": "#/components/schemas/beam_server.models.media.Title"
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "description": "Year the show was released",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.media.source.AudioSourceInfo": {
+        "type": "object",
+        "required": [
+          "codec",
+          "channels",
+          "is_default"
+        ],
+        "properties": {
+          "channels": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0.0
+          },
+          "codec": {
+            "type": "string"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "beam_server.models.media.source.MediaSource": {
+        "type": "object",
+        "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.",
+        "required": [
+          "file_id",
+          "size_bytes",
+          "audio_tracks",
+          "stream_url",
+          "download_url"
+        ],
+        "properties": {
+          "audio_tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.media.source.AudioSourceInfo"
+            }
+          },
+          "container_format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "download_url": {
+            "type": "string",
+            "description": "Download URL for this file (Range-request capable, `Content-Disposition: attachment`)."
+          },
+          "duration_secs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "file_id": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "stream_url": {
+            "type": "string",
+            "description": "Direct-play stream URL for this file (Range-request capable, inline)."
+          },
+          "video": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/beam_server.models.media.source.VideoSourceInfo"
+              }
+            ]
+          }
+        }
+      },
+      "beam_server.models.media.source.VideoSourceInfo": {
+        "type": "object",
+        "required": [
+          "codec",
+          "width",
+          "height"
+        ],
+        "properties": {
+          "bit_rate": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "codec": {
+            "type": "string"
+          },
+          "hdr_format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "height": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "width": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.models.media.stream.AudioTrack": {
+        "type": "object",
+        "required": [
+          "codec",
+          "title",
+          "is_default",
+          "is_autoselect"
+        ],
+        "properties": {
+          "channel_layout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Channel layout description (e.g., \"stereo\", \"5.1\")."
+          },
+          "codec": {
+            "$ref": "#/components/schemas/beam_server.models.media.codec.OutputAudioCodec"
+          },
+          "is_autoselect": {
+            "type": "boolean",
+            "description": "Autoselect means client may automatically choose, typically based on user preferences (e.g. system language)."
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "Default means client should select this track if no other preference is given."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ISO 639-2/B 3-letter language code (e.g., \"eng\", \"jpn\")."
+          },
+          "title": {
+            "type": "string",
+            "description": "A descriptive title for the audio track (e.g., \"English\", \"日本語\")."
+          }
+        }
+      },
+      "beam_server.models.media.stream.MediaStreamMetadata": {
+        "type": "object",
+        "required": [
+          "video_tracks",
+          "audio_tracks",
+          "subtitle_tracks"
+        ],
+        "properties": {
+          "audio_tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.media.stream.AudioTrack"
+            },
+            "description": "Audio tracks"
+          },
+          "subtitle_tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.media.stream.SubtitleTrack"
+            },
+            "description": "Subtitle tracks"
+          },
+          "video_tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.models.media.stream.VideoTrack"
+            },
+            "description": "Video tracks"
+          }
+        }
+      },
+      "beam_server.models.media.stream.SubtitleTrack": {
+        "type": "object",
+        "required": [
+          "codec",
+          "is_default",
+          "is_autoselect",
+          "is_forced"
+        ],
+        "properties": {
+          "codec": {
+            "$ref": "#/components/schemas/beam_server.models.media.codec.OutputSubtitleCodec"
+          },
+          "is_autoselect": {
+            "type": "boolean",
+            "description": "Autoselect means client may automatically choose, typically based on user preferences (e.g. system language)."
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "Default means client should select this track if no other preference is given."
+          },
+          "is_forced": {
+            "type": "boolean",
+            "description": "Flag indicating if this is a \"forced\" subtitle track (e.g., for foreign audio only)."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ISO 639-2/B 3-letter language code (e.g., \"eng\", \"spa\")."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A descriptive title for the subtitle track (e.g., \"SDH\", \"Commentary\")."
+          }
+        }
+      },
+      "beam_server.models.media.stream.VideoTrack": {
+        "type": "object",
+        "required": [
+          "codec",
+          "max_rate",
+          "bit_rate",
+          "resolution",
+          "frame_rate"
+        ],
+        "properties": {
+          "bit_rate": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Average bitrate (in bits per second)",
+            "minimum": 0.0
+          },
+          "codec": {
+            "$ref": "#/components/schemas/beam_server.models.media.codec.OutputVideoCodec"
+          },
+          "frame_rate": {
+            "type": "string",
+            "format": "decimal",
+            "description": "Frame rate (frames per second)"
+          },
+          "max_rate": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Maximum bitrate (in bits per second)",
+            "minimum": 0.0
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/beam_server.models.media.format.Resolution"
+          }
+        }
+      },
+      "beam_server.routes.genres.GenreListResponse": {
+        "type": "object",
+        "description": "The distinct genre names present in the library, sorted alphabetically.",
+        "required": [
+          "genres"
+        ],
+        "properties": {
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Genre display names, sorted alphabetically (case-insensitive)."
+          }
+        }
+      },
+      "beam_server.routes.health.HealthChecks": {
+        "type": "object",
+        "description": "Per-dependency check results reported by [`HealthStatus`].",
+        "required": [
+          "database"
+        ],
+        "properties": {
+          "database": {
+            "type": "string",
+            "description": "`\"ok\"` when the database round-trips, otherwise `\"error: <reason>\"`."
+          }
+        }
+      },
+      "beam_server.routes.health.HealthStatus": {
+        "type": "object",
+        "required": [
+          "status",
+          "checks",
+          "timestamp",
+          "version",
+          "uptime_secs"
+        ],
+        "properties": {
+          "checks": {
+            "$ref": "#/components/schemas/beam_server.routes.health.HealthChecks"
+          },
+          "status": {
+            "type": "string",
+            "description": "`\"healthy\"` when every dependency check passed, `\"degraded\"` otherwise."
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "uptime_secs": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "Whole seconds the process has been serving.",
+            "minimum": 0.0
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "beam_server.routes.playback.HistoryResponse": {
+        "type": "object",
+        "description": "A page of watch history. `total` counts every history row for the user\n(completed and in-progress) so the client can paginate; `items` may hold\nfewer than the requested `limit` when a row's underlying file was removed\nby a rescan (those stale rows are skipped here but still counted in\n`total`).",
+        "required": [
+          "items",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.services.playback.HistoryItem"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        }
+      },
+      "beam_server.routes.playback.ReportProgressRequest": {
+        "type": "object",
+        "required": [
+          "position_secs"
+        ],
+        "properties": {
+          "duration_secs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "position_secs": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "beam_server.services.metadata.MediaConnection": {
+        "type": "object",
+        "description": "Relay-style connection for media search results",
+        "required": [
+          "edges",
+          "page_info"
+        ],
+        "properties": {
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/beam_server.services.metadata.MediaEdge"
+            },
+            "description": "List of edges containing media items and cursors"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/beam_server.services.metadata.PageInfo"
+          }
+        }
+      },
+      "beam_server.services.metadata.MediaEdge": {
+        "type": "object",
+        "description": "Relay-style edge for media",
+        "required": [
+          "cursor",
+          "node"
+        ],
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "description": "Cursor for this edge"
+          },
+          "node": {
+            "$ref": "#/components/schemas/beam_server.models.media.MediaMetadata"
+          }
+        }
+      },
+      "beam_server.services.metadata.MediaSortField": {
+        "type": "string",
+        "description": "Sort field options for media search",
+        "enum": [
+          "title",
+          "year",
+          "rating",
+          "date_added",
+          "runtime"
+        ]
+      },
+      "beam_server.services.metadata.MediaTypeFilter": {
+        "type": "string",
+        "description": "Media type filter",
+        "enum": [
+          "movie",
+          "show"
+        ]
+      },
+      "beam_server.services.metadata.PageInfo": {
+        "type": "object",
+        "description": "Relay-style page info",
+        "required": [
+          "has_next_page",
+          "has_previous_page"
+        ],
+        "properties": {
+          "end_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor of the last edge"
+          },
+          "has_next_page": {
+            "type": "boolean",
+            "description": "Whether there is a next page"
+          },
+          "has_previous_page": {
+            "type": "boolean",
+            "description": "Whether there is a previous page"
+          },
+          "start_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor of the first edge"
+          }
+        }
+      },
+      "beam_server.services.metadata.SortOrder": {
+        "type": "string",
+        "description": "Sort order",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      },
+      "beam_server.services.playback.ContinueWatchingItem": {
+        "type": "object",
+        "description": "One row in the continue-watching list. `media_id`/`media_type` let the\nclient link to the detail page; `episode_id` is set only for episodes, so\nthe client can additionally deep-link to the right episode within a show.",
+        "required": [
+          "file_id",
+          "media_id",
+          "media_type",
+          "position_secs",
+          "updated_at"
+        ],
+        "properties": {
+          "duration_secs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "episode_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file_id": {
+            "type": "string"
+          },
+          "media_id": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "position_secs": {
+            "type": "number",
+            "format": "double"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "beam_server.services.playback.HistoryItem": {
+        "type": "object",
+        "description": "One row in the watch-history list. Same resolved shape as\n[`ContinueWatchingItem`] but additionally carries `completed`, since history\nlists finished items too (continue-watching filters them out).",
+        "required": [
+          "file_id",
+          "media_id",
+          "media_type",
+          "position_secs",
+          "completed",
+          "updated_at"
+        ],
+        "properties": {
+          "completed": {
+            "type": "boolean"
+          },
+          "duration_secs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "episode_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file_id": {
+            "type": "string"
+          },
+          "media_id": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "position_secs": {
+            "type": "number",
+            "format": "double"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "beam_server.services.playback.PlaybackProgressDto": {
+        "type": "object",
+        "required": [
+          "file_id",
+          "position_secs",
+          "completed",
+          "updated_at"
+        ],
+        "properties": {
+          "completed": {
+            "type": "boolean"
+          },
+          "duration_secs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "file_id": {
+            "type": "string"
+          },
+          "position_secs": {
+            "type": "number",
+            "format": "double"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}
