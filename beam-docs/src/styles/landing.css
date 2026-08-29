@@ -1,0 +1,33 @@
+/*
+ * Tailwind entry point for the marketing pages under `src/pages/`.
+ *
+ * This file is imported from exactly one place -- `src/layouts/LandingLayout.astro`. Astro emits
+ * per-page CSS chunks and does not link a stylesheet into pages that never import it, so keeping
+ * the import site singular is what stops Tailwind's Preflight reset from reaching Starlight's
+ * pages and fighting its theme. It is why the site needs no `@astrojs/starlight-tailwind`
+ * compatibility layer.
+ *
+ * Never add this file to Starlight's `customCss`.
+ */
+@import "./tokens.css";
+@import "tailwindcss" source(none);
+
+/*
+ * `source(none)` disables Tailwind's automatic source detection, which would otherwise root at the
+ * working directory and scan the Markdown under `src/content/docs/` -- treating every prose word as
+ * a candidate class name -- along with the 8k-line generated `worker-configuration.d.ts`. The
+ * explicit list below keeps the generated stylesheet deterministic and small.
+ */
+@source "../pages";
+@source "../layouts";
+@source "../components";
+
+@theme inline {
+	--color-brand: var(--beam-accent);
+	--color-brand-bright: var(--beam-accent-bright);
+	--color-brand-dim: var(--beam-accent-dim);
+	--color-brand-deep: var(--beam-accent-deep);
+	--color-brand-fg: var(--beam-accent-fg);
+	--color-surface: var(--beam-surface);
+	--color-surface-raised: var(--beam-surface-raised);
+}
