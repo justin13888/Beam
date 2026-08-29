@@ -98,8 +98,10 @@ hooks {
                 glob = List("*.ts", "*.tsx")
                 check = "mise run ts:test"
             }
-            // Mirrors the `docs` path filter in ci.yml. Without this a docs-only change is
-            // pushed unverified, because none of the ts-* steps above build beam-docs.
+            // Without this a docs-only change is pushed unverified, because none of the ts-*
+            // steps above build beam-docs. Narrower than ci.yml's `docs` filter, which also
+            // watches mise.toml and the workflows; hk globs file paths, and firing a docs
+            // build on every mise.toml edit is not worth the wait. CI still covers that.
             ["docs-build"] {
                 glob = List("beam-docs/**")
                 check = "mise run docs:build"

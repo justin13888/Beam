@@ -127,6 +127,10 @@ run = "bun run build"
 description = "Build only the beam-web SPA (release asset)"
 run = "bun run --filter beam-web build"
 
+[tasks."docs:og"]
+description = "Regenerate the docs site's Open Graph card (committed; run after editing the artwork)"
+run = "bun run --filter beam-docs og:build"
+
 [tasks."docs:build"]
 description = "Type-check and build the beam-docs site"
 run = [
