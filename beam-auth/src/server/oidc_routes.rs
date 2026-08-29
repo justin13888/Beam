@@ -284,6 +284,11 @@ async fn require_web_session(
 #[endpoint(
     tags("auth"),
     parameters(("redirect" = Option<String>, Query, description = "Path to return to after login")),
+    responses(
+        (status_code = 302, description = "Redirect to the identity provider's authorization endpoint"),
+        (status_code = 500, description = "Server state unavailable, or the IdP returned an invalid authorization URL"),
+        (status_code = 503, description = "OIDC is not configured or the provider is unreachable"),
+    )
 )]
 pub async fn oidc_login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let deps = (
@@ -538,7 +543,10 @@ pub async fn oidc_me(
 }
 
 /// Logs out the current session (deletes it and clears the cookie).
-#[endpoint(tags("auth"))]
+#[endpoint(
+    tags("auth"),
+    responses((status_code = 204, description = "Session deleted and cookie cleared"))
+)]
 pub async fn oidc_logout(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     if let Some(token) = req.cookie(SESSION_COOKIE).map(|c| c.value().to_string())
         && let Ok(session_store) = obtain_dep::<Arc<dyn SessionStore>>(depot)
