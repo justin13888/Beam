@@ -1,0 +1,51 @@
+---
+title: Watching
+description: How playback works, what the player can do, and how to pick a different source file.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Press play and Beam begins sending the file's bytes. Your browser does the decoding. Nothing is
+converted along the way, which is why playback starts quickly and why it depends entirely on what
+your browser can handle — see [When a file won't play](/using/playback-compatibility/).
+
+## The player
+
+Seeking, volume, playback speed, fullscreen and picture-in-picture are all available, along with
+the usual keyboard shortcuts. Seeking anywhere in a title works immediately, including into parts
+that have not been buffered — Beam serves any byte range of the file on request rather than
+streaming it strictly start to finish.
+
+## Choosing a source
+
+A title can have more than one file indexed against it — say a high-bitrate rip and a smaller
+re-encode. When it does, the player offers a picker, and each option is labelled with its actual
+resolution and codec, read from the file itself:
+
+```
+1080p · h264
+720p · h264
+```
+
+A file whose video stream Beam could not probe is listed as **Original**.
+
+The highest-quality option is selected by default. Switch to a smaller one when your connection
+cannot keep up — this is how Beam handles constrained bandwidth. It has no adaptive streaming and
+will never switch for you, because there is no transcoder generating alternatives on the fly:
+every option in that list is a file that already exists on the server.
+
+<Aside type="note">
+If a title shows no picker, only one file is indexed for it. Adding another version is something
+an administrator does — see [Managing libraries](/operate/libraries/#multiple-versions).
+</Aside>
+
+## Subtitles
+
+**Beam does not currently play subtitles.** Even where a file carries subtitle tracks, the player
+is not wired to expose them, so there is no track selector and no way to turn captions on. This is
+a gap rather than a deliberate exclusion.
+
+## Your position is saved
+
+Beam records where you stopped as you watch, so you can close the tab and come back — see
+[Resume and history](/using/continue-watching/).

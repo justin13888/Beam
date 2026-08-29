@@ -1,0 +1,46 @@
+---
+title: Account and sessions
+description: See who Beam thinks you are, review where you are signed in, and sign out everywhere.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Your profile page shows the identity your provider asserted and every session currently signed in
+as you.
+
+## Your details
+
+Name and email come from your identity provider and are refreshed when you sign in. Beam does not
+let you edit them — change them at the provider.
+
+Whether you are an admin is also shown, and is likewise not editable in Beam. It comes from a
+claim your provider asserts, recalculated at every sign-in.
+
+## Active sessions
+
+Each session lists:
+
+- a **device fingerprint**, so you can tell sessions apart without Beam storing your user agent
+  verbatim,
+- the **IP address** it was last seen from,
+- when it was **created**, and when it was **last active**.
+
+Revoke any one of them individually — useful if you signed in somewhere you no longer control.
+
+## Signing out everywhere
+
+There is also a sign-out-everywhere action. It ends **all** your sessions, including the one you
+are using, so you will be signed out immediately and have to sign in again.
+
+<Aside type="tip">
+Reach for this if you think someone else has access to your account. Because Beam holds no
+password, there is nothing else to rotate on Beam's side — but change your credentials at your
+identity provider too, since that is what actually grants access.
+</Aside>
+
+## Session expiry
+
+Sessions expire on their own: one after a period of inactivity, and every session at a fixed
+maximum age regardless of use. The server's administrator sets both, so how long you stay signed
+in varies between deployments. Being signed out unexpectedly is usually one of these rather than
+a fault.

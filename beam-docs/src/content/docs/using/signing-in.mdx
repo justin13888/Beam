@@ -1,0 +1,45 @@
+---
+title: Signing in
+description: Beam signs you in through your organisation's identity provider — there is no Beam password.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Beam has no passwords. Signing in hands you to the identity provider the server's administrator
+configured — the same account you use for other services there — and brings you back.
+
+There is **no account to create**. The first time Beam sees your identity, it creates your user
+record automatically.
+
+## What you will not find
+
+- No sign-up form.
+- No "forgot password" link. Beam never had your password to reset.
+- No way to change your email or display name in Beam — those come from your identity provider.
+
+If you need any of those, they belong to your identity provider, not Beam.
+
+## When sign-in does not work
+
+**You are sent back to the app still signed out.** Your browser most likely discarded the
+short-lived cookie that ties the round trip together. Blocking third-party cookies can do it, and
+so can reaching Beam over plain HTTP when it expects HTTPS. Start again from the app rather than
+reloading the callback URL, which is single-use.
+
+**"This account has been disabled."** Your identity was verified, but an administrator has
+disabled your Beam account. Nothing you can change will fix it — ask them.
+
+**A 503 mentioning OIDC.** The server's identity provider settings are incomplete or its provider
+is unreachable. That is a server-side problem; report it to whoever runs it.
+
+<Aside type="note">
+Both of the first two produce an error page rather than a redirect loop. The
+[error reference](/reference/errors/) explains what each status means, and
+[Troubleshooting](/help/troubleshooting/) walks through the fixes.
+</Aside>
+
+## Admin access
+
+If you are expecting an admin area and cannot see one, your account is not an admin. Beam decides
+that solely from a claim your identity provider asserts, and it re-checks at **every** sign-in. If
+someone has just granted you access, sign out and back in.

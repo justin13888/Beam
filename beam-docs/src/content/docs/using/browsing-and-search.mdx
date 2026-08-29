@@ -1,0 +1,44 @@
+---
+title: Browsing and searching
+description: Find titles by browsing your libraries or with search, filters and sorting.
+---
+
+There are two ways to reach a title: browse a library, or search.
+
+## Browsing
+
+Each library the administrator has added appears as its own collection of titles. Opening one
+lists everything indexed in it.
+
+## Explore
+
+The Explore view searches and filters across everything you can see. Filters available:
+
+| Filter | Values |
+|---|---|
+| Type | Movie or show |
+| Genre | Any genre present in your library |
+| Year | A range, from and to |
+| Minimum rating | 6, 7, 8 or 9 out of 10 |
+| Sort by | Title, year or rating |
+| Order | Ascending or descending |
+
+Filters are reflected in the URL, so a filtered view is a link you can bookmark or share with
+another user of the same server.
+
+## Search
+
+Search runs on the server and matches on **title similarity**, so a near-miss or a small typo
+still finds the right thing. Results update as you type, with a short pause so that a fast typist
+does not fire a query per keystroke.
+
+Two things it does not do:
+
+- It does **not** search inside descriptions, cast lists or subtitles — titles only.
+- It only finds titles that have been **indexed**. If something is missing, the library may need
+  a scan; ask an administrator, or see [Managing libraries](/operate/libraries/) if that is you.
+
+## What you will not see
+
+Beam never exposes filesystem paths through its API, so you cannot search by filename or
+directory, and a title's page will not tell you where the file lives on disk.

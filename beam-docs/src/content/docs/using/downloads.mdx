@@ -1,0 +1,27 @@
+---
+title: Downloading for offline
+description: Download the original file as-is, with resumable transfers.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Downloading is a separate action from playing. Beam sends the file exactly as it is stored — the
+same bytes, the same container, the same codecs. It is never re-encoded, repackaged or altered on
+the way out.
+
+That has a practical consequence worth knowing before you start: **the download is as large as the
+file is.** Beam cannot hand you a smaller version of a title it does not already have. If the
+server has several versions indexed, pick the smaller one before downloading — see
+[Watching](/using/watching/).
+
+## Interrupted downloads resume
+
+Beam serves downloads with range support, so a transfer that drops can pick up where it stopped
+rather than starting over. Whether it actually does is up to what you are downloading with —
+browsers usually offer to resume, and dedicated download managers handle it reliably.
+
+<Aside type="note">
+A downloaded file plays in whatever your device can decode. Because Beam never converts anything,
+a file your browser refused to play will not play any better once downloaded — you will need a
+player that supports the format, such as VLC or mpv.
+</Aside>

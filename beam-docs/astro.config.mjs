@@ -86,6 +86,24 @@ export default defineConfig({
 					],
 				},
 				{
+					label: "Using Beam",
+					items: [
+						{ slug: "using/signing-in" },
+						{ slug: "using/browsing-and-search", label: "Browsing and search" },
+						{ slug: "using/watching" },
+						{
+							slug: "using/playback-compatibility",
+							label: "When a file won't play",
+						},
+						{ slug: "using/downloads", label: "Downloading" },
+						{ slug: "using/continue-watching", label: "Resume and history" },
+						{
+							slug: "using/account-and-sessions",
+							label: "Account and sessions",
+						},
+					],
+				},
+				{
 					label: "Engineering docs",
 					link: "https://github.com/justin13888/beam/tree/master/docs",
 					badge: { text: "Repo", variant: "note" },
