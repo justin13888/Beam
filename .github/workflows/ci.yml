@@ -31,6 +31,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
       android: ${{ steps.filter.outputs.android }}
+      apple: ${{ steps.filter.outputs.apple }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v4
@@ -87,6 +88,16 @@ jobs:
               # single Kotlin file.
               - 'beam-client-core/**'
               - 'Cargo.lock'
+            apple:
+              - *tooling
+              - 'beam-apple/**'
+              # The Swift bindings and the XCFramework are generated from the
+              # core, so a change there can break the Apple build without
+              # touching a single Swift file.
+              - 'beam-client-core/**'
+              - 'Cargo.lock'
+              # The app's version comes from here (ADR-0009).
+              - 'version.txt'
             ffmpeg:
               - *tooling
               - 'Cargo.toml'
@@ -465,6 +476,93 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: mise run android:build
 
+  # The Apple jobs need macOS runners, which are free for a public repository
+  # but slower and scarcer than the Linux ones -- hence the path filter, and
+  # hence four focused jobs rather than one that redoes the cross-compile four
+  # times.
+  #
+  # Each cross-compiles the Rust core, because the Swift bindings are generated
+  # from the built library rather than from source: they can only ever describe
+  # an XCFramework that actually exists.
+  #
+  # Xcode is pinned explicitly. The snapshot references are pixel comparisons
+  # recorded against one renderer, and a runner image that silently moved to a
+  # newer Xcode would fail them for a reason that has nothing to do with the
+  # change under test.
+  apple-lint:
+    name: Apple lint
+    needs: [changes]
+    if: needs.changes.outputs.apple == 'true'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.0"
+      - uses: jdx/mise-action@v4
+      - run: mise run apple:lint
+
+  apple-test:
+    name: Apple tests
+    needs: [changes]
+    if: needs.changes.outputs.apple == 'true'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.0"
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: mise run apple:test
+
+  apple-snapshot:
+    name: Apple snapshots
+    needs: [changes]
+    if: needs.changes.outputs.apple == 'true'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.0"
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: mise run apple:snapshot
+
+      # The diffs are the whole point of a failed snapshot check: without them
+      # a reviewer knows only that something moved, not what.
+      - name: Upload snapshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-snapshot-diffs
+          path: |
+            beam-apple/Packages/BeamKit/Tests/SnapshotTests/__Snapshots__
+            ~/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
+
+  apple-build:
+    name: Apple build
+    needs: [changes]
+    if: needs.changes.outputs.apple == 'true'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.0"
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: mise run apple:build
+
   # The single required status check. Branch protection should require this job
   # and nothing else: it is the only one that always runs, and it distinguishes
   # "skipped by a path filter" (fine) from "failed" (not fine).
@@ -492,6 +590,10 @@ jobs:
       - android-test
       - android-screenshot
       - android-build
+      - apple-lint
+      - apple-test
+      - apple-snapshot
+      - apple-build
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every job succeeded or was skipped
