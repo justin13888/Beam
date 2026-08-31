@@ -482,6 +482,14 @@ run = [
 
 [tasks."android:avd"]
 description = "Create the phone and tablet emulator AVDs (idempotent)"
+# Creating the AVDs is not the same as being able to run one. On a headless
+# host the emulator may segfault during boot -- `qemu-system-x86 dumped core`
+# in the journal, with the X11/EGL/GLES modules loaded -- regardless of
+# `-no-window` and of `-gpu swiftshader_indirect`, `-gpu guest` or `-gpu off`.
+# Nothing in the app or these tasks causes it; it is the host's graphics stack.
+# CI never boots an emulator for exactly this class of reason: the Robolectric
+# and Roborazzi suites are the automated coverage, and a device is the manual
+# tier.
 depends = ["android:sdk"]
 run = '''
 set -eu
