@@ -3,6 +3,8 @@
 build/
 local.properties
 .cxx/
+# The Kotlin compiler daemon's session files, written beside the build.
+.kotlin/
 
 # Produced by `mise run core:android` -- cross-compiled from beam-client-core,
 # never edited by hand. Regenerate rather than committing ~60 MB per ABI.
