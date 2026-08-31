@@ -40,3 +40,16 @@ pub struct Playback;
     description = "Library, user, and system administration"
 )]
 pub struct Admin;
+
+/// Operations the `/v1` client contract does not include.
+///
+/// `/metrics` is the only member: a scrape target the reverse proxy does not
+/// forward. It carries a tag rather than hiding, because Kynos routes and
+/// describes from one declaration -- so "undocumented" would mean waiving the
+/// whole document's authority, not omitting one path.
+#[derive(Tag)]
+#[tag(
+    name = "internal",
+    description = "Operational endpoints outside the client contract"
+)]
+pub struct Internal;
