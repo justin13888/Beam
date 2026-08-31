@@ -888,14 +888,22 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 0
 fi
 
+beam_swift_sources() {
+    find beam-apple -name '*.swift' \
+        -not -path '*/BeamCoreBindings/Generated/*' \
+        -not -path '*/.build/*' \
+        -not -path '*/Beam.xcodeproj/*'
+}
+
 # Run over the sources rather than through Xcode: it is the same binary the
-# pre-commit hook uses, so a hook pass and a CI pass cannot disagree. The
-# generated UniFFI bindings are not in these directories -- they land in
-# Sources/BeamFFI/Generated, which is gitignored and excluded by .swift-format.
-xcrun swift-format lint --strict --recursive --parallel \
-    beam-apple/Packages/BeamKit/Sources \
-    beam-apple/Packages/BeamKit/Tests \
-    beam-apple/Apps
+# pre-commit hook uses, so a hook pass and a CI pass cannot disagree.
+#
+# The file list is built here rather than with `--recursive`, because
+# swift-format has no exclude mechanism and the generated UniFFI bindings sit
+# under Sources/BeamCoreBindings. Linting generated code produces hundreds of
+# findings nobody can act on -- the next `core:bindgen:swift` would undo any
+# fix -- and would bury a real one.
+xcrun swift-format lint --strict --parallel $(beam_swift_sources)
 '''
 
 [tasks."apple:lint:fix"]
@@ -908,10 +916,14 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 0
 fi
 
-xcrun swift-format format --in-place --recursive --parallel \
-    beam-apple/Packages/BeamKit/Sources \
-    beam-apple/Packages/BeamKit/Tests \
-    beam-apple/Apps
+beam_swift_sources() {
+    find beam-apple -name '*.swift' \
+        -not -path '*/BeamCoreBindings/Generated/*' \
+        -not -path '*/.build/*' \
+        -not -path '*/Beam.xcodeproj/*'
+}
+
+xcrun swift-format format --in-place --parallel $(beam_swift_sources)
 '''
 
 [tasks."apple:test"]

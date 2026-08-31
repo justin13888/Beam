@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "lineLength": 100,
+  "indentation": { "spaces": 4 },
+  "respectsExistingLineBreaks": true,
+  "lineBreakBeforeControlFlowKeywords": false,
+  "lineBreakBeforeEachArgument": false,
+  "prioritizeKeepingFunctionOutputTogether": true,
+  "indentConditionalCompilationBlocks": false,
+  "rules": {
+    // Off deliberately. It fires on every protocol conformance and on every
+    // SwiftUI `var body`, where the documentation belongs on the protocol or
+    // is simply boilerplate -- so satisfying it would mean a few hundred
+    // "/// See the protocol." lines diluting the comments that say something.
+    // Types, and members whose behaviour is not obvious from their signature,
+    // are documented; that is the bar reviews hold, not this rule.
+    "AllPublicDeclarationsHaveDocumentation": false,
+    "AlwaysUseLowerCamelCase": true,
+    "AmbiguousTrailingClosureOverload": true,
+    "NeverForceUnwrap": false,
+    "NeverUseForceTry": true,
+    "NoLeadingUnderscores": true,
+    "OrderedImports": true,
+    "UseLetInEveryBoundCaseVariable": true,
+    "UseShorthandTypeNames": true,
+    "UseSynthesizedInitializer": true,
+    "ReturnVoidInsteadOfEmptyTuple": true
+  }
+}

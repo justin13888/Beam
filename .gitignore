@@ -46,5 +46,6 @@ beam-apple/Packages/BeamKit/Sources/BeamCoreBindings/Generated/
 beam-apple/Beam.xcodeproj/
 beam-apple/Version.xcconfig
 beam-apple/build/
+beam-apple/Packages/BeamKit/.build/
 .swiftpm/
 *.xcuserdatad
