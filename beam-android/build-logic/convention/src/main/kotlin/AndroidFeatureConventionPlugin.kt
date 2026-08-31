@@ -23,6 +23,14 @@ class AndroidFeatureConventionPlugin : Plugin<Project> {
             pluginManager.apply("org.jetbrains.kotlin.plugin.serialization")
 
             extensions.configure<LibraryExtension> {
+                // One shared `robolectric.properties` rather than a copy per
+                // module: the API level it pins is a property of the
+                // Robolectric version, not of any one module, and per-module
+                // copies would drift apart.
+                sourceSets.getByName("test").resources.srcDir(
+                    rootProject.layout.projectDirectory.dir("gradle/robolectric"),
+                )
+
                 testOptions.unitTests.all { test ->
                     // Robolectric's native graphics mode renders real pixels,
                     // which is what makes the screenshot tests meaningful rather

@@ -1,9 +1,17 @@
+// Media3 marks most of its ExoPlayer, DataSource and offline surface
+// @UnstableApi: the library guarantees behaviour, not source compatibility
+// across minor versions. Opting in at the file level is what the library
+// itself documents for application code; the protection is the pinned version
+// in the catalog, and an upgrade is a deliberate change that recompiles here.
+@file:UnstableApi
+
 package dev.beam.android.core.media.session
 
 import android.app.PendingIntent
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService

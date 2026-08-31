@@ -49,7 +49,7 @@ public class PlayerViewModel
     @Inject
     constructor(
         private val player: BeamPlayer,
-        playerProvider: PlayerProvider,
+        private val playerProvider: PlayerProvider,
         private val playback: PlaybackRepository,
         private val catalog: CatalogRepository,
         private val preferences: PreferencesRepository,
@@ -74,7 +74,7 @@ public class PlayerViewModel
          * singleton the media session publishes, so the notification and the
          * screen can never disagree about what is playing.
          */
-        public val exoPlayer: androidx.media3.common.Player = playerProvider.exoPlayer()
+        public val exoPlayer: androidx.media3.common.Player by lazy { playerProvider.exoPlayer() }
 
         init {
             viewModelScope.launch {
@@ -181,7 +181,6 @@ public class PlayerViewModel
         }
 
         override fun onCleared() {
-            super.onCleared()
             // Deliberately not `release()`: the player is a singleton shared with
             // the media session, so releasing it here would kill background
             // playback the moment the screen went away.

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Playback continues while the app is backgrounded, which since API 34
          requires the foreground service type to be declared here as well as
@@ -16,10 +17,20 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application>
+        <!--
+          Exported deliberately, and it has to be. A MediaSessionService is
+          discovered by external controllers (the system media notification,
+          Bluetooth and headset buttons, Android Auto, Assistant), and an
+          unexported one is invisible to all of them, which is most of the
+          reason for having a media session at all. It is guarded by the
+          MediaSession's own controller connection check rather than by a
+          manifest permission, which is the mechanism Media3 provides.
+        -->
         <service
             android:name=".session.PlaybackService"
             android:exported="true"
-            android:foregroundServiceType="mediaPlayback">
+            android:foregroundServiceType="mediaPlayback"
+            tools:ignore="ExportedService">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>

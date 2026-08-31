@@ -16,6 +16,7 @@ dependencies {
     compileOnly(libs.kotlin.gradlePlugin)
     compileOnly(libs.ksp.gradlePlugin)
     compileOnly(libs.compose.gradlePlugin)
+    compileOnly(libs.roborazzi.gradlePlugin)
 }
 
 gradlePlugin {
@@ -39,6 +40,10 @@ gradlePlugin {
         register("androidFeature") {
             id = "beam.android.feature"
             implementationClass = "AndroidFeatureConventionPlugin"
+        }
+        register("androidScreenshot") {
+            id = "beam.android.screenshot"
+            implementationClass = "AndroidScreenshotConventionPlugin"
         }
         register("jvmLibrary") {
             id = "beam.jvm.library"

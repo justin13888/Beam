@@ -637,6 +637,48 @@ exit "$status"
 # Aggregate
 # ---------------------------------------------------------------------------
 
+[tasks."android:lint"]
+description = "Format-check the Kotlin sources and run Android Lint"
+run = '''
+set -eu
+# ktlint runs over the sources rather than through Gradle: it is the same
+# binary the pre-commit hook uses, so a hook pass and a CI pass cannot
+# disagree. Generated bindings are excluded by beam-android/.ktlintignore.
+ktlint --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'
+cd beam-android && ./gradlew lintDebug
+'''
+
+[tasks."android:lint:fix"]
+description = "Rewrite the Kotlin sources to satisfy ktlint"
+run = "ktlint --format --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'"
+
+[tasks."android:test"]
+description = "Run the Android unit tests (JVM and Robolectric)"
+run = "cd beam-android && ./gradlew testDebugUnitTest"
+
+[tasks."android:screenshot"]
+description = "Check the rendered screens against the recorded references"
+run = "cd beam-android && ./gradlew verifyRoborazziDebug"
+
+[tasks."android:screenshot:record"]
+description = "Re-record the screenshot references after an intended visual change"
+run = "cd beam-android && ./gradlew recordRoborazziDebug"
+
+[tasks."android:build"]
+description = "Assemble the debug APK"
+run = "cd beam-android && ./gradlew assembleDebug"
+
+[tasks."android:release"]
+description = "Assemble the release APK for every ABI"
+run = '''
+set -eu
+# Release builds every ABI, unlike the debug build which produces only the
+# emulator's. Without this an APK from a release build would run on the
+# emulator and crash with UnsatisfiedLinkError on an actual phone.
+BEAM_CARGO_PROFILE=release mise run core:android
+cd beam-android && ./gradlew assembleRelease
+'''
+
 [tasks.ci]
 description = "Run every check that CI enforces, except coverage and image builds"
 depends = [
@@ -652,4 +694,7 @@ depends = [
     "ts:typecheck",
     "ts:test",
     "docs:build",
+    "android:lint",
+    "android:test",
+    "android:screenshot",
 ]

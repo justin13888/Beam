@@ -1,5 +1,6 @@
 package dev.beam.android.core.media.http
 
+import android.annotation.SuppressLint
 import java.security.MessageDigest
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
@@ -27,6 +28,7 @@ import javax.net.ssl.X509TrustManager
  * the core agree about which certificate the user approved, and it is the same
  * value `openssl x509 -fingerprint -sha256` prints.
  */
+@SuppressLint("CustomX509TrustManager")
 internal class TofuTrustManager(
     private val platform: X509TrustManager,
     trustedFingerprints: Collection<String>,

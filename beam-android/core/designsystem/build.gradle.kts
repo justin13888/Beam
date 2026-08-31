@@ -1,6 +1,7 @@
 plugins {
     id("beam.android.library")
     id("beam.android.compose")
+    id("beam.android.screenshot")
 }
 
 android {
@@ -18,11 +19,5 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
 
-    testImplementation(libs.junit)
-    testImplementation(libs.robolectric)
-    testImplementation(libs.roborazzi)
-    testImplementation(libs.roborazzi.compose)
-    testImplementation(libs.roborazzi.junit.rule)
-    testImplementation(libs.androidx.compose.ui.test.junit4)
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    // The screenshot dependencies come from `beam.android.screenshot`.
 }

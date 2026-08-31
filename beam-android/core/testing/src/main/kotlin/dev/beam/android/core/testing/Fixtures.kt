@@ -2,8 +2,10 @@ package dev.beam.android.core.testing
 
 import uniffi.beam_client_core.AdminCounts
 import uniffi.beam_client_core.AdminStatus
+import uniffi.beam_client_core.AdminUser
 import uniffi.beam_client_core.AudioTrackView
 import uniffi.beam_client_core.ContinueWatchingEntry
+import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EnrichmentCounts
 import uniffi.beam_client_core.EpisodeSummary
 import uniffi.beam_client_core.HistoryEntry
@@ -254,5 +256,36 @@ public object Fixtures {
                     unmatched = 10uL,
                 ),
             recentScans = emptyList(),
+        )
+
+    /** One signed-in device. */
+    public fun deviceSession(
+        id: String = "session-1",
+        ip: String = "192.168.1.24",
+        lastActiveUnix: Long = 1_700_000_000L,
+    ): DeviceSession =
+        DeviceSession(
+            id = id,
+            deviceHash = "d41d8cd98f00b204",
+            ip = ip,
+            createdAtUnix = lastActiveUnix - 86_400L,
+            lastActiveUnix = lastActiveUnix,
+        )
+
+    /** One user account, as the admin screen lists them. */
+    public fun adminUser(
+        id: String = "user-1",
+        displayName: String = "Ada Lovelace",
+        isAdmin: Boolean = false,
+        disabled: Boolean = false,
+    ): AdminUser =
+        AdminUser(
+            id = id,
+            displayName = displayName,
+            email = "$id@beam.test",
+            avatarUrl = null,
+            isAdmin = isAdmin,
+            disabled = disabled,
+            createdAtUnix = 1_690_000_000L,
         )
 }

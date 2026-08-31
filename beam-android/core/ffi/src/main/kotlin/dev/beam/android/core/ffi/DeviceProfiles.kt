@@ -1,5 +1,6 @@
 package dev.beam.android.core.ffi
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.Configuration
 import android.media.MediaCodecInfo
@@ -192,8 +193,18 @@ public object DeviceProfiles {
     // sets a player actually cares about have to be assembled by hand. Each
     // one spans every codec that can carry the feature, because the question
     // being asked is "can this device show HDR10", not "which codec is it".
+    //
+    // InlinedApi is suppressed deliberately, and it is safe here in a way it
+    // is not generally. These are `static final int` constants, so javac bakes
+    // the literal into the bytecode -- there is no field lookup at runtime and
+    // therefore no NoSuchFieldError on an older platform. They are only ever
+    // compared against the profile numbers the device's own `MediaCodecInfo`
+    // reports, so on a device that predates a constant, nothing reports that
+    // value and the comparison simply never matches. That is the correct
+    // answer: such a device genuinely cannot decode that profile.
 
     /** Profiles that carry an HDR10 or HDR10+ signal. */
+    @SuppressLint("InlinedApi")
     private val Hdr10Profiles =
         setOf(
             MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
@@ -207,6 +218,7 @@ public object DeviceProfiles {
         )
 
     /** Dolby Vision profile constants, which have no named group in the SDK. */
+    @SuppressLint("InlinedApi")
     private val DolbyVisionProfiles =
         setOf(
             MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheDtr,
@@ -215,6 +227,7 @@ public object DeviceProfiles {
         )
 
     /** Profiles with a bit depth above 8, HDR ones included. */
+    @SuppressLint("InlinedApi")
     private val TenBitProfiles =
         Hdr10Profiles +
             setOf(

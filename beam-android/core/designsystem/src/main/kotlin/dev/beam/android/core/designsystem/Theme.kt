@@ -1,6 +1,7 @@
 package dev.beam.android.core.designsystem
 
 import android.os.Build
+import androidx.annotation.ChecksSdkIntAtLeast
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -46,8 +47,16 @@ public fun BeamTheme(
     )
 }
 
-/** Whether this device can supply a wallpaper-derived palette. */
+/**
+ * Whether this device can supply a wallpaper-derived palette.
+ *
+ * Annotated so lint can see through it: without this, every caller guarding an
+ * API 31 call with this property is reported as an unguarded call, and the
+ * only remedies would be `@SuppressLint` at each site or repeating the version
+ * check inline.
+ */
 public val supportsDynamicColor: Boolean
+    @ChecksSdkIntAtLeast(api = Build.VERSION_CODES.S)
     get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
 /** Beam's own scheme, for previews and for the brand-palette preference. */

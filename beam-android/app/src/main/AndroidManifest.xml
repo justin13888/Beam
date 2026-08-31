@@ -11,13 +11,11 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Beam.Starting"
-        android:enableOnBackInvokedCallback="true">
+        android:theme="@style/Theme.Beam.Starting">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="@string/app_name"
             android:launchMode="singleTask"
             android:theme="@style/Theme.Beam.Starting"
             android:supportsPictureInPicture="true"

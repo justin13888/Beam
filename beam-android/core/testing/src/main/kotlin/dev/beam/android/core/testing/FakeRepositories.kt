@@ -1,15 +1,18 @@
 package dev.beam.android.core.testing
 
+import dev.beam.android.core.ffi.preferences.PreferencesRepository
 import dev.beam.android.core.ffi.repository.AdminRepository
 import dev.beam.android.core.ffi.repository.CatalogRepository
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.repository.SessionRepository
+import dev.beam.android.core.model.UserPreferences
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import uniffi.beam_client_core.AdminEvent
 import uniffi.beam_client_core.AdminLogEntry
 import uniffi.beam_client_core.AdminStatus
+import uniffi.beam_client_core.AdminUser
 import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.BrowseQuery
@@ -173,10 +176,15 @@ public class FakePlaybackRepository : PlaybackRepository {
         return sourceList
     }
 
+    /** The policy [selectSource] was last asked for. */
+    public var selectionPolicy: QualityPolicy? = null
+        private set
+
     override suspend fun selectSource(
         mediaId: String,
         policy: QualityPolicy,
     ): SourceSelection {
+        selectionPolicy = policy
         failWith?.let { throw it }
         return selection ?: throw BeamException.NotFound("This title has no playable files")
     }
@@ -338,8 +346,15 @@ public class FakeSessionRepository : SessionRepository {
     /** Set to make every call throw. */
     public var failWith: BeamException? = null
 
-    /** The devices returned by [sessions]. */
-    public var deviceSessions: MutableList<DeviceSession> = mutableListOf()
+    /**
+     * The devices returned by [sessions].
+     *
+     * Populated by default, matching every other fake here: a test asserting
+     * on an empty list should say so explicitly rather than depending on the
+     * fake happening to start empty.
+     */
+    public var deviceSessions: MutableList<DeviceSession> =
+        mutableListOf(Fixtures.deviceSession())
 
     /** Whether [logoutEverywhere] was called. */
     public var loggedOutEverywhere: Boolean = false
@@ -368,8 +383,27 @@ public class FakeAdminRepository : AdminRepository {
     /** The dashboard snapshot. */
     public var statusValue: AdminStatus = Fixtures.adminStatus()
 
-    /** Accounts returned by [users]. */
-    public var userPage: AdminUserPage = AdminUserPage(emptyList(), 0uL)
+    /**
+     * Accounts, held as mutable state rather than a fixed page.
+     *
+     * Stateful because the interesting assertion is that blocking an account
+     * is *reflected* afterwards -- a fake that only records the call cannot
+     * tell a working implementation from one that drops the write.
+     */
+    public var userList: MutableList<AdminUser> =
+        mutableListOf(
+            Fixtures.adminUser(),
+            Fixtures.adminUser(id = "user-2", displayName = "Grace Hopper", isAdmin = true),
+        )
+
+    /**
+     * Set to make [users] alone fail.
+     *
+     * Distinct from [failWith] because the user list is one section of the
+     * dashboard: it failing must be distinguishable from the whole screen
+     * failing.
+     */
+    public var usersFailWith: BeamException? = null
 
     /** Log lines returned by [logs]. */
     public var logEntries: List<AdminLogEntry> = emptyList()
@@ -397,8 +431,9 @@ public class FakeAdminRepository : AdminRepository {
         limit: UInt?,
         offset: UInt?,
     ): AdminUserPage {
+        usersFailWith?.let { throw it }
         failWith?.let { throw it }
-        return userPage
+        return AdminUserPage(userList, userList.size.toULong())
     }
 
     override suspend fun setUserDisabled(
@@ -407,6 +442,10 @@ public class FakeAdminRepository : AdminRepository {
     ) {
         failWith?.let { throw it }
         disableCalls += userId to disabled
+        val index = userList.indexOfFirst { it.id == userId }
+        if (index >= 0) {
+            userList[index] = userList[index].copy(disabled = disabled)
+        }
     }
 
     override suspend fun logs(
@@ -461,3 +500,30 @@ public data class ProgressReport(
     /** Whether the core was asked to bypass its throttle. */
     val force: Boolean,
 )
+
+/**
+ * Preferences held in memory.
+ *
+ * A real [dev.beam.android.core.ffi.preferences.PreferencesRepository] is
+ * DataStore-backed, which means a file, a coroutine scope and a real
+ * filesystem -- none of which a view-model test should need.
+ */
+public class FakePreferencesRepository(
+    initial: UserPreferences = UserPreferences(),
+) : PreferencesRepository {
+    private val state = MutableStateFlow(initial)
+
+    override val preferences: Flow<UserPreferences> = state
+
+    /** The current value, for assertions. */
+    public val current: UserPreferences get() = state.value
+
+    /** How many times [update] was called. */
+    public var updateCount: Int = 0
+        private set
+
+    override suspend fun update(transform: (UserPreferences) -> UserPreferences) {
+        updateCount++
+        state.value = transform(state.value)
+    }
+}

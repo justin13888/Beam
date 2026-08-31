@@ -58,8 +58,19 @@ public class AdminViewModel
 
         /** Reload the dashboard. */
         public fun refresh() {
+            viewModelScope.launch { reload() }
+        }
+
+        /**
+         * The reload itself, so an action can await it.
+         *
+         * Load-bearing: `refresh` returns as soon as it has launched, so an
+         * action that set a confirmation message and then called it would have
+         * the reload overwrite the message it had just written.
+         */
+        private suspend fun reload() {
             mutableState.value = LoadState.Loading(mutableState.value.previous())
-            viewModelScope.launch {
+            run {
                 try {
                     val loaded =
                         coroutineScope {
@@ -94,6 +105,10 @@ public class AdminViewModel
             mutableState.update { it.mapValue { state -> state.copy(scanningLibraryId = libraryId) } }
             viewModelScope.launch {
                 val outcome = runCatching { admin.scanLibrary(libraryId) }
+                // Reloaded first, message applied after: `reload` replaces the
+                // whole state, so writing the message before it would have the
+                // reload wipe the confirmation the operator needs to see.
+                reload()
                 mutableState.update {
                     it.mapValue { state ->
                         state.copy(
@@ -109,7 +124,6 @@ public class AdminViewModel
                         )
                     }
                 }
-                refresh()
             }
         }
 
@@ -120,7 +134,7 @@ public class AdminViewModel
         ) {
             viewModelScope.launch {
                 runCatching { admin.setUserDisabled(userId, disabled) }
-                refresh()
+                reload()
             }
         }
 
@@ -131,6 +145,7 @@ public class AdminViewModel
         ) {
             viewModelScope.launch {
                 val outcome = runCatching { admin.createLibrary(name, rootPath) }
+                reload()
                 mutableState.update {
                     it.mapValue { state ->
                         state.copy(
@@ -145,7 +160,6 @@ public class AdminViewModel
                         )
                     }
                 }
-                refresh()
             }
         }
 
@@ -153,7 +167,7 @@ public class AdminViewModel
         public fun deleteLibrary(libraryId: String) {
             viewModelScope.launch {
                 runCatching { admin.deleteLibrary(libraryId) }
-                refresh()
+                reload()
             }
         }
 
@@ -170,12 +184,34 @@ public class AdminViewModel
                 LoadState.Idle -> null
             }
 
+        /**
+         * Apply a change to whichever value is currently on screen.
+         *
+         * The retained `previous` of a Loading or Failure is mapped too,
+         * because that is what the screen is still rendering. Mapping only
+         * Success leaves a scan's progress indicator spinning forever whenever
+         * the reload after it also fails -- indistinguishable, to the
+         * operator, from a scan that never completes.
+         */
         private fun LoadState<AdminUiState>.mapValue(
             transform: (AdminUiState) -> AdminUiState,
         ): LoadState<AdminUiState> =
             when (this) {
-                is LoadState.Success -> LoadState.Success(transform(value))
-                else -> this
+                is LoadState.Success -> {
+                    LoadState.Success(transform(value))
+                }
+
+                is LoadState.Loading -> {
+                    LoadState.Loading(previous?.let(transform))
+                }
+
+                is LoadState.Failure -> {
+                    LoadState.Failure(message, retryable, previous?.let(transform))
+                }
+
+                LoadState.Idle -> {
+                    this
+                }
             }
 
         private companion object {
