@@ -63,10 +63,28 @@ public class FakeCatalogRepository : CatalogRepository {
     /** Every query [browse] was called with, in order. */
     public val browseCalls: MutableList<BrowseQuery> = mutableListOf()
 
+    /**
+     * The cursor every page reports, or null for "this is the last page".
+     *
+     * Overrides whatever [pages] carries, so a paging test can be written
+     * without constructing a page fixture per page.
+     */
+    public var nextCursor: String? = null
+
+    /**
+     * Set to make [genres] alone fail.
+     *
+     * Distinct from [failWith] because the genre chips and the catalog grid
+     * are separate concerns: one failing must not be indistinguishable from
+     * both failing.
+     */
+    public var genresFailWith: BeamException? = null
+
     override suspend fun browse(query: BrowseQuery): MediaPage {
         failWith?.let { throw it }
         browseCalls += query
-        return pages.getOrElse(browseCalls.size - 1) { pages.last() }
+        val page = pages.getOrElse(browseCalls.size - 1) { pages.last() }
+        return page.copy(endCursor = nextCursor, hasNextPage = nextCursor != null)
     }
 
     override suspend fun detail(mediaId: String): MediaDetail {
@@ -76,6 +94,7 @@ public class FakeCatalogRepository : CatalogRepository {
     }
 
     override suspend fun genres(): List<String> {
+        genresFailWith?.let { throw it }
         failWith?.let { throw it }
         return genreList
     }
