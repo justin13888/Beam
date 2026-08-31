@@ -666,14 +666,12 @@ run = "cd beam-android && ./gradlew assembleDebug"
 
 [tasks."android:release"]
 description = "Assemble the release APK for every ABI"
-run = '''
-set -eu
-# Release builds every ABI, unlike the debug build which produces only the
-# emulator's. Without this an APK from a release build would run on the
-# emulator and crash with UnsatisfiedLinkError on an actual phone.
-BEAM_CARGO_PROFILE=release mise run core:android
-cd beam-android && ./gradlew assembleRelease
-'''
+# No explicit cross-compile step: the Gradle `cargoNdkRelease` task selects the
+# release profile itself, and every ABI with it. Doing it here as well would be
+# a second place for the profile to be chosen, and the two could disagree --
+# which is exactly the bug that made an earlier release APK carry debug
+# libraries.
+run = "cd beam-android && ./gradlew assembleRelease"
 
 [tasks.ci]
 description = "Run every check that CI enforces, except coverage and image builds"
