@@ -87,6 +87,16 @@ about. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam
    forward it through the reverse proxy) and keep `RUST_LOG` at `info` or `warn`; structured logs
    back the admin log viewer.
 
+   With `BEAM_ENABLE_METRICS=false` the route does **not** disappear: no recorder is installed, and
+   `GET /metrics` answers `503` with an RFC 9457 problem document rather than `404`. The router's
+   shape — and therefore the OpenAPI document it exports — must not depend on deployment
+   configuration, or the description stops covering every deployment it claims to
+   ([ADR-0010](../architecture/decisions/ADR-0010-openapi-3-2-kynos.md)). A scrape configuration
+   that treats `503` as "target down" is reading it correctly; there is nothing to collect.
+   `/metrics` is a described operation tagged `internal`, so it appears in the document and is
+   deliberately outside the `/v1` client contract — keeping it out of the reverse proxy is still
+   the control, since it carries no authentication of its own.
+
 Then `podman compose up -d`, and verify: `https://<your-domain>/v1/health` returns OK, the web
 app loads, login round-trips through your IdP, and an admin user can create a library pointing at
 a path under `BEAM_VIDEO_DIR` and trigger a scan.

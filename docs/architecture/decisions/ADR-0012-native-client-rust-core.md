@@ -37,8 +37,17 @@ diverge.
 `beam-server`'s own handler annotations and lowered to Rust by [spargen](https://github.com/getkono/spargen)
 in `build.rs`. A gap in spargen blocks and is fixed upstream rather than worked around locally,
 because a hand-written exception is exactly how a generated client stops describing the server.
-salvo-oapi emits OpenAPI 3.1, which spargen is native to, so this does not depend on the 3.2
-migration that [ADR-0010](ADR-0010-openapi-3-2-kynos.md) governs.
+The document is now OpenAPI 3.2, emitted by Kynos under
+[ADR-0010](ADR-0010-openapi-3-2-kynos.md), and spargen 0.4.0 reads 3.2 natively -- including the
+typed SSE stream, which it lowers to an `EventStream<AdminEventDto>`. This was written while the
+server still emitted 3.1 and said the two were independent; they are not, and the dependency turned
+out to be already satisfied.
+
+The four media-delivery operations are omitted from generation (`build.rs`). Playback never goes
+through this client -- `MediaSource` carries the URLs, `ServerRecord::absolute_url` resolves them,
+and Media3 does its own ranged HTTP -- so a generated method that buffered a whole file would be one
+no caller may use. That the omission also sidesteps a Kynos/spargen disagreement about how a binary
+body is described is a coincidence, not the reason; the disagreement is filed upstream.
 
 **`beam-client-core` depends on none of `beam-domain`, `beam-index`, or `beam-server`.**
 `beam-domain` is not reusable despite the name: it takes a non-optional `sea-orm` dependency and

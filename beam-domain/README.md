@@ -1,7 +1,8 @@
 # Beam Domain
 
 Core domain models and trait abstractions shared by `beam-index` and `beam-server`. This crate
-is deliberately framework- and infrastructure-agnostic: no `salvo`, no `sea-orm` (the optional
+is deliberately framework- and infrastructure-agnostic: no web framework (`kynos` lives in
+`beam-server` alone), no `sea-orm` (the optional
 `entity` feature bridges to `beam-entity` for conversions, but the models themselves don't depend
 on it), no `ffmpeg`. See [`docs/architecture/components.md`](../docs/architecture/components.md) for the
 current architecture.
