@@ -32,7 +32,10 @@ confique = "0.4.0"
 ffmpeg-next = "8.1"
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 # Kynos does not re-export the stream trait its `Sse` response is generic over.
-futures-core = "0.3"
+# 0.3.32 is spargen's floor for a generated streaming client: its E023
+# runtime-dependency check parses the caret lower bound, so a bare "0.3"
+# reads as 0.3.0 and fails even though the lockfile resolves higher.
+futures-core = "0.3.32"
 # The HTTP edge (ADR-0010). Kynos derives the OpenAPI 3.2 document from the same
 # types the server runs on, so runtime routing and the description cannot
 # disagree. `openapi32` carries `Sse`, `itemSchema` and the streaming response
@@ -92,6 +95,7 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+# 1.24.0 is spargen's floor for `format: uuid` in a generated client (E023).
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
 walkdir = "2.5.0"
 
