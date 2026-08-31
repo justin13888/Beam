@@ -202,8 +202,17 @@ public struct DisplayCapabilities: Equatable, Sendable {
     @MainActor
     public static func current() -> DisplayCapabilities {
         #if canImport(UIKit)
-        let screen = UIScreen.main
-        let scale = screen.nativeScale
+        // Resolved through a scene rather than `UIScreen.main`, which iOS 26
+        // deprecated: an app can span several displays, and the one that
+        // matters is the one it is actually on.
+        guard
+            let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first
+        else {
+            return DisplayCapabilities(width: 1920, height: 1080, supportsHDR: false)
+        }
+        let screen = scene.screen
         let size = screen.nativeBounds.size
         return DisplayCapabilities(
             width: UInt32(max(size.width, size.height)),
@@ -212,7 +221,6 @@ public struct DisplayCapabilities: Equatable, Sendable {
             // brighter-than-white, which is the property that matters --
             // rather than a model-name lookup that ages badly.
             supportsHDR: screen.potentialEDRHeadroom > 1.0
-                || scale > 0 && screen.traitCollection.displayGamut == .P3
         )
         #elseif canImport(AppKit)
         guard let screen = NSScreen.main else {

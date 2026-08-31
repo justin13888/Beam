@@ -38,6 +38,11 @@ public final class AVPlayerEngine: NSObject, PlaybackEngine {
     private var bufferObservation: NSKeyValueObservation?
     private var endWatcher: Task<Void, Never>?
     private var resourceLoaderDelegate: TrustingResourceLoaderDelegate?
+    // Cached when the item becomes ready. The synchronous accessor is
+    // deprecated, and the async one cannot be called from `selectAudioTrack`,
+    // which the transport menu invokes without awaiting.
+    private var audibleGroup: AVMediaSelectionGroup?
+    private var legibleGroup: AVMediaSelectionGroup?
 
     /// A player with no item loaded.
     public override init() {
@@ -131,6 +136,8 @@ public final class AVPlayerEngine: NSObject, PlaybackEngine {
         statusObservation = nil
         bufferObservation = nil
         resourceLoaderDelegate = nil
+        audibleGroup = nil
+        legibleGroup = nil
         player.replaceCurrentItem(with: nil)
         item = nil
     }
@@ -245,6 +252,8 @@ public final class AVPlayerEngine: NSObject, PlaybackEngine {
         Task { @MainActor in
             let audible = try? await item.asset.loadMediaSelectionGroup(for: .audible)
             let legible = try? await item.asset.loadMediaSelectionGroup(for: .legible)
+            audibleGroup = audible
+            legibleGroup = legible
             update {
                 $0.audioTracks = Self.tracks(in: audible)
                 $0.subtitleTracks = Self.tracks(in: legible)
@@ -268,7 +277,7 @@ public final class AVPlayerEngine: NSObject, PlaybackEngine {
     }
 
     private func mediaGroup(_ characteristic: AVMediaCharacteristic) -> AVMediaSelectionGroup? {
-        item?.asset.mediaSelectionGroup(forMediaCharacteristic: characteristic)
+        characteristic == .audible ? audibleGroup : legibleGroup
     }
 
     private func select(

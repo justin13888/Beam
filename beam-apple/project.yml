@@ -1,0 +1,105 @@
+# The Xcode project is generated, never committed. XcodeGen reads this file, so
+# the reviewable artifact is a hundred lines of YAML rather than a .pbxproj that
+# no one can read in a diff and everyone conflicts on -- the same reasoning that
+# has beam-android generate its bindings and jniLibs rather than commit them.
+#
+# Regenerate with `mise run apple:project`.
+
+name: Beam
+options:
+  bundleIdPrefix: net.justinchung.beam
+  # The deployment target is deliberately absent: Version.xcconfig supplies
+  # IPHONEOS_DEPLOYMENT_TARGET and MACOSX_DEPLOYMENT_TARGET from mise.toml, so
+  # the app and the Rust static library are built for the same floor.
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  # Schemes are declared below rather than generated per target, so
+  # `mise run apple:test` and `apple:build` name schemes that are stable.
+  xcodeVersion: "2600"
+
+configs:
+  Debug: debug
+  Release: release
+
+# MARKETING_VERSION and CURRENT_PROJECT_VERSION come from version.txt, written
+# by `apple:project`. Beam ships as one product with one version (ADR-0009), so
+# there is nothing here to keep in step by hand.
+configFiles:
+  Debug: Version.xcconfig
+  Release: Version.xcconfig
+
+packages:
+  BeamKit:
+    path: Packages/BeamKit
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    CLANG_ENABLE_MODULES: YES
+    DEAD_CODE_STRIPPING: YES
+    # No signing identity is assumed: CI has none, and a contributor should not
+    # need an Apple Developer account to check that the app compiles.
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  Beam-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Apps/Shared
+      - path: Apps/iOS
+        excludes: ["Info.plist"]
+    info:
+      path: Apps/iOS/Info.plist
+    dependencies:
+      - package: BeamKit
+        product: BeamAppShell
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.justinchung.beam
+        PRODUCT_NAME: Beam
+        INFOPLIST_FILE: Apps/iOS/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+
+  Beam-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: Apps/Shared
+      - path: Apps/macOS
+        excludes: ["Info.plist", "Beam.entitlements"]
+    info:
+      path: Apps/macOS/Info.plist
+    entitlements:
+      path: Apps/macOS/Beam.entitlements
+    dependencies:
+      - package: BeamKit
+        product: BeamAppShell
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.justinchung.beam
+        PRODUCT_NAME: Beam
+        INFOPLIST_FILE: Apps/macOS/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/macOS/Beam.entitlements
+
+schemes:
+  Beam (iOS):
+    build:
+      targets:
+        Beam-iOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+  Beam (macOS):
+    build:
+      targets:
+        Beam-macOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release
