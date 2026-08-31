@@ -19,7 +19,16 @@ hk = "1.50.0"
 # cargo-mutants publishes prebuilt binaries for x86_64 only (linux-gnu, apple-
 # darwin, pc-windows-msvc). On an aarch64 host, override in a gitignored
 # mise.local.toml with `"cargo:cargo-mutants" = "27.1.0"` to build from source.
-"github:sourcefrog/cargo-mutants" = "27.1.0"
+#
+# `os = ["linux"]` because mise installs every tool in this table before any
+# task runs, so a platform with no matching asset fails *every* job rather than
+# only the ones that wanted the tool. Every runner that actually runs
+# `rust:mutants:*` is ubuntu-latest (see .github/workflows/mutants.yml), and
+# the advisory mutants tasks are deliberately outside `mise run ci`, so nothing
+# on macOS needs this. Without the filter, the arm64 macOS runners the Apple
+# jobs use fail during setup with "No matching asset found for platform
+# macos-arm64" -- which is what happened the first time those jobs ran.
+"github:sourcefrog/cargo-mutants" = { version = "27.1.0", os = ["linux"] }
 # .cargo/mutants.toml sets `test_tool = "nextest"`, so nextest is a hard runtime
 # requirement of `cargo mutants` here, not an optional speedup. nextest tags its
 # releases as `cargo-nextest-<semver>`, which is the version string mise wants.
@@ -44,7 +53,13 @@ ktlint = "1.8.0"
 # `apple:*` tasks resolve `swift-format`, `xcodebuild` and `lipo` through `xcrun`
 # so they follow whichever Xcode the host has selected. CI pins the version in
 # the workflow instead, which is the only place that can.
-"aqua:yonaskolb/XcodeGen" = "2.46.0"
+#
+# `os` is load-bearing, not decoration: XcodeGen publishes a macOS binary only,
+# and mise installs every tool in [tools] before any task runs. Without the
+# filter, `mise install` fails on Linux with "unsupported env: linux/amd64" --
+# which is every Linux CI job and every Linux contributor, not just the Apple
+# ones.
+"aqua:yonaskolb/XcodeGen" = { version = "2.46.0", os = ["macos"] }
 
 [env]
 # Wrap the git hooks in `mise x` so contributors who have not activated mise in
