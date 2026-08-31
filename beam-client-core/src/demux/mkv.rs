@@ -236,11 +236,17 @@ impl MatroskaExtractor {
             return Ok(target);
         }
 
+        // Selected video tracks only, matching `has_selected_video` above. A
+        // file with more than one video track would otherwise let the scan
+        // land on a keyframe belonging to a track `next_sample` filters out,
+        // leaving the reader mid-GOP for the track actually being played --
+        // which is a corrupt picture after a seek rather than an error.
         let video_tracks: HashSet<u64> = self
             .tracks
             .iter()
             .filter(|track| track.kind == TrackKind::Video)
             .map(|track| track.number)
+            .filter(|number| inner.selected.contains(number))
             .collect();
 
         for backoff in SEEK_BACKOFF_SECONDS {

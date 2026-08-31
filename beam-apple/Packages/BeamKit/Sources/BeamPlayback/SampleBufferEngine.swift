@@ -137,6 +137,10 @@ public final class SampleBufferEngine: PlaybackEngine {
     public func seek(to seconds: Double) async {
         guard let pump else { return }
 
+        // Remembered and restored: the renderers have to be stopped to be
+        // flushed, and leaving the rate at zero afterwards would turn every
+        // scrub during playback into a silent pause.
+        let rateBeforeSeek = synchronizer.rate
         synchronizer.rate = 0
         videoRenderer.flush()
         audioRenderer?.flush()
@@ -152,7 +156,10 @@ public final class SampleBufferEngine: PlaybackEngine {
         // asked for. Setting it to the request would make every subsequent
         // position report drift by the gap between them.
         let position = landed ?? seconds
-        synchronizer.setRate(0, time: CMTime(seconds: position, preferredTimescale: 600))
+        synchronizer.setRate(
+            rateBeforeSeek,
+            time: CMTime(seconds: position, preferredTimescale: 600)
+        )
         update { $0.position = position }
     }
 
@@ -166,20 +173,30 @@ public final class SampleBufferEngine: PlaybackEngine {
 
         audioTrack = track
         audioFormat = format
+
+        // The old renderer stops being asked for data as well as being
+        // removed: `requestMediaDataWhenReady` outlives `removeRenderer`, and a
+        // block still pulling the previous track's samples would race the new
+        // one for the pump and drain audio the new renderer needs.
         if let existing = audioRenderer {
+            existing.stopRequestingMediaData()
+            existing.flush()
             synchronizer.removeRenderer(existing, at: synchronizer.currentTime())
         }
         let renderer = AVSampleBufferAudioRenderer()
         synchronizer.addRenderer(renderer)
         audioRenderer = renderer
-
-        pump.map { _ in }
         update { $0.selectedAudioTrackID = id }
 
-        // Re-seek to the current position so the new track starts in step with
-        // the video rather than wherever in the file the demuxer had reached.
-        let position = snapshot.position
-        Task { await seek(to: position) }
+        Task {
+            // Both steps are required and neither is optional. The extractor
+            // yields nothing for an unselected track, so without the first the
+            // new track produces no samples at all; and the new renderer has no
+            // `requestMediaDataWhenReady` block, so without the second nothing
+            // would ever ask for them. Missing either is silence, not an error.
+            await self.reselectExtractorTracks()
+            self.startFeeding()
+        }
     }
 
     public func selectSubtitleTrack(id: String?) {
@@ -241,6 +258,12 @@ public final class SampleBufferEngine: PlaybackEngine {
 
     // MARK: - Feeding
 
+    /// Install the `requestMediaDataWhenReady` loops that pull from the pump.
+    ///
+    /// Idempotent for video: `requestMediaDataWhenReady` replaces any block
+    /// already installed on a renderer, so calling this again after an audio
+    /// track change re-arms both rather than stacking two video loops that
+    /// would race each other for the same samples.
     private func startFeeding() {
         guard let pump, let videoTrack, let videoFormat else { return }
 

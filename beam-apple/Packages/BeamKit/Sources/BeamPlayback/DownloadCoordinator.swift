@@ -27,6 +27,7 @@ public final class DownloadCoordinator: NSObject {
     private var session: URLSession?
     private var tasksByFile: [String: URLSessionDownloadTask] = [:]
     private var metadata: [String: DownloadMetadata] = [:]
+    private var receivedBytes: [String: UInt64] = [:]
     private var allowsCellular: Bool
 
     /// A coordinator writing under Application Support.
@@ -79,7 +80,7 @@ public final class DownloadCoordinator: NSObject {
             request.setValue(value, forHTTPHeaderField: name)
         }
 
-        let task = backgroundSession(for: config).downloadTask(with: request)
+        let task = backgroundSession().downloadTask(with: request)
         // `taskDescription` is the only field that survives the app being
         // relaunched to finish a background transfer, so the file id rides
         // there rather than in a dictionary that would be empty on relaunch.
@@ -105,6 +106,7 @@ public final class DownloadCoordinator: NSObject {
             try? FileManager.default.removeItem(at: url)
         }
         metadata.removeValue(forKey: fileId)
+        receivedBytes.removeValue(forKey: fileId)
         saveMetadata()
         rebuildRecords()
     }
@@ -146,7 +148,17 @@ public final class DownloadCoordinator: NSObject {
 
     // MARK: - Internals
 
-    private func backgroundSession(for config: PlaybackHttpConfig) -> URLSession {
+    /// The one background session every download runs on.
+    ///
+    /// Built from `serverHTTPConfig()` rather than from any one file's
+    /// `playbackConfig`. The credential and the trust decision are properties
+    /// of the *server* -- the core says so, and only the URL is per-file -- and
+    /// a session is created once and reused, so seeding its trust from
+    /// whichever file happened to be downloaded first would apply that file's
+    /// server's fingerprints to every later download. With one server that is
+    /// invisible; with two it is a download that fails to validate a
+    /// certificate the user has already accepted.
+    private func backgroundSession() -> URLSession {
         if let session { return session }
         let configuration = URLSessionConfiguration.background(
             withIdentifier: "net.justinchung.beam.downloads"
@@ -154,9 +166,15 @@ public final class DownloadCoordinator: NSObject {
         configuration.allowsCellularAccess = allowsCellular
         configuration.isDiscretionary = false
         configuration.sessionSendsLaunchEvents = true
+
+        let serverConfig = try? playback.serverHTTPConfig()
         let created = URLSession(
             configuration: configuration,
-            delegate: DownloadDelegate(coordinator: self, config: config),
+            delegate: DownloadDelegate(
+                coordinator: self,
+                trustedFingerprints: serverConfig?.trustedFingerprints ?? [],
+                pinnedHost: serverConfig?.host ?? ""
+            ),
             delegateQueue: nil
         )
         session = created
@@ -196,8 +214,12 @@ public final class DownloadCoordinator: NSObject {
     }
 
     fileprivate func progressed(fileId: String, received: Int64, expected: Int64) {
-        let fraction = expected > 0 ? Double(received) / Double(expected) : nil
-        rebuildRecords(overriding: [fileId: .downloading(fraction: fraction)], received: received)
+        receivedBytes[fileId] = UInt64(max(0, received))
+        // The server's own size is preferred where it sent one; this is
+        // URLSession's view, which is only available once bytes are moving.
+        let total = metadata[fileId]?.totalBytes ?? UInt64(max(0, expected))
+        let fraction = total > 0 ? Double(received) / Double(total) : nil
+        rebuildRecords(overriding: [fileId: .downloading(fraction: fraction)])
     }
 
     fileprivate func failed(fileId: String, message: String) {
@@ -205,10 +227,7 @@ public final class DownloadCoordinator: NSObject {
         rebuildRecords(overriding: [fileId: .failed(message)])
     }
 
-    private func rebuildRecords(
-        overriding overrides: [String: DownloadState] = [:],
-        received: Int64 = 0
-    ) {
+    private func rebuildRecords(overriding overrides: [String: DownloadState] = [:]) {
         records = metadata.values
             .sorted { $0.title < $1.title }
             .map { entry in
@@ -220,7 +239,10 @@ public final class DownloadCoordinator: NSObject {
                     title: entry.title,
                     subtitle: entry.subtitle,
                     totalBytes: entry.totalBytes,
-                    receivedBytes: UInt64(max(0, received)),
+                    // Per file. A single figure applied to every row would show
+                    // one download's progress against every other title in the
+                    // list.
+                    receivedBytes: receivedBytes[entry.fileId] ?? 0,
                     state: state,
                     localURL: url
                 )
@@ -270,12 +292,12 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
     private weak var coordinator: DownloadCoordinator?
     private let trust: TrustingSessionDelegate
 
-    init(coordinator: DownloadCoordinator, config: PlaybackHttpConfig) {
+    init(coordinator: DownloadCoordinator, trustedFingerprints: [String], pinnedHost: String) {
         self.coordinator = coordinator
         self.trust = TrustingSessionDelegate(
             evaluator: CertificateTrustEvaluator(
-                trustedFingerprints: config.trustedFingerprints,
-                pinnedHost: config.pinnedHost
+                trustedFingerprints: trustedFingerprints,
+                pinnedHost: pinnedHost
             )
         )
     }
