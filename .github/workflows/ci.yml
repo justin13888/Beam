@@ -30,6 +30,7 @@ jobs:
       ts: ${{ steps.filter.outputs.ts }}
       docs: ${{ steps.filter.outputs.docs }}
       ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
+      android: ${{ steps.filter.outputs.android }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v4
@@ -78,6 +79,14 @@ jobs:
               # untouched. Without this, the first sign of a break would be release.yml's
               # docs-deploy -- after the tag.
               - 'bun.lock'
+            android:
+              - *tooling
+              - 'beam-android/**'
+              # The Kotlin bindings and the .so are generated from the core, so
+              # a change there can break the Android build without touching a
+              # single Kotlin file.
+              - 'beam-client-core/**'
+              - 'Cargo.lock'
             ffmpeg:
               - *tooling
               - 'Cargo.toml'
@@ -367,6 +376,95 @@ jobs:
       - uses: ./.github/actions/bun-install
       - run: mise run docs:build
 
+
+  # The Android jobs are JVM-only. An emulator in CI needs nested
+  # virtualisation that hosted runners do not reliably provide, and would make
+  # the required check flaky; the screenshot tests run under Robolectric
+  # instead, which renders real pixels on the JVM.
+  #
+  # Each job cross-compiles the Rust core, because the Kotlin bindings are
+  # generated from the built library rather than from source -- they can only
+  # ever describe a .so that actually exists.
+  android-lint:
+    name: Android lint
+    needs: [changes]
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/setup-android
+      - uses: gradle/actions/setup-gradle@v4
+      - run: mise run android:lint
+
+  android-test:
+    name: Android tests
+    needs: [changes]
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/setup-android
+      - uses: gradle/actions/setup-gradle@v4
+      - run: mise run android:test
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports
+          path: beam-android/**/build/reports/tests
+          if-no-files-found: ignore
+          retention-days: 7
+
+  android-screenshot:
+    name: Android screenshots
+    needs: [changes]
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/setup-android
+      - uses: gradle/actions/setup-gradle@v4
+      - run: mise run android:screenshot
+
+      # The diffs are the whole point of a failed screenshot check: without
+      # them a reviewer knows only that something moved, not what.
+      - name: Upload screenshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-screenshot-diffs
+          path: beam-android/**/build/outputs/roborazzi
+          if-no-files-found: ignore
+          retention-days: 7
+
+  android-build:
+    name: Android build
+    needs: [changes]
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/setup-android
+      - uses: gradle/actions/setup-gradle@v4
+      - run: mise run android:build
+
   # The single required status check. Branch protection should require this job
   # and nothing else: it is the only one that always runs, and it distinguishes
   # "skipped by a path filter" (fine) from "failed" (not fine).
@@ -390,6 +488,10 @@ jobs:
       - ts-test
       - ts-build
       - docs-build
+      - android-lint
+      - android-test
+      - android-screenshot
+      - android-build
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every job succeeded or was skipped

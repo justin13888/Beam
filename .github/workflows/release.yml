@@ -215,9 +215,49 @@ jobs:
           docker buildx imagetools inspect \
             "${REGISTRY}/${{ github.repository_owner }}/${{ matrix.image }}:${{ needs.release-please.outputs.tag_name }}"
 
+  # The APK is built in its own job rather than inside release-assets: it needs
+  # the Android SDK, the NDK and a Rust cross-compile toolchain, none of which
+  # the web asset job has any use for.
+  android-apk:
+    name: Build the Android APK
+    needs: [release-please]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/setup-android
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Builds every ABI, unlike a debug build which produces only the
+      # emulator's x86_64. An APK missing arm64-v8a installs on a phone and
+      # then crashes with UnsatisfiedLinkError on the first call into the core.
+      - run: mise run android:release
+
+      - name: Check the APK carries every ABI
+        run: |
+          apk=$(find beam-android/app/build/outputs/apk/release -name '*.apk' | head -n1)
+          echo "Inspecting $apk"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            unzip -l "$apk" | grep -q "lib/$abi/libbeam_client_core.so" \
+              || { echo "APK is missing $abi" >&2; exit 1; }
+          done
+          cp "$apk" beam-android.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: beam-android.apk
+          retention-days: 1
+
   release-assets:
     name: Attach release assets
-    needs: [release-please, openapi]
+    needs: [release-please, openapi, android-apk]
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -232,13 +272,19 @@ jobs:
           name: openapi-spec
           path: beam-web
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+
       - run: mise run ts:build:web
 
       - name: Package the assets
         run: |
           tar -czf beam-web-dist.tar.gz -C beam-web dist
           cp beam-web/openapi.json openapi.json
-          sha256sum openapi.json beam-web-dist.tar.gz > SHA256SUMS
+          mv beam-android.apk "beam-${{ needs.release-please.outputs.tag_name }}.apk"
+          sha256sum openapi.json beam-web-dist.tar.gz \
+            "beam-${{ needs.release-please.outputs.tag_name }}.apk" > SHA256SUMS
           cat SHA256SUMS
 
       - name: Upload to the GitHub Release
@@ -246,7 +292,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ needs.release-please.outputs.tag_name }}" \
-            openapi.json beam-web-dist.tar.gz SHA256SUMS --clobber
+            openapi.json beam-web-dist.tar.gz \
+            "beam-${{ needs.release-please.outputs.tag_name }}.apk" \
+            SHA256SUMS --clobber
 
   # Cloudflare Pages' Git integration only triggers on branch pushes, never on
   # tags or releases, so the released docs must be pushed with wrangler. Skips

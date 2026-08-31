@@ -412,13 +412,18 @@ fi
 #
 # The NDK is pinned to 29.0.14206865 because every 30.x release is still a
 # release candidate, and a release build should not cross-compile with one.
-"$android" --no-metrics --sdk "$ANDROID_SDK_ROOT" sdk install \
-    "platform-tools" \
-    "platforms/android-37.2" \
-    "build-tools/37.0.0" \
-    "ndk/29.0.14206865" \
-    "emulator" \
-    "system-images/android-37.1/google_apis_ps16k/x86_64"
+#
+# The emulator and its system image are ~10 GB and are only useful where there
+# is a screen and nested virtualisation. CI has neither -- the Android jobs are
+# JVM-only -- so BEAM_ANDROID_SDK_MINIMAL=1 leaves them out, which is the
+# difference between a job that installs 12 GB and one that installs 2.
+packages="platform-tools platforms/android-37.2 build-tools/37.0.0 ndk/29.0.14206865"
+if [ "${BEAM_ANDROID_SDK_MINIMAL:-0}" != "1" ]; then
+    packages="$packages emulator system-images/android-37.1/google_apis_ps16k/x86_64"
+fi
+
+# shellcheck disable=SC2086
+"$android" --no-metrics --sdk "$ANDROID_SDK_ROOT" sdk install $packages
 '''
 
 [tasks."core:android"]
