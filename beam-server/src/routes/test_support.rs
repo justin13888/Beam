@@ -149,6 +149,37 @@ pub(crate) fn make_app_state_with_clock(
     adjust: impl FnOnce(&mut crate::config::ServerConfig),
     clock: Arc<dyn beam_domain::services::Clock>,
 ) -> AppState {
+    make_app_state_full(
+        adjust,
+        clock,
+        Arc::new(InMemoryDependencyProbe::healthy()),
+        None,
+    )
+}
+
+/// [`make_app_state_with`] with the dependency probe chosen too.
+///
+/// `/v1/health` reports what the probe says, so a test that wants a degraded
+/// answer configures the probe to fail rather than breaking a real dependency
+/// (NFR-205).
+pub(crate) fn make_app_state_with_probe(
+    probe: Arc<dyn crate::services::health::DependencyProbe>,
+) -> AppState {
+    make_app_state_full(
+        |_| {},
+        Arc::new(beam_domain::services::RealClock),
+        probe,
+        None,
+    )
+}
+
+/// Every seam at once. The three wrappers above name the one they vary.
+pub(crate) fn make_app_state_full(
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
+    clock: Arc<dyn beam_domain::services::Clock>,
+    probe: Arc<dyn crate::services::health::DependencyProbe>,
+    metrics: Option<metrics_exporter_prometheus::PrometheusHandle>,
+) -> AppState {
     let notification = Arc::new(InMemoryNotificationService::new());
     let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
         InMemoryAdminLogRepository::default(),
@@ -209,11 +240,5 @@ pub(crate) fn make_app_state_with_clock(
     let mut config = config;
     adjust(&mut config);
 
-    AppState::with_clock(
-        config,
-        services,
-        Arc::new(InMemoryDependencyProbe::healthy()),
-        clock,
-        None,
-    )
+    AppState::with_clock(config, services, probe, clock, metrics)
 }
