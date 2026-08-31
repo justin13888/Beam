@@ -15,6 +15,7 @@ use beam_domain::services::{Clock, RealClock};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
+use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::{
     config::ServerConfig,
@@ -48,6 +49,12 @@ pub struct AppStateInner {
     /// time: with `Instant::now()` read directly, uptime is always ~0 and no
     /// assertion about it can fail.
     clock: Arc<dyn Clock>,
+    /// The Prometheus handle `GET /metrics` renders, present only when
+    /// `BEAM_ENABLE_METRICS=true` installed a recorder at startup. Carried on
+    /// the state rather than passed to `create_router` so the router's shape --
+    /// and therefore the exported description -- does not depend on
+    /// configuration.
+    metrics: Option<PrometheusHandle>,
 }
 
 impl AppState {
@@ -55,8 +62,9 @@ impl AppState {
         config: ServerConfig,
         services: AppServices,
         probe: Arc<dyn DependencyProbe>,
+        metrics: Option<PrometheusHandle>,
     ) -> Self {
-        Self::with_clock(config, services, probe, Arc::new(RealClock))
+        Self::with_clock(config, services, probe, Arc::new(RealClock), metrics)
     }
 
     pub fn with_clock(
@@ -64,6 +72,7 @@ impl AppState {
         services: AppServices,
         probe: Arc<dyn DependencyProbe>,
         clock: Arc<dyn Clock>,
+        metrics: Option<PrometheusHandle>,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -72,8 +81,23 @@ impl AppState {
                 probe,
                 start_instant: clock.monotonic(),
                 clock,
+                metrics,
             }),
         }
+    }
+
+    /// The clock every time-dependent policy reads.
+    ///
+    /// Exposed because the rate limiter is now a Kynos `RateLimitPolicy`, which
+    /// receives `&AppState` at check time rather than owning a clock handed to
+    /// its constructor. The seam is unchanged; only where it is read from moved.
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.inner.clock
+    }
+
+    /// The Prometheus handle, or `None` when no recorder was installed.
+    pub fn metrics(&self) -> Option<&PrometheusHandle> {
+        self.inner.metrics.as_ref()
     }
 
     /// Whole seconds elapsed since the process built its state.

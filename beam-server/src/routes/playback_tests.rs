@@ -210,6 +210,7 @@ mod tests {
             config,
             services,
             Arc::new(crate::services::health::InMemoryDependencyProbe::healthy()),
+            None,
         );
         TestFixture {
             state,

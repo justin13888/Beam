@@ -128,16 +128,25 @@ impl MetadataService for StubMetadataService {
 /// dependency probe, for tests that exercise router wiring rather than any
 /// individual service.
 pub(crate) fn make_app_state() -> AppState {
-    make_app_state_with(|config| config, Arc::new(beam_domain::services::RealClock))
+    make_app_state_with(|_| {})
 }
 
-/// [`make_app_state`] with the configuration adjusted and the clock chosen.
+/// [`make_app_state`] with the configuration adjusted, on the real clock.
 ///
-/// `adjust` receives the defaults-shaped config so a test can change only the
-/// fields it cares about, and `clock` lets a test move time -- `uptime_secs`
-/// is otherwise always zero and unassertable.
+/// `adjust` mutates the defaults-shaped config in place so a test names only
+/// the fields it cares about.
 pub(crate) fn make_app_state_with(
-    adjust: impl FnOnce(crate::config::ServerConfig) -> crate::config::ServerConfig,
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
+) -> AppState {
+    make_app_state_with_clock(adjust, Arc::new(beam_domain::services::RealClock))
+}
+
+/// [`make_app_state_with`] with the clock chosen too.
+///
+/// `clock` lets a test move time -- `uptime_secs` is otherwise always zero and
+/// unassertable.
+pub(crate) fn make_app_state_with_clock(
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
     clock: Arc<dyn beam_domain::services::Clock>,
 ) -> AppState {
     let notification = Arc::new(InMemoryNotificationService::new());
@@ -197,10 +206,14 @@ pub(crate) fn make_app_state_with(
         ..Default::default()
     };
 
+    let mut config = config;
+    adjust(&mut config);
+
     AppState::with_clock(
-        adjust(config),
+        config,
         services,
         Arc::new(InMemoryDependencyProbe::healthy()),
         clock,
+        None,
     )
 }

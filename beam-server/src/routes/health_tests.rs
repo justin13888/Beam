@@ -194,7 +194,7 @@ mod tests {
             ..Default::default()
         };
 
-        AppState::new(config, services, probe)
+        AppState::new(config, services, probe, None)
     }
 
     fn service(probe: Arc<dyn DependencyProbe>) -> Service {
