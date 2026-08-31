@@ -76,7 +76,7 @@ struct PlayerModelTests {
     }
 
     @Test("pausing reports the position immediately rather than waiting for the sampler")
-    func pauseForcesAReport() async throws {
+    func pauseForcesAReport() async {
         // The 15-second sampler would lose up to fifteen seconds of a pause,
         // which is the difference between resuming where someone stopped and
         // resuming before it.
@@ -87,7 +87,7 @@ struct PlayerModelTests {
         engine.simulate { $0.position = 640 }
 
         model.pause()
-        try await Task.sleep(for: .milliseconds(50))
+        await model.pendingWork?.value
 
         let forced = playback.reports().filter(\.forced)
         #expect(forced.contains { $0.position == 640 })
@@ -111,19 +111,19 @@ struct PlayerModelTests {
     }
 
     @Test("skipping never runs past either end of the item")
-    func skipIsClamped() async throws {
+    func skipIsClamped() async {
         let engine = FakePlaybackEngine()
         engine.duration = 100
         let model = makeModel(engine: engine)
         await model.start(item: item)
 
         model.skip(by: -30)
-        try await Task.sleep(for: .milliseconds(20))
+        await model.pendingWork?.value
         #expect(model.snapshot.position == 0)
 
         engine.simulate { $0.position = 95 }
         model.skip(by: 30)
-        try await Task.sleep(for: .milliseconds(20))
+        await model.pendingWork?.value
         #expect(model.snapshot.position == 100)
     }
 

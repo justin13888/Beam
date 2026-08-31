@@ -13,7 +13,10 @@ import Foundation
 @Observable
 public final class ExploreModel {
     /// How long to wait after a keystroke before searching.
-    public static let searchDebounce: Duration = .milliseconds(300)
+    ///
+    /// 300ms matches `beam-web`'s explore page and `beam-android`'s, so the
+    /// same typing produces the same requests on every client.
+    public static let defaultSearchDebounce: Duration = .milliseconds(300)
 
     /// The results so far, accumulated across pages.
     public private(set) var results: LoadState<[MediaSummary]> = .idle
@@ -45,12 +48,30 @@ public final class ExploreModel {
     // makes a stored task handle unreachable from `deinit`.
     @ObservationIgnored private let catalog: any CatalogRepository
     @ObservationIgnored private var cursor: String?
+    @ObservationIgnored private let searchDebounce: Duration
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var pageTask: Task<Void, Never>?
 
+    /// The debounce and fetch currently in flight, if any.
+    ///
+    /// Exposed so a test can await the work rather than sleep for longer than
+    /// it thinks the work takes. A wall-clock sleep is flaky under load and
+    /// hides the seam -- and this one did exactly that, passing locally and
+    /// failing on a slower CI machine.
+    @ObservationIgnored public private(set) var pendingWork: Task<Void, Never>?
+
     /// Build a model over the catalogue seam.
-    public init(catalog: any CatalogRepository, initialGenre: String? = nil) {
+    ///
+    /// - Parameter searchDebounce: injected so a test can make the wait
+    ///   negligible, or long enough that "has not searched yet" is a fact
+    ///   rather than a race.
+    public init(
+        catalog: any CatalogRepository,
+        initialGenre: String? = nil,
+        searchDebounce: Duration = ExploreModel.defaultSearchDebounce
+    ) {
         self.catalog = catalog
+        self.searchDebounce = searchDebounce
         self.genre = initialGenre
     }
 
@@ -74,26 +95,35 @@ public final class ExploreModel {
         guard hasMore, !isLoadingMore, let cursor else { return }
         isLoadingMore = true
         pageTask?.cancel()
-        pageTask = Task { [weak self] in
-            await self?.fetch(after: cursor, appending: true)
-            self?.isLoadingMore = false
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.fetch(after: cursor, appending: true)
+            self.isLoadingMore = false
         }
+        pageTask = task
+        pendingWork = task
     }
 
     private func scheduleSearch() {
         searchTask?.cancel()
-        searchTask = Task { [weak self] in
-            try? await Task.sleep(for: Self.searchDebounce)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: self.searchDebounce)
             guard !Task.isCancelled else { return }
-            await self?.loadFirstPage()
+            await self.loadFirstPage()
         }
+        searchTask = task
+        pendingWork = task
     }
 
     private func restart() {
         searchTask?.cancel()
-        searchTask = Task { [weak self] in
-            await self?.loadFirstPage()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.loadFirstPage()
         }
+        searchTask = task
+        pendingWork = task
     }
 
     private func loadFirstPage() async {

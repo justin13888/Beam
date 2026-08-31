@@ -22,18 +22,33 @@ struct ExploreModelTests {
     func debounceDelaysTheSearch() async throws {
         // Every keystroke issuing a request would hammer one of only two
         // rate-limited route classes on the server.
+        //
+        // The debounce is injected as a full minute rather than waited out: it
+        // makes "has not searched yet" a fact about the code instead of a race
+        // the test wins on a fast machine and loses on a slow one.
         let catalog = catalog()
-        let model = ExploreModel(catalog: catalog)
+        let model = ExploreModel(catalog: catalog, searchDebounce: .seconds(60))
         await model.load()
 
         model.searchText = "T"
         model.searchText = "Th"
         model.searchText = "Thi"
-        try await Task.sleep(for: .milliseconds(50))
 
         #expect(catalog.lastQuery()?.query == nil, "searched before the debounce elapsed")
+    }
 
-        try await Task.sleep(for: ExploreModel.searchDebounce + .milliseconds(150))
+    @Test("only the last keystroke reaches the server")
+    func debounceCoalesces() async throws {
+        // Three keystrokes, one request, and it carries the final text --
+        // which is the whole point of the debounce.
+        let catalog = catalog()
+        let model = ExploreModel(catalog: catalog, searchDebounce: .zero)
+
+        model.searchText = "T"
+        model.searchText = "Th"
+        model.searchText = "Thi"
+        await model.pendingWork?.value
+
         #expect(catalog.lastQuery()?.query == "Thi")
     }
 
@@ -57,7 +72,7 @@ struct ExploreModelTests {
         await model.load()
 
         model.genre = "Documentary"
-        try await Task.sleep(for: .milliseconds(150))
+        await model.pendingWork?.value
 
         let query = catalog.lastQuery()
         #expect(query?.genre == "Documentary")
@@ -66,12 +81,15 @@ struct ExploreModelTests {
 
     @Test("a search narrows the results")
     func searchNarrowsResults() async throws {
-        let model = ExploreModel(catalog: catalog())
+        // Awaited rather than slept through. The sleep this replaced passed
+        // locally and failed on a slower CI runner, which is exactly the
+        // failure mode "never sleep for ordering" exists to prevent.
+        let model = ExploreModel(catalog: catalog(), searchDebounce: .zero)
         await model.load()
         #expect(model.results.value?.count == 3)
 
         model.searchText = "Third"
-        try await Task.sleep(for: ExploreModel.searchDebounce + .milliseconds(200))
+        await model.pendingWork?.value
 
         #expect(model.results.value?.count == 2)
     }

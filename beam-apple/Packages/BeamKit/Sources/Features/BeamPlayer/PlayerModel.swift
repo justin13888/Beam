@@ -33,6 +33,13 @@ public final class PlayerModel {
     @ObservationIgnored private let nowPlaying: NowPlayingCenter
     @ObservationIgnored private let autoplayNextEpisode: Bool
 
+    /// Work started by `pause`, `seek` or `skip` that has not finished.
+    ///
+    /// Exposed so a test can await it rather than sleep for longer than it
+    /// guesses the work takes. A wall-clock sleep is flaky under load and
+    /// hides the seam.
+    @ObservationIgnored public private(set) var pendingWork: Task<Void, Never>?
+
     /// Build a model for one request.
     public init(
         request: PlaybackRequest,
@@ -103,7 +110,10 @@ public final class PlayerModel {
     /// difference between resuming where they were and resuming before it.
     public func pause() {
         engine.pause()
-        Task { await flushProgress() }
+        pendingWork = Task { [weak self] in
+            guard let self else { return }
+            await self.flushProgress()
+        }
     }
 
     /// Toggle between playing and paused.
@@ -113,9 +123,10 @@ public final class PlayerModel {
 
     /// Move to an absolute position.
     public func seek(to seconds: Double) {
-        Task {
-            await engine.seek(to: seconds)
-            await flushProgress()
+        pendingWork = Task { [weak self] in
+            guard let self else { return }
+            await self.engine.seek(to: seconds)
+            await self.flushProgress()
         }
     }
 
@@ -159,7 +170,10 @@ public final class PlayerModel {
         nowPlaying.update(request: request, snapshot: snapshot)
 
         if !wasEnded, snapshot.status == .ended {
-            Task { await flushProgress() }
+            pendingWork = Task { [weak self] in
+                guard let self else { return }
+                await self.flushProgress()
+            }
         }
     }
 
