@@ -201,8 +201,13 @@ impl BeamClient {
         // the user typing the same address twice means "go there", not "fail".
         if !self.servers.read().expect("servers lock").contains_key(&id) {
             let record = ServerRecord::new(&origin, display_name.as_deref(), self.clock.now_unix());
+            // Installed before persisting, because `persist_record` writes the
+            // index from the in-memory map. Persisting first wrote an index
+            // that did not yet contain this server, so the very first server
+            // added was never in it -- and `restore` found nothing, sending
+            // the viewer back to the address field on every cold start.
+            self.install(record.clone(), None)?;
             self.persist_record(&record).await?;
-            self.install(record, None)?;
         }
 
         self.select_server(id.clone()).await?;
@@ -1527,4 +1532,348 @@ fn to_view(
         stream_url: record.absolute_url(&source.stream_url)?,
         download_url: record.absolute_url(&source.download_url)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ports::kv::{FailureMode, InMemoryKeyValueStore};
+    use crate::upnext::{UpNextEpisode, UpNextSeason};
+
+    /// Everything here exercises the façade without a network. That is most of
+    /// it: the registry, the session state machine, trust decisions, and the
+    /// configuration handed to the platform player are all local, and they are
+    /// the parts a mistake in would be invisible until a device ran them.
+    fn client() -> Arc<BeamClient> {
+        BeamClient::new(Arc::new(InMemoryKeyValueStore::new()))
+    }
+
+    async fn client_with_server() -> (Arc<BeamClient>, String) {
+        let client = client();
+        let summary = client
+            .add_server("https://beam.test".to_owned(), Some("Home".to_owned()))
+            .await
+            .expect("adding a server is offline");
+        let id = summary.id.clone();
+        (client, id)
+    }
+
+    #[tokio::test]
+    async fn a_new_client_knows_no_servers() {
+        let client = client();
+        assert!(client.list_servers().expect("listable").is_empty());
+        assert!(matches!(
+            client.playback_config("f1".to_owned()),
+            Err(BeamError::NoActiveServer)
+        ));
+    }
+
+    #[tokio::test]
+    async fn adding_a_server_makes_it_active() {
+        let (client, id) = client_with_server().await;
+
+        let servers = client.list_servers().expect("listable");
+        assert_eq!(servers.len(), 1);
+        assert!(servers[0].is_active);
+        assert_eq!(servers[0].id, id);
+        assert_eq!(servers[0].display_name, "Home");
+    }
+
+    #[tokio::test]
+    async fn adding_the_same_server_twice_is_idempotent() {
+        // Typing the same address again means "go there", not "fail" -- and
+        // certainly not "register it twice".
+        let (client, id) = client_with_server().await;
+
+        let again = client
+            .add_server("https://beam.test/".to_owned(), None)
+            .await
+            .expect("idempotent");
+
+        assert_eq!(again.id, id);
+        assert_eq!(client.list_servers().expect("listable").len(), 1);
+        assert_eq!(
+            again.display_name, "Home",
+            "re-adding must not discard the name the user gave it"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unusable_address_is_rejected_before_anything_is_stored() {
+        let client = client();
+
+        assert!(matches!(
+            client.add_server("not a url".to_owned(), None).await,
+            Err(BeamError::InvalidServerUrl { .. })
+        ));
+        assert!(client.list_servers().expect("listable").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_registry_survives_a_restart() {
+        // The whole point of persisting it: a cold start must not send the
+        // viewer back to the address field.
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let first = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        first
+            .add_server("https://beam.test".to_owned(), Some("Home".to_owned()))
+            .await
+            .expect("added");
+
+        let second = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        let restored = second.restore().await.expect("restored");
+
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].is_active, "the active choice must survive too");
+    }
+
+    #[tokio::test]
+    async fn a_restored_session_is_expired_until_a_request_confirms_it() {
+        // Optimistic restore keeps app start off the network, but the cookie
+        // has not been checked, so claiming Authenticated would be a lie.
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let first = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let summary = first
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added");
+        storage
+            .put_secret(format!("session/{}", summary.id), "opaque".to_owned())
+            .await
+            .expect("stored");
+
+        let second = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        second.restore().await.expect("restored");
+
+        assert!(matches!(
+            second.session_state(summary.id).expect("known"),
+            SessionState::Expired
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_server_with_no_stored_cookie_restores_as_logged_out() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let first = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let summary = first
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added");
+
+        let second = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        second.restore().await.expect("restored");
+
+        assert!(matches!(
+            second.session_state(summary.id).expect("known"),
+            SessionState::LoggedOut
+        ));
+    }
+
+    #[tokio::test]
+    async fn removing_a_server_forgets_it_and_its_secret() {
+        let (client, id) = client_with_server().await;
+
+        client.remove_server(id.clone()).await.expect("removed");
+
+        assert!(client.list_servers().expect("listable").is_empty());
+        assert!(matches!(
+            client.session_state(id),
+            Err(BeamError::UnknownServer { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn selecting_an_unknown_server_is_an_error() {
+        let client = client();
+        assert!(matches!(
+            client.select_server("nope".to_owned()).await,
+            Err(BeamError::UnknownServer { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_login_url_is_built_from_the_server_origin() {
+        let (client, id) = client_with_server().await;
+
+        let url = client.login_url(id).expect("built");
+
+        assert!(url.starts_with("https://beam.test/v1/auth/login"));
+        assert!(
+            url.contains("redirect="),
+            "the server only accepts a same-origin relative redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn playback_needs_a_session_before_it_will_hand_over_a_url() {
+        // Returning a URL with no cookie would produce a request the server
+        // answers with 401, surfacing to the viewer as a broken file.
+        let (client, _) = client_with_server().await;
+
+        assert!(matches!(
+            client.playback_config("file-1".to_owned()),
+            Err(BeamError::Unauthenticated)
+        ));
+        assert!(matches!(
+            client.server_http_config(),
+            Err(BeamError::Unauthenticated)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_playback_config_carries_the_cookie_and_the_stream_url() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let summary = client
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added");
+        storage
+            .put_secret(format!("session/{}", summary.id), "opaque-value".to_owned())
+            .await
+            .expect("stored");
+        let client = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        client.restore().await.expect("restored");
+
+        let config = client
+            .playback_config("file-1".to_owned())
+            .expect("configured");
+
+        assert_eq!(config.url, "https://beam.test/v1/files/file-1/stream");
+        assert_eq!(
+            config.headers.get("Cookie").map(String::as_str),
+            Some("beam_session=opaque-value"),
+            "Media3 fetches the bytes itself, so the credential has to travel with it"
+        );
+        assert_eq!(config.pinned_host, "beam.test");
+    }
+
+    #[tokio::test]
+    async fn trusting_a_certificate_records_it_and_survives_a_restart() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let summary = client
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added");
+
+        client
+            .trust_certificate(summary.id.clone(), "AA:BB:CC".to_owned())
+            .await
+            .expect("trusted");
+
+        assert_eq!(
+            client
+                .trusted_certificates(summary.id.clone())
+                .expect("known"),
+            vec!["AA:BB:CC".to_owned()]
+        );
+
+        // A trust decision the user made once must not be forgotten on restart,
+        // or they would be asked again on every cold start.
+        let restarted = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        restarted.restore().await.expect("restored");
+        assert_eq!(
+            restarted.trusted_certificates(summary.id).expect("known"),
+            vec!["AA:BB:CC".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn trusting_the_same_certificate_twice_does_not_duplicate_it() {
+        let (client, id) = client_with_server().await;
+
+        client
+            .trust_certificate(id.clone(), "AA:BB".to_owned())
+            .await
+            .expect("trusted");
+        client
+            .trust_certificate(id.clone(), "AA:BB".to_owned())
+            .await
+            .expect("trusted again");
+
+        assert_eq!(client.trusted_certificates(id).expect("known").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn forgetting_certificates_withdraws_every_one() {
+        let (client, id) = client_with_server().await;
+        client
+            .trust_certificate(id.clone(), "AA:BB".to_owned())
+            .await
+            .expect("trusted");
+
+        client
+            .forget_certificates(id.clone())
+            .await
+            .expect("forgotten");
+
+        assert!(client.trusted_certificates(id).expect("known").is_empty());
+    }
+
+    #[tokio::test]
+    async fn trusting_a_certificate_for_an_unknown_server_is_an_error() {
+        let client = client();
+        assert!(matches!(
+            client
+                .trust_certificate("nope".to_owned(), "AA:BB".to_owned())
+                .await,
+            Err(BeamError::UnknownServer { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn logging_out_clears_the_session_but_keeps_the_server() {
+        // Signing out is not forgetting the address; the viewer will sign back
+        // in to the same place.
+        let (client, id) = client_with_server().await;
+
+        client.logout(id.clone()).await.expect("logged out");
+
+        assert!(matches!(
+            client.session_state(id).expect("still known"),
+            SessionState::LoggedOut
+        ));
+        assert_eq!(client.list_servers().expect("listable").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn up_next_is_resolved_locally_from_the_seasons_it_is_given() {
+        let client = client();
+        let seasons = vec![UpNextSeason {
+            season_number: 1,
+            episodes: vec![
+                UpNextEpisode {
+                    id: "e1".to_owned(),
+                    episode_number: 1,
+                    file_id: Some("f1".to_owned()),
+                },
+                UpNextEpisode {
+                    id: "e2".to_owned(),
+                    episode_number: 2,
+                    file_id: Some("f2".to_owned()),
+                },
+            ],
+        }];
+
+        let next = client.up_next(seasons, "e1".to_owned());
+
+        assert_eq!(next.map(|episode| episode.id), Some("e2".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_when_adding_a_server_is_reported_not_swallowed() {
+        // A server that appears to be added but was never written would come
+        // back missing on the next start, with nothing having said so.
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        storage.set_failure(FailureMode::FailWrites);
+        let client = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+
+        assert!(matches!(
+            client
+                .add_server("https://beam.test".to_owned(), None)
+                .await,
+            Err(BeamError::Storage { .. })
+        ));
+    }
 }
