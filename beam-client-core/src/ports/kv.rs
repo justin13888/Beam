@@ -41,6 +41,7 @@ pub trait KeyValueStore: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub use in_memory::{FailureMode, InMemoryKeyValueStore};
 
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 mod in_memory {
     use super::{KeyValueStore, StorageError};

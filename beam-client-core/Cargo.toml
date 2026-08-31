@@ -23,6 +23,9 @@ time = { version = "0.3.55", features = ["formatting", "parsing", "serde"] }
 # Core-owned dependencies, beyond the generated client's contract above.
 async-trait = { workspace = true }
 base64 = "0.22.1"
+# Provides `#[mutants::skip]` for the test-only doubles; see the workspace
+# manifest and `mise run check:mutants-skip-fakes` for why they need it.
+mutants = { workspace = true }
 # rustls is configured directly rather than through reqwest's bundled roots:
 # a self-hosted server on a LAN needs a trust-on-first-use exception, and that
 # is a `ServerCertVerifier`, which reqwest exposes only via a preconfigured

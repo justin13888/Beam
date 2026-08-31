@@ -165,6 +165,7 @@ fn best_decoder(
         })
 }
 
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod builders;
 

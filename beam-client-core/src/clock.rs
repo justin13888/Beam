@@ -31,6 +31,7 @@ impl Clock for SystemClock {
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_clock::TestClock;
 
+#[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 mod test_clock {
     use super::Clock;

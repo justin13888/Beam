@@ -1016,7 +1016,17 @@
             }
           }
         ],
-        "responses": {}
+        "responses": {
+          "302": {
+            "description": "Redirect to the identity provider's authorization endpoint"
+          },
+          "500": {
+            "description": "Server state unavailable, or the IdP returned an invalid authorization URL"
+          },
+          "503": {
+            "description": "OIDC is not configured or the provider is unreachable"
+          }
+        }
       }
     },
     "/v1/continue-watching": {
@@ -1801,7 +1811,11 @@
         ],
         "summary": "Logs out the current session (deletes it and clears the cookie).",
         "operationId": "beam_auth.server.oidc_routes.oidc_logout",
-        "responses": {}
+        "responses": {
+          "204": {
+            "description": "Session deleted and cookie cleared"
+          }
+        }
       }
     },
     "/v1/logout-all": {
