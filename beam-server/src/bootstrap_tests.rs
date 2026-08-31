@@ -1,7 +1,3 @@
-use salvo::http::StatusCode;
-use salvo::prelude::*;
-use salvo::test::TestClient;
-
 use super::*;
 
 fn https_deployment() -> ServerConfig {
@@ -87,35 +83,65 @@ mod cookie_security_gate {
 }
 
 mod cors {
+    use std::collections::BTreeSet;
+
+    use kynos::http::StatusCode;
+    use kynos::prelude::*;
+    use kynos::response::status::NoContent;
+    use kynos::test::TestClient;
+
     use super::*;
 
-    #[handler]
-    async fn ok_handler() -> &'static str {
-        "ok"
+    // Three operations on one path, doing nothing: the policy is the subject,
+    // and the *set* of methods is now part of what it answers with.
+    #[kynos::get("/thing", operation_id = "corsProbe")]
+    async fn probe() -> NoContent {
+        NoContent
     }
 
-    fn service() -> Service {
-        Service::new(Router::new().goal(ok_handler)).hoop(cors_handler())
+    #[kynos::patch("/thing", operation_id = "corsProbePatch")]
+    async fn probe_patch() -> NoContent {
+        NoContent
+    }
+
+    #[kynos::delete("/thing", operation_id = "corsProbeDelete")]
+    async fn probe_delete() -> NoContent {
+        NoContent
+    }
+
+    /// `Cors` is an `Interceptor<C>` for any context, so the policy needs no
+    /// `AppState` to be exercised.
+    fn client() -> TestClient<()> {
+        let service = Router::new()
+            .mount(kynos::routes![probe, probe_patch, probe_delete])
+            .intercept(cors_policy())
+            .build(())
+            .expect("the probe router describes itself");
+
+        TestClient::new(service)
+    }
+
+    /// A preflight proposing `method`, from an origin that is not ours.
+    async fn preflight(method: &str) -> kynos::test::TestResponse {
+        client()
+            .options("/thing")
+            .header("origin", "https://beam.example.com")
+            .header("access-control-request-method", method)
+            .header("access-control-request-headers", "range")
+            .send()
+            .await
     }
 
     #[tokio::test]
     async fn a_preflight_allows_the_headers_the_player_and_client_send() {
-        let response = TestClient::options("http://127.0.0.1:8000/")
-            .add_header("origin", "https://beam.example.com", true)
-            .add_header("access-control-request-method", "GET", true)
-            .add_header("access-control-request-headers", "range", true)
-            .send(&service())
-            .await;
+        let response = preflight("GET").await;
 
-        assert!(
-            response.status_code.unwrap_or(StatusCode::OK).is_success(),
-            "the preflight was rejected: {:?}",
-            response.status_code
-        );
+        // Kynos answers a preflight with 204: it is a protocol answer rather
+        // than an operation, so there is no body and no declared status.
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
         let allowed = response
-            .headers()
-            .get("access-control-allow-headers")
-            .and_then(|v| v.to_str().ok())
+            .header("access-control-allow-headers")
             .unwrap_or_default()
             .to_ascii_lowercase();
         assert!(
@@ -125,18 +151,39 @@ mod cors {
         assert!(allowed.contains("content-type"), "{allowed}");
     }
 
+    /// The advertised methods are derived from the operations declared on the
+    /// matched path, so preflight and the description cannot disagree. The
+    /// hand-written list this replaces named GET, POST, PUT, DELETE and
+    /// OPTIONS -- but not PATCH, which `/v1/admin/users/{id}` has used since
+    /// issue #85, so a browser preflighting that request was told no.
+    #[tokio::test]
+    async fn the_advertised_methods_are_the_ones_the_path_actually_declares() {
+        let response = preflight("PATCH").await;
+
+        let advertised: BTreeSet<&str> = response
+            .header("access-control-allow-methods")
+            .expect("a permitted preflight advertises the methods")
+            .split(',')
+            .map(str::trim)
+            .collect();
+
+        assert_eq!(
+            advertised,
+            BTreeSet::from(["GET", "PATCH", "DELETE"]),
+            "the advertised set must be exactly what this path declares"
+        );
+    }
+
     #[tokio::test]
     async fn credentials_are_allowed_so_the_session_cookie_is_sent() {
-        let response = TestClient::get("http://127.0.0.1:8000/")
-            .add_header("origin", "https://beam.example.com", true)
-            .send(&service())
+        let response = client()
+            .get("/thing")
+            .header("origin", "https://beam.example.com")
+            .send()
             .await;
 
         assert_eq!(
-            response
-                .headers()
-                .get("access-control-allow-credentials")
-                .and_then(|v| v.to_str().ok()),
+            response.header("access-control-allow-credentials"),
             Some("true"),
             "cookie-only auth needs credentialed CORS"
         );
@@ -147,15 +194,14 @@ mod cors {
         // A browser cannot read `content-range` off a cross-origin response
         // unless it is explicitly exposed, and the player needs it to know how
         // much of the file it just received.
-        let response = TestClient::get("http://127.0.0.1:8000/")
-            .add_header("origin", "https://beam.example.com", true)
-            .send(&service())
+        let response = client()
+            .get("/thing")
+            .header("origin", "https://beam.example.com")
+            .send()
             .await;
 
         let exposed = response
-            .headers()
-            .get("access-control-expose-headers")
-            .and_then(|v| v.to_str().ok())
+            .header("access-control-expose-headers")
             .unwrap_or_default()
             .to_ascii_lowercase();
         for header in ["accept-ranges", "content-length", "content-range"] {
@@ -166,18 +212,16 @@ mod cors {
     #[tokio::test]
     async fn the_origin_is_mirrored_rather_than_allow_listed() {
         // Documented posture, not an accident: `/v1` is protected by
-        // `enforce_same_origin` instead. Pinning it here means a change to
+        // `EnforceSameOrigin` instead. Pinning it here means a change to
         // either half has to be a deliberate change to both.
-        let response = TestClient::get("http://127.0.0.1:8000/")
-            .add_header("origin", "https://somewhere.else.example", true)
-            .send(&service())
+        let response = client()
+            .get("/thing")
+            .header("origin", "https://somewhere.else.example")
+            .send()
             .await;
 
         assert_eq!(
-            response
-                .headers()
-                .get("access-control-allow-origin")
-                .and_then(|v| v.to_str().ok()),
+            response.header("access-control-allow-origin"),
             Some("https://somewhere.else.example"),
         );
     }

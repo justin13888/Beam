@@ -134,7 +134,9 @@ async fn safe_methods_are_never_checked() {
         .send()
         .await
         .status();
-    assert_eq!(status, StatusCode::OK);
+    // `probe_safe` answers `NoContent`, so reaching the handler is a 204. What
+    // matters is that it is not the interceptor's 403.
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 /// The interceptor's 403 is a declared response, not something it renders on

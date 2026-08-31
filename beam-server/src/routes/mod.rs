@@ -32,6 +32,10 @@ use crate::state::AppState;
 #[path = "test_support.rs"]
 pub(crate) mod test_support;
 
+#[cfg(test)]
+#[path = "contract_tests.rs"]
+mod contract_tests;
+
 /// Every `/v1` operation, as one table.
 ///
 /// Grouped by tag rather than mounted flat. Every route here also carries a
@@ -43,8 +47,9 @@ pub(crate) mod test_support;
 ///
 /// So the tags are declared where Kynos does read them. The route attributes
 /// keep theirs as the statement of intent, and the grouping is one group per
-/// tag, which is the structure Kynos recommends anyway. Filed upstream; when it
-/// lands, the groups that exist only to carry a tag can collapse back.
+/// tag, which is the structure Kynos recommends anyway. Filed upstream as
+/// getkono/kynos#94; when it lands, the groups that exist only to carry a tag
+/// can collapse back.
 ///
 /// One `mount` per module rather than one list: `routes!` builds a tuple, and
 /// the arity runs out well before Beam's operation count. Grouping by module is
