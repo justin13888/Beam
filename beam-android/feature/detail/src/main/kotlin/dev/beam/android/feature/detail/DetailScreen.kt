@@ -25,9 +25,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -59,6 +64,8 @@ public fun DetailRoute(
         onSelectSeason = viewModel::selectSeason,
         onPickSource = { viewModel.setPickingSource(true) },
         onDismissPicker = { viewModel.setPickingSource(false) },
+        onDownload = viewModel::download,
+        onMessageShown = viewModel::clearMessage,
         onRetry = viewModel::refresh,
         modifier = modifier,
     )
@@ -72,10 +79,29 @@ internal fun DetailScreen(
     onSelectSeason: (UInt) -> Unit,
     onPickSource: () -> Unit,
     onDismissPicker: () -> Unit,
+    onDownload: (fileId: String, title: String, subtitle: String?) -> Unit,
+    onMessageShown: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val content = state.valueOrNull
+    val snackbarHost = remember { SnackbarHostState() }
+
+    // Shown once and then cleared, so a configuration change does not replay a
+    // confirmation the viewer has already read.
+    LaunchedEffect(content?.message) {
+        content?.message?.let { message ->
+            snackbarHost.showSnackbar(message)
+            onMessageShown()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        SnackbarHost(
+            hostState = snackbarHost,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
+    }
 
     when {
         content != null -> {
@@ -85,6 +111,7 @@ internal fun DetailScreen(
                 onSelectSeason = onSelectSeason,
                 onPickSource = onPickSource,
                 onDismissPicker = onDismissPicker,
+                onDownload = onDownload,
                 modifier = modifier,
             )
         }
@@ -110,6 +137,7 @@ private fun DetailContent(
     onSelectSeason: (UInt) -> Unit,
     onPickSource: () -> Unit,
     onDismissPicker: () -> Unit,
+    onDownload: (fileId: String, title: String, subtitle: String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val summary = state.summary
@@ -172,6 +200,7 @@ private fun DetailContent(
                 state = state,
                 onPlay = onPlay,
                 onPickSource = onPickSource,
+                onDownload = onDownload,
             )
         }
 
@@ -251,6 +280,7 @@ private fun Actions(
     state: DetailUiState,
     onPlay: (fileId: String, episodeId: String?, title: String) -> Unit,
     onPickSource: () -> Unit,
+    onDownload: (fileId: String, title: String, subtitle: String?) -> Unit,
 ) {
     val playable = state.selection?.source
     Row(
@@ -272,6 +302,16 @@ private fun Actions(
                 text = if (playable == null) "Unavailable" else "Play",
                 modifier = Modifier.padding(start = BeamSpacing.Small),
             )
+        }
+
+        // Offered for whichever file would play, so downloading and playing
+        // never disagree about which one the viewer meant.
+        playable?.let { source ->
+            OutlinedButton(
+                onClick = { onDownload(source.fileId, state.summary.title, null) },
+            ) {
+                Icon(Icons.Rounded.Download, contentDescription = "Download for offline")
+            }
         }
 
         if (state.sources.size > 1) {

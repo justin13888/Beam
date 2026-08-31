@@ -60,6 +60,15 @@ public class FakeCatalogRepository : CatalogRepository {
     /** Files returned by [libraryFiles]. */
     public var files: List<LibraryFileSummary> = emptyList()
 
+    /**
+     * Set to make [libraryFiles] alone fail.
+     *
+     * A library whose files cannot be read is not the same as a library that
+     * is gone, and the screen treats them differently; one failure mode for
+     * both could not express that.
+     */
+    public var filesFailWith: BeamException? = null
+
     /** The episode [upNext] resolves to. */
     public var nextEpisode: EpisodeSummary? = null
 
@@ -114,6 +123,7 @@ public class FakeCatalogRepository : CatalogRepository {
     }
 
     override suspend fun libraryFiles(libraryId: String): List<LibraryFileSummary> {
+        filesFailWith?.let { throw it }
         failWith?.let { throw it }
         return files
     }

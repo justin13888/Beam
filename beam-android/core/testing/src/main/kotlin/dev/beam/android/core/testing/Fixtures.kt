@@ -8,7 +8,10 @@ import uniffi.beam_client_core.ContinueWatchingEntry
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EnrichmentCounts
 import uniffi.beam_client_core.EpisodeSummary
+import uniffi.beam_client_core.FileContentType
+import uniffi.beam_client_core.FileIndexStatus
 import uniffi.beam_client_core.HistoryEntry
+import uniffi.beam_client_core.LibraryFileSummary
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaKind
@@ -287,5 +290,26 @@ public object Fixtures {
             isAdmin = isAdmin,
             disabled = disabled,
             createdAtUnix = 1_690_000_000L,
+        )
+
+    /** One indexed file, as a library's contents list shows it. */
+    public fun libraryFile(
+        id: String = "file-1",
+        libraryId: String = "library-1",
+        path: String = "/media/films/Arrival (2016)/Arrival.mkv",
+        status: FileIndexStatus = FileIndexStatus.KNOWN,
+        contentType: FileContentType = FileContentType.MOVIE,
+    ): LibraryFileSummary =
+        LibraryFileSummary(
+            id = id,
+            libraryId = libraryId,
+            path = path,
+            sizeBytes = 4_500_000_000uL,
+            containerFormat = "matroska",
+            mimeType = "video/x-matroska",
+            durationSecs = 6_960.0,
+            contentType = contentType,
+            status = status,
+            scannedAtUnix = 1_700_000_000L,
         )
 }

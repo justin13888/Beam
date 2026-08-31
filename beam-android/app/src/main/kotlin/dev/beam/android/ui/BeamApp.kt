@@ -34,6 +34,7 @@ import dev.beam.android.feature.explore.ExploreRoute
 import dev.beam.android.feature.history.HistoryRoute
 import dev.beam.android.feature.home.HomeRoute
 import dev.beam.android.feature.libraries.LibrariesRoute
+import dev.beam.android.feature.libraries.LibraryDetailRoute
 import dev.beam.android.feature.player.PlayerRoute
 import dev.beam.android.feature.settings.SettingsRoute
 import dev.beam.android.navigation.Admin
@@ -173,6 +174,8 @@ private fun BeamNavDisplay(
                                     backStack.clear()
                                     backStack.add(SignIn)
                                 },
+                                onOpenHistory = { backStack.add(History) },
+                                onOpenAdmin = { backStack.add(Admin) },
                             )
                         }
                     }

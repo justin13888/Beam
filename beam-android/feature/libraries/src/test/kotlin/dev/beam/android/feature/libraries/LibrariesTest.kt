@@ -1,5 +1,6 @@
 package dev.beam.android.feature.libraries
 
+import androidx.lifecycle.SavedStateHandle
 import dev.beam.android.core.model.LoadState
 import dev.beam.android.core.model.valueOrNull
 import dev.beam.android.core.testing.FakeCatalogRepository
@@ -13,10 +14,12 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.FileIndexStatus
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LibrariesTest {
@@ -101,5 +104,80 @@ class LibrariesTest {
         assertEquals("Empty", base.copy(size = 0u).summaryLine())
         assertEquals("1 file", base.copy(size = 1u).summaryLine())
         assertEquals("128 files", base.copy(size = 128u).summaryLine())
+    }
+}
+
+/** The library detail screen, which lists a library's indexed files. */
+@OptIn(ExperimentalCoroutinesApi::class)
+class LibraryDetailTest {
+    private val dispatcher = StandardTestDispatcher()
+
+    @Before
+    fun setUp() = Dispatchers.setMain(dispatcher)
+
+    @After
+    fun tearDown() = Dispatchers.resetMain()
+
+    private fun viewModel(catalog: FakeCatalogRepository = catalogWithFiles()) =
+        LibraryDetailViewModel(catalog, SavedStateHandle(mapOf("libraryId" to LIBRARY_ID)))
+
+    private fun catalogWithFiles() =
+        FakeCatalogRepository().apply {
+            libraryList = listOf(Fixtures.library(id = LIBRARY_ID))
+            files = listOf(Fixtures.libraryFile(), Fixtures.libraryFile(id = "file-2"))
+        }
+
+    @Test
+    fun `a library loads with its files`() =
+        runTest {
+            val model = viewModel()
+            testScheduler.advanceUntilIdle()
+
+            val state = model.state.value.valueOrNull
+            assertNotNull(state)
+            assertEquals(2, state!!.files.size)
+        }
+
+    @Test
+    fun `a library whose files cannot be read still names the library`() =
+        runTest {
+            // The file listing failing is not the same as the library being gone;
+            // an error page with nothing on it would be worse than a short one.
+            val catalog =
+                catalogWithFiles().apply {
+                    filesFailWith = BeamException.Network("offline", retryable = true)
+                }
+            val model = viewModel(catalog)
+            testScheduler.advanceUntilIdle()
+
+            val state = model.state.value.valueOrNull
+            assertNotNull(state)
+            assertTrue(state!!.files.isEmpty())
+            assertEquals(LIBRARY_ID, state.library.id)
+        }
+
+    @Test
+    fun `a library that cannot be loaded at all is a failure`() =
+        runTest {
+            val catalog = FakeCatalogRepository().apply { libraryList = emptyList() }
+            val model = viewModel(catalog)
+            testScheduler.advanceUntilIdle()
+
+            assertTrue(model.state.value is LoadState.Failure)
+        }
+
+    @Test
+    fun `a changed file says so rather than looking indexed`() {
+        // A changed or unscanned file is the usual reason a title will not
+        // play, and an operator cannot act on what the screen does not say.
+        val changed = Fixtures.libraryFile().copy(status = FileIndexStatus.CHANGED)
+        assertTrue(changed.detailLine().contains("Changed"))
+
+        val known = Fixtures.libraryFile().copy(status = FileIndexStatus.KNOWN)
+        assertFalse(known.detailLine().contains("Changed"))
+    }
+
+    private companion object {
+        const val LIBRARY_ID = "library-1"
     }
 }

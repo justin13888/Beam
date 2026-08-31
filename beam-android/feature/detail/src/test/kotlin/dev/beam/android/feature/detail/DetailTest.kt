@@ -8,6 +8,7 @@ import dev.beam.android.core.model.valueOrNull
 import dev.beam.android.core.testing.FakeCatalogRepository
 import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.FakePreferencesRepository
+import dev.beam.android.core.testing.FakeServerRepository
 import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -47,11 +48,13 @@ class DetailTest {
         playback: FakePlaybackRepository = FakePlaybackRepository(),
         downloads: FakeDownloadRepository = FakeDownloadRepository(),
         preferences: FakePreferencesRepository = FakePreferencesRepository(),
+        servers: FakeServerRepository = FakeServerRepository(),
     ) = DetailViewModel(
         catalog,
         playback,
         downloads,
         preferences,
+        servers,
         SavedStateHandle(mapOf("mediaId" to MEDIA_ID)),
     )
 
@@ -225,10 +228,61 @@ class DetailTest {
             val model = viewModel(downloads = downloads)
             testScheduler.advanceUntilIdle()
 
-            model.download("file-9", "server-1", "Arrival", null)
+            model.download("file-9", "Arrival")
             testScheduler.advanceUntilIdle()
 
             assertEquals(listOf("file-9" to "Arrival"), downloads.enqueued)
+        }
+
+    @Test
+    fun `downloading with no server signed in explains itself`() =
+        runTest {
+            val downloads = FakeDownloadRepository()
+            val model = viewModel(downloads = downloads, servers = FakeServerRepository(emptyList()))
+            testScheduler.advanceUntilIdle()
+
+            model.download("file-9", "Arrival")
+            testScheduler.advanceUntilIdle()
+
+            assertTrue(downloads.enqueued.isEmpty())
+            assertNotNull(
+                "a silent tap that does nothing reads as a broken button",
+                model.state.value.valueOrNull
+                    ?.message,
+            )
+        }
+
+    @Test
+    fun `a started download tells the viewer it started`() =
+        runTest {
+            val model = viewModel()
+            testScheduler.advanceUntilIdle()
+
+            model.download("file-9", "Arrival")
+            testScheduler.advanceUntilIdle()
+
+            assertNotNull(
+                model.state.value.valueOrNull
+                    ?.message,
+            )
+        }
+
+    @Test
+    fun `a message is cleared once it has been shown`() =
+        runTest {
+            // Otherwise a configuration change replays a confirmation the viewer
+            // has already read.
+            val model = viewModel()
+            testScheduler.advanceUntilIdle()
+            model.download("file-9", "Arrival")
+            testScheduler.advanceUntilIdle()
+
+            model.clearMessage()
+
+            assertNull(
+                model.state.value.valueOrNull
+                    ?.message,
+            )
         }
 
     private companion object {

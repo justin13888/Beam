@@ -40,6 +40,8 @@ import java.util.Date
 @Composable
 public fun SettingsRoute(
     onSignedOut: () -> Unit,
+    onOpenHistory: () -> Unit,
+    onOpenAdmin: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
@@ -51,6 +53,8 @@ public fun SettingsRoute(
 
     SettingsScreen(
         state = state,
+        onOpenHistory = onOpenHistory,
+        onOpenAdmin = onOpenAdmin,
         onThemeMode = viewModel::setThemeMode,
         onPaletteSource = viewModel::setPaletteSource,
         onQuality = viewModel::setQuality,
@@ -69,6 +73,8 @@ public fun SettingsRoute(
 @Composable
 internal fun SettingsScreen(
     state: SettingsUiState,
+    onOpenHistory: () -> Unit,
+    onOpenAdmin: () -> Unit,
     onThemeMode: (ThemeMode) -> Unit,
     onPaletteSource: (PaletteSource) -> Unit,
     onQuality: (QualityPreference) -> Unit,
@@ -123,6 +129,37 @@ internal fun SettingsScreen(
                             Icon(Icons.Rounded.Logout, contentDescription = "Sign out")
                         }
                     },
+                )
+            }
+        }
+
+        // History and the admin area live here rather than as their own tabs.
+        // Neither is a browsing surface, and a five-tab bar that spent two of
+        // its slots on screens most viewers open rarely would crowd out the
+        // ones they open constantly.
+        item(key = "history") {
+            ListItem(
+                headlineContent = { Text("Watch history") },
+                supportingContent = { Text("Everything you have watched, newest first.") },
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenHistory),
+            )
+        }
+
+        // Shown only to administrators. The server rejects these calls for
+        // anyone else regardless, so hiding the row is a courtesy rather than
+        // the control.
+        if (state.user?.isAdmin == true) {
+            item(key = "admin") {
+                ListItem(
+                    headlineContent = { Text("Administration") },
+                    supportingContent = { Text("Libraries, users, and server status.") },
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenAdmin),
                 )
             }
         }

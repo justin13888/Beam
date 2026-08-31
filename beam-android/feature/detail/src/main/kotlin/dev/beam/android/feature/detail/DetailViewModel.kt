@@ -7,6 +7,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.beam.android.core.ffi.preferences.PreferencesRepository
 import dev.beam.android.core.ffi.repository.CatalogRepository
 import dev.beam.android.core.ffi.repository.PlaybackRepository
+import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.toFailure
 import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.model.LoadState
@@ -38,6 +39,8 @@ public data class DetailUiState(
     val isPickingSource: Boolean = false,
     /** Files already downloaded, so the action reads "Play offline". */
     val downloadedFileIds: Set<String> = emptySet(),
+    /** What the last action reported, for a snackbar. */
+    val message: String? = null,
 ) {
     /** The seasons, for a series; empty for a film. */
     public val seasons: List<uniffi.beam_client_core.SeasonSummary>
@@ -82,6 +85,7 @@ public class DetailViewModel
         private val playback: PlaybackRepository,
         private val downloads: DownloadRepository,
         private val preferences: PreferencesRepository,
+        private val servers: ServerRepository,
         savedStateHandle: SavedStateHandle,
     ) : ViewModel() {
         private val mediaId: String =
@@ -156,29 +160,57 @@ public class DetailViewModel
             }
         }
 
-        /** Queue a file for offline playback. */
+        /**
+         * Queue a file for offline playback.
+         *
+         * The server is resolved here rather than demanded from the screen: a
+         * download belongs to the server it came from, so that a removed
+         * server can take its files with it, but which server is active is not
+         * something a detail screen knows or should have to pass down.
+         */
         public fun download(
             fileId: String,
-            serverId: String,
             title: String,
-            subtitle: String?,
+            subtitle: String? = null,
         ) {
             viewModelScope.launch {
-                runCatching {
-                    downloads.enqueue(
-                        fileId = fileId,
-                        serverId = serverId,
-                        mediaId = mediaId,
-                        title = title,
-                        subtitle = subtitle,
-                        posterUrl =
-                            mutableState.value
-                                .previous()
-                                ?.summary
-                                ?.posterUrl,
-                    )
+                val serverId = runCatching { servers.activeServer()?.id }.getOrNull()
+                if (serverId == null) {
+                    setMessage("Sign in before downloading.")
+                    return@launch
                 }
+                val outcome =
+                    runCatching {
+                        downloads.enqueue(
+                            fileId = fileId,
+                            serverId = serverId,
+                            mediaId = mediaId,
+                            title = title,
+                            subtitle = subtitle,
+                            posterUrl =
+                                mutableState.value
+                                    .previous()
+                                    ?.summary
+                                    ?.posterUrl,
+                        )
+                    }
+                setMessage(
+                    outcome.fold(
+                        onSuccess = { "Downloading $title." },
+                        onFailure = { error ->
+                            (error as? BeamException)?.toFailure()?.message
+                                ?: "The download could not be started."
+                        },
+                    ),
+                )
             }
+        }
+
+        /** Dismiss whatever the last action reported. */
+        public fun clearMessage(): Unit = setMessage(null)
+
+        private fun setMessage(message: String?) {
+            mutableState.update { current -> current.mapValue { it.copy(message = message) } }
         }
 
         private fun LoadState<DetailUiState>.previous(): DetailUiState? =
