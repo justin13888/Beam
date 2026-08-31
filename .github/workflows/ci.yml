@@ -32,7 +32,7 @@ jobs:
       ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
       android: ${{ steps.filter.outputs.android }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -98,7 +98,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: jdx/mise-action@v4
@@ -122,7 +122,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-ffmpeg
 
   rust-fmt:
@@ -131,7 +131,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -144,7 +144,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -157,7 +157,7 @@ jobs:
     if: needs.changes.outputs.ffmpeg == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - run: mise run check:ffmpeg-version
 
@@ -167,7 +167,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -184,7 +184,7 @@ jobs:
       # and statically compiling one (which is the local-dev default).
       BEAM_CARGO_FEATURES: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -201,7 +201,7 @@ jobs:
     env:
       BEAM_CARGO_FEATURES: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -217,7 +217,7 @@ jobs:
       - run: mise run rust:coverage
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-coverage
           path: lcov.info
@@ -248,7 +248,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -270,7 +270,7 @@ jobs:
     env:
       BEAM_CARGO_FEATURES: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -287,7 +287,7 @@ jobs:
       - run: mise run codegen:openapi:check
 
       - name: Upload OpenAPI artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openapi-artifacts
           path: |
@@ -301,7 +301,7 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
       # biome.json excludes the generated api.gen.ts, so this needs no OpenAPI.
@@ -313,10 +313,10 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: openapi-artifacts
           path: beam-web
@@ -328,17 +328,17 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: openapi-artifacts
           path: beam-web
       - run: mise run ts:coverage
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: web-coverage
           path: "**/coverage"
@@ -351,10 +351,10 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: openapi-artifacts
           path: beam-web
@@ -369,7 +369,7 @@ jobs:
     steps:
       # Starlight's lastUpdated reads git history; a shallow clone renders wrong
       # "Last updated" dates rather than failing, so the error would ship silently.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: jdx/mise-action@v4
@@ -391,13 +391,13 @@ jobs:
     if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: mise run android:lint
 
   android-test:
@@ -406,18 +406,18 @@ jobs:
     if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: mise run android:test
 
       - name: Upload test reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-test-reports
           path: beam-android/**/build/reports/tests
@@ -430,20 +430,20 @@ jobs:
     if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: mise run android:screenshot
 
       # The diffs are the whole point of a failed screenshot check: without
       # them a reviewer knows only that something moved, not what.
       - name: Upload screenshot diffs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-screenshot-diffs
           path: beam-android/**/build/outputs/roborazzi
@@ -456,13 +456,13 @@ jobs:
     if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - run: mise run android:build
 
   # The single required status check. Branch protection should require this job
