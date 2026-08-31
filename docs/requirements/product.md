@@ -20,7 +20,7 @@ Native clients exist for a specific reason rather than as a matter of taste. Bea
 whether a title plays at all is decided by what the client can decode; a browser without an HEVC or
 AV1 decoder simply fails on a file a phone would play in hardware. The logic that makes that
 decision is shared across native clients by `beam-client-core`, a Rust crate consumed over UniFFI —
-see [ADR-0011](../architecture/decisions/ADR-0011-native-client-rust-core.md).
+see [ADR-0012](../architecture/decisions/ADR-0012-native-client-rust-core.md).
 
 ## Personas
 

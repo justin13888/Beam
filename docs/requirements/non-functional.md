@@ -164,7 +164,7 @@ requirements (referenced below as FR-xxx).
   therefore lifts the cookie out of an in-app WebView. A native token mint — an endpoint issuing a
   credential to a client that can prove an OIDC exchange without a browser — SHOULD replace this;
   until it exists, this is a recorded limitation rather than a property of the design. See
-  [ADR-0011](../architecture/decisions/ADR-0011-native-client-rust-core.md).
+  [ADR-0012](../architecture/decisions/ADR-0012-native-client-rust-core.md).
 - **NFR-602**: Business logic in the service layer MUST remain isolated from web-framework types
   (HTTP requests/responses/extractors); such logic MUST be reachable and testable without going
   through an HTTP layer, preserving the option of a non-HTTP transport without a rewrite.

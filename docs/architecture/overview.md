@@ -127,7 +127,7 @@ The logic every native client would otherwise reimplement: the generated REST cl
 TLS trust decisions, codec capability matching, source selection, up-next resolution, the progress
 throttle and its retry queue, and cursor paging. Exposed to Kotlin and Swift over UniFFI. Depends
 on none of `beam-domain`, `beam-index`, or `beam-server` — see
-[ADR-0011](decisions/ADR-0011-native-client-rust-core.md). Not linked into `beam-server`; it is
+[ADR-0012](decisions/ADR-0012-native-client-rust-core.md). Not linked into `beam-server`; it is
 built for the clients only.
 
 **beam-android**

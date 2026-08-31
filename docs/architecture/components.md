@@ -185,7 +185,7 @@ so the suite runs with zero backend, mirroring the Rust side's zero-infrastructu
 
 The logic every native client would otherwise reimplement, owned once in Rust and exposed to
 Kotlin (and later Swift) over UniFFI 0.32 —
-[ADR-0011](decisions/ADR-0011-native-client-rust-core.md). It deliberately depends on none of
+[ADR-0012](decisions/ADR-0012-native-client-rust-core.md). It deliberately depends on none of
 `beam-domain`, `beam-index`, or `beam-server`: `beam-domain` takes a non-optional `sea-orm`
 dependency and would drag a Postgres driver into an Android `.so`, and `beam-index` links FFmpeg,
 which does not cross-compile to Android.
@@ -231,7 +231,7 @@ plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
   ExoPlayer can read directly.
 - **Auth** lifts the `beam_session` cookie from an in-app WebView, which is the only flow the
   server currently supports — see NFR-605 and
-  [ADR-0011](decisions/ADR-0011-native-client-rust-core.md).
+  [ADR-0012](decisions/ADR-0012-native-client-rust-core.md).
 
 **Testing:** 129 JVM tests plus Roborazzi screenshot references, run under Robolectric. No emulator
 runs in CI.

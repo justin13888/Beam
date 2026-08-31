@@ -1,4 +1,4 @@
-# ADR-0011: A shared Rust core for native clients, with a generated REST client
+# ADR-0012: A shared Rust core for native clients, with a generated REST client
 
 ## Status
 
