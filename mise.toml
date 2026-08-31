@@ -618,7 +618,11 @@ for file in $(git ls-files '*.rs'); do
               if ((getline nxt) > 0) {
                   n = nxt
                   sub(/^[ \t]+/, "", n)
-                  if (n !~ /^(pub )?use / && prev != "#[mutants::skip]") {
+                  # `use` items take no mutants, and a non-inline `mod foo;`
+                  # cannot carry an attribute proc macro at all -- that is
+                  # unstable -- so such files are excluded by path in
+                  # .cargo/mutants.toml instead. Everything else must be marked.
+                  if (n !~ /^(pub )?use / && n !~ /^(pub )?mod [A-Za-z_][A-Za-z0-9_]*;/ && prev != "#[mutants::skip]") {
                       printf "%s:%d: test-only item is not marked #[mutants::skip]\n", f, NR - 1
                       bad = 1
                   }
