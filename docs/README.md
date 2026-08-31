@@ -26,10 +26,11 @@ responsibility.
    - [`streaming.md`](architecture/streaming.md) — direct-play delivery model (never transcode).
    - [`components.md`](architecture/components.md) — per-crate/app ownership, module layout,
      boundaries, and testing approach.
-   - [`kynos-migration-readiness.md`](architecture/kynos-migration-readiness.md) — the blocking
-     framework and client-tool contract for the ratified post-Salvo migration; not current state.
+   - [`kynos-migration-readiness.md`](architecture/kynos-migration-readiness.md) — the framework
+     and client-tool contract the Salvo-to-Kynos migration had to satisfy, with the status each
+     gate ended at; the one unmet gate is the browser toolchain.
    - [`decisions/`](architecture/decisions/) — ADRs recording the settled, non-obvious calls
-     (see its [README](architecture/decisions/README.md); ADR-0001 through ADR-0010).
+     (see its [README](architecture/decisions/README.md); ADR-0001 through ADR-0012).
 3. **[`testing.md`](testing.md)** — zero-dependency unit testing, fakes over mocks, subcutaneous
    e2e, coverage tooling.
 4. **[`operations/`](operations/)** — how to run the system.

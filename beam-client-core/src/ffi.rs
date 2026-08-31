@@ -360,7 +360,7 @@ impl BeamClient {
     /// out with no signal is still signed out on this device.
     pub async fn logout(&self, server_id: String) -> Result<(), BeamError> {
         let client = self.client_for(&server_id)?;
-        let _ = client.beam_auth_server_oidc_routes_oidc_logout().await;
+        let _ = client.logout(None).await;
 
         self.with_context(&server_id, |context| context.cookie.clear())?;
         self.storage
@@ -401,7 +401,7 @@ impl BeamClient {
         let record = self.record_for(&server_id)?;
 
         let response = client
-            .beam_server_routes_media_get_media_sources(media_id)
+            .get_media_sources(media_id, None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
 
@@ -597,7 +597,7 @@ impl BeamClient {
     pub async fn browse_media(&self, query: BrowseQuery) -> Result<MediaPage, BeamError> {
         let (server_id, client, record) = self.active_context()?;
         let response = client
-            .beam_server_routes_media_browse_media(browse_params(&query)?)
+            .browse_media(browse_params(&query)?)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(MediaPage::from_generated(response.into_inner(), &record))
@@ -627,7 +627,7 @@ impl BeamClient {
     pub async fn genres(&self) -> Result<Vec<String>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_server_routes_genres_list_genres()
+            .list_genres(None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(response.into_inner().genres)
@@ -684,7 +684,7 @@ impl BeamClient {
     pub async fn libraries(&self) -> Result<Vec<LibrarySummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_server_routes_admin_list_libraries()
+            .list_libraries(None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(response
@@ -702,7 +702,7 @@ impl BeamClient {
     pub async fn library(&self, library_id: String) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_server_routes_admin_get_library(library_id)
+            .get_library(library_id, None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
@@ -719,7 +719,7 @@ impl BeamClient {
     ) -> Result<Vec<LibraryFileSummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_server_routes_admin_get_library_files(library_id)
+            .get_library_files(library_id, None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(response
@@ -747,11 +747,13 @@ impl BeamClient {
         limit: Option<u32>,
     ) -> Result<Vec<ContinueWatchingEntry>, BeamError> {
         let (server_id, client, record) = self.active_context()?;
-        let params = crate::api::BeamServerRoutesPlaybackGetContinueWatchingParams {
+        let params = crate::api::GetContinueWatchingParams {
             limit: limit.map(i64::from),
+            origin: None,
+            referer: None,
         };
         let response = client
-            .beam_server_routes_playback_get_continue_watching(params)
+            .get_continue_watching(params)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
 
@@ -789,12 +791,14 @@ impl BeamClient {
         offset: Option<u32>,
     ) -> Result<HistoryPage, BeamError> {
         let (server_id, client, record) = self.active_context()?;
-        let params = crate::api::BeamServerRoutesPlaybackGetHistoryParams {
+        let params = crate::api::GetHistoryParams {
             limit: limit.map(i64::from),
             offset: offset.map(i64::from),
+            origin: None,
+            referer: None,
         };
         let response = client
-            .beam_server_routes_playback_get_history(params)
+            .get_history(params)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?
             .into_inner();
@@ -830,10 +834,11 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Storage`] only when the retry queue itself cannot
-    /// be written. A failed *send* is reported as
-    /// [`ProgressOutcome::Queued`], not as an error: the position is safe, and
-    /// a player should not surface a network blip as a playback failure.
+    /// Returns [`BeamError::BadRequest`] when `file_id` is not a UUID, and
+    /// [`BeamError::Storage`] only when the retry queue itself cannot be
+    /// written. A failed *send* is reported as [`ProgressOutcome::Queued`],
+    /// not as an error: the position is safe, and a player should not surface
+    /// a network blip as a playback failure.
     pub async fn report_progress(
         &self,
         file_id: String,
@@ -841,6 +846,7 @@ impl BeamClient {
         duration_secs: Option<f64>,
         force: bool,
     ) -> Result<ProgressOutcome, BeamError> {
+        let wire_file_id = parse_uuid("file_id", &file_id)?;
         let (server_id, client, _) = self.active_context()?;
         let (throttle, queue) = self.with_context(&server_id, |context| {
             (Arc::clone(&context.throttle), Arc::clone(&context.queue))
@@ -861,12 +867,12 @@ impl BeamClient {
                 } => (position_secs, duration_secs),
             };
 
-        let body = crate::api::types::BeamServerRoutesPlaybackReportProgressRequest {
+        let body = crate::api::types::ReportProgressRequest {
             duration_secs: duration,
             position_secs: position,
         };
         match client
-            .beam_server_routes_playback_report_playback_progress(file_id.clone(), &body)
+            .report_playback_progress(wire_file_id, None, &body)
             .await
         {
             Ok(response) => {
@@ -912,12 +918,19 @@ impl BeamClient {
 
         let mut sent = 0_u32;
         for entry in queue.ready().await? {
-            let body = crate::api::types::BeamServerRoutesPlaybackReportProgressRequest {
+            let Ok(wire_file_id) = uuid::Uuid::parse_str(&entry.file_id) else {
+                // The path parameter is a UUID, so an entry that is not one
+                // was written by an older build and can never be accepted.
+                // It is treated exactly like a rejected send.
+                queue.record_failure(&entry.file_id, None).await?;
+                break;
+            };
+            let body = crate::api::types::ReportProgressRequest {
                 duration_secs: entry.duration_secs,
                 position_secs: entry.position_secs,
             };
             match client
-                .beam_server_routes_playback_report_playback_progress(entry.file_id.clone(), &body)
+                .report_playback_progress(wire_file_id, None, &body)
                 .await
             {
                 Ok(_) => {
@@ -957,7 +970,7 @@ impl BeamClient {
     pub async fn sessions(&self) -> Result<Vec<DeviceSession>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_auth_server_oidc_routes_oidc_list_sessions()
+            .list_sessions(None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(response
@@ -975,7 +988,7 @@ impl BeamClient {
     pub async fn revoke_session(&self, session_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
         client
-            .beam_auth_server_oidc_routes_oidc_delete_session(session_id)
+            .delete_session(session_id, None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(())
@@ -993,7 +1006,7 @@ impl BeamClient {
     pub async fn logout_everywhere(&self) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
         client
-            .beam_auth_server_oidc_routes_oidc_logout_all()
+            .logout_all(None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
 
@@ -1015,7 +1028,7 @@ impl BeamClient {
     pub async fn admin_status(&self) -> Result<AdminStatus, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_server_routes_admin_get_admin_status()
+            .get_admin_status(None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(AdminStatus::from_generated(response.into_inner()))
@@ -1032,12 +1045,14 @@ impl BeamClient {
         offset: Option<u32>,
     ) -> Result<AdminUserPage, BeamError> {
         let (server_id, client, record) = self.active_context()?;
-        let params = crate::api::BeamServerRoutesAdminListAdminUsersParams {
+        let params = crate::api::ListAdminUsersParams {
             limit: limit.map(i64::from),
             offset: offset.map(i64::from),
+            origin: None,
+            referer: None,
         };
         let response = client
-            .beam_server_routes_admin_list_admin_users(params)
+            .list_admin_users(params)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?
             .into_inner();
@@ -1055,16 +1070,18 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::BadRequest`] when `user_id` is not a UUID, and
+    /// [`BeamError::Forbidden`] for a non-administrator.
     pub async fn set_user_disabled(
         &self,
         user_id: String,
         disabled: bool,
     ) -> Result<(), BeamError> {
+        let wire_user_id = parse_uuid("user_id", &user_id)?;
         let (server_id, client, _) = self.active_context()?;
-        let body = crate::api::types::BeamServerModelsAdminUpdateAdminUserRequest { disabled };
+        let body = crate::api::types::UpdateAdminUserRequest { disabled };
         client
-            .beam_server_routes_admin_update_admin_user(user_id, &body)
+            .update_admin_user(wire_user_id, None, &body)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(())
@@ -1081,12 +1098,14 @@ impl BeamClient {
         offset: Option<u32>,
     ) -> Result<Vec<AdminLogEntry>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let params = crate::api::BeamServerRoutesAdminGetAdminLogsParams {
+        let params = crate::api::GetAdminLogsParams {
             limit: limit.map(i64::from),
             offset: offset.map(i64::from),
+            origin: None,
+            referer: None,
         };
         let response = client
-            .beam_server_routes_admin_get_admin_logs(params)
+            .get_admin_logs(params)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(response
@@ -1104,7 +1123,7 @@ impl BeamClient {
     pub async fn admin_log_count(&self) -> Result<u64, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_server_routes_admin_get_admin_log_count()
+            .get_admin_log_count(None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(u64::try_from(response.into_inner().count).unwrap_or(0))
@@ -1113,22 +1132,26 @@ impl BeamClient {
     /// Recent server events, newest first.
     ///
     /// This polls `GET /v1/admin/events` rather than subscribing to
-    /// `/v1/admin/events/stream`. The streaming endpoint declares a `200` with
-    /// no content at all -- salvo's macro cannot see the runtime `sse::stream()`
-    /// call -- and a typed event stream needs OpenAPI 3.2's `itemSchema`, which
-    /// salvo does not emit. Hand-writing that one client is not an option, so
-    /// the feed polls until the contract can describe it.
+    /// `/v1/admin/events/stream`. Kynos now describes the streaming endpoint
+    /// with OpenAPI 3.2's `itemSchema`, and spargen lowers it to
+    /// `Client::stream_admin_events` returning
+    /// `support::EventStream<types::AdminEventDto>`. Nothing on the UniFFI
+    /// surface consumes a stream yet -- UniFFI has no async-iterator type, so
+    /// exposing it needs a callback-interface subscription rather than a return
+    /// value -- so the feed still polls.
     ///
     /// # Errors
     ///
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn admin_events(&self, limit: Option<u32>) -> Result<Vec<AdminEvent>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let params = crate::api::BeamServerRoutesAdminGetAdminEventsParams {
+        let params = crate::api::GetAdminEventsParams {
             limit: limit.map(i64::from),
+            origin: None,
+            referer: None,
         };
         let response = client
-            .beam_server_routes_admin_get_admin_events(params)
+            .get_admin_events(params)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(response
@@ -1149,9 +1172,9 @@ impl BeamClient {
         root_path: String,
     ) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let body = crate::api::types::BeamServerModelsAdminCreateLibraryRequest { name, root_path };
+        let body = crate::api::types::CreateLibraryRequest { name, root_path };
         let response = client
-            .beam_server_routes_admin_create_library(&body)
+            .create_library(None, &body)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
@@ -1165,7 +1188,7 @@ impl BeamClient {
     pub async fn delete_library(&self, library_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
         client
-            .beam_server_routes_admin_delete_library(library_id)
+            .delete_library(library_id, None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(())
@@ -1179,7 +1202,7 @@ impl BeamClient {
     pub async fn scan_library(&self, library_id: String) -> Result<u32, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_server_routes_admin_scan_library(library_id)
+            .scan_library(library_id, None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(u32::try_from(response.into_inner().added).unwrap_or(0))
@@ -1196,7 +1219,7 @@ impl BeamClient {
     pub async fn refresh_media_metadata(&self, media_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
         client
-            .beam_server_routes_admin_refresh_media_metadata(media_id.clone())
+            .refresh_media_metadata(media_id.clone(), None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         if let Ok(cache) = self.metadata_cache(&server_id) {
@@ -1213,11 +1236,22 @@ impl BeamClient {
     pub async fn health(&self) -> Result<ServerHealth, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = client
-            .beam_server_routes_health_health_check()
+            .get_health(None)
             .await
             .map_err(|error| self.map_error(&server_id, &error.to_string()))?;
         Ok(ServerHealth::from_generated(response.into_inner()))
     }
+}
+
+/// A path parameter the API declares as `format: uuid`.
+///
+/// The FFI surface takes identifiers as strings, because that is what the
+/// foreign bindings carry; the generated client takes a [`uuid::Uuid`], so a
+/// malformed identifier is rejected here rather than on the wire.
+fn parse_uuid(field: &str, value: &str) -> Result<uuid::Uuid, BeamError> {
+    uuid::Uuid::parse_str(value).map_err(|_| BeamError::BadRequest {
+        detail: format!("{field} is not a valid identifier"),
+    })
 }
 
 /// The episode with this id, wherever it sits in a series.
@@ -1361,7 +1395,7 @@ impl BeamClient {
             return Ok(hit.clone());
         }
         let response = client
-            .beam_server_routes_media_get_media_detail(media_id.to_owned())
+            .get_media_detail(media_id.to_owned(), None)
             .await
             .map_err(|error| error.to_string())?;
         let detail = MediaDetail::from_generated(response.into_inner(), record);
@@ -1452,7 +1486,7 @@ impl BeamClient {
     async fn fetch_me(&self, server_id: &str) -> Result<UserSummary, BeamError> {
         let client = self.client_for(server_id)?;
         let response = client
-            .beam_auth_server_oidc_routes_oidc_me()
+            .get_current_user(None)
             .await
             .map_err(|error| self.map_error(server_id, &error.to_string()))?;
         let me = response.into_inner();
@@ -1496,10 +1530,10 @@ impl BeamClient {
 /// Normalise a generated `MediaSource` into the core's own view, resolving its
 /// relative URLs against the server that served it.
 fn to_view(
-    source: crate::api::types::BeamServerModelsMediaSourceMediaSource,
+    source: crate::api::types::MediaSource,
     record: &ServerRecord,
 ) -> Result<MediaSourceView, BeamError> {
-    // JSON Schema has no unsigned integer type, so salvo's `uint32`/`uint64`
+    // JSON Schema has no unsigned integer type, so kynos's `uint32`/`uint64`
     // formats reach the generated client as `i64`. Narrowing here rather than
     // widening the core's own types keeps "a size cannot be negative" true in
     // the one place that reasons about sizes; a nonsensical negative is

@@ -1,7 +1,7 @@
-use salvo::oapi::ToSchema;
+use kynos::Schema;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct Resolution {
     pub width: u32,
     pub height: u32,

@@ -8,16 +8,22 @@ architecture, and run/test `beam-server` per its own README for local developmen
 
 ## Architecture
 
-`beam-auth` is a library crate with two feature flags:
+`beam-auth` is a library crate, and it has **no web-framework dependency**. Its HTTP adapter moved
+to `beam-server/src/routes/auth.rs` with the Kynos migration, because
+[ADR-0010](../docs/architecture/decisions/ADR-0010-openapi-3-2-kynos.md) requires the framework to
+stay in `beam-server`. What is left here is transport-independent by construction rather than by
+convention.
+
+Feature flags:
 
 - **`utils`** -- Core domain types and trait abstractions: `UserRepository`, `SessionStore`,
   `PendingAuthStore`, `OidcClient`, plus their sea-orm-backed (`Sql*`) and `InMemory*` fake
   implementations.
-- **`server`** (implies `utils`) -- Salvo HTTP handlers (`oidc_routes.rs`) that wire the above
-  into a router.
+- **`oidc`** (the default) -- real discovery and token exchange via `openidconnect` + `reqwest`.
+- **`test-utils`** -- `FakeOidcClient` and the in-memory doubles, with no HTTP client.
 
-`beam-server` depends on `beam-auth` and mounts its routes directly into its own router; there is
-no network call between them.
+`beam-server` links `beam-auth` and calls it in process; there is no network call between them. The
+route table below is served by `beam-server`.
 
 ## Auth flow
 
@@ -57,5 +63,6 @@ See [ADR-0003](../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md) for the
 Zero-dependency: `InMemoryUserRepository`, `InMemorySessionStore`, `InMemoryPendingAuthStore`, and
 `FakeOidcClient` (a programmable fake IdP that verifies the state/nonce/PKCE round-trip the same
 way a real one would, including rejecting a mismatched verifier/nonce) let the full login/
-callback/me/logout/sessions flow be exercised via `salvo::test::TestClient` with no real IdP,
-network, or database. See the `test-utils` feature.
+callback/me/logout/sessions flow be exercised with no real IdP, network, or database. The
+HTTP-level round-trip runs in `beam-server` through `kynos::test::TestClient`, over these same
+fakes. See the `test-utils` feature.

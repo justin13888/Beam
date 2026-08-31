@@ -6,8 +6,23 @@ license.workspace = true
 publish.workspace = true
 default-run = "beam-server"
 
+
+[lib]
+# TODO(getkono/kynos#95): re-enable once the macro's generated doc is fixed.
+#
+# Every `#[kynos::get(...)]` emits a `relative_uri` doc comment whose second
+# paragraph is indented eight spaces. Markdown reads a 4+ space indent as a code
+# block and rustdoc compiles an unannotated code block as Rust, so each of the
+# 34 route attributes produces a doctest that tries to compile an English
+# sentence and fails -- which fails `cargo test --workspace`.
+#
+# This costs nothing today: all 34 doctests are macro-generated and this crate
+# has no hand-written ones. Restore the default the moment it is fixed, or a
+# doctest written later will be silently skipped.
+doctest = false
+
 [dependencies]
-beam-auth = { path = "../beam-auth", features = ["utils"] }
+beam-auth = { path = "../beam-auth", features = ["utils", "oidc"] }
 beam-domain = { path = "../beam-domain" }
 beam-entity = { path = "../beam-entity" }
 beam-index = { path = "../beam-index" }
@@ -24,16 +39,19 @@ color-eyre = "0.6.5"
 confique = { workspace = true }
 dotenvy = "0.15.7"
 eyre = "0.6.14"
+# `Sse` is generic over `futures_core::Stream`, which kynos does not re-export.
+futures-core = { workspace = true }
+kynos = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 mutants = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 rust_decimal = "1.42.1"
-salvo = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tempfile = "3.27.0"
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -43,6 +61,8 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 futures = "0.3.34"
+# Adds the in-process `TestClient` and the contract-conformance assertions.
+kynos = { workspace = true, features = ["test-util"] }
 beam-auth = { path = "../beam-auth", features = ["test-utils"] }
 beam-domain = { path = "../beam-domain", features = ["test-utils"] }
 beam-index = { path = "../beam-index", features = ["test-utils"] }

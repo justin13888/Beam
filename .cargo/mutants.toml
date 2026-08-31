@@ -19,7 +19,7 @@
 #
 #  1. Signal correctness. This architecture deliberately exercises beam-domain
 #     and beam-index logic through beam-server's subcutaneous
-#     salvo::test::TestClient tests (AGENTS.md, NFR-204). Under the default, a
+#     kynos::test::TestClient tests (AGENTS.md, NFR-204). Under the default, a
 #     beam-domain mutant killed only by a beam-server route test is reported as
 #     MISSED -- manufacturing a large backlog of phantom gaps on day one and
 #     destroying trust in the tool before it has said anything true.
@@ -53,7 +53,7 @@ test_tool = "nextest"
 # Copy target/ into each scratch build directory.
 #
 # The default (false) starts every build dir empty, so each one does a full
-# clean build of salvo, sea-orm/sqlx, rustls, openidconnect and ffmpeg-next
+# clean build of kynos, sea-orm/sqlx, rustls, openidconnect and ffmpeg-next
 # before testing its first mutant -- once per parallel job. Locally that is
 # worse than it sounds: BEAM_CARGO_FEATURES defaults to the statically vendored
 # FFmpeg (ADR-0007), whose build script compiles all of FFmpeg from source, so

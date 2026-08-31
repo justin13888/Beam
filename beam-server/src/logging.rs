@@ -17,7 +17,7 @@ pub fn init_tracing() {
             )
             .with(
                 tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("beam_server=trace,salvo=debug")
+                    tracing_subscriber::EnvFilter::new("beam_server=trace,kynos=debug")
                 }),
             )
             .init();
@@ -33,7 +33,7 @@ pub fn init_tracing() {
             )
             .with(
                 tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("beam_server=debug,salvo=debug")
+                    tracing_subscriber::EnvFilter::new("beam_server=debug,kynos=debug")
                 }),
             )
             .init();

@@ -1,5 +1,8 @@
+//! The `/v1` route table, and the router the process serves.
+
 pub mod admin;
 pub mod api_error;
+pub mod auth;
 pub mod genres;
 pub mod health;
 pub mod media;
@@ -8,168 +11,173 @@ pub mod middleware;
 pub mod playback;
 pub mod rate_limit;
 pub mod stream;
-#[cfg(test)]
-pub(crate) mod test_support;
+pub mod tags;
 
-use metrics_exporter_prometheus::PrometheusHandle;
-use salvo::prelude::*;
+// No `pub use <module>::*`. Two modules declare a `FilePath` -- `playback` for
+// progress reporting and `stream` for delivery -- and glob re-exporting both
+// made the name ambiguous at this level. Nothing outside this module used the
+// globs, and Kynos's own convention is that every item has one canonical path,
+// so they are gone rather than disambiguated.
 
-pub use admin::*;
-pub use genres::*;
-pub use health::*;
-pub use media::*;
-pub use playback::*;
-pub use stream::*;
+use kynos::middleware::rate_limit::RateLimit;
+use kynos::openapi::Info;
+use kynos::prelude::*;
+use kynos::router::docs::Docs;
 
-use crate::config::ServerConfig;
+use crate::bootstrap;
+use crate::routes::rate_limit::{BeamRateLimit, Class};
 use crate::state::AppState;
-use rate_limit::RateLimiters;
 
-/// Builds the rate limiters to install, or `None` when rate limiting is
-/// disabled (`BEAM_RATE_LIMIT_ENABLED=false`) so no hoops are mounted at all.
-fn build_rate_limiters(config: &ServerConfig) -> Option<RateLimiters> {
-    config
-        .rate_limit_enabled
-        .then(|| RateLimiters::from_config(config))
-}
-
-/// REST-only sub-routes (health, stream, media, libraries, admin, auth).
-/// Single source of truth used by both `create_router` and
-/// `create_docs_router` so new endpoints only need to be registered in one
-/// place.
-///
-/// `rate_limiters` is `Some` only for the live server (`create_router`); the
-/// docs router passes `None` so the rate-limit hoops never appear there and the
-/// exported OpenAPI spec stays byte-for-byte unchanged.
-fn rest_routes(rate_limiters: Option<RateLimiters>) -> Router {
-    // Pull the two rate-limited subrouters out of the chain so their limiter
-    // hoops can be attached here (and only here). Split first so each limiter
-    // moves into exactly one router.
-    let (auth_limiter, search_limiter) = match rate_limiters {
-        Some(RateLimiters { auth, search }) => (Some(auth), Some(search)),
-        None => (None, None),
-    };
-
-    // SEARCH class: only the browse/search endpoint. `media/{id}` and
-    // `media/{id}/sources` are separate routers below and stay unlimited.
-    let mut media_browse = Router::with_path("media").get(browse_media);
-    if let Some(search) = search_limiter {
-        media_browse = media_browse.hoop(search);
-    }
-
-    // AUTH class: the whole `/auth` subtree (login + callback).
-    // OIDC login/callback stay under /auth; everything else that acts on the
-    // resulting session cookie is top-level, matching the final ratified shape
-    // (see ADR-0003) now that no legacy auth routes remain to coexist with.
-    let mut auth_router = Router::with_path("auth")
-        .push(Router::with_path("login").get(beam_auth::server::oidc_login))
-        .push(Router::with_path("callback").get(beam_auth::server::oidc_callback));
-    if let Some(auth) = auth_limiter {
-        auth_router = auth_router.hoop(auth);
-    }
-
-    Router::new()
-        .push(Router::with_path("health").get(health_check))
-        .push(media_browse)
-        .push(Router::with_path("media/{id}").get(get_media_detail))
-        .push(Router::with_path("media/{id}/sources").get(get_media_sources))
-        .push(Router::with_path("genres").get(list_genres))
-        .push(Router::with_path("libraries").get(list_libraries))
-        .push(Router::with_path("libraries/{id}").get(get_library))
-        .push(Router::with_path("libraries/{id}/files").get(get_library_files))
-        .push(Router::with_path("files/{file_id}/progress").put(report_playback_progress))
-        .push(Router::with_path("files/{file_id}/stream").get(stream_file))
-        .push(Router::with_path("files/{file_id}/download").get(download_file))
-        .push(Router::with_path("continue-watching").get(get_continue_watching))
-        .push(Router::with_path("history").get(get_history))
-        .push(
-            Router::with_path("admin")
-                .push(Router::with_path("libraries").post(create_library))
-                .push(Router::with_path("libraries/{id}/scan").post(scan_library))
-                .push(Router::with_path("libraries/{id}").delete(delete_library))
-                .push(Router::with_path("media/{id}/refresh").post(refresh_media_metadata))
-                .push(Router::with_path("logs").get(get_admin_logs))
-                .push(Router::with_path("logs/count").get(get_admin_log_count))
-                .push(Router::with_path("events").get(get_admin_events))
-                .push(Router::with_path("events/stream").get(stream_admin_events))
-                .push(Router::with_path("users").get(list_admin_users))
-                .push(Router::with_path("users/{id}").patch(update_admin_user))
-                .push(Router::with_path("status").get(get_admin_status)),
-        )
-        .push(auth_router)
-        .push(Router::with_path("me").get(beam_auth::server::oidc_me))
-        .push(Router::with_path("logout").post(beam_auth::server::oidc_logout))
-        .push(Router::with_path("logout-all").post(beam_auth::server::oidc_logout_all))
-        .push(Router::with_path("sessions").get(beam_auth::server::oidc_list_sessions))
-        .push(Router::with_path("sessions/{id}").delete(beam_auth::server::oidc_delete_session))
-}
-
-/// Create the main API router with all routes.
-///
-/// `metrics_handle` is `Some` when `BEAM_ENABLE_METRICS=true` (main installs
-/// the Prometheus recorder and passes its handle here). It switches on both
-/// metrics pieces at once: the [`metrics_mw::HttpMetrics`] hoop wrapping the
-/// `/v1` subtree, and the top-level unauthenticated `GET /metrics` exposition
-/// route. When `None`, neither is mounted — zero overhead, matching the
-/// flag's promise. `/metrics` never appears in `create_docs_router`, so the
-/// exported OpenAPI spec is independent of the flag.
-pub fn create_router(state: AppState, metrics_handle: Option<PrometheusHandle>) -> Router {
-    // Note: No authorization is done at the top-level here -- each endpoint is
-    // either public or self-contained (admin routes gated via
-    // `require_admin`).
-    //
-    // The `beam_auth::server::oidc_*` handlers (mounted individually above)
-    // pull their dependencies straight from the depot via
-    // `depot.obtain::<Arc<dyn ...>>()`, so they're injected here individually
-    // rather than only injecting the outer `AppState`.
-    let services = &state.services;
-    let user_repo = services.user_repo.clone();
-    let session_store = services.session_store.clone();
-    let oidc_client = services.oidc_client.clone();
-    let pending_auth_store = services.pending_auth_store.clone();
-    let oidc_config = services.oidc_config.clone();
-
-    // Build limiters (or not) before `state` is moved into the affix hoop.
-    let rate_limiters = build_rate_limiters(&state.config);
-
-    let mut v1 = Router::with_path("v1");
-    if metrics_handle.is_some() {
-        // First hoop on the subtree = outermost: it observes the final status
-        // of every /v1 response, including 429s from the rate limiters and
-        // same-origin rejections below.
-        v1 = v1.hoop(metrics_mw::HttpMetrics);
-    }
-    let v1 = v1
-        .hoop(middleware::enforce_same_origin)
-        .push(rest_routes(rate_limiters));
-
-    let mut router = Router::new()
-        .hoop(affix_state::inject(state))
-        .hoop(affix_state::inject(user_repo))
-        .hoop(affix_state::inject(session_store))
-        .hoop(affix_state::inject(oidc_client))
-        .hoop(affix_state::inject(pending_auth_store))
-        .hoop(affix_state::inject(oidc_config))
-        .push(v1);
-
-    if let Some(handle) = metrics_handle {
-        router =
-            router.push(Router::with_path("metrics").get(metrics_mw::MetricsEndpoint::new(handle)));
-    }
-
-    router
-}
-
-/// Create a minimal router for OpenAPI documentation export.
-///
-/// Includes only the REST endpoints (health, stream, auth) without state
-/// injection middleware.
-pub fn create_docs_router() -> Router {
-    // `None`: no rate-limit hoops in the docs router, keeping the exported
-    // OpenAPI spec unchanged.
-    Router::new().push(Router::with_path("v1").push(rest_routes(None)))
-}
+#[cfg(test)]
+#[path = "test_support.rs"]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "contract_tests.rs"]
 mod contract_tests;
+
+/// Every `/v1` operation, as one table.
+///
+/// Grouped by tag rather than mounted flat. Every route here also carries a
+/// `tag = ...` in its own attribute, which reads like the tag is set there --
+/// but Kynos 0.1.0 never applies it: `Router::describe` unions the router's and
+/// the group's tag scopes and does not read the endpoint's own `TAGS` const, so
+/// a route-level tag is accepted by the macro and silently dropped. Every tag
+/// disappeared from the exported document when the port first ran.
+///
+/// So the tags are declared where Kynos does read them. The route attributes
+/// keep theirs as the statement of intent, and the grouping is one group per
+/// tag, which is the structure Kynos recommends anyway. Filed upstream as
+/// getkono/kynos#94; when it lands, the groups that exist only to carry a tag
+/// can collapse back.
+///
+/// One `mount` per module rather than one list: `routes!` builds a tuple, and
+/// the arity runs out well before Beam's operation count. Grouping by module is
+/// what the split would have been anyway.
+pub fn rest_routes() -> Router<AppState> {
+    Router::new()
+        .group(
+            Group::new("/")
+                .tag::<tags::Health>()
+                .mount(kynos::routes![health::health_check]),
+        )
+        .group(
+            Group::new("/")
+                .tag::<tags::Media>()
+                .mount(kynos::routes![genres::list_genres])
+                .mount(kynos::routes![
+                    media::get_media_detail,
+                    media::get_media_sources,
+                ]),
+        )
+        // `browse_media` fans out into metadata queries, so it is the most
+        // expensive read path and the one worth a budget. Its own group: two
+        // `RateLimit`s on one operation would both declare a 429 and both add
+        // `X-RateLimit-*`, which Kynos refuses at build time.
+        .group(
+            Group::new("/")
+                .tag::<tags::Media>()
+                .mount(kynos::routes![media::browse_media])
+                .intercept(RateLimit::new(BeamRateLimit::new(Class::Search))),
+        )
+        .group(
+            Group::new("/")
+                .tag::<tags::Playback>()
+                .mount(kynos::routes![
+                    playback::report_playback_progress,
+                    playback::get_continue_watching,
+                    playback::get_history,
+                ])
+                .mount(kynos::routes![
+                    stream::stream_file,
+                    stream::head_stream_file,
+                    stream::download_file,
+                    stream::head_download_file,
+                ]),
+        )
+        .group(
+            Group::new("/")
+                .tag::<tags::Admin>()
+                .mount(kynos::routes![
+                    admin::list_libraries,
+                    admin::get_library,
+                    admin::get_library_files,
+                    admin::create_library,
+                    admin::scan_library,
+                    admin::refresh_media_metadata,
+                    admin::delete_library,
+                ])
+                .mount(kynos::routes![
+                    admin::get_admin_logs,
+                    admin::get_admin_log_count,
+                    admin::get_admin_events,
+                    admin::stream_admin_events,
+                    admin::list_admin_users,
+                    admin::update_admin_user,
+                    admin::get_admin_status,
+                ]),
+        )
+        .group(Group::new("/").tag::<tags::Auth>().mount(kynos::routes![
+            auth::oidc_me,
+            auth::oidc_logout,
+            auth::oidc_logout_all,
+            auth::oidc_list_sessions,
+            auth::oidc_delete_session,
+        ]))
+        // The two operations that begin an OIDC flow, sharing one budget --
+        // which is what makes the auth class a class. Keyed by client only, so
+        // spending the budget on `login` also spends it for `callback`.
+        .group(
+            Group::new("/")
+                .tag::<tags::Auth>()
+                .mount(kynos::routes![auth::oidc_login, auth::oidc_callback])
+                .intercept(RateLimit::new(BeamRateLimit::new(Class::Auth))),
+        )
+}
+
+/// The router the process serves and the document is derived from.
+///
+/// Takes no arguments on purpose. Kynos derives the dispatch table and the
+/// OpenAPI document from one walk of this value, so anything passed in at
+/// startup would be something the exported description cannot see -- and a
+/// served surface that disagrees with its document is the failure ADR-0010
+/// exists to remove. Everything that used to arrive as an argument (the
+/// Prometheus handle, the rate-limit numbers, the clock) is read off
+/// `AppState` at request time instead.
+///
+/// The CORS policy and the same-origin check are mounted in one expression
+/// because they are one control. `bootstrap::cors_policy` mirrors the request
+/// origin and allows credentials, which on its own would let any site read an
+/// authenticated response; it is safe only because `EnforceSameOrigin` rejects
+/// a cross-origin write before it reaches a handler. Dropping either is a
+/// one-line diff sitting next to the comment that says why it cannot be.
+///
+/// CORS is listed first so it is the outer of the two: a rejected cross-origin
+/// write still leaves with `Access-Control-Allow-Origin`, so the browser
+/// reports the real 403 rather than an opaque network error.
+///
+/// Neither reaches `/metrics` or the docs pages. They are mounted at the root,
+/// and Kynos copies a nested router's interceptors onto that router's own
+/// operations only -- which is what we want: a scrape target has no session to
+/// forge, and a cross-origin reader of `/openapi` has nothing to steal.
+pub fn create_router() -> Router<AppState> {
+    Router::new()
+        .info(Info::new("Beam Server API", "1.0.0"))
+        .nest(
+            "/v1",
+            rest_routes()
+                .intercept(bootstrap::cors_policy())
+                .intercept(middleware::EnforceSameOrigin),
+        )
+        .group(
+            Group::new("/")
+                .tag::<tags::Internal>()
+                .mount(kynos::routes![metrics_mw::render_metrics]),
+        )
+        .observe(metrics_mw::HttpMetrics)
+        .docs(
+            Docs::scalar()
+                .at("/openapi")
+                .description_at("/api-doc/openapi.json"),
+        )
+}

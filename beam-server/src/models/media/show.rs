@@ -4,10 +4,10 @@ use super::{ExternalIdentifiers, Ratings};
 
 use super::Title;
 use chrono::{DateTime, Utc};
-use salvo::oapi::ToSchema;
+use kynos::Schema;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct ShowMetadata {
     /// Stable identifier for this show (UUID).
     pub id: String,
@@ -21,7 +21,7 @@ pub struct ShowMetadata {
     pub seasons: Vec<SeasonMetadata>,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct SeasonMetadata {
     /// Season number
     pub season_number: u32,
@@ -44,7 +44,7 @@ pub struct SeasonMetadata {
     // Add people involved (cast, crew, directors, writers, etc.)
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct ShowDates {
     /// First air date
     pub first_aired: Option<DateTime<Utc>>,
@@ -52,7 +52,7 @@ pub struct ShowDates {
     pub last_aired: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct EpisodeMetadata {
     /// Stable identifier for this episode (UUID).
     pub id: String,

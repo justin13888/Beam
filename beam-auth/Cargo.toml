@@ -6,7 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["server"]
+# `oidc` rather than the old `server`: the HTTP adapter moved to `beam-server`
+# with the Kynos migration (ADR-0010), so this crate no longer has a transport
+# layer to enable. What is left is transport-independent by construction.
+default = ["oidc"]
 utils = [
     "dep:async-trait",
     "dep:beam-domain",
@@ -30,11 +33,6 @@ oidc = [
     "dep:openidconnect",
     "dep:reqwest",
 ]
-server = [
-    "utils",
-    "oidc",
-    "dep:salvo",
-]
 test-utils = ["utils", "beam-domain/test-utils"]
 # The feature set cargo-mutants builds this package with.
 #
@@ -42,7 +40,7 @@ test-utils = ["utils", "beam-domain/test-utils"]
 # feature name that is valid everywhere -- and the set it selects has to compile
 # every `cfg`-gated production path, or mutants in code that was never built are
 # reported MISSED for a reason that has nothing to do with the tests.
-mutation-testing = ["server", "test-utils"]
+mutation-testing = ["oidc", "test-utils"]
 # Opt-in tier: runs the shared repository contracts against a real Postgres.
 # Never enabled by `rust:test`, `rust:coverage`, `mise run ci`, or the pre-push
 # hook -- see NFR-201 and ADR-0011.
@@ -66,7 +64,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ], optional = true }
-salvo = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }

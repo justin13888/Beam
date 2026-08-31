@@ -7,6 +7,21 @@ import { env } from "@/env";
  *
  * Regenerate types with: `bun run codegen:openapi:full`
  * (exports openapi.json from the backend, then generates src/api.gen.ts)
+ *
+ * TODO(#118-followup): `src/api.gen.ts` is STALE and does not describe the
+ * server.
+ *
+ * The Kynos migration moved the contract to OpenAPI 3.2 and renamed every
+ * generated identifier -- `beam_server.models.media.MediaMetadata` is now
+ * `MediaMetadata`, and so on for ~55 schema keys across ~20 files here.
+ * `api.gen.ts` cannot be regenerated yet: `openapi-typescript` 7.13.0 delegates
+ * to @redocly/openapi-core 1.34.8, whose `detectSpec` throws
+ * `Unsupported OpenAPI version: 3.2.0`. Redocly 2.x reads 3.2; openapi-typescript
+ * has not bumped to it.
+ *
+ * beam-web is being rewritten shortly, so it is deliberately NOT being renamed
+ * in the meantime. `ts:typecheck` and `ts:test` are switched off in CI until
+ * then -- see the codegen:openapi task in mise.toml.
  */
 export const apiClient = createClient<paths>({
 	baseUrl: env.C_STREAM_SERVER_URL,
