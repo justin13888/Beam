@@ -96,6 +96,13 @@ jobs:
               # touching a single Swift file.
               - 'beam-client-core/**'
               - 'Cargo.lock'
+              # Every apple-* job cross-compiles for the five Apple triples
+              # declared here, so a change that drops one -- or moves the
+              # channel -- must run them. Without this it matches only the
+              # `rust` filter, the apple jobs report "skipped", ci-ok counts
+              # skipped as success, and the break surfaces on some later,
+              # unrelated pull request.
+              - 'rust-toolchain.toml'
               # The app's version comes from here (ADR-0009).
               - 'version.txt'
             ffmpeg:

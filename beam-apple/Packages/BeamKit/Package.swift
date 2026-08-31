@@ -55,9 +55,14 @@ let package = Package(
         .library(name: "BeamAppShell", targets: ["BeamAppShell"])
     ],
     dependencies: [
+        // Pinned exactly, not `from:`. The references this drives are pixel
+        // comparisons, and the Xcode project resolves its own dependency graph
+        // whose Package.resolved lives inside the generated (and gitignored)
+        // .xcodeproj -- so a floating minor could change the renderer under CI
+        // with nothing in the diff to explain the failure.
         .package(
             url: "https://github.com/pointfreeco/swift-snapshot-testing",
-            from: "1.18.0"
+            exact: "1.19.4"
         )
     ],
     targets: [

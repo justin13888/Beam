@@ -51,8 +51,44 @@ targets:
       - path: Apps/Shared
       - path: Apps/iOS
         excludes: ["Info.plist"]
+        optional: true
+    # Declared here rather than in a committed Info.plist. XcodeGen *generates*
+    # the file at `info.path` and overwrites whatever is there, so a
+    # hand-written plist beside this is silently replaced by a stub the first
+    # time anyone runs `apple:project` -- which is exactly what happened, and
+    # it cost background audio and the ATS exception with no diff to show for
+    # it. The generated file is gitignored; this is the source of truth.
     info:
       path: Apps/iOS/Info.plist
+      properties:
+        # Both come from version.txt via Version.xcconfig, so the single
+        # product version of ADR-0009 reaches the bundle. Without them Xcode
+        # defaults to 1.0/1 and every build carries the same version -- the
+        # second App Store upload is then rejected for a non-increasing
+        # CFBundleVersion.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Playback continues with the screen locked. Without this the system
+        # stops the session the moment the app leaves the screen, which reads
+        # as a crash rather than as a policy.
+        UIBackgroundModes: [audio, fetch]
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # A self-hosted server on a LAN is routinely plain HTTP with no
+        # resolvable name, so App Transport Security has to permit it. Scoped
+        # to local networking rather than opened wholesale: an arbitrary HTTP
+        # host on the internet is still refused.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: Beam connects to your media server on this network.
     dependencies:
       - package: BeamKit
         product: BeamAppShell
@@ -60,7 +96,6 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.justinchung.beam
         PRODUCT_NAME: Beam
-        INFOPLIST_FILE: Apps/iOS/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
 
@@ -71,10 +106,25 @@ targets:
       - path: Apps/Shared
       - path: Apps/macOS
         excludes: ["Info.plist", "Beam.entitlements"]
+        optional: true
     info:
       path: Apps/macOS/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.entertainment
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: Beam connects to your media server on this network.
+    # Generated too, and for the same reason -- a committed entitlements file
+    # is overwritten with an empty `<dict/>`, which under the sandbox leaves
+    # the app unable to open a single outbound connection.
     entitlements:
       path: Apps/macOS/Beam.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        # Outgoing only: Beam reaches a server, and nothing reaches Beam.
+        com.apple.security.network.client: true
     dependencies:
       - package: BeamKit
         product: BeamAppShell
@@ -82,8 +132,6 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.justinchung.beam
         PRODUCT_NAME: Beam
-        INFOPLIST_FILE: Apps/macOS/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Apps/macOS/Beam.entitlements
 
 schemes:
   Beam (iOS):

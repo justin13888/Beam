@@ -25,12 +25,23 @@ import XCTest
 /// only.
 @MainActor
 final class SnapshotTests: XCTestCase {
-    override func setUp() {
-        super.setUp()
-        // Recording is a deliberate act: `apple:snapshot:record` sets this, and
-        // nothing else does. Leaving it on would have every run overwrite the
-        // references it was meant to check.
-        isRecording = ProcessInfo.processInfo.environment["BEAM_SNAPSHOT_RECORD"] == "1"
+    /// The marker `apple:snapshot:record` writes, and nothing else does.
+    ///
+    /// A file rather than an environment variable. A SwiftPM package test runs
+    /// with no test host, so `xcodebuild` treats `TEST_RUNNER_BEAM_SNAPSHOT_RECORD`
+    /// as a build setting and never puts it in the test process's environment
+    /// -- which made the record task report success while changing nothing, so
+    /// an intended visual change could redden CI with no documented way to fix
+    /// it. The test bundle already reaches the source tree through `#filePath`,
+    /// so a marker beside this file is reachable where an environment variable
+    /// is not.
+    private static var recordMarker: URL {
+        URL(filePath: #filePath).deletingLastPathComponent().appending(path: ".record")
+    }
+
+    /// Whether this run should rewrite the references.
+    private static var isRecordingRun: Bool {
+        FileManager.default.fileExists(atPath: recordMarker.path)
     }
 
     #if os(iOS)
@@ -136,13 +147,18 @@ final class SnapshotTests: XCTestCase {
         controller.overrideUserInterfaceStyle = .light
         controller.view.backgroundColor = .systemBackground
 
-        assertSnapshot(
-            of: controller,
-            as: .image(on: .iPhone13Pro),
-            file: file,
-            testName: testName,
-            line: line
-        )
+        // `.missing` on a normal run, so a new reference is written once and an
+        // existing one is compared; `.all` only when the record marker says so.
+        // `isRecording` would do the same job and is deprecated in 1.19.
+        withSnapshotTesting(record: Self.isRecordingRun ? .all : .missing) {
+            assertSnapshot(
+                of: controller,
+                as: .image(on: .iPhone13Pro),
+                file: file,
+                testName: testName,
+                line: line
+            )
+        }
     }
 
     #endif

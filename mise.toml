@@ -17,8 +17,11 @@ hk = "1.50.0"
 # docs/testing.md; `ci-ok` in .github/workflows/ci.yml must never depend on them.
 #
 # cargo-mutants publishes prebuilt binaries for x86_64 only (linux-gnu, apple-
-# darwin, pc-windows-msvc). On an aarch64 host, override in a gitignored
-# mise.local.toml with `"cargo:cargo-mutants" = "27.1.0"` to build from source.
+# darwin, pc-windows-msvc). The `os` filter below means macOS gets it from
+# neither source, so a contributor who wants to run the advisory `rust:mutants*`
+# tasks on any Mac -- not only an aarch64 one -- adds
+# `"cargo:cargo-mutants" = "27.1.0"` to a gitignored mise.local.toml and builds
+# it from source.
 #
 # `os = ["linux"]` because mise installs every tool in this table before any
 # task runs, so a platform with no matching asset fails *every* job rather than
@@ -526,7 +529,12 @@ description = "Generate the Swift bindings and C header for beam-client-core"
 run = '''
 set -eu
 out="${BEAM_SWIFT_BINDINGS_DIR:-beam-apple/Packages/BeamKit/Sources/BeamCoreBindings/Generated}"
-headers="${BEAM_XCFRAMEWORK_HEADERS_DIR:-beam-apple/Packages/BeamKit/Frameworks/include}"
+# Derived from the same variable `core:apple` derives it from, so setting
+# BEAM_XCFRAMEWORK_DIR moves both halves together. Hardcoding it here meant
+# the override wrote headers to the default path and then handed
+# `-create-xcframework` a `-headers` path that did not exist.
+frameworks="${BEAM_XCFRAMEWORK_DIR:-beam-apple/Packages/BeamKit/Frameworks}"
+headers="${BEAM_XCFRAMEWORK_HEADERS_DIR:-$frameworks/include}"
 
 # See `core:bindgen` for why this is resolved rather than hardcoded.
 case "$(uname -s)" in
@@ -1023,21 +1031,26 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 0
 fi
 
-# TEST_RUNNER_ prefixed, because a simulator test runs in its own process and
-# does not inherit this shell's environment. A plain `BEAM_SNAPSHOT_RECORD=1`
-# here would be silently ignored, and the task would verify the references it
-# was asked to replace -- which looks like success.
-#
-# Recording always "fails": snapshot-testing reports every newly written
-# reference as a failure so a recording run can never be mistaken for a passing
-# one. That is why this does not propagate the exit status.
+# A marker file, not an environment variable. A SwiftPM package test runs with
+# no test host, so xcodebuild treats TEST_RUNNER_BEAM_SNAPSHOT_RECORD as a
+# build setting and it never reaches the test process -- the task then verified
+# the references it was asked to replace and reported success, which is the
+# worst possible outcome for a task whose whole job is to rewrite them.
+# Relative to this task's `dir`, which is beam-apple/Packages/BeamKit.
+marker="Tests/SnapshotTests/.record"
+touch "$marker"
+trap 'rm -f "$marker"' EXIT
+
+# Recording always "fails": snapshot-testing reports every reference it writes
+# as a failure so a recording run cannot be mistaken for a passing one. That is
+# why the status is not propagated -- but the marker is what makes the writing
+# actually happen.
 xcrun xcodebuild test \
     -scheme BeamKit \
     -destination "${BEAM_IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}" \
-    -only-testing:SnapshotTests \
-    TEST_RUNNER_BEAM_SNAPSHOT_RECORD=1 || true
+    -only-testing:SnapshotTests || true
 
-echo "References written. Review the diff before committing them."
+echo "References rewritten. Review \`git diff\` before committing them."
 '''
 
 [tasks."apple:build"]
