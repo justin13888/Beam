@@ -21,7 +21,7 @@ Beam originally started as a project to surpass the limitations of Jellyfin, a p
 *Every client is native and uses the public API contracts as source-of-truth.*
 
 - [ ] Web
-- [ ] Swift (iOS/macOS)
+- [x] Swift (iOS/macOS)
 - [x] Kotlin (Android)
 - [ ] GTK (Linux)
 

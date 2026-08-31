@@ -184,7 +184,7 @@ so the suite runs with zero backend, mirroring the Rust side's zero-infrastructu
 ## Client core (`beam-client-core`)
 
 The logic every native client would otherwise reimplement, owned once in Rust and exposed to
-Kotlin (and later Swift) over UniFFI 0.32 —
+Kotlin and Swift over UniFFI 0.32 —
 [ADR-0012](decisions/ADR-0012-native-client-rust-core.md). It deliberately depends on none of
 `beam-domain`, `beam-index`, or `beam-server`: `beam-domain` takes a non-optional `sea-orm`
 dependency and would drag a Postgres driver into an Android `.so`, and `beam-index` links FFmpeg,
@@ -235,6 +235,38 @@ plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
 
 **Testing:** 129 JVM tests plus Roborazzi screenshot references, run under Robolectric. No emulator
 runs in CI.
+
+## Apple client (`beam-apple`)
+
+SwiftUI apps for iOS/iPadOS and macOS on top of `beam-client-core`, generated into an Xcode project
+by XcodeGen from a committed `project.yml` -- [ADR-0013](decisions/ADR-0013-apple-client-two-engines.md).
+One SwiftPM package, `BeamKit`, holds everything: `BeamCoreBindings` (the generated UniFFI Swift,
+alone in its own target so it can build in Swift 5 language mode), `BeamFFI`, `BeamModel`,
+`BeamCore`, `BeamDesignSystem`, `BeamUI`, `BeamPlayback`, `BeamTesting`, ten `Features/*` targets
+and `BeamAppShell`.
+
+- **`BeamFFI`** is the only target that constructs a `BeamClient`. It implements the core's
+  `KeyValueStore` over the Keychain, flattens `BeamError` into the four questions a screen asks,
+  and builds the `DeviceProfile`. That last file is the consequential one: `supportedContainers` is
+  AVFoundation's set **union the core's own `probeContainers()`**, which is the single line that
+  makes the Matroska engine visible to source selection.
+- **Two playback engines**, behind one `PlaybackEngine` protocol. `AVPlayerEngine` wherever
+  AVFoundation can open the container -- it brings PiP, AirPlay and the system transport, and takes
+  the session cookie through `AVURLAssetHTTPCookiesKey` and the trust decision through
+  `AVAssetResourceLoaderDelegate`. `SampleBufferEngine` for Matroska and WebM, which AVFoundation
+  cannot open at all: the core demuxes, Swift builds `CMSampleBuffer`s, and VideoToolbox decodes in
+  hardware. `EngineSelector` is the one place the choice is made.
+- **Liquid Glass** is applied as a system: related controls share a `GlassEffectContainer` so they
+  merge and separate in motion, artwork sits under glass rather than being tinted by it, and colours
+  are expressed against the system palette so the material keeps adapting.
+- **Auth** lifts the `beam_session` cookie from a `WKWebView`, the only flow the server supports --
+  see NFR-605 and [ADR-0012](decisions/ADR-0012-native-client-rust-core.md). The cookie's domain is
+  checked against the server's host, so a cookie set by an identity provider in the redirect chain
+  is never mistaken for the server's.
+
+**Testing:** 54 hermetic tests under swift-testing, run on macOS and the iOS simulator, plus
+light-mode snapshot references on one pinned simulator. tvOS is not shipped: `aarch64-apple-tvos` is
+a Tier 3 Rust target, and tvOS has no web view to lift a cookie from.
 
 ## Docs site (`beam-docs`)
 

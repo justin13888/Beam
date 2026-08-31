@@ -161,10 +161,17 @@ requirements (referenced below as FR-xxx).
   described as needing no server changes on that account. `beam-server` reads exactly one credential,
   the `beam_session` cookie, and `sanitize_redirect_path` accepts only same-origin relative paths, so
   the OIDC provider cannot redirect to a custom scheme a native app could intercept. `beam-android`
-  therefore lifts the cookie out of an in-app WebView. A native token mint — an endpoint issuing a
-  credential to a client that can prove an OIDC exchange without a browser — SHOULD replace this;
-  until it exists, this is a recorded limitation rather than a property of the design. See
+  therefore lifts the cookie out of an in-app WebView, and `beam-apple` lifts the same cookie out of
+  a `WKWebView`. A native token mint — an endpoint issuing a credential to a client that can prove an
+  OIDC exchange without a browser — SHOULD replace this; until it exists, this is a recorded
+  limitation rather than a property of the design. See
   [ADR-0012](../architecture/decisions/ADR-0012-native-client-rust-core.md).
+  On a platform with **no web view at all** the "should" above is a hard prerequisite rather than an
+  improvement: tvOS has no `WKWebView`, so a tvOS client cannot authenticate under the current
+  server by any means. The native token mint is therefore a blocker for the tvOS remainder of
+  [#66](https://github.com/justin13888/beam/issues/66) and for
+  [#65](https://github.com/justin13888/beam/issues/65), not a nicety. See
+  [ADR-0013](../architecture/decisions/ADR-0013-apple-client-two-engines.md).
 - **NFR-602**: Business logic in the service layer MUST remain isolated from web-framework types
   (HTTP requests/responses/extractors); such logic MUST be reachable and testable without going
   through an HTTP layer, preserving the option of a non-HTTP transport without a rewrite.

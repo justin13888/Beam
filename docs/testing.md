@@ -321,6 +321,18 @@ everything up to the trait boundary hermetically, and validate the real round-tr
   catch a layout or colour regression, but not to catch a surface-lifecycle bug, a
   picture-in-picture transition, or a media session that misbehaves against a real notification
   shade.
+- **The Apple sample-buffer engine on real hardware.** `beam-apple`'s `SampleBufferEngine` demuxes
+  Matroska in the core and feeds VideoToolbox itself ([ADR-0013](architecture/decisions/ADR-0013-apple-client-two-engines.md)),
+  so it owns A/V synchronisation, seek accuracy and decoder configuration that `AVPlayer` would
+  otherwise own. The suite covers the parts that can be: the demuxer against committed real
+  Matroska files, and `avcC`/`hvcC` parsing against the records those files actually carry. What no
+  simulator can establish is whether a hardware decoder, driven by buffers we built, stays in step
+  with its audio over an hour -- the same edge as Android's, arrived at from the other side.
+- **Dark mode in the Apple snapshot tier.** The references are light mode only, because
+  `glassEffect` does not render its material offscreen and resolves content colours against the
+  light appearance regardless of the host's `overrideUserInterfaceStyle`. A recorded dark reference
+  would be black text on a black ground -- a picture of a renderer limitation that would then pass
+  forever whether or not dark mode worked. Dark mode is checked on a device.
 
 This is a deliberate, accepted boundary: the unit suite guarantees "business logic behaves
 correctly given any trait response"; only a real system can guarantee "the real external system
@@ -334,6 +346,8 @@ behaves the way our fakes assume."
 | Web (`beam-web`) | `@vitest/coverage-v8` | lines 79%, functions 72%, branches 70%, statements 76% | `coverage.thresholds` in `beam-web/vitest.config.ts` |
 | Android (`beam-android`) | JUnit + Robolectric | no percentage gate; the suite must pass | the `android:test` task in `mise.toml`, run by the `android-test` job |
 | Android screenshots | Roborazzi | every reference must match | the `android:screenshot` task, run by the `android-screenshot` job |
+| Apple (`beam-apple`) | swift-testing | no percentage gate; the suite must pass on macOS and the iOS simulator | the `apple:test` task in `mise.toml`, run by the `apple-test` job |
+| Apple snapshots | swift-snapshot-testing | every reference must match, on one pinned simulator and Xcode | the `apple:snapshot` task, run by the `apple-snapshot` job |
 
 **Regions, not branches.** `cargo-llvm-cov`'s `--branch` requires
 `-Z coverage-options=branch` and therefore a nightly toolchain, and

@@ -11,10 +11,13 @@ handling belongs to the client (the browser direct-plays the source format) and 
 belongs to the library (operators index additional pre-encoded file versions of the same title).
 See [ADR-0004](../architecture/decisions/ADR-0004-never-transcode.md).
 
-Beam ships two clients: the `beam-web` web application, the reference implementation of the domain
-API, and `beam-android`, a native Android client for phone and tablet. Both are built against the
-same domain API (see NFR-6xx in `non-functional.md`). Android TV and iOS/tvOS remain outstanding —
-see the [client roadmap umbrella #78](https://github.com/justin13888/beam/issues/78).
+Beam ships three clients: the `beam-web` web application, the reference implementation of the domain
+API; `beam-android`, a native Android client for phone and tablet; and `beam-apple`, a native
+SwiftUI client for iOS, iPadOS and macOS. All three are built against the same domain API (see
+NFR-6xx in `non-functional.md`). Android TV and tvOS remain outstanding, both blocked on the same
+thing — neither has a web view to lift a session cookie from, so neither can authenticate until a
+native token mint exists (NFR-605). See the
+[client roadmap umbrella #78](https://github.com/justin13888/beam/issues/78).
 
 Native clients exist for a specific reason rather than as a matter of taste. Beam direct-plays, so
 whether a title plays at all is decided by what the client can decode; a browser without an HEVC or
@@ -83,10 +86,11 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
 ## Out of scope (tracked in issues)
 
 - Remaining native clients — umbrella [#78](https://github.com/justin13888/beam/issues/78):
-  Android TV [#65](https://github.com/justin13888/beam/issues/65) and
-  tvOS/iOS [#66](https://github.com/justin13888/beam/issues/66). Android mobile
-  [#67](https://github.com/justin13888/beam/issues/67) has shipped; both remaining clients inherit
-  `beam-client-core`.
+  Android TV [#65](https://github.com/justin13888/beam/issues/65) and the tvOS remainder of
+  [#66](https://github.com/justin13888/beam/issues/66). Android mobile
+  [#67](https://github.com/justin13888/beam/issues/67) and Apple iOS/macOS
+  [#66](https://github.com/justin13888/beam/issues/66) have shipped; both remaining clients inherit
+  `beam-client-core`, and both need a native token mint before they can sign in at all.
 - HLS/DASH exploration — [#75](https://github.com/justin13888/beam/issues/75).
 - Server-side image proxy for poster/backdrop art (currently direct CDN links, see NFR-501 and
   [ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md)) —
