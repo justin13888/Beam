@@ -1,5 +1,8 @@
+use std::num::NonZeroUsize;
+use std::time::Duration;
+
 use eyre::{Result, eyre};
-use salvo::prelude::*;
+use kynos::server::{Server, error::ServerError, shutdown::Shutdown};
 use tracing::info;
 
 use beam_server::config::ServerConfig;
@@ -104,13 +107,13 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(config.enrich_interval_secs),
     );
 
-    let state = beam_server::state::AppState::new(config.clone(), services, probe);
-
     // Install the global Prometheus recorder when metrics are enabled. Done
     // once at startup: every `metrics::counter!`/`histogram!` call anywhere in
-    // the process (HTTP middleware, beam-index domain counters) records into
-    // it, and `create_router` mounts `GET /metrics` to render it. When
-    // disabled, no recorder exists and every facade call is a no-op.
+    // the process (the HTTP observer, beam-index domain counters) records into
+    // it, and `GET /metrics` renders it from the handle carried on the state.
+    // When disabled, no recorder exists, every facade call is a no-op, and
+    // `/metrics` answers 503 rather than disappearing -- the router's shape,
+    // and therefore the exported description, must not depend on configuration.
     let metrics_handle = if config.enable_metrics {
         let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
             .install_recorder()
@@ -121,79 +124,48 @@ async fn main() -> Result<()> {
         None
     };
 
-    let cors = beam_server::bootstrap::cors_handler();
+    let state = beam_server::state::AppState::new(config.clone(), services, probe, metrics_handle);
 
-    // Build API router
-    let router = create_router(state.clone(), metrics_handle);
+    // `build` is where Kynos checks that every operation can be described and
+    // that no two interceptors contribute the same header or status. A router
+    // that cannot describe itself never reaches a listener.
+    let service = create_router()
+        .build(state)
+        .map_err(|e| eyre!("The router does not describe itself: {e}"))?;
 
-    // Generate OpenAPI documentation. `/metrics` (when mounted) is a plain
-    // Handler, not an `#[endpoint]`, so `merge_router` never picks it up and
-    // the served spec matches the exported one.
-    let doc = OpenApi::new("Beam Server API", "1.0.0").merge_router(&router);
-    let router = router
-        .push(doc.into_router("/api-doc/openapi.json"))
-        .push(Scalar::new("/api-doc/openapi.json").into_router("/openapi"));
+    // `prepare` binds before it serves, so "address already in use" fails here
+    // rather than after the process has claimed to be up -- and it is the only
+    // way to learn which port was chosen when the configured one is zero.
+    let bound = Server::new(service)
+        .bind(config.bind_address.clone())
+        .graceful_shutdown(Shutdown::signals())
+        .shutdown_timeout(Duration::from_secs(config.shutdown_timeout_secs))
+        .max_connections(NonZeroUsize::new(10_000).expect("10000 is not zero"))
+        .prepare()
+        .await?;
 
-    let service = Service::new(router).hoop(cors);
-
-    info!("Binding to address: {}", &config.bind_address);
-    let acceptor = TcpListener::new(config.bind_address.clone()).bind().await;
-
-    info!("Server listening on {}", config.bind_address);
-    info!(
-        "API documentation available at http://{}/openapi",
-        config.bind_address
-    );
-
-    let server = Server::new(acceptor);
-    let handle = server.handle();
-    let shutdown_timeout = std::time::Duration::from_secs(config.shutdown_timeout_secs);
-    tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        info!(
-            "Shutdown signal received -- draining connections for up to {}s",
-            shutdown_timeout.as_secs()
-        );
-        handle.stop_graceful(shutdown_timeout);
-    });
-
-    server.serve(service).await;
-    info!("Server stopped");
-
-    Ok(())
-}
-
-/// Resolves when the process is asked to stop: ctrl-c anywhere, or SIGTERM
-/// on unix (what container orchestrators send before a hard kill).
-async fn wait_for_shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            tracing::error!("Failed to listen for ctrl-c; that shutdown path is disabled: {e}");
-            std::future::pending::<()>().await
-        }
-    };
-
-    #[cfg(unix)]
-    {
-        let sigterm = async {
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut stream) => {
-                    stream.recv().await;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to listen for SIGTERM; that shutdown path is disabled: {e}"
-                    );
-                    std::future::pending::<()>().await
-                }
-            }
-        };
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm => {}
-        }
+    for address in bound.local_addrs() {
+        info!("Server listening on http://{address}");
+        info!("API documentation available at http://{address}/openapi");
     }
 
-    #[cfg(not(unix))]
-    ctrl_c.await;
+    match bound.serve().await {
+        Ok(()) => info!("Server stopped"),
+        // A drain that ran out of time, or one a second signal cut short, is an
+        // operational fact rather than a startup failure. The process stops
+        // either way; exiting non-zero would make a normal rollout look like a
+        // crash to whatever is watching the exit code.
+        Err(kynos::Error::Server(ServerError::ShutdownTimeout { timeout })) => {
+            tracing::warn!(
+                ?timeout,
+                "Graceful shutdown hit its deadline -- remaining connections were cut"
+            );
+        }
+        Err(kynos::Error::Server(ServerError::ShutdownForced)) => {
+            tracing::warn!("Shutdown forced by a second termination signal");
+        }
+        Err(error) => return Err(eyre!("Server failed: {error}")),
+    }
+
+    Ok(())
 }

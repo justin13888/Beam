@@ -1,5 +1,4 @@
-//! MIGRATION SCAFFOLD -- only the modules already ported to Kynos are wired
-//! here. The full route table is restored as each module lands.
+//! The `/v1` route table, and the router the process serves.
 
 pub mod admin;
 pub mod api_error;
@@ -7,21 +6,28 @@ pub mod auth;
 pub mod genres;
 pub mod health;
 pub mod media;
+pub mod metrics_mw;
+pub mod middleware;
 pub mod playback;
 pub mod stream;
 pub mod tags;
 
-pub use admin::*;
-pub use auth::*;
-pub use genres::*;
-pub use health::*;
-pub use media::*;
-pub use playback::*;
-pub use stream::*;
+// No `pub use <module>::*`. Two modules declare a `FilePath` -- `playback` for
+// progress reporting and `stream` for delivery -- and glob re-exporting both
+// made the name ambiguous at this level. Nothing outside this module used the
+// globs, and Kynos's own convention is that every item has one canonical path,
+// so they are gone rather than disambiguated.
 
+use kynos::openapi::Info;
 use kynos::prelude::*;
+use kynos::router::docs::Docs;
 
+use crate::bootstrap;
 use crate::state::AppState;
+
+#[cfg(test)]
+#[path = "test_support.rs"]
+pub(crate) mod test_support;
 
 /// Every `/v1` operation, as one table.
 ///
@@ -78,6 +84,44 @@ pub fn rest_routes() -> Router<AppState> {
 }
 
 /// The router the process serves and the document is derived from.
+///
+/// Takes no arguments on purpose. Kynos derives the dispatch table and the
+/// OpenAPI document from one walk of this value, so anything passed in at
+/// startup would be something the exported description cannot see -- and a
+/// served surface that disagrees with its document is the failure ADR-0010
+/// exists to remove. Everything that used to arrive as an argument (the
+/// Prometheus handle, the rate-limit numbers, the clock) is read off
+/// `AppState` at request time instead.
+///
+/// The CORS policy and the same-origin check are mounted in one expression
+/// because they are one control. `bootstrap::cors_policy` mirrors the request
+/// origin and allows credentials, which on its own would let any site read an
+/// authenticated response; it is safe only because `EnforceSameOrigin` rejects
+/// a cross-origin write before it reaches a handler. Dropping either is a
+/// one-line diff sitting next to the comment that says why it cannot be.
+///
+/// CORS is listed first so it is the outer of the two: a rejected cross-origin
+/// write still leaves with `Access-Control-Allow-Origin`, so the browser
+/// reports the real 403 rather than an opaque network error.
+///
+/// Neither reaches `/metrics` or the docs pages. They are mounted at the root,
+/// and Kynos copies a nested router's interceptors onto that router's own
+/// operations only -- which is what we want: a scrape target has no session to
+/// forge, and a cross-origin reader of `/openapi` has nothing to steal.
 pub fn create_router() -> Router<AppState> {
-    Router::new().nest("/v1", rest_routes())
+    Router::new()
+        .info(Info::new("Beam Server API", "1.0.0"))
+        .nest(
+            "/v1",
+            rest_routes()
+                .intercept(bootstrap::cors_policy())
+                .intercept(middleware::EnforceSameOrigin),
+        )
+        .mount(kynos::routes![metrics_mw::render_metrics])
+        .observe(metrics_mw::HttpMetrics)
+        .docs(
+            Docs::scalar()
+                .at("/openapi")
+                .description_at("/api-doc/openapi.json"),
+        )
 }

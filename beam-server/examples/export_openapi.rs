@@ -11,12 +11,13 @@
 //! exactly what `routes/contract_tests.rs` existed to catch.
 
 use beam_server::routes::create_router;
-use kynos::openapi::{Info, SpecVersion};
+use kynos::openapi::SpecVersion;
 
 fn main() -> kynos::Result<()> {
-    let document = create_router()
-        .info(Info::new("Beam Server API", "1.0.0"))
-        .openapi_as(SpecVersion::V3_2)?;
+    // No `.info(..)` here: `create_router` carries it, so the document this
+    // exports and the one the running server serves at `/api-doc/openapi.json`
+    // come from the same value rather than two that must be kept in step.
+    let document = create_router().openapi_as(SpecVersion::V3_2)?;
 
     // Pretty-printed rather than `Document::to_json`, which is compact: the
     // spec is committed, so `mise run codegen:openapi:check` turns a contract
