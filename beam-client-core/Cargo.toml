@@ -22,7 +22,7 @@ time = { version = "0.3.55", features = ["formatting", "parsing", "serde"] }
 
 # Core-owned dependencies, beyond the generated client's contract above.
 async-trait = { workspace = true }
-base64 = "0.22.1"
+base64 = "0.23.1"
 # Provides `#[mutants::skip]` for the test-only doubles; see the workspace
 # manifest and `mise run check:mutants-skip-fakes` for why they need it.
 mutants = { workspace = true }
@@ -30,22 +30,28 @@ mutants = { workspace = true }
 # a self-hosted server on a LAN needs a trust-on-first-use exception, and that
 # is a `ServerCertVerifier`, which reqwest exposes only via a preconfigured
 # `ClientConfig`. See `src/tls.rs`.
-rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-webpki-roots = "1.0.8"
+webpki-roots = "1.0.9"
 x509-parser = "0.18.1"
 tracing = { workspace = true }
 # Only the `rt` feature: the core needs `JoinSet` to fan out the metadata
 # lookups the playback endpoints force (they return bare identifiers), and
 # nothing else. `full` would put a multi-threaded scheduler, process and signal
 # handling into an Android `.so` that already runs on the platform's runtime.
-tokio = { version = "1.49.0", default-features = false, features = ["rt"] }
+tokio = { version = "1.53.1", default-features = false, features = ["rt"] }
 uniffi = { version = "0.32", features = ["tokio"] }
-url = "2.5"
+url = "2.5.8"
 
 # rustls with `ring`, deliberately not `aws-lc-rs`: aws-lc-rs needs cmake and a
 # per-ABI C toolchain, which does not cross-compile cleanly to Android.
+#
+# Held at 0.12 for that reason. reqwest 0.13 collapsed the TLS feature matrix
+# and dropped `rustls-tls-manual-roots-no-provider`; its replacements are
+# `rustls` (which forces aws-lc-rs) and `rustls-no-provider` (which pulls
+# `rustls-platform-verifier`, the thing `src/tls.rs` exists to replace with a
+# trust-on-first-use `ServerCertVerifier`). Neither is usable here.
 [dependencies.reqwest]
 version = "0.12.28"
 default-features = false
@@ -57,7 +63,7 @@ spargen = "0.4.0"
 [dev-dependencies]
 # Real certificates, so the trust tests exercise the actual DER parsing and
 # digest rather than a hand-built struct that cannot disagree with reality.
-rcgen = "0.14.8"
+rcgen = "0.14.10"
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 # The bindgen entry point ships as a bin so the Kotlin bindings are always
