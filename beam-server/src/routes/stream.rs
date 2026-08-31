@@ -142,14 +142,27 @@ impl IntoResponse for MediaDelivery {
         let status = inner.status();
         let mut response = inner.into_response();
 
-        // A 304 carries no representation, so it carries no content type
-        // either -- RFC 9110 section 15.4.5.
-        if status != kynos::http::StatusCode::NOT_MODIFIED {
-            if let Ok(value) = content_type.parse() {
-                response
-                    .headers_mut()
-                    .insert(kynos::http::header::CONTENT_TYPE, value);
-            }
+        // Only the two statuses that actually carry the media bytes get the
+        // media's content type. Everything else keeps whatever the range engine
+        // labelled it.
+        //
+        // The check used to be `!= 304`, which was right about 304 -- a
+        // response with no representation carries no content type, RFC 9110
+        // section 15.4.5 -- and wrong about everything else the engine can
+        // produce. A `Range` that cannot be satisfied answers 416 with an
+        // RFC 9457 problem document, and that was being relabelled
+        // `video/mp4`: a JSON body announced as video, which a client is
+        // entitled to fail on. Naming the two statuses that mean "here is the
+        // file" states the rule positively, so a status added later is
+        // excluded by default rather than mislabelled by default.
+        if matches!(
+            status,
+            kynos::http::StatusCode::OK | kynos::http::StatusCode::PARTIAL_CONTENT
+        ) && let Ok(value) = content_type.parse()
+        {
+            response
+                .headers_mut()
+                .insert(kynos::http::header::CONTENT_TYPE, value);
         }
 
         response

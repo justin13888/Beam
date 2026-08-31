@@ -325,6 +325,17 @@ pub async fn oidc_login(
 
 /// Completes the Authorization Code + PKCE exchange, JIT-provisions or
 /// looks up the user, mints a session, and redirects back into the web app.
+// Eight parameters, and none of them is an argument in the sense the lint
+// means. Nothing calls this function: Kynos resolves each parameter from the
+// request or the context, and the list *is* the operation's declared contract --
+// three extractors and five injected dependencies. Collapsing them into a
+// struct would hide the contract from the description without removing a single
+// dependency. `expect` rather than `allow` so it reports itself if the
+// signature ever shrinks below the threshold.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter is a declared extractor or injection, not a caller-supplied argument"
+)]
 #[kynos::get("/auth/callback", tag = Auth, operation_id = "oidcCallback")]
 pub async fn oidc_callback(
     Query(query): Query<CallbackQuery>,

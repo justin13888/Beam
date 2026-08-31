@@ -102,6 +102,15 @@ impl Observer<AppState> for HttpMetrics {
 }
 
 /// The `method` and `route` labels a matched or unmatched request carries.
+///
+/// An unmatched request is labelled `<unmatched>` on *both*, which reads odd
+/// until you look at what is available: `Observer::on_response` receives the
+/// response and the matched route, never the request, so when nothing matched
+/// there is no method to report. Counting a 404 under a fabricated method would
+/// be worse than counting it under a placeholder, and taking the method from
+/// `on_request` would mean carrying per-request state through an observer that
+/// is deliberately stateless. The count is the useful part; the method of a
+/// request that reached no operation is not.
 fn labels(route: Option<Route<'_>>) -> (String, String) {
     route.map_or_else(
         || (UNMATCHED.to_owned(), UNMATCHED.to_owned()),
