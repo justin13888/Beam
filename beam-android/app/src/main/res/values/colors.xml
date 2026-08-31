@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches BeamDarkColors' background, so the launch window and the first
+         Compose frame are the same colour and the handoff is invisible. -->
+    <color name="splash_background">#0F1416</color>
+</resources>

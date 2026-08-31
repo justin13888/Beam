@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Both sizing schemes are declared on purpose. targetCellWidth and
+  targetCellHeight are honoured from API 31, where the launcher grid is
+  expressed in cells; minWidth and minHeight are what everything older uses.
+  Declaring only the newer pair would make the widget size badly on API 26 to
+  30, and declaring only the older pair would make it size badly everywhere
+  since. Lint flags the newer attributes as unused below minSdk, which is
+  exactly the intended fallback rather than a mistake.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:minWidth="180dp"
+    android:minHeight="60dp"
+    android:targetCellWidth="3"
+    android:targetCellHeight="1"
+    android:maxResizeWidth="320dp"
+    android:maxResizeHeight="200dp"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen"
+    android:description="@string/widget_description"
+    android:initialLayout="@layout/glance_default_loading_layout"
+    android:updatePeriodMillis="1800000"
+    tools:ignore="UnusedAttribute" />

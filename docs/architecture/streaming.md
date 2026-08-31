@@ -23,7 +23,9 @@ e.g. a 1080p remux and a separately indexed 480p re-encode. `GET /v1/media/{id}/
 the available versions with size, container, duration, and real probed per-stream codecs
 (`H264`/`H265`/`AV1`, `Aac`/`Opus`, with an `UNKNOWN` fallback) plus each file's `stream_url` and
 `download_url`. Selecting one is just a request against that file's own `/stream` endpoint. Sources
-currently cover movies only; show/episode sources are deferred — tracked in
+accept a movie id or an episode id; a show id is rejected with 400, since shows have no files of
+their own. Episode sources landed in
+[#102](https://github.com/justin13888/beam/pull/102), closing
 [#68](https://github.com/justin13888/beam/issues/68). If an operator wants a low-bandwidth option,
 they place a second, smaller rip in the library and let it get indexed — Beam does not create it.
 

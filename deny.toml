@@ -112,6 +112,10 @@ allow = [
     "BSL-1.0",
     "WTFPL",
     "CDLA-Permissive-2.0",
+    # MIT with the attribution clause removed, so strictly more permissive than
+    # MIT above. Reaches the tree only through spargen's build-time JSON Schema
+    # validator; nothing MIT-0 is linked into a shipped artifact.
+    "MIT-0",
     # beam's own crates -- see the root LICENSE file.
     "AGPL-3.0-only",
 ]

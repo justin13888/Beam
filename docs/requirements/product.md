@@ -11,10 +11,16 @@ handling belongs to the client (the browser direct-plays the source format) and 
 belongs to the library (operators index additional pre-encoded file versions of the same title).
 See [ADR-0004](../architecture/decisions/ADR-0004-never-transcode.md).
 
-Beam ships exactly one client: the `beam-web` web application, the reference implementation of the
-domain API. The API is designed so that native clients (mobile, TV, desktop) can be built against it
-without server-side changes (see NFR-6xx in `non-functional.md`); none exists today — see the
-[client roadmap umbrella #78](https://github.com/justin13888/beam/issues/78).
+Beam ships two clients: the `beam-web` web application, the reference implementation of the domain
+API, and `beam-android`, a native Android client for phone and tablet. Both are built against the
+same domain API (see NFR-6xx in `non-functional.md`). Android TV and iOS/tvOS remain outstanding —
+see the [client roadmap umbrella #78](https://github.com/justin13888/beam/issues/78).
+
+Native clients exist for a specific reason rather than as a matter of taste. Beam direct-plays, so
+whether a title plays at all is decided by what the client can decode; a browser without an HEVC or
+AV1 decoder simply fails on a file a phone would play in hardware. The logic that makes that
+decision is shared across native clients by `beam-client-core`, a Rust crate consumed over UniFFI —
+see [ADR-0012](../architecture/decisions/ADR-0012-native-client-rust-core.md).
 
 ## Personas
 
@@ -76,10 +82,11 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
 
 ## Out of scope (tracked in issues)
 
-- Native clients — umbrella [#78](https://github.com/justin13888/beam/issues/78):
-  Android TV [#65](https://github.com/justin13888/beam/issues/65),
-  tvOS/iOS [#66](https://github.com/justin13888/beam/issues/66),
-  Android mobile [#67](https://github.com/justin13888/beam/issues/67).
+- Remaining native clients — umbrella [#78](https://github.com/justin13888/beam/issues/78):
+  Android TV [#65](https://github.com/justin13888/beam/issues/65) and
+  tvOS/iOS [#66](https://github.com/justin13888/beam/issues/66). Android mobile
+  [#67](https://github.com/justin13888/beam/issues/67) has shipped; both remaining clients inherit
+  `beam-client-core`.
 - HLS/DASH exploration — [#75](https://github.com/justin13888/beam/issues/75).
 - Server-side image proxy for poster/backdrop art (currently direct CDN links, see NFR-501 and
   [ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md)) —

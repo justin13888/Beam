@@ -1,0 +1,47 @@
+name: Set up Android
+description: >
+  Install the Android SDK and NDK a JVM-only build needs, and cache them.
+
+# The emulator and its system image are deliberately not installed. The Android
+# CI jobs never boot a device: an emulator needs nested virtualisation that
+# hosted runners do not reliably provide, and the screenshot tests run under
+# Robolectric on the JVM instead. Leaving them out takes the download from
+# about 12 GB to about 2.
+
+runs:
+  using: composite
+  steps:
+    # Pinned to the same location mise defaults to, so a cache restored here is
+    # the directory `mise run android:sdk` would have populated.
+    - name: Resolve the SDK location
+      shell: bash
+      run: |
+        echo "ANDROID_SDK_ROOT=$HOME/Android/Sdk" >> "$GITHUB_ENV"
+        echo "ANDROID_HOME=$HOME/Android/Sdk" >> "$GITHUB_ENV"
+
+    - name: Restore the SDK
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/Android/Sdk
+        # Keyed on mise.toml because that is where the package coordinates and
+        # the NDK pin live; changing either must not silently reuse the old
+        # SDK.
+        key: android-sdk-${{ runner.os }}-${{ hashFiles('mise.toml') }}
+
+    - name: Install the SDK
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        BEAM_ANDROID_SDK_MINIMAL: "1"
+      run: mise run android:sdk
+
+    # The Rust core cross-compiles to the Android ABIs, and the Kotlin bindings
+    # are generated from the built library rather than from source.
+    - name: Add the Android Rust targets
+      shell: bash
+      run: |
+        rustup target add \
+          aarch64-linux-android \
+          armv7-linux-androideabi \
+          x86_64-linux-android

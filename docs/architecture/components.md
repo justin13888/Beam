@@ -181,6 +181,61 @@ codegen:openapi` exports from the Rust types.
 **Testing:** vitest + MSW (`src/test/`) + Testing Library in jsdom — the REST boundary is mocked,
 so the suite runs with zero backend, mirroring the Rust side's zero-infrastructure rule.
 
+## Client core (`beam-client-core`)
+
+The logic every native client would otherwise reimplement, owned once in Rust and exposed to
+Kotlin (and later Swift) over UniFFI 0.32 —
+[ADR-0012](decisions/ADR-0012-native-client-rust-core.md). It deliberately depends on none of
+`beam-domain`, `beam-index`, or `beam-server`: `beam-domain` takes a non-optional `sea-orm`
+dependency and would drag a Postgres driver into an Android `.so`, and `beam-index` links FFmpeg,
+which does not cross-compile to Android.
+
+- **Generated REST client** (`api/openapi.json` → `$OUT_DIR` via spargen in `build.rs`): all 31
+  operations, never hand-written. The spec is exported from `beam-server`'s own handler
+  annotations by `mise run codegen:openapi:core`.
+- **`capability.rs`** — the reason a native client exists. Matches each source against a
+  `DeviceProfile` built from `MediaCodecList`, and returns a per-source verdict (hardware,
+  software, or unplayable with a reason) plus a ranking. Unplayable sources are returned with
+  their reason rather than hidden, because under direct play
+  ([ADR-0004](decisions/ADR-0004-never-transcode.md)) that is a permanent property the viewer may
+  need to act on.
+- **`tls.rs`** — installs the rustls `ring` provider and implements trust-on-first-use. The public
+  trust store is consulted first and its acceptance is final; only on failure is a user-accepted
+  certificate considered, and only when the whole-certificate SHA-256 matches, the SANs cover the
+  host, and it has not expired.
+- **`transport.rs`** — attaches the `beam_session` cookie below the generated code, as a spargen
+  middleware, and notices a mid-session 401 in one place rather than at every call site.
+- **`upnext.rs`, `progress.rs`, `paging.rs`, `session.rs`, `servers.rs`, `catalog.rs`** — next
+  playable episode across season boundaries, the 15-second progress throttle with a durable retry
+  queue, Relay cursor state, the auth state machine, the multi-server registry, and the mapping
+  from generated wire types to the vocabulary a UI renders.
+
+**Testing:** 152 tests, all pure or against an `InMemoryKeyValueStore`. Certificates in the TLS
+tests are generated with `rcgen` rather than hand-built, so they cannot disagree with reality.
+
+## Android client (`beam-android`)
+
+A Compose app for phone and tablet, on top of `beam-client-core`. Multi-module with convention
+plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
+`feature/{auth,home,libraries,explore,detail,player,downloads,history,settings,admin}`.
+
+- **`core:ffi`** is the only module that sees the generated UniFFI Kotlin or loads the `.so`.
+  Everything above it depends on a Kotlin interface, which is what lets every screen be tested on
+  the JVM with no native library and no JNA on the classpath.
+- **Navigation** is Navigation 3: the back stack is ordinary observable state, so the tabs, the
+  detail pages and the player share one history. Destinations are typed keys carrying their own
+  arguments, so a navigation call cannot lose or misspell one.
+- **`core:media`** owns Media3. Playback and the API client are handed the same credential and
+  trust decision by the core, because a mismatch surfaces as apparently corrupt media rather than
+  as an auth error. Downloads go through Media3's `DownloadManager` so their bytes land in a cache
+  ExoPlayer can read directly.
+- **Auth** lifts the `beam_session` cookie from an in-app WebView, which is the only flow the
+  server currently supports — see NFR-605 and
+  [ADR-0012](decisions/ADR-0012-native-client-rust-core.md).
+
+**Testing:** 129 JVM tests plus Roborazzi screenshot references, run under Robolectric. No emulator
+runs in CI.
+
 ## Docs site (`beam-docs`)
 
 The user- and operator-facing documentation **site**: a marketing landing page plus end-user and

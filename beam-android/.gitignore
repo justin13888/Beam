@@ -1,0 +1,17 @@
+# Gradle
+.gradle/
+build/
+local.properties
+.cxx/
+# The Kotlin compiler daemon's session files, written beside the build.
+.kotlin/
+
+
+# Produced by `mise run core:bindgen`. Generated from the built library, so it
+# is only ever as current as the .so it describes.
+core/ffi/build/generated/
+
+# Roborazzi writes failure diffs beside the reference images; the references
+# themselves are committed, the diffs are not.
+**/src/test/screenshots/*_compare.png
+**/src/test/screenshots/*_actual.png

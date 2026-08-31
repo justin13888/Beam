@@ -154,8 +154,17 @@ requirements (referenced below as FR-xxx).
 - **NFR-601**: The domain API MUST express itself entirely in domain terms (title id, file id,
   season/episode id, user id) and MUST NOT require a client to know or construct filesystem paths,
   internal database row identifiers unrelated to the domain, or web-framework-specific conventions,
-  so that a native client (see [#78](https://github.com/justin13888/beam/issues/78)) can be built
-  against the same API without server changes.
+  so that a native client (see [#78](https://github.com/justin13888/beam/issues/78)) can consume the
+  same API. This holds for the catalog, playback and administrative surfaces. It does *not* hold for
+  authentication — see NFR-605.
+- **NFR-605**: Authentication currently requires a browser context, and a native client MUST NOT be
+  described as needing no server changes on that account. `beam-server` reads exactly one credential,
+  the `beam_session` cookie, and `sanitize_redirect_path` accepts only same-origin relative paths, so
+  the OIDC provider cannot redirect to a custom scheme a native app could intercept. `beam-android`
+  therefore lifts the cookie out of an in-app WebView. A native token mint — an endpoint issuing a
+  credential to a client that can prove an OIDC exchange without a browser — SHOULD replace this;
+  until it exists, this is a recorded limitation rather than a property of the design. See
+  [ADR-0012](../architecture/decisions/ADR-0012-native-client-rust-core.md).
 - **NFR-602**: Business logic in the service layer MUST remain isolated from web-framework types
   (HTTP requests/responses/extractors); such logic MUST be reachable and testable without going
   through an HTTP layer, preserving the option of a non-HTTP transport without a rewrite.

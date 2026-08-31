@@ -25,6 +25,14 @@ hooks {
                 check = "rustfmt --edition 2024 --check {{files}}"
                 fix = "rustfmt --edition 2024 {{files}}"
             }
+            ["ktlint"] {
+                // Generated bindings live under beam-android/**/build/ and are
+                // excluded by beam-android/.ktlintignore, so they never reach
+                // this even when a build has just written them.
+                glob = List("*.kt", "*.kts")
+                check = "ktlint --relative {{files}}"
+                fix = "ktlint --format --relative {{files}}"
+            }
             ["biome"] {
                 // Generated files (api.gen.ts, routeTree.gen.ts) are gitignored
                 // and so never appear in the staged set.
@@ -114,6 +122,21 @@ hooks {
             ["docs-build"] {
                 glob = List("beam-docs/**")
                 check = "mise run docs:build"
+            }
+            // The Android steps also watch beam-client-core: the Kotlin
+            // bindings and the .so are generated from it, so a change there can
+            // break the Android build without touching a Kotlin file.
+            ["android-lint"] {
+                glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
+                check = "mise run android:lint"
+            }
+            ["android-test"] {
+                glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
+                check = "mise run android:test"
+            }
+            ["android-screenshot"] {
+                glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
+                check = "mise run android:screenshot"
             }
         }
     }

@@ -27,6 +27,14 @@ hk = "1.50.0"
 # Rust is deliberately absent: rust-toolchain.toml pins 1.91.0 and is honored by
 # rustup, rust-analyzer, and CI's setup-rust-toolchain action. Duplicating the
 # pin here would create a second source of truth for the same thing.
+#
+# Android client toolchain (ADR-0011). The JDK is pinned here rather than left
+# to the host because AGP is strict about it; Gradle itself is not pinned here
+# because the checked-in wrapper already pins it, and a second pin would be the
+# duplication ADR-0009 exists to prevent.
+java = "temurin-21"
+ktlint = "1.8.0"
+"cargo:cargo-ndk" = "4.1.2"
 
 [env]
 # Wrap the git hooks in `mise x` so contributors who have not activated mise in
@@ -34,6 +42,17 @@ hk = "1.50.0"
 HK_MISE = "1"
 CARGO_TERM_COLOR = "always"
 RUST_BACKTRACE = "1"
+# The Android SDK is not a mise tool: the registry only reaches it through a
+# third-party vfox plugin, and it has no NDK entry at all. `android:sdk`
+# bootstraps it with Google's own tooling instead.
+#
+# ~/Android/Sdk is both the Android CLI's own default and Android Studio's, so
+# using it means a contributor who already has either does not end up with two
+# 12 GB copies. Overridable for CI images and existing installs.
+ANDROID_SDK_ROOT = "{{ env.ANDROID_SDK_ROOT | default(value=env.HOME ~ '/Android/Sdk') }}"
+ANDROID_HOME = "{{ env.ANDROID_SDK_ROOT | default(value=env.HOME ~ '/Android/Sdk') }}"
+# cargo-ndk resolves the toolchain from here.
+ANDROID_NDK_HOME = "{{ env.ANDROID_SDK_ROOT | default(value=env.HOME ~ '/Android/Sdk') }}/ndk/29.0.14206865"
 # Local dev statically vendors an LGPL-only FFmpeg (ADR-0007) so the workspace
 # builds on hosts without FFmpeg development libraries. CI sets this to "" in
 # the job environment because .github/actions/setup-ffmpeg provides a system
@@ -340,6 +359,158 @@ echo "OpenAPI spec matches the router"
 '''
 
 # ---------------------------------------------------------------------------
+# Android client (ADR-0011)
+#
+# The Android SDK is bootstrapped with Google's own sdkmanager rather than
+# pinned as a mise tool: mise's registry reaches the SDK only through a
+# third-party vfox plugin and carries no NDK entry at all, so a bootstrap task
+# is both the smaller dependency and the only one that can pin exact package
+# versions. It stays a mise task, so ADR-0009 still holds -- CI, the hooks, and
+# a human all run the same command.
+# ---------------------------------------------------------------------------
+
+[tasks."android:sdk"]
+description = "Bootstrap the Android SDK, NDK, and emulator image into $ANDROID_SDK_ROOT"
+run = '''
+set -eu
+
+# cmdline-tools 23.0 deprecated sdkmanager in favour of an `android` CLI, which
+# also retired `--licenses`: installing a package now accepts the SDK terms
+# implicitly, so there is no separate acceptance step left to gate on. The
+# terms are at https://developer.android.com/studio/terms; running this task
+# is what agrees to them.
+#
+# --no-metrics is passed to every invocation. The CLI reports command and flag
+# usage to Google by default, and that is a contributor's decision rather than
+# something a build task should make quietly on their behalf.
+cmdline_tools_zip="commandlinetools-linux-16111833_latest.zip"
+cmdline_tools_sha1="e025545c62a8e64c7559119566a569fb1dec5f60"
+android="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/android"
+
+if [ ! -x "$android" ]; then
+    echo "Bootstrapping the Android command-line tools into $ANDROID_SDK_ROOT"
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL -o "$tmp/tools.zip" \
+        "https://dl.google.com/android/repository/$cmdline_tools_zip"
+    got=$(sha1sum "$tmp/tools.zip" | cut -d" " -f1)
+    if [ "$got" != "$cmdline_tools_sha1" ]; then
+        echo "checksum mismatch for $cmdline_tools_zip:" >&2
+        echo "  expected $cmdline_tools_sha1" >&2
+        echo "  got      $got" >&2
+        exit 1
+    fi
+    unzip -q "$tmp/tools.zip" -d "$tmp"
+    mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+    rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+    mv "$tmp/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+fi
+
+# Package coordinates use "/" under the new CLI, and platforms now carry a
+# minor version -- android-37.2 rather than android-37 -- which is why the
+# Gradle config sets compileSdkMinor alongside compileSdk.
+#
+# The NDK is pinned to 29.0.14206865 because every 30.x release is still a
+# release candidate, and a release build should not cross-compile with one.
+#
+# The emulator and its system image are ~10 GB and are only useful where there
+# is a screen and nested virtualisation. CI has neither -- the Android jobs are
+# JVM-only -- so BEAM_ANDROID_SDK_MINIMAL=1 leaves them out, which is the
+# difference between a job that installs 12 GB and one that installs 2.
+packages="platform-tools platforms/android-37.2 build-tools/37.0.0 ndk/29.0.14206865"
+if [ "${BEAM_ANDROID_SDK_MINIMAL:-0}" != "1" ]; then
+    packages="$packages emulator system-images/android-37.1/google_apis_ps16k/x86_64"
+fi
+
+# shellcheck disable=SC2086
+"$android" --no-metrics --sdk "$ANDROID_SDK_ROOT" sdk install $packages
+'''
+
+[tasks."core:android"]
+description = "Cross-compile beam-client-core into jniLibs for every Android ABI"
+run = '''
+set -eu
+# Under `build/`, and per profile. Not `src/main/jniLibs`, which is AGP's
+# default jniLibs source directory: anything left there is packaged *in
+# addition* to whatever the build generates, so a stale debug library would
+# ride along in a release APK. One location, and Gradle passes the profile.
+out="${BEAM_JNI_LIBS_DIR:-beam-android/core/ffi/build/jniLibs/${BEAM_CARGO_PROFILE:-debug}}"
+profile="${BEAM_CARGO_PROFILE:-debug}"
+
+# A debug build carries a ~60 MB unstripped .so per ABI, so local iteration
+# builds only the emulator's architecture unless asked for more.
+if [ "${BEAM_ANDROID_ALL_ABIS:-0}" = "1" ] || [ "$profile" != "debug" ]; then
+    targets="-t arm64-v8a -t armeabi-v7a -t x86_64"
+else
+    targets="-t x86_64"
+fi
+
+release_flag=""
+if [ "$profile" = "release" ]; then
+    release_flag="--release"
+fi
+
+mkdir -p "$out"
+# shellcheck disable=SC2086
+cargo ndk $targets -o "$out" build -p beam-client-core --lib $release_flag
+'''
+
+[tasks."core:bindgen"]
+description = "Generate the Kotlin bindings for beam-client-core"
+run = '''
+set -eu
+out="${BEAM_BINDINGS_DIR:-beam-android/core/ffi/build/generated/uniffi}"
+
+# Generated from the built library rather than from source, so the bindings can
+# only ever describe a .so that actually exists. Building the host cdylib first
+# is cheaper than a cross build and produces identical metadata.
+cargo build -p beam-client-core --lib
+mkdir -p "$out"
+cargo run -p beam-client-core --features uniffi-bindgen --bin uniffi-bindgen -- \
+    generate \
+    --library target/debug/libbeam_client_core.so \
+    --language kotlin \
+    --out-dir "$out" \
+    --no-format
+'''
+
+[tasks."codegen:openapi:core"]
+description = "Re-export the OpenAPI document beam-client-core generates from"
+run = [
+    'cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > beam-client-core/api/openapi.json',
+]
+
+[tasks."android:avd"]
+description = "Create the phone and tablet emulator AVDs (idempotent)"
+# Creating the AVDs is not the same as being able to run one. On a headless
+# host the emulator may segfault during boot -- `qemu-system-x86 dumped core`
+# in the journal, with the X11/EGL/GLES modules loaded -- regardless of
+# `-no-window` and of `-gpu swiftshader_indirect`, `-gpu guest` or `-gpu off`.
+# Nothing in the app or these tasks causes it; it is the host's graphics stack.
+# CI never boots an emulator for exactly this class of reason: the Robolectric
+# and Roborazzi suites are the automated coverage, and a device is the manual
+# tier.
+depends = ["android:sdk"]
+run = '''
+set -eu
+android="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/android"
+
+# Both form factors, because #67 asks for phone *and* tablet and the adaptive
+# layouts are the part most likely to regress unnoticed on one of them.
+#
+# The new CLI chooses the system image for a profile itself; there is no flag
+# to pin one, so this deliberately does not try to.
+existing=$("$android" --no-metrics emulator list 2>/dev/null || true)
+for profile in medium_phone medium_tablet; do
+    if printf '%s' "$existing" | grep -q "$profile"; then
+        echo "AVD $profile already exists"
+    else
+        "$android" --no-metrics emulator create "$profile"
+    fi
+done
+'''
+
+# ---------------------------------------------------------------------------
 # Commit hygiene
 # ---------------------------------------------------------------------------
 
@@ -447,7 +618,11 @@ for file in $(git ls-files '*.rs'); do
               if ((getline nxt) > 0) {
                   n = nxt
                   sub(/^[ \t]+/, "", n)
-                  if (n !~ /^(pub )?use / && prev != "#[mutants::skip]") {
+                  # `use` items take no mutants, and a non-inline `mod foo;`
+                  # cannot carry an attribute proc macro at all -- that is
+                  # unstable -- so such files are excluded by path in
+                  # .cargo/mutants.toml instead. Everything else must be marked.
+                  if (n !~ /^(pub )?use / && n !~ /^(pub )?mod [A-Za-z_][A-Za-z0-9_]*;/ && prev != "#[mutants::skip]") {
                       printf "%s:%d: test-only item is not marked #[mutants::skip]\n", f, NR - 1
                       bad = 1
                   }
@@ -470,6 +645,46 @@ exit "$status"
 # Aggregate
 # ---------------------------------------------------------------------------
 
+[tasks."android:lint"]
+description = "Format-check the Kotlin sources and run Android Lint"
+run = '''
+set -eu
+# ktlint runs over the sources rather than through Gradle: it is the same
+# binary the pre-commit hook uses, so a hook pass and a CI pass cannot
+# disagree. Generated bindings are excluded by beam-android/.ktlintignore.
+ktlint --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'
+cd beam-android && ./gradlew lintDebug
+'''
+
+[tasks."android:lint:fix"]
+description = "Rewrite the Kotlin sources to satisfy ktlint"
+run = "ktlint --format --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'"
+
+[tasks."android:test"]
+description = "Run the Android unit tests (JVM and Robolectric)"
+run = "cd beam-android && ./gradlew testDebugUnitTest"
+
+[tasks."android:screenshot"]
+description = "Check the rendered screens against the recorded references"
+run = "cd beam-android && ./gradlew verifyRoborazziDebug"
+
+[tasks."android:screenshot:record"]
+description = "Re-record the screenshot references after an intended visual change"
+run = "cd beam-android && ./gradlew recordRoborazziDebug"
+
+[tasks."android:build"]
+description = "Assemble the debug APK"
+run = "cd beam-android && ./gradlew assembleDebug"
+
+[tasks."android:release"]
+description = "Assemble the release APK for every ABI"
+# No explicit cross-compile step: the Gradle `cargoNdkRelease` task selects the
+# release profile itself, and every ABI with it. Doing it here as well would be
+# a second place for the profile to be chosen, and the two could disagree --
+# which is exactly the bug that made an earlier release APK carry debug
+# libraries.
+run = "cd beam-android && ./gradlew assembleRelease"
+
 [tasks.ci]
 description = "Run every check that CI enforces, except coverage and image builds"
 depends = [
@@ -485,4 +700,7 @@ depends = [
     "ts:typecheck",
     "ts:test",
     "docs:build",
+    "android:lint",
+    "android:test",
+    "android:screenshot",
 ]
