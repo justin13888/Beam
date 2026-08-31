@@ -41,17 +41,23 @@ public enum EngineSelector {
         forContainer container: String?,
         fileExtension: String? = nil
     ) -> PlaybackEngineKind {
-        let candidates = [container, fileExtension]
-            .compactMap { $0 }
-            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-            .map { $0.hasPrefix(".") ? String($0.dropFirst()) : $0 }
-            .filter { !$0.isEmpty }
+        // The catalogue's container wins outright when it has one. It came
+        // from probing the file at index time, where the URL's extension is a
+        // guess -- `/v1/files/{id}/stream` carries no extension at all, and a
+        // download URL's filename is whatever was on disk. Letting the
+        // extension override a known container would route a file to an engine
+        // that then refuses it, which reads as corrupt media rather than as a
+        // wrong decision.
+        let candidate = normalise(container) ?? normalise(fileExtension)
+        guard let candidate else { return .avPlayer }
+        return demuxedContainers.contains(candidate) ? .sampleBuffer : .avPlayer
+    }
 
-        let demuxed = demuxedContainers
-        for candidate in candidates where demuxed.contains(candidate) {
-            return .sampleBuffer
-        }
-        return .avPlayer
+    private static func normalise(_ value: String?) -> String? {
+        guard let value else { return nil }
+        var trimmed = value.trimmingCharacters(in: .whitespaces).lowercased()
+        if trimmed.hasPrefix(".") { trimmed.removeFirst() }
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Pick an engine for a source the catalogue described.

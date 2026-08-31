@@ -965,12 +965,12 @@ fi
 # shell. The snapshot target is skipped here and owned by `apple:snapshot`,
 # which pins the one simulator its references were recorded on.
 xcrun xcodebuild test \
-    -scheme BeamKit-Package \
+    -scheme BeamKit \
     -destination "platform=macOS" \
     -skip-testing:SnapshotTests
 
 xcrun xcodebuild test \
-    -scheme BeamKit-Package \
+    -scheme BeamKit \
     -destination "${BEAM_IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}" \
     -skip-testing:SnapshotTests
 '''
@@ -991,7 +991,7 @@ fi
 # and are only meaningful against a fixed idiom, scale and OS version -- the
 # equivalent of beam-android pinning Robolectric to one API level.
 xcrun xcodebuild test \
-    -scheme BeamKit-Package \
+    -scheme BeamKit \
     -destination "${BEAM_IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}" \
     -only-testing:SnapshotTests
 '''
@@ -1000,7 +1000,6 @@ xcrun xcodebuild test \
 description = "Re-record the snapshot references after an intended visual change"
 depends = ["core:apple"]
 dir = "beam-apple/Packages/BeamKit"
-env = { BEAM_SNAPSHOT_RECORD = "1" }
 run = '''
 set -eu
 
@@ -1009,10 +1008,21 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 0
 fi
 
+# TEST_RUNNER_ prefixed, because a simulator test runs in its own process and
+# does not inherit this shell's environment. A plain `BEAM_SNAPSHOT_RECORD=1`
+# here would be silently ignored, and the task would verify the references it
+# was asked to replace -- which looks like success.
+#
+# Recording always "fails": snapshot-testing reports every newly written
+# reference as a failure so a recording run can never be mistaken for a passing
+# one. That is why this does not propagate the exit status.
 xcrun xcodebuild test \
-    -scheme BeamKit-Package \
+    -scheme BeamKit \
     -destination "${BEAM_IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}" \
-    -only-testing:SnapshotTests
+    -only-testing:SnapshotTests \
+    TEST_RUNNER_BEAM_SNAPSHOT_RECORD=1 || true
+
+echo "References written. Review the diff before committing them."
 '''
 
 [tasks."apple:build"]

@@ -54,20 +54,34 @@ public enum BeamFormat {
 
     /// A resolution, named the way a viewer would name it.
     ///
-    /// Keyed on height, and by lower bound rather than exact match, because a
-    /// 1920x804 scope-ratio rip is 1080p to everyone except a table of exact
-    /// dimensions.
+    /// Keyed on **width**, not height. A 2.39:1 scope rip of a 1080p master is
+    /// 1920x804: its height sits in the 720p band, but nobody calls that file
+    /// 720p, and a source picker that did would have a viewer choose the
+    /// "higher quality" 1280x720 version of the same film. Width is stable
+    /// across aspect ratios in a way height is not.
+    ///
+    /// Lower bounds rather than exact matches, because no two rips of the same
+    /// master agree on the last few pixels.
     public static func resolution(width: UInt32?, height: UInt32?) -> String? {
-        guard let height, height > 0 else { return nil }
-        switch height {
-        case 2000...: return "4K"
-        case 1400..<2000: return "1440p"
-        case 900..<1400: return "1080p"
-        case 600..<900: return "720p"
-        case 400..<600: return "480p"
-        default:
-            guard let width else { return "\(height)p" }
+        if let width, width > 0 {
+            switch width {
+            case 3400...: return "4K"
+            case 2400..<3400: return "1440p"
+            case 1800..<2400: return "1080p"
+            case 1200..<1800: return "720p"
+            case 640..<1200: return "480p"
+            default: break
+            }
+        }
+        // Below the smallest named band, or with no width at all, the exact
+        // dimensions say more than a name that would be wrong.
+        switch (width, height) {
+        case (let width?, let height?) where width > 0 && height > 0:
             return "\(width)x\(height)"
+        case (_, let height?) where height > 0:
+            return "\(height)p"
+        default:
+            return nil
         }
     }
 

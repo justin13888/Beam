@@ -114,7 +114,7 @@ final class SignInCoordinator: NSObject, WKNavigationDelegate {
     /// Without this, a cookie called `beam_session` set by some other host in
     /// the redirect chain would be lifted and handed to the core as if it were
     /// the server's.
-    private func matchesHost(_ domain: String) -> Bool {
+    func matchesHost(_ domain: String) -> Bool {
         let normalized = domain.hasPrefix(".") ? String(domain.dropFirst()) : domain
         return host == normalized || host.hasSuffix(".\(normalized)")
     }
