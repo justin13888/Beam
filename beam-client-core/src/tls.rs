@@ -167,7 +167,12 @@ impl ServerCertVerifier for TofuVerifier {
         // and dropping the expiry check would make a pin permanent.
         let pinned = self.decision.is_trusted(&details.sha256_fingerprint);
         let covers = details.covers_host(&host);
-        let live = now.as_secs() <= details.not_after_unix.max(0).unsigned_abs();
+        // The whole validity window, not just the far end. A certificate whose
+        // window has not opened yet is as invalid as an expired one, and
+        // checking only expiry would accept one a public CA would refuse.
+        let seconds = now.as_secs();
+        let live = seconds >= details.not_before_unix.max(0).unsigned_abs()
+            && seconds <= details.not_after_unix.max(0).unsigned_abs();
 
         if pinned && covers && live {
             return Ok(ServerCertVerified::assertion());
@@ -490,6 +495,42 @@ mod tests {
                 .build()
                 .expect("verifier builds");
         TofuVerifier { inner, decision }
+    }
+
+    #[test]
+    fn a_pinned_certificate_is_rejected_outside_its_validity_window() {
+        // Both ends of the window. Checking only expiry would accept a
+        // certificate a public CA would refuse for not having started yet.
+        install_crypto_provider();
+        let der = certificate(&["beam.local"]);
+        let details = describe(&der).expect("parses");
+        let decision = Arc::new(TrustDecision::new(vec![details.sha256_fingerprint.clone()]));
+        let verifier = verifier(Arc::clone(&decision));
+        let name = ServerName::try_from("beam.local").expect("name");
+
+        let before_it_starts = UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+            details
+                .not_before_unix
+                .max(0)
+                .unsigned_abs()
+                .saturating_sub(3_600),
+        ));
+        assert!(
+            verifier
+                .verify_server_cert(&der, &[], &name, &[], before_it_starts)
+                .is_err(),
+            "a certificate whose validity has not begun must be refused"
+        );
+
+        let after_it_ends = UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+            details.not_after_unix.max(0).unsigned_abs() + 3_600,
+        ));
+        assert!(
+            verifier
+                .verify_server_cert(&der, &[], &name, &[], after_it_ends)
+                .is_err(),
+            "an expired certificate must be refused even when pinned"
+        );
     }
 
     #[test]
