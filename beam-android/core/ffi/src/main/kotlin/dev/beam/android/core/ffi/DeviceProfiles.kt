@@ -21,7 +21,6 @@ import uniffi.beam_client_core.DeviceProfile
  * sources against.
  */
 public object DeviceProfiles {
-
     /**
      * Containers ExoPlayer can demux.
      *
@@ -30,9 +29,20 @@ public object DeviceProfiles {
      * no API that reports it. Matroska is the entry that matters: it is what
      * most remuxed libraries use and what a browser most often refuses.
      */
-    private val SupportedContainers = listOf(
-        "mp4", "m4v", "mov", "mkv", "webm", "ts", "mpegts", "avi", "flv", "ogg", "3gp",
-    )
+    private val SupportedContainers =
+        listOf(
+            "mp4",
+            "m4v",
+            "mov",
+            "mkv",
+            "webm",
+            "ts",
+            "mpegts",
+            "avi",
+            "flv",
+            "ogg",
+            "3gp",
+        )
 
     /**
      * Build a profile describing this device.
@@ -40,7 +50,10 @@ public object DeviceProfiles {
      * @param allowSoftwareDecode whether files that only a software decoder
      *   can handle should count as playable.
      */
-    public fun build(context: Context, allowSoftwareDecode: Boolean): DeviceProfile {
+    public fun build(
+        context: Context,
+        allowSoftwareDecode: Boolean,
+    ): DeviceProfile {
         val codecs = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
         val video = mutableListOf<DecoderCapability>()
         val audio = mutableListOf<DecoderCapability>()
@@ -49,14 +62,17 @@ public object DeviceProfiles {
             if (info.isEncoder) continue
             val hardware = isHardwareAccelerated(info)
             for (mime in info.supportedTypes) {
-                val capabilities = runCatching { info.getCapabilitiesForType(mime) }.getOrNull()
-                    ?: continue
+                val capabilities =
+                    runCatching { info.getCapabilitiesForType(mime) }.getOrNull()
+                        ?: continue
                 when {
-                    mime.startsWith("video/") ->
+                    mime.startsWith("video/") -> {
                         video += videoCapability(mime, capabilities, hardware)
+                    }
 
-                    mime.startsWith("audio/") ->
+                    mime.startsWith("audio/") -> {
                         audio += audioCapability(mime, hardware)
+                    }
                 }
             }
         }
@@ -88,8 +104,9 @@ public object DeviceProfiles {
             maxHeight = video?.supportedHeights?.upper?.toUInt(),
             maxBitrateBps = video?.bitrateRange?.upper?.toULong(),
             supportsHdr10 = profiles.any { it in Hdr10Profiles },
-            supportsDolbyVision = mime.equals(MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION, true) ||
-                profiles.any { it in DolbyVisionProfiles },
+            supportsDolbyVision =
+                mime.equals(MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION, true) ||
+                    profiles.any { it in DolbyVisionProfiles },
             // A decoder that only advertises 8-bit profiles cannot play a
             // 10-bit stream even at a resolution it otherwise accepts, which
             // is the failure that looks like a green or black picture rather
@@ -98,7 +115,10 @@ public object DeviceProfiles {
         )
     }
 
-    private fun audioCapability(mime: String, hardware: Boolean): DecoderCapability =
+    private fun audioCapability(
+        mime: String,
+        hardware: Boolean,
+    ): DecoderCapability =
         DecoderCapability(
             mimeType = mime,
             isHardwareAccelerated = hardware,
@@ -129,8 +149,10 @@ public object DeviceProfiles {
 
     private fun displaySize(context: Context): Pair<Int, Int> {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val metrics = context.getSystemService(WindowManager::class.java)
-                ?.maximumWindowMetrics
+            val metrics =
+                context
+                    .getSystemService(WindowManager::class.java)
+                    ?.maximumWindowMetrics
             val bounds = metrics?.bounds
             if (bounds != null) return bounds.width() to bounds.height()
         }
@@ -140,8 +162,11 @@ public object DeviceProfiles {
     }
 
     private fun supportsHdr(context: Context): Boolean {
-        val display: Display = context.getSystemService(WindowManager::class.java)
-            ?.defaultDisplay ?: return false
+        val display: Display =
+            context
+                .getSystemService(WindowManager::class.java)
+                ?.defaultDisplay ?: return false
+
         @Suppress("DEPRECATION")
         val types = display.hdrCapabilities?.supportedHdrTypes ?: return false
         return types.isNotEmpty()
@@ -157,9 +182,10 @@ public object DeviceProfiles {
     private fun preferredLanguages(context: Context): List<String> {
         val configuration: Configuration = context.resources.configuration
         val locales = configuration.locales
-        return (0 until locales.size()).mapNotNull { index ->
-            locales[index]?.isO3Language?.takeIf { it.isNotBlank() }
-        }.distinct()
+        return (0 until locales.size())
+            .mapNotNull { index ->
+                locales[index]?.isO3Language?.takeIf { it.isNotBlank() }
+            }.distinct()
     }
 
     // The SDK groups profile constants by codec, not by capability, so the
@@ -168,30 +194,34 @@ public object DeviceProfiles {
     // being asked is "can this device show HDR10", not "which codec is it".
 
     /** Profiles that carry an HDR10 or HDR10+ signal. */
-    private val Hdr10Profiles = setOf(
-        MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
-        MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus,
-        MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR,
-        MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR,
-        MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus,
-        MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR10Plus,
-        MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10,
-        MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10Plus,
-    )
+    private val Hdr10Profiles =
+        setOf(
+            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
+            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus,
+            MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR,
+            MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR,
+            MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus,
+            MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR10Plus,
+            MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10,
+            MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10Plus,
+        )
 
     /** Dolby Vision profile constants, which have no named group in the SDK. */
-    private val DolbyVisionProfiles = setOf(
-        MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheDtr,
-        MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheSt,
-        MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvavSe,
-    )
+    private val DolbyVisionProfiles =
+        setOf(
+            MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheDtr,
+            MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheSt,
+            MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvavSe,
+        )
 
     /** Profiles with a bit depth above 8, HDR ones included. */
-    private val TenBitProfiles = Hdr10Profiles + setOf(
-        MediaCodecInfo.CodecProfileLevel.AVCProfileHigh10,
-        MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10,
-        MediaCodecInfo.CodecProfileLevel.VP9Profile2,
-        MediaCodecInfo.CodecProfileLevel.VP9Profile3,
-        MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10,
-    )
+    private val TenBitProfiles =
+        Hdr10Profiles +
+            setOf(
+                MediaCodecInfo.CodecProfileLevel.AVCProfileHigh10,
+                MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10,
+                MediaCodecInfo.CodecProfileLevel.VP9Profile2,
+                MediaCodecInfo.CodecProfileLevel.VP9Profile3,
+                MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10,
+            )
 }

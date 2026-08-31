@@ -19,7 +19,6 @@ import javax.crypto.spec.GCMParameterSpec
  * keystore is the mechanism it wrapped anyway.
  */
 internal object SecretCipher {
-
     private const val PROVIDER = "AndroidKeyStore"
     private const val ALIAS = "dev.beam.android.session"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
@@ -44,15 +43,16 @@ internal object SecretCipher {
      * and the right response is to treat the session as expired and ask them
      * to sign in, not to crash on launch.
      */
-    fun decrypt(encoded: String): String? = runCatching {
-        val packed = Base64.decode(encoded, Base64.NO_WRAP)
-        require(packed.size > IV_LENGTH_BYTES) { "ciphertext is too short to contain an IV" }
-        val iv = packed.copyOfRange(0, IV_LENGTH_BYTES)
-        val body = packed.copyOfRange(IV_LENGTH_BYTES, packed.size)
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_LENGTH_BITS, iv))
-        cipher.doFinal(body).toString(Charsets.UTF_8)
-    }.getOrNull()
+    fun decrypt(encoded: String): String? =
+        runCatching {
+            val packed = Base64.decode(encoded, Base64.NO_WRAP)
+            require(packed.size > IV_LENGTH_BYTES) { "ciphertext is too short to contain an IV" }
+            val iv = packed.copyOfRange(0, IV_LENGTH_BYTES)
+            val body = packed.copyOfRange(IV_LENGTH_BYTES, packed.size)
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_LENGTH_BITS, iv))
+            cipher.doFinal(body).toString(Charsets.UTF_8)
+        }.getOrNull()
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
@@ -60,11 +60,11 @@ internal object SecretCipher {
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
         generator.init(
-            KeyGenParameterSpec.Builder(
-                ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            KeyGenParameterSpec
+                .Builder(
+                    ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 // Deliberately not requiring user authentication: playback has
                 // to survive a locked screen, and the threat this defends

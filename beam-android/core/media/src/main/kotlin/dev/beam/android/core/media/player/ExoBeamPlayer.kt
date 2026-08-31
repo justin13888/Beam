@@ -352,7 +352,8 @@ private fun Tracks.optionsOfType(trackType: Int): List<TrackOption> =
         }
     }
 
-private fun BeamFailure.asPlaybackFailure(): PlaybackFailure = PlaybackFailure(message = message, isRetryable = retryable)
+private fun BeamFailure.asPlaybackFailure(): PlaybackFailure =
+    PlaybackFailure(message = message, isRetryable = retryable)
 
 private fun PlaybackException.asPlaybackFailure(): PlaybackFailure {
     // Direct play means there is no server-side fallback for a file this

@@ -21,10 +21,12 @@ import uniffi.beam_client_core.StorageException
 internal class DataStoreKeyValueStore(
     private val dataStore: DataStore<Preferences>,
 ) : KeyValueStore {
-
     override suspend fun `get`(key: String): String? = read(plainKey(key))
 
-    override suspend fun `put`(key: String, value: String) {
+    override suspend fun `put`(
+        key: String,
+        value: String,
+    ) {
         write(plainKey(key), value)
     }
 
@@ -32,20 +34,24 @@ internal class DataStoreKeyValueStore(
         delete(plainKey(key))
     }
 
-    override suspend fun listKeys(prefix: String): List<String> = guard {
-        dataStore.data.first()
-            .asMap()
-            .keys
-            .map { it.name }
-            .filter { it.startsWith(PLAIN_PREFIX) }
-            .map { it.removePrefix(PLAIN_PREFIX) }
-            .filter { it.startsWith(prefix) }
-    }
+    override suspend fun listKeys(prefix: String): List<String> =
+        guard {
+            dataStore.data
+                .first()
+                .asMap()
+                .keys
+                .map { it.name }
+                .filter { it.startsWith(PLAIN_PREFIX) }
+                .map { it.removePrefix(PLAIN_PREFIX) }
+                .filter { it.startsWith(prefix) }
+        }
 
-    override suspend fun getSecret(key: String): String? =
-        read(secretKey(key))?.let(SecretCipher::decrypt)
+    override suspend fun getSecret(key: String): String? = read(secretKey(key))?.let(SecretCipher::decrypt)
 
-    override suspend fun putSecret(key: String, value: String) {
+    override suspend fun putSecret(
+        key: String,
+        value: String,
+    ) {
         write(secretKey(key), SecretCipher.encrypt(value))
     }
 
@@ -53,10 +59,12 @@ internal class DataStoreKeyValueStore(
         delete(secretKey(key))
     }
 
-    private suspend fun read(key: Preferences.Key<String>): String? =
-        guard { dataStore.data.first()[key] }
+    private suspend fun read(key: Preferences.Key<String>): String? = guard { dataStore.data.first()[key] }
 
-    private suspend fun write(key: Preferences.Key<String>, value: String) {
+    private suspend fun write(
+        key: Preferences.Key<String>,
+        value: String,
+    ) {
         guard { dataStore.edit { it[key] = value } }
     }
 
@@ -71,17 +79,19 @@ internal class DataStoreKeyValueStore(
      * IOException escaping here would cross the FFI boundary as an unexpected
      * panic rather than as the error the calling screen knows how to render.
      */
-    private inline fun <T> guard(block: () -> T): T = try {
-        block()
-    } catch (error: Exception) {
-        throw StorageException.Unavailable(error.message ?: error.javaClass.simpleName)
-    }
+    private inline fun <T> guard(block: () -> T): T =
+        try {
+            block()
+        } catch (error: Exception) {
+            throw StorageException.Unavailable(error.message ?: error.javaClass.simpleName)
+        }
 
     private companion object {
         const val PLAIN_PREFIX = "plain:"
         const val SECRET_PREFIX = "secret:"
 
         fun plainKey(key: String) = stringPreferencesKey("$PLAIN_PREFIX$key")
+
         fun secretKey(key: String) = stringPreferencesKey("$SECRET_PREFIX$key")
     }
 }

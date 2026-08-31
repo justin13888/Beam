@@ -28,10 +28,11 @@ public fun Modifier.shimmer(enabled: Boolean = true): Modifier {
     val progress by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1_400),
-            repeatMode = RepeatMode.Restart,
-        ),
+        animationSpec =
+            infiniteRepeatable(
+                animation = tween(durationMillis = 1_400),
+                repeatMode = RepeatMode.Restart,
+            ),
         label = "shimmerProgress",
     )
 
@@ -46,11 +47,12 @@ public fun Modifier.shimmer(enabled: Boolean = true): Modifier {
         val travel = size.width * 2f
         val start = -size.width + travel * progress
         drawRect(
-            brush = Brush.linearGradient(
-                colors = listOf(base, highlight, base),
-                start = Offset(start, 0f),
-                end = Offset(start + size.width, size.height),
-            ),
+            brush =
+                Brush.linearGradient(
+                    colors = listOf(base, highlight, base),
+                    start = Offset(start, 0f),
+                    end = Offset(start + size.width, size.height),
+                ),
         )
     }
 }

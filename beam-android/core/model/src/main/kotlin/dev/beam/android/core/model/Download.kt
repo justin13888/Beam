@@ -59,11 +59,12 @@ public data class DownloadRecord(
      * indeterminate one, so this stays null rather than guessing.
      */
     public val progress: Float?
-        get() = if (totalBytes > 0L) {
-            (downloadedBytes.toDouble() / totalBytes.toDouble()).toFloat().coerceIn(0f, 1f)
-        } else {
-            null
-        }
+        get() =
+            if (totalBytes > 0L) {
+                (downloadedBytes.toDouble() / totalBytes.toDouble()).toFloat().coerceIn(0f, 1f)
+            } else {
+                null
+            }
 
     /** Whether the file can be played with no network. */
     public val isPlayableOffline: Boolean

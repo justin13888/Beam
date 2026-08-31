@@ -12,17 +12,18 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
  * Robolectric sandbox in the way.
  */
 class JvmLibraryConventionPlugin : Plugin<Project> {
-    override fun apply(target: Project) = with(target) {
-        pluginManager.apply("org.jetbrains.kotlin.jvm")
+    override fun apply(target: Project) =
+        with(target) {
+            pluginManager.apply("org.jetbrains.kotlin.jvm")
 
-        extensions.configure<KotlinJvmProjectExtension> {
-            jvmToolchain {
-                languageVersion.set(JavaLanguageVersion.of(21))
+            extensions.configure<KotlinJvmProjectExtension> {
+                jvmToolchain {
+                    languageVersion.set(JavaLanguageVersion.of(21))
+                }
+                // Public API must be explicit about visibility and return types:
+                // this module is a vocabulary other modules depend on, and an
+                // accidentally-public helper becomes someone else's dependency.
+                explicitApi()
             }
-            // Public API must be explicit about visibility and return types:
-            // this module is a vocabulary other modules depend on, and an
-            // accidentally-public helper becomes someone else's dependency.
-            explicitApi()
         }
-    }
 }

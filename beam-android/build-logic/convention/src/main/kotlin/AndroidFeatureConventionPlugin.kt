@@ -15,38 +15,39 @@ import org.gradle.kotlin.dsl.project
  * tested without dragging in nine others.
  */
 class AndroidFeatureConventionPlugin : Plugin<Project> {
-    override fun apply(target: Project) = with(target) {
-        pluginManager.apply("beam.android.library")
-        pluginManager.apply("beam.android.compose")
-        pluginManager.apply("beam.android.hilt")
-        pluginManager.apply("org.jetbrains.kotlin.plugin.serialization")
+    override fun apply(target: Project) =
+        with(target) {
+            pluginManager.apply("beam.android.library")
+            pluginManager.apply("beam.android.compose")
+            pluginManager.apply("beam.android.hilt")
+            pluginManager.apply("org.jetbrains.kotlin.plugin.serialization")
 
-        extensions.configure<LibraryExtension> {
-            testOptions.unitTests.all { test ->
-                // Robolectric's native graphics mode renders real pixels,
-                // which is what makes the screenshot tests meaningful rather
-                // than a record of blank rectangles.
-                test.systemProperty("robolectric.graphicsMode", "NATIVE")
+            extensions.configure<LibraryExtension> {
+                testOptions.unitTests.all { test ->
+                    // Robolectric's native graphics mode renders real pixels,
+                    // which is what makes the screenshot tests meaningful rather
+                    // than a record of blank rectangles.
+                    test.systemProperty("robolectric.graphicsMode", "NATIVE")
+                }
+            }
+
+            dependencies {
+                add("implementation", project(":core:model"))
+                add("implementation", project(":core:ffi"))
+                add("implementation", project(":core:designsystem"))
+                add("implementation", project(":core:ui"))
+
+                addAll(
+                    libs,
+                    "implementation",
+                    "androidx.lifecycle.viewmodel.compose",
+                    "androidx.hilt.navigation.compose",
+                    "androidx.navigation3.runtime",
+                    "androidx.navigation3.ui",
+                    "kotlinx.serialization.json",
+                )
+
+                add("testImplementation", project(":core:testing"))
             }
         }
-
-        dependencies {
-            add("implementation", project(":core:model"))
-            add("implementation", project(":core:ffi"))
-            add("implementation", project(":core:designsystem"))
-            add("implementation", project(":core:ui"))
-
-            addAll(
-                libs,
-                "implementation",
-                "androidx.lifecycle.viewmodel.compose",
-                "androidx.hilt.navigation.compose",
-                "androidx.navigation3.runtime",
-                "androidx.navigation3.ui",
-                "kotlinx.serialization.json",
-            )
-
-            add("testImplementation", project(":core:testing"))
-        }
-    }
 }

@@ -100,7 +100,12 @@ internal class TofuTrustManager(
  * and the symptom would be an unexplained connection failure, not an obvious
  * bug.
  */
-internal fun normalizeFingerprint(value: String): String = value.filter { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }.lowercase()
+internal fun normalizeFingerprint(value: String): String =
+    value
+        .filter {
+            it.isDigit() || it in 'a'..'f' ||
+                it in 'A'..'F'
+        }.lowercase()
 
 /** Whole-certificate SHA-256, lowercase hex with no separators. */
 internal fun fingerprintOf(certificate: X509Certificate): String =

@@ -1,0 +1,24 @@
+# ktlint's configuration for the Android app. Scoped to `beam-android/` so it
+# cannot affect the repository's other languages.
+root = true
+
+[*.{kt,kts}]
+indent_size = 4
+max_line_length = 120
+insert_final_newline = true
+
+# Compose composables are PascalCase by convention, and the whole ecosystem --
+# including Compose's own lint rules -- depends on that. ktlint's default
+# function-naming rule flags every one of them, so it is disabled rather than
+# suppressed at 700 call sites.
+ktlint_standard_function-naming = disabled
+
+# `@Composable` lambdas are frequently multi-line trailing arguments, which the
+# argument-list rules want to reformat into something less readable.
+ktlint_function_signature_body_expression_wrapping = multiline
+
+# Design tokens are PascalCase, matching Compose's own -- `ButtonDefaults.MinWidth`,
+# `TextFieldDefaults.MinHeight`. ktlint wants SCREAMING_SNAKE for immutable
+# properties, which would make the design system read unlike every Compose API
+# beside it.
+ktlint_standard_property-naming = disabled

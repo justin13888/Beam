@@ -8,7 +8,6 @@ package dev.beam.android.core.model
  * exhaustive over the cases that actually exist.
  */
 public sealed interface LoadState<out T> {
-
     /** Nothing has been requested yet. */
     public data object Idle : LoadState<Nothing>
 
@@ -18,10 +17,14 @@ public sealed interface LoadState<out T> {
      * @property previous the last successful value, kept so a refresh can keep
      *   showing content instead of flashing a spinner over it.
      */
-    public data class Loading<out T>(val previous: T? = null) : LoadState<T>
+    public data class Loading<out T>(
+        val previous: T? = null,
+    ) : LoadState<T>
 
     /** The request succeeded. */
-    public data class Success<out T>(val value: T) : LoadState<T>
+    public data class Success<out T>(
+        val value: T,
+    ) : LoadState<T>
 
     /**
      * The request failed.
@@ -40,12 +43,13 @@ public sealed interface LoadState<out T> {
 
 /** The value held, if this state has one -- current or stale. */
 public val <T> LoadState<T>.valueOrNull: T?
-    get() = when (this) {
-        is LoadState.Success -> value
-        is LoadState.Loading -> previous
-        is LoadState.Failure -> previous
-        LoadState.Idle -> null
-    }
+    get() =
+        when (this) {
+            is LoadState.Success -> value
+            is LoadState.Loading -> previous
+            is LoadState.Failure -> previous
+            LoadState.Idle -> null
+        }
 
 /** Whether a progress indicator belongs on screen. */
 public val LoadState<*>.isLoading: Boolean

@@ -8,7 +8,6 @@ import kotlin.math.roundToLong
  * catalog, on a detail page, and on the lock screen.
  */
 public object Format {
-
     /** `1h 45m`, or `45m` under an hour. Blank for an unknown duration. */
     public fun runtime(minutes: UInt?): String {
         val total = minutes?.toInt() ?: return ""
@@ -51,7 +50,7 @@ public object Format {
             index++
         }
         return if (index == 0) {
-            "${bytes} B"
+            "$bytes B"
         } else {
             String.format(Locale.US, "%.1f %s", scaled, units[index])
         }
@@ -70,7 +69,10 @@ public object Format {
      * Named by height rather than by exact pixel count, because a 2.35:1 film
      * is 3840x1600 and calling that anything but 4K would confuse everyone.
      */
-    public fun resolution(width: UInt?, height: UInt?): String {
+    public fun resolution(
+        width: UInt?,
+        height: UInt?,
+    ): String {
         val h = height?.toInt() ?: return ""
         val w = width?.toInt() ?: 0
         return when {
@@ -84,10 +86,16 @@ public object Format {
     }
 
     /** `S2 E4`, the compact episode label used on tiles. */
-    public fun episodeCode(season: UInt, episode: UInt): String = "S$season E$episode"
+    public fun episodeCode(
+        season: UInt,
+        episode: UInt,
+    ): String = "S$season E$episode"
 
     /** `24m left`, shown on a partially-watched tile. */
-    public fun remaining(positionSecs: Double, durationSecs: Double?): String {
+    public fun remaining(
+        positionSecs: Double,
+        durationSecs: Double?,
+    ): String {
         val duration = durationSecs ?: return ""
         val left = (duration - positionSecs).coerceAtLeast(0.0)
         val minutes = (left / 60).roundToLong()

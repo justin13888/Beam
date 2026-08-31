@@ -18,8 +18,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.beam.android.core.designsystem.BeamSpacing
@@ -98,16 +98,17 @@ private fun StateScaffold(
     announce: Boolean = false,
 ) {
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(BeamSpacing.ExtraLarge)
-            .then(
-                if (announce) {
-                    Modifier.semantics { liveRegion = LiveRegionMode.Polite }
-                } else {
-                    Modifier
-                },
-            ),
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .padding(BeamSpacing.ExtraLarge)
+                .then(
+                    if (announce) {
+                        Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                    } else {
+                        Modifier
+                    },
+                ),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(BeamSpacing.Compact, Alignment.CenterVertically),
     ) {

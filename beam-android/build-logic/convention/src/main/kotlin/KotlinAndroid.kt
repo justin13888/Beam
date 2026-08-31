@@ -10,8 +10,7 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinAndroidProjectExtension
 internal val Project.libs
     get() = extensions.getByType<VersionCatalogsExtension>().named("libs")
 
-internal fun Project.version(alias: String): String =
-    libs.findVersion(alias).get().requiredVersion
+internal fun Project.version(alias: String): String = libs.findVersion(alias).get().requiredVersion
 
 /**
  * The Android and Kotlin settings every module shares.
@@ -39,10 +38,11 @@ internal fun Project.configureKotlinAndroid(extension: CommonExtension) {
     extension.compileOptions.sourceCompatibility = JavaVersion.VERSION_21
     extension.compileOptions.targetCompatibility = JavaVersion.VERSION_21
 
-    extension.packaging.resources.excludes += setOf(
-        "/META-INF/{AL2.0,LGPL2.1}",
-        "/META-INF/versions/9/previous-compilation-data.bin",
-    )
+    extension.packaging.resources.excludes +=
+        setOf(
+            "/META-INF/{AL2.0,LGPL2.1}",
+            "/META-INF/versions/9/previous-compilation-data.bin",
+        )
 
     extension.testOptions.unitTests.isIncludeAndroidResources = true
 

@@ -12,36 +12,38 @@ import org.gradle.kotlin.dsl.dependencies
  * that can silently disagree.
  */
 class AndroidComposeConventionPlugin : Plugin<Project> {
-    override fun apply(target: Project) = with(target) {
-        pluginManager.apply("org.jetbrains.kotlin.plugin.compose")
+    override fun apply(target: Project) =
+        with(target) {
+            pluginManager.apply("org.jetbrains.kotlin.plugin.compose")
 
-        val extension = extensions.findByName("android") as? CommonExtension
-            ?: error("beam.android.compose requires an Android module")
-        extension.buildFeatures.compose = true
+            val extension =
+                extensions.findByName("android") as? CommonExtension
+                    ?: error("beam.android.compose requires an Android module")
+            extension.buildFeatures.compose = true
 
-        dependencies {
-            val bom = libs.findLibrary("androidx.compose.bom").get()
-            add("implementation", platform(bom))
-            add("androidTestImplementation", platform(bom))
-            add("testImplementation", platform(bom))
+            dependencies {
+                val bom = libs.findLibrary("androidx.compose.bom").get()
+                add("implementation", platform(bom))
+                add("androidTestImplementation", platform(bom))
+                add("testImplementation", platform(bom))
 
-            addAll(
-                libs,
-                "implementation",
-                "androidx.compose.foundation",
-                "androidx.compose.ui",
-                "androidx.compose.ui.graphics",
-                "androidx.compose.ui.tooling.preview",
-                "androidx.compose.material3",
-                "androidx.compose.material.icons.extended",
-                "androidx.lifecycle.runtime.compose",
-                "kotlinx.collections.immutable",
-            )
-            // Tooling is debug-only: it drags the layout inspector and preview
-            // infrastructure in, none of which belongs in a release APK.
-            add("debugImplementation", libs.findLibrary("androidx.compose.ui.tooling").get())
+                addAll(
+                    libs,
+                    "implementation",
+                    "androidx.compose.foundation",
+                    "androidx.compose.ui",
+                    "androidx.compose.ui.graphics",
+                    "androidx.compose.ui.tooling.preview",
+                    "androidx.compose.material3",
+                    "androidx.compose.material.icons.extended",
+                    "androidx.lifecycle.runtime.compose",
+                    "kotlinx.collections.immutable",
+                )
+                // Tooling is debug-only: it drags the layout inspector and preview
+                // infrastructure in, none of which belongs in a release APK.
+                add("debugImplementation", libs.findLibrary("androidx.compose.ui.tooling").get())
+            }
         }
-    }
 }
 
 internal fun org.gradle.api.artifacts.dsl.DependencyHandler.addAll(

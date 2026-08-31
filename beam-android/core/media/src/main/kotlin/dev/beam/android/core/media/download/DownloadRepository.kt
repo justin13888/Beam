@@ -109,7 +109,8 @@ internal class MediaDownloadRepository
             beamManager().setRequiresUnmeteredNetwork(required)
         }
 
-        override suspend fun isDownloaded(fileId: String): Boolean = titles.get(fileId) != null && cache.getCachedSpans(fileId).isNotEmpty()
+        override suspend fun isDownloaded(fileId: String): Boolean =
+            titles.get(fileId) != null && cache.getCachedSpans(fileId).isNotEmpty()
 
         /**
          * The raw manager the download service drives.

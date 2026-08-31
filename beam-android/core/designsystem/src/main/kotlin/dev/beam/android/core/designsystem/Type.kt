@@ -21,59 +21,67 @@ private val Family = FontFamily.Default
  * large styles are pulled in and weighted up while body and label text keeps
  * the baseline metrics that make long synopses readable.
  */
-internal val BeamTypography = Typography().let { base ->
-    Typography(
-        displayLarge = base.displayLarge.copy(
-            fontFamily = Family,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = (-0.5).sp,
-        ),
-        displayMedium = base.displayMedium.copy(
-            fontFamily = Family,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = (-0.25).sp,
-        ),
-        displaySmall = base.displaySmall.copy(fontFamily = Family, fontWeight = FontWeight.Bold),
-        headlineLarge = base.headlineLarge.copy(
-            fontFamily = Family,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = (-0.25).sp,
-        ),
-        headlineMedium = base.headlineMedium.copy(
-            fontFamily = Family,
-            fontWeight = FontWeight.SemiBold,
-        ),
-        headlineSmall = base.headlineSmall.copy(
-            fontFamily = Family,
-            fontWeight = FontWeight.SemiBold,
-        ),
-        titleLarge = base.titleLarge.copy(fontFamily = Family, fontWeight = FontWeight.SemiBold),
-        titleMedium = base.titleMedium.copy(fontFamily = Family, fontWeight = FontWeight.SemiBold),
-        titleSmall = base.titleSmall.copy(fontFamily = Family, fontWeight = FontWeight.Medium),
-        bodyLarge = base.bodyLarge.copy(fontFamily = Family),
-        bodyMedium = base.bodyMedium.copy(fontFamily = Family),
-        bodySmall = base.bodySmall.copy(fontFamily = Family),
-        labelLarge = base.labelLarge.copy(fontFamily = Family, fontWeight = FontWeight.Medium),
-        labelMedium = base.labelMedium.copy(fontFamily = Family, fontWeight = FontWeight.Medium),
-        labelSmall = base.labelSmall.copy(fontFamily = Family, fontWeight = FontWeight.Medium),
-    )
-}
+internal val BeamTypography =
+    Typography().let { base ->
+        Typography(
+            displayLarge =
+                base.displayLarge.copy(
+                    fontFamily = Family,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.5).sp,
+                ),
+            displayMedium =
+                base.displayMedium.copy(
+                    fontFamily = Family,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.25).sp,
+                ),
+            displaySmall = base.displaySmall.copy(fontFamily = Family, fontWeight = FontWeight.Bold),
+            headlineLarge =
+                base.headlineLarge.copy(
+                    fontFamily = Family,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.25).sp,
+                ),
+            headlineMedium =
+                base.headlineMedium.copy(
+                    fontFamily = Family,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+            headlineSmall =
+                base.headlineSmall.copy(
+                    fontFamily = Family,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+            titleLarge = base.titleLarge.copy(fontFamily = Family, fontWeight = FontWeight.SemiBold),
+            titleMedium = base.titleMedium.copy(fontFamily = Family, fontWeight = FontWeight.SemiBold),
+            titleSmall = base.titleSmall.copy(fontFamily = Family, fontWeight = FontWeight.Medium),
+            bodyLarge = base.bodyLarge.copy(fontFamily = Family),
+            bodyMedium = base.bodyMedium.copy(fontFamily = Family),
+            bodySmall = base.bodySmall.copy(fontFamily = Family),
+            labelLarge = base.labelLarge.copy(fontFamily = Family, fontWeight = FontWeight.Medium),
+            labelMedium = base.labelMedium.copy(fontFamily = Family, fontWeight = FontWeight.Medium),
+            labelSmall = base.labelSmall.copy(fontFamily = Family, fontWeight = FontWeight.Medium),
+        )
+    }
 
 /** Styles with no Material role, kept here so they are not redefined per screen. */
 public object BeamTextStyles {
     /** The tiny uppercase caption on codec and container badges. */
-    public val Badge: TextStyle = TextStyle(
-        fontFamily = Family,
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 11.sp,
-        letterSpacing = 0.6.sp,
-    )
+    public val Badge: TextStyle =
+        TextStyle(
+            fontFamily = Family,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 11.sp,
+            letterSpacing = 0.6.sp,
+        )
 
     /** Centred supporting copy inside an empty or error state. */
-    public val EmptyStateBody: TextStyle = TextStyle(
-        fontFamily = Family,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
-        textAlign = TextAlign.Center,
-    )
+    public val EmptyStateBody: TextStyle =
+        TextStyle(
+            fontFamily = Family,
+            fontSize = 14.sp,
+            lineHeight = 20.sp,
+            textAlign = TextAlign.Center,
+        )
 }

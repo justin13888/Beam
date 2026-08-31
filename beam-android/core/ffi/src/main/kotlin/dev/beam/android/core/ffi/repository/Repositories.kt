@@ -39,7 +39,10 @@ public interface ServerRepository {
     public suspend fun restore(): List<ServerSummary>
 
     /** Add a server by address, and make it the active one. */
-    public suspend fun addServer(baseUrl: String, displayName: String?): ServerSummary
+    public suspend fun addServer(
+        baseUrl: String,
+        displayName: String?,
+    ): ServerSummary
 
     /** Make an already-known server the active one. */
     public suspend fun selectServer(serverId: String)
@@ -51,10 +54,30 @@ public interface ServerRepository {
     public suspend fun loginUrl(serverId: String): String
 
     /** Hand over a cookie lifted from the browser, and verify it. */
-    public suspend fun completeLogin(serverId: String, sessionCookie: String): UserSummary
+    public suspend fun completeLogin(
+        serverId: String,
+        sessionCookie: String,
+    ): UserSummary
 
     /** End the session on this device. */
     public suspend fun logout(serverId: String)
+
+    /**
+     * Accept a certificate the verifier turned away.
+     *
+     * Only ever called after the viewer has been shown the certificate and has
+     * agreed to it.
+     */
+    public suspend fun trustCertificate(
+        serverId: String,
+        fingerprint: String,
+    )
+
+    /** Withdraw trust from every certificate accepted for a server. */
+    public suspend fun forgetCertificates(serverId: String)
+
+    /** The certificates the viewer has accepted for a server. */
+    public suspend fun trustedCertificates(serverId: String): List<String>
 
     /** The current authentication state of a server. */
     public suspend fun sessionState(serverId: String): SessionState
@@ -84,7 +107,10 @@ public interface CatalogRepository {
     public suspend fun libraryFiles(libraryId: String): List<LibraryFileSummary>
 
     /** The next playable episode after this one, across season boundaries. */
-    public suspend fun upNext(showId: String, currentEpisodeId: String): EpisodeSummary?
+    public suspend fun upNext(
+        showId: String,
+        currentEpisodeId: String,
+    ): EpisodeSummary?
 }
 
 /** Choosing what to play, playing it, and recording where the viewer got to. */
@@ -96,7 +122,10 @@ public interface PlaybackRepository {
     public suspend fun sources(mediaId: String): List<MediaSourceView>
 
     /** The file to play, plus why, plus why each other file was rejected. */
-    public suspend fun selectSource(mediaId: String, policy: QualityPolicy): SourceSelection
+    public suspend fun selectSource(
+        mediaId: String,
+        policy: QualityPolicy,
+    ): SourceSelection
 
     /** URL, headers and pins for the platform player to fetch bytes itself. */
     public suspend fun playbackConfig(fileId: String): PlaybackHttpConfig
@@ -105,7 +134,10 @@ public interface PlaybackRepository {
     public suspend fun continueWatching(limit: UInt?): List<ContinueWatchingEntry>
 
     /** One page of watch history. */
-    public suspend fun history(limit: UInt?, offset: UInt?): HistoryPage
+    public suspend fun history(
+        limit: UInt?,
+        offset: UInt?,
+    ): HistoryPage
 
     /** Report where the viewer is, subject to the shared throttle. */
     public suspend fun reportProgress(
@@ -143,13 +175,22 @@ public interface AdminRepository {
     public suspend fun health(): ServerHealth
 
     /** One page of user accounts. */
-    public suspend fun users(limit: UInt?, offset: UInt?): AdminUserPage
+    public suspend fun users(
+        limit: UInt?,
+        offset: UInt?,
+    ): AdminUserPage
 
     /** Block or unblock an account. */
-    public suspend fun setUserDisabled(userId: String, disabled: Boolean)
+    public suspend fun setUserDisabled(
+        userId: String,
+        disabled: Boolean,
+    )
 
     /** One page of the operational log. */
-    public suspend fun logs(limit: UInt?, offset: UInt?): List<AdminLogEntry>
+    public suspend fun logs(
+        limit: UInt?,
+        offset: UInt?,
+    ): List<AdminLogEntry>
 
     /** How many log lines the server holds. */
     public suspend fun logCount(): ULong
@@ -158,7 +199,10 @@ public interface AdminRepository {
     public suspend fun events(limit: UInt?): List<AdminEvent>
 
     /** Create a library from a path on the server. */
-    public suspend fun createLibrary(name: String, rootPath: String): LibrarySummary
+    public suspend fun createLibrary(
+        name: String,
+        rootPath: String,
+    ): LibrarySummary
 
     /** Delete a library and everything indexed into it. */
     public suspend fun deleteLibrary(libraryId: String)

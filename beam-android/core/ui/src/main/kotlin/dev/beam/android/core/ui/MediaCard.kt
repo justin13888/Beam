@@ -37,29 +37,33 @@ public fun MediaCard(
     modifier: Modifier = Modifier,
     progress: Float? = null,
 ) {
-    val subtitle = when (media.kind) {
-        MediaKind.MOVIE -> listOfNotNull(
-            media.year?.toString(),
-            Format.runtime(media.runtimeMinutes).takeIf { it.isNotEmpty() },
-        ).joinToString(" · ")
+    val subtitle =
+        when (media.kind) {
+            MediaKind.MOVIE -> {
+                listOfNotNull(
+                    media.year?.toString(),
+                    Format.runtime(media.runtimeMinutes).takeIf { it.isNotEmpty() },
+                ).joinToString(" · ")
+            }
 
-        MediaKind.SHOW -> {
-            val seasons = media.seasonCount.toInt()
-            if (seasons == 1) "1 season" else "$seasons seasons"
+            MediaKind.SHOW -> {
+                val seasons = media.seasonCount.toInt()
+                if (seasons == 1) "1 season" else "$seasons seasons"
+            }
         }
-    }
 
     Column(
         // Width is the caller's decision: a row wants a fixed poster width, a
         // grid wants to fill its cell.
-        modifier = modifier
-            .clickable(onClick = onClick)
-            .semantics(mergeDescendants = true) {
-                contentDescription = listOf(media.title, subtitle)
-                    .filter { it.isNotBlank() }
-                    .joinToString(", ")
-            }
-            .padding(bottom = BeamSpacing.Small),
+        modifier =
+            modifier
+                .clickable(onClick = onClick)
+                .semantics(mergeDescendants = true) {
+                    contentDescription =
+                        listOf(media.title, subtitle)
+                            .filter { it.isNotBlank() }
+                            .joinToString(", ")
+                }.padding(bottom = BeamSpacing.Small),
     ) {
         Box(contentAlignment = Alignment.BottomStart) {
             Artwork(url = media.posterUrl, aspectRatio = BeamSizes.PosterAspectRatio)

@@ -9,13 +9,14 @@ import androidx.compose.ui.unit.dp
  * expressive direction: the shapes carry the personality, so the colour does
  * not have to shout.
  */
-internal val BeamShapes = Shapes(
-    extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(16.dp),
-    large = RoundedCornerShape(24.dp),
-    extraLarge = RoundedCornerShape(32.dp),
-)
+internal val BeamShapes =
+    Shapes(
+        extraSmall = RoundedCornerShape(6.dp),
+        small = RoundedCornerShape(10.dp),
+        medium = RoundedCornerShape(16.dp),
+        large = RoundedCornerShape(24.dp),
+        extraLarge = RoundedCornerShape(32.dp),
+    )
 
 /** Shapes for parts of the UI that are not Material components. */
 public object BeamShapeDefaults {

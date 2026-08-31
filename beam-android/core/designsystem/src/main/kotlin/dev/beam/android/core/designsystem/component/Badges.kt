@@ -32,10 +32,11 @@ public fun MetaBadge(
     content: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
     Box(
-        modifier = modifier
-            .clip(BeamShapeDefaults.Badge)
-            .background(container)
-            .padding(horizontal = BeamSpacing.Small, vertical = BeamSpacing.Tiny),
+        modifier =
+            modifier
+                .clip(BeamShapeDefaults.Badge)
+                .background(container)
+                .padding(horizontal = BeamSpacing.Small, vertical = BeamSpacing.Tiny),
     ) {
         Text(text = text, style = BeamTextStyles.Badge, color = content)
     }
@@ -70,11 +71,12 @@ public fun WatchProgressBar(
     modifier: Modifier = Modifier,
 ) {
     Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(4.dp)
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-            .clearAndSetSemantics {},
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                .clearAndSetSemantics {},
     ) {
         Box(
             Modifier

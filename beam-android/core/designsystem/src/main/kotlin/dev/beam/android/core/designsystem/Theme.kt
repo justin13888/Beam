@@ -30,12 +30,13 @@ public fun BeamTheme(
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
-    val colorScheme = when {
-        dynamicColor && supportsDynamicColor && darkTheme -> dynamicDarkColorScheme(context)
-        dynamicColor && supportsDynamicColor -> dynamicLightColorScheme(context)
-        darkTheme -> BeamDarkColors
-        else -> BeamLightColors
-    }
+    val colorScheme =
+        when {
+            dynamicColor && supportsDynamicColor && darkTheme -> dynamicDarkColorScheme(context)
+            dynamicColor && supportsDynamicColor -> dynamicLightColorScheme(context)
+            darkTheme -> BeamDarkColors
+            else -> BeamLightColors
+        }
 
     MaterialTheme(
         colorScheme = colorScheme,
@@ -50,5 +51,4 @@ public val supportsDynamicColor: Boolean
     get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
 /** Beam's own scheme, for previews and for the brand-palette preference. */
-public fun beamColorScheme(darkTheme: Boolean): ColorScheme =
-    if (darkTheme) BeamDarkColors else BeamLightColors
+public fun beamColorScheme(darkTheme: Boolean): ColorScheme = if (darkTheme) BeamDarkColors else BeamLightColors

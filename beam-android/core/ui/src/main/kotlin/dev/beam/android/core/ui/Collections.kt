@@ -9,20 +9,20 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import dev.beam.android.core.designsystem.BeamSizes
 import dev.beam.android.core.designsystem.BeamSpacing
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.snapshotFlow
 import uniffi.beam_client_core.MediaSummary
+import androidx.compose.foundation.lazy.grid.items as gridItems
 
 /** A horizontally-scrolling row of catalog tiles. */
 @Composable
@@ -69,7 +69,10 @@ public fun MediaGrid(
     if (onLoadMore != null) {
         val shouldLoadMore by remember(state, items.size) {
             derivedStateOf {
-                val last = state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+                val last =
+                    state.layoutInfo.visibleItemsInfo
+                        .lastOrNull()
+                        ?.index ?: return@derivedStateOf false
                 // Two rows of slack, so the request is in flight before the
                 // user can see that there is nothing below.
                 last >= items.size - PrefetchDistance

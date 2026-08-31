@@ -248,7 +248,14 @@ public class FakeServerRepository(
         state.value = state.value.filterNot { it.id == serverId }
     }
 
-    override suspend fun loginUrl(serverId: String): String = "https://beam.test/v1/auth/login?redirect=/"
+    override suspend fun loginUrl(serverId: String): String {
+        failOnce?.let {
+            failOnce = null
+            throw it
+        }
+        failWith?.let { throw it }
+        return "https://beam.test/v1/auth/login?redirect=/"
+    }
 
     override suspend fun completeLogin(
         serverId: String,
@@ -269,6 +276,36 @@ public class FakeServerRepository(
             state.value.map {
                 if (it.id == serverId) it.copy(state = SessionState.LoggedOut) else it
             }
+    }
+
+    /** Fingerprints accepted, per server. */
+    public val trusted: MutableMap<String, MutableList<String>> = mutableMapOf()
+
+    /**
+     * Set to make the next call throw once, then clear itself.
+     *
+     * Distinct from [failWith], which fails everything: a trust prompt is
+     * driven by a failure that must *stop* failing once the certificate is
+     * accepted, and a permanent failure cannot express that.
+     */
+    public var failOnce: BeamException? = null
+
+    override suspend fun trustCertificate(
+        serverId: String,
+        fingerprint: String,
+    ) {
+        failWith?.let { throw it }
+        trusted.getOrPut(serverId) { mutableListOf() } += fingerprint
+    }
+
+    override suspend fun forgetCertificates(serverId: String) {
+        failWith?.let { throw it }
+        trusted.remove(serverId)
+    }
+
+    override suspend fun trustedCertificates(serverId: String): List<String> {
+        failWith?.let { throw it }
+        return trusted[serverId].orEmpty()
     }
 
     override suspend fun sessionState(serverId: String): SessionState =

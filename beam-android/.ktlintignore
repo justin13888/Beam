@@ -1,0 +1,4 @@
+# UniFFI's output, and everything else Gradle writes. Generated code is the
+# generator's responsibility, and reformatting it would be undone on the next
+# `mise run core:bindgen`.
+**/build/**

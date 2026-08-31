@@ -48,18 +48,19 @@ public fun Artwork(
     var state by remember(url) { mutableStateOf(ArtworkState.Loading) }
 
     Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .aspectRatio(aspectRatio)
-            .clip(BeamShapeDefaults.Artwork)
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-            .then(
-                if (contentDescription == null) {
-                    Modifier.clearAndSetSemantics {}
-                } else {
-                    Modifier
-                },
-            ),
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .aspectRatio(aspectRatio)
+                .clip(BeamShapeDefaults.Artwork)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                .then(
+                    if (contentDescription == null) {
+                        Modifier.clearAndSetSemantics {}
+                    } else {
+                        Modifier
+                    },
+                ),
         contentAlignment = Alignment.Center,
     ) {
         if (state == ArtworkState.Loading) {

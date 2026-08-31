@@ -28,9 +28,10 @@ public fun SectionHeader(
     onAction: (() -> Unit)? = null,
 ) {
     Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = BeamSpacing.Medium, vertical = BeamSpacing.Small),
+        modifier =
+            modifier
+                .fillMaxWidth()
+                .padding(horizontal = BeamSpacing.Medium, vertical = BeamSpacing.Small),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {

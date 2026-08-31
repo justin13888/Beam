@@ -41,26 +41,28 @@ public fun ContinueWatchingCard(
     modifier: Modifier = Modifier,
 ) {
     val title = entry.media?.title ?: "Continue watching"
-    val subtitle = entry.episode?.let { episode ->
-        listOfNotNull(
-            episode.title.takeIf { it.isNotBlank() },
-            Format.remaining(entry.positionSecs, entry.durationSecs).takeIf { it.isNotEmpty() },
-        ).joinToString(" · ")
-    } ?: Format.remaining(entry.positionSecs, entry.durationSecs)
+    val subtitle =
+        entry.episode?.let { episode ->
+            listOfNotNull(
+                episode.title.takeIf { it.isNotBlank() },
+                Format.remaining(entry.positionSecs, entry.durationSecs).takeIf { it.isNotEmpty() },
+            ).joinToString(" · ")
+        } ?: Format.remaining(entry.positionSecs, entry.durationSecs)
 
     Column(
-        modifier = modifier
-            .width(BeamSizes.ThumbnailWidth)
-            .clickable(onClick = onClick)
-            .semantics(mergeDescendants = true) {
-                contentDescription = "Resume $title, $subtitle"
-            }
-            .padding(bottom = BeamSpacing.Small),
+        modifier =
+            modifier
+                .width(BeamSizes.ThumbnailWidth)
+                .clickable(onClick = onClick)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "Resume $title, $subtitle"
+                }.padding(bottom = BeamSpacing.Small),
     ) {
         Box(contentAlignment = Alignment.BottomStart) {
             Artwork(
-                url = entry.episode?.thumbnailUrl ?: entry.media?.backdropUrl
-                    ?: entry.media?.posterUrl,
+                url =
+                    entry.episode?.thumbnailUrl ?: entry.media?.backdropUrl
+                        ?: entry.media?.posterUrl,
                 aspectRatio = BeamSizes.ThumbnailAspectRatio,
                 fallbackIcon = Icons.Rounded.Tv,
             )

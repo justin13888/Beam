@@ -32,18 +32,18 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 internal object FfiProvidesModule {
-
     @Provides
     @Singleton
-    fun dataStore(@ApplicationContext context: Context): DataStore<Preferences> =
+    fun dataStore(
+        @ApplicationContext context: Context,
+    ): DataStore<Preferences> =
         PreferenceDataStoreFactory.create {
             context.preferencesDataStoreFile("beam")
         }
 
     @Provides
     @Singleton
-    fun keyValueStore(dataStore: DataStore<Preferences>): KeyValueStore =
-        DataStoreKeyValueStore(dataStore)
+    fun keyValueStore(dataStore: DataStore<Preferences>): KeyValueStore = DataStoreKeyValueStore(dataStore)
 
     /**
      * The core itself.
@@ -62,7 +62,6 @@ internal object FfiProvidesModule {
 @Module
 @InstallIn(SingletonComponent::class)
 internal interface FfiBindsModule {
-
     @Binds
     fun serverRepository(impl: BeamServerRepository): ServerRepository
 
