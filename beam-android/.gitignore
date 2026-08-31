@@ -6,9 +6,6 @@ local.properties
 # The Kotlin compiler daemon's session files, written beside the build.
 .kotlin/
 
-# Produced by `mise run core:android` -- cross-compiled from beam-client-core,
-# never edited by hand. Regenerate rather than committing ~60 MB per ABI.
-core/ffi/src/main/jniLibs/
 
 # Produced by `mise run core:bindgen`. Generated from the built library, so it
 # is only ever as current as the .so it describes.
