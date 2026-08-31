@@ -9,8 +9,26 @@ components = ["rustfmt", "clippy", "llvm-tools-preview"]
 # armeabi-v7a is included even though 32-bit ARM is a shrinking share: Play
 # requires a 64-bit build, not a 64-bit-only one, and omitting it silently
 # drops older devices from the release.
+#
+# The Apple targets are for the iOS/macOS client (#66). Only the four below are
+# listed: `aarch64-apple-darwin` and `x86_64-apple-darwin` cover the two Mac
+# architectures, and the two iOS entries cover a device and both simulator
+# architectures. tvOS is deliberately absent -- `aarch64-apple-tvos` is a Tier 3
+# target that rustup does not ship a `rust-std` for, so it cannot be listed here
+# at all; see ADR-0013 for why that keeps tvOS out of #66's first release.
+#
+# The cost is real and accepted: every Rust CI job now installs four more
+# `rust-std` sets, on Linux runners that will never build an Apple binary. The
+# alternative -- `rustup target add` inside the `core:apple` task -- would put
+# the target set in a second place, which is exactly the drift ADR-0009 exists
+# to prevent.
 targets = [
     "aarch64-linux-android",
     "armv7-linux-androideabi",
     "x86_64-linux-android",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+    "x86_64-apple-ios",
 ]

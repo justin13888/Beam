@@ -17,9 +17,21 @@ hk = "1.57.0"
 # docs/testing.md; `ci-ok` in .github/workflows/ci.yml must never depend on them.
 #
 # cargo-mutants publishes prebuilt binaries for x86_64 only (linux-gnu, apple-
-# darwin, pc-windows-msvc). On an aarch64 host, override in a gitignored
-# mise.local.toml with `"cargo:cargo-mutants" = "27.1.0"` to build from source.
-"github:sourcefrog/cargo-mutants" = "27.1.0"
+# darwin, pc-windows-msvc). The `os` filter below means macOS gets it from
+# neither source, so a contributor who wants to run the advisory `rust:mutants*`
+# tasks on any Mac -- not only an aarch64 one -- adds
+# `"cargo:cargo-mutants" = "27.1.0"` to a gitignored mise.local.toml and builds
+# it from source.
+#
+# `os = ["linux"]` because mise installs every tool in this table before any
+# task runs, so a platform with no matching asset fails *every* job rather than
+# only the ones that wanted the tool. Every runner that actually runs
+# `rust:mutants:*` is ubuntu-latest (see .github/workflows/mutants.yml), and
+# the advisory mutants tasks are deliberately outside `mise run ci`, so nothing
+# on macOS needs this. Without the filter, the arm64 macOS runners the Apple
+# jobs use fail during setup with "No matching asset found for platform
+# macos-arm64" -- which is what happened the first time those jobs ran.
+"github:sourcefrog/cargo-mutants" = { version = "27.1.0", os = ["linux"] }
 # .cargo/mutants.toml sets `test_tool = "nextest"`, so nextest is a hard runtime
 # requirement of `cargo mutants` here, not an optional speedup. nextest tags its
 # releases as `cargo-nextest-<semver>`, which is the version string mise wants.
@@ -35,6 +47,22 @@ hk = "1.57.0"
 java = "temurin-21"
 ktlint = "1.8.0"
 "cargo:cargo-ndk" = "4.1.2"
+# Apple client toolchain (#66, ADR-0013). XcodeGen generates Beam.xcodeproj from
+# the committed beam-apple/project.yml, so the reviewable artifact is a YAML file
+# rather than a .pbxproj -- the same reason beam-android generates its bindings
+# and jniLibs rather than committing them.
+#
+# Xcode itself is deliberately not pinned here: mise cannot install it, and the
+# `apple:*` tasks resolve `swift-format`, `xcodebuild` and `lipo` through `xcrun`
+# so they follow whichever Xcode the host has selected. CI pins the version in
+# the workflow instead, which is the only place that can.
+#
+# `os` is load-bearing, not decoration: XcodeGen publishes a macOS binary only,
+# and mise installs every tool in [tools] before any task runs. Without the
+# filter, `mise install` fails on Linux with "unsupported env: linux/amd64" --
+# which is every Linux CI job and every Linux contributor, not just the Apple
+# ones.
+"aqua:yonaskolb/XcodeGen" = { version = "2.46.0", os = ["macos"] }
 
 [env]
 # Wrap the git hooks in `mise x` so contributors who have not activated mise in
@@ -71,6 +99,17 @@ BEAM_CARGO_FEATURES = "{{ env.BEAM_CARGO_FEATURES | default(value='beam-index/ve
 # for a reason that has nothing to do with the tests. Override on a host with
 # the system FFmpeg development libraries.
 BEAM_MUTANTS_FEATURES = "{{ env.BEAM_MUTANTS_FEATURES | default(value='mutation-testing') }}"
+# The Apple client's minimum OS, in one place (ADR-0013). `core:apple` exports
+# these to cargo so the static library is built for the same floor the app
+# targets, and `apple:project` writes them into Version.xcconfig so the Xcode
+# targets read the same values. Without that the linker warns that the library
+# was built for a newer OS than the app -- which is not cosmetic: the library
+# would be free to call symbols the declared floor does not have.
+#
+# Package.swift declares the same floor a third time, because SwiftPM's
+# `platforms:` takes literals only. Those three must agree.
+BEAM_IOS_DEPLOYMENT_TARGET = "26.0"
+BEAM_MACOS_DEPLOYMENT_TARGET = "26.0"
 
 [hooks]
 # Installs .git/hooks/{pre-commit,commit-msg,pre-push} pointing at hk. Safe to
@@ -461,17 +500,164 @@ run = '''
 set -eu
 out="${BEAM_BINDINGS_DIR:-beam-android/core/ffi/build/generated/uniffi}"
 
+# The host cdylib's extension is not portable, and hardcoding `.so` meant this
+# task could never run on a Mac -- an Android contributor on macOS hit a missing
+# file rather than a build. The same four lines appear in `core:bindgen:swift`;
+# they are duplicated rather than shared because mise tasks have no way to share
+# a shell function, and factoring them into a script would move a command out of
+# mise.toml, which ADR-0009 makes the single source of truth.
+case "$(uname -s)" in
+    Darwin) libext="dylib" ;;
+    *) libext="so" ;;
+esac
+
 # Generated from the built library rather than from source, so the bindings can
-# only ever describe a .so that actually exists. Building the host cdylib first
-# is cheaper than a cross build and produces identical metadata.
+# only ever describe a library that actually exists. Building the host cdylib
+# first is cheaper than a cross build and produces identical metadata.
 cargo build -p beam-client-core --lib
 mkdir -p "$out"
 cargo run -p beam-client-core --features uniffi-bindgen --bin uniffi-bindgen -- \
     generate \
-    --library target/debug/libbeam_client_core.so \
+    --library "target/debug/libbeam_client_core.$libext" \
     --language kotlin \
     --out-dir "$out" \
     --no-format
+'''
+
+[tasks."core:bindgen:swift"]
+description = "Generate the Swift bindings and C header for beam-client-core"
+run = '''
+set -eu
+out="${BEAM_SWIFT_BINDINGS_DIR:-beam-apple/Packages/BeamKit/Sources/BeamCoreBindings/Generated}"
+# Derived from the same variable `core:apple` derives it from, so setting
+# BEAM_XCFRAMEWORK_DIR moves both halves together. Hardcoding it here meant
+# the override wrote headers to the default path and then handed
+# `-create-xcframework` a `-headers` path that did not exist.
+frameworks="${BEAM_XCFRAMEWORK_DIR:-beam-apple/Packages/BeamKit/Frameworks}"
+headers="${BEAM_XCFRAMEWORK_HEADERS_DIR:-$frameworks/include}"
+
+# See `core:bindgen` for why this is resolved rather than hardcoded.
+case "$(uname -s)" in
+    Darwin) libext="dylib" ;;
+    *) libext="so" ;;
+esac
+
+cargo build -p beam-client-core --lib
+rm -rf "$out" "$headers"
+mkdir -p "$out" "$headers"
+cargo run -p beam-client-core --features uniffi-bindgen --bin uniffi-bindgen -- \
+    generate \
+    --library "target/debug/libbeam_client_core.$libext" \
+    --language swift \
+    --out-dir "$out" \
+    --no-format
+
+# The .h and the modulemap belong to the XCFramework, not to the Swift target:
+# the framework is what declares the `beam_client_coreFFI` clang module that the
+# generated Swift imports. Xcode requires the modulemap to be named
+# `module.modulemap` inside an XCFramework's headers directory, which is why it
+# is renamed rather than copied verbatim.
+mv "$out"/*.h "$headers/"
+mv "$out"/*.modulemap "$headers/module.modulemap"
+'''
+
+[tasks."core:apple"]
+description = "Build beam-client-core for the Apple targets and assemble the XCFramework"
+depends = ["core:bindgen:swift"]
+run = '''
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "core:apple: skipping -- an XCFramework can only be assembled on macOS."
+    exit 0
+fi
+
+profile="${BEAM_CARGO_PROFILE:-debug}"
+frameworks="${BEAM_XCFRAMEWORK_DIR:-beam-apple/Packages/BeamKit/Frameworks}"
+headers="${BEAM_XCFRAMEWORK_HEADERS_DIR:-$frameworks/include}"
+xcframework="$frameworks/BeamClientCoreFFI.xcframework"
+lib="libbeam_client_core.a"
+
+release_flag=""
+if [ "$profile" = "release" ]; then
+    release_flag="--release"
+fi
+
+# A debug static library is tens of megabytes per slice, so local iteration
+# builds only what a simulator and this Mac actually need -- the same trade
+# `core:android` makes for ABIs. A device build or a release build gets every
+# slice. The Intel slices are what make the XCFramework usable on an Intel Mac
+# and in an Intel simulator; nothing here can produce them by cross-lipo.
+all_slices="${BEAM_APPLE_ALL_SLICES:-0}"
+host_arch="$(uname -m)"
+
+targets="$host_arch-apple-darwin"
+case "$host_arch" in
+    arm64|aarch64) targets="aarch64-apple-darwin aarch64-apple-ios-sim" ;;
+    x86_64) targets="x86_64-apple-darwin x86_64-apple-ios" ;;
+esac
+if [ "$all_slices" = "1" ] || [ "$profile" != "debug" ]; then
+    targets="aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios"
+fi
+
+# Without these, cargo builds each slice against the SDK's own newest OS and
+# the linker warns that the library targets a newer system than the app.
+export IPHONEOS_DEPLOYMENT_TARGET="$BEAM_IOS_DEPLOYMENT_TARGET"
+export MACOSX_DEPLOYMENT_TARGET="$BEAM_MACOS_DEPLOYMENT_TARGET"
+
+for target in $targets; do
+    cargo build -p beam-client-core --lib --target "$target" $release_flag
+done
+
+staging="$(mktemp -d)"
+trap 'rm -rf "$staging"' EXIT
+
+# `lipo -create` refuses a single-architecture input list on some toolchains and
+# is pointless on one, so each family is assembled only from the slices that
+# were actually built. An absent family is simply omitted from the XCFramework
+# rather than faked, so a missing slice fails at link time with a clear message
+# instead of at runtime with a missing symbol.
+assemble() {
+    family="$1"
+    shift
+    inputs=""
+    for target in "$@"; do
+        candidate="target/$target/$profile/$lib"
+        if [ -f "$candidate" ]; then
+            inputs="$inputs $candidate"
+        fi
+    done
+    [ -n "$inputs" ] || return 0
+    mkdir -p "$staging/$family"
+    # shellcheck disable=SC2086
+    xcrun lipo -create $inputs -output "$staging/$family/$lib"
+    echo "$staging/$family/$lib"
+}
+
+args=""
+for family_spec in \
+    "macos:aarch64-apple-darwin:x86_64-apple-darwin" \
+    "ios:aarch64-apple-ios" \
+    "ios-simulator:aarch64-apple-ios-sim:x86_64-apple-ios"
+do
+    family="${family_spec%%:*}"
+    slices="$(echo "${family_spec#*:}" | tr ':' ' ')"
+    # shellcheck disable=SC2086
+    built="$(assemble "$family" $slices)"
+    if [ -n "$built" ]; then
+        args="$args -library $built -headers $headers"
+    fi
+done
+
+if [ -z "$args" ]; then
+    echo "core:apple: no slices were built -- nothing to assemble." >&2
+    exit 1
+fi
+
+rm -rf "$xcframework"
+mkdir -p "$frameworks"
+# shellcheck disable=SC2086
+xcrun xcodebuild -create-xcframework $args -output "$xcframework"
 '''
 
 [tasks."codegen:openapi:core"]
@@ -685,6 +871,215 @@ description = "Assemble the release APK for every ABI"
 # libraries.
 run = "cd beam-android && ./gradlew assembleRelease"
 
+# ---------------------------------------------------------------------------
+# Apple client (#66, ADR-0013)
+#
+# Every task here begins with the same `uname` guard. Apple builds need macOS,
+# and `mise run ci` has to stay runnable on Linux -- a hard failure there would
+# make the aggregate task useless to anyone not on a Mac, and dropping these
+# from `ci` would mean the hooks and CI no longer run the same set.
+#
+# The Apple toolchain is reached through `xcrun` rather than by absolute path,
+# so these follow whichever Xcode `xcode-select` points at. `swift-format`
+# ships inside Xcode, so there is no separate tool to pin.
+# ---------------------------------------------------------------------------
+
+[tasks."apple:project"]
+description = "Generate Beam.xcodeproj and Version.xcconfig from project.yml and version.txt"
+run = '''
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "apple:project: skipping -- Xcode projects are only generated on macOS."
+    exit 0
+fi
+
+version="$(tr -d '[:space:]' < version.txt)"
+
+# CFBundleVersion has to increase monotonically for every build TestFlight or
+# the App Store ever sees, and it is compared as a build number rather than as
+# the semver in MARKETING_VERSION. Deriving it from version.txt keeps the single
+# product version of ADR-0009 authoritative with nothing to bump by hand -- the
+# same reason beam-android derives versionCode rather than storing it.
+major="${version%%.*}"
+rest="${version#*.}"
+minor="${rest%%.*}"
+patch="${rest#*.}"
+patch="${patch%%-*}"
+build="$(( major * 10000 + minor * 100 + patch ))"
+
+cat > beam-apple/Version.xcconfig <<EOF
+// Generated by \`mise run apple:project\`. Do not edit.
+//
+// The version comes from version.txt and the OS floor from mise.toml, so both
+// have exactly one source (ADR-0009).
+MARKETING_VERSION = $version
+CURRENT_PROJECT_VERSION = $build
+IPHONEOS_DEPLOYMENT_TARGET = $BEAM_IOS_DEPLOYMENT_TARGET
+MACOSX_DEPLOYMENT_TARGET = $BEAM_MACOS_DEPLOYMENT_TARGET
+EOF
+
+cd beam-apple && xcodegen generate --quiet
+'''
+
+[tasks."apple:lint"]
+description = "Format-check the Swift sources"
+run = '''
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "apple:lint: skipping -- swift-format ships inside Xcode."
+    exit 0
+fi
+
+beam_swift_sources() {
+    find beam-apple -name '*.swift' \
+        -not -path '*/BeamCoreBindings/Generated/*' \
+        -not -path '*/.build/*' \
+        -not -path '*/Beam.xcodeproj/*'
+}
+
+# Run over the sources rather than through Xcode: it is the same binary the
+# pre-commit hook uses, so a hook pass and a CI pass cannot disagree.
+#
+# The file list is built here rather than with `--recursive`, because
+# swift-format has no exclude mechanism and the generated UniFFI bindings sit
+# under Sources/BeamCoreBindings. Linting generated code produces hundreds of
+# findings nobody can act on -- the next `core:bindgen:swift` would undo any
+# fix -- and would bury a real one.
+xcrun swift-format lint --strict --parallel $(beam_swift_sources)
+'''
+
+[tasks."apple:lint:fix"]
+description = "Rewrite the Swift sources to satisfy swift-format"
+run = '''
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "apple:lint:fix: skipping -- swift-format ships inside Xcode."
+    exit 0
+fi
+
+beam_swift_sources() {
+    find beam-apple -name '*.swift' \
+        -not -path '*/BeamCoreBindings/Generated/*' \
+        -not -path '*/.build/*' \
+        -not -path '*/Beam.xcodeproj/*'
+}
+
+xcrun swift-format format --in-place --parallel $(beam_swift_sources)
+'''
+
+[tasks."apple:test"]
+description = "Run the BeamKit unit tests on macOS and the iOS simulator"
+depends = ["core:apple"]
+dir = "beam-apple/Packages/BeamKit"
+run = '''
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "apple:test: skipping -- the Apple suite needs Xcode."
+    exit 0
+fi
+
+# Both destinations, because the two platforms genuinely differ: the design
+# system branches on idiom and the playback engines resolve different AVKit
+# types, so a suite that only ran on macOS would never have compiled the iOS
+# shell. The snapshot target is skipped here and owned by `apple:snapshot`,
+# which pins the one simulator its references were recorded on.
+xcrun xcodebuild test \
+    -scheme BeamKit \
+    -destination "platform=macOS" \
+    -skip-testing:SnapshotTests
+
+xcrun xcodebuild test \
+    -scheme BeamKit \
+    -destination "${BEAM_IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}" \
+    -skip-testing:SnapshotTests
+'''
+
+[tasks."apple:snapshot"]
+description = "Check the rendered screens against the recorded references"
+depends = ["core:apple"]
+dir = "beam-apple/Packages/BeamKit"
+run = '''
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "apple:snapshot: skipping -- the snapshot tier needs an iOS simulator."
+    exit 0
+fi
+
+# One pinned simulator, deliberately. Snapshot references are pixel comparisons
+# and are only meaningful against a fixed idiom, scale and OS version -- the
+# equivalent of beam-android pinning Robolectric to one API level.
+xcrun xcodebuild test \
+    -scheme BeamKit \
+    -destination "${BEAM_IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}" \
+    -only-testing:SnapshotTests
+'''
+
+[tasks."apple:snapshot:record"]
+description = "Re-record the snapshot references after an intended visual change"
+depends = ["core:apple"]
+dir = "beam-apple/Packages/BeamKit"
+run = '''
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "apple:snapshot:record: skipping -- the snapshot tier needs an iOS simulator."
+    exit 0
+fi
+
+# A marker file, not an environment variable. A SwiftPM package test runs with
+# no test host, so xcodebuild treats TEST_RUNNER_BEAM_SNAPSHOT_RECORD as a
+# build setting and it never reaches the test process -- the task then verified
+# the references it was asked to replace and reported success, which is the
+# worst possible outcome for a task whose whole job is to rewrite them.
+# Relative to this task's `dir`, which is beam-apple/Packages/BeamKit.
+marker="Tests/SnapshotTests/.record"
+touch "$marker"
+trap 'rm -f "$marker"' EXIT
+
+# Recording always "fails": snapshot-testing reports every reference it writes
+# as a failure so a recording run cannot be mistaken for a passing one. That is
+# why the status is not propagated -- but the marker is what makes the writing
+# actually happen.
+xcrun xcodebuild test \
+    -scheme BeamKit \
+    -destination "${BEAM_IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}" \
+    -only-testing:SnapshotTests || true
+
+echo "References rewritten. Review \`git diff\` before committing them."
+'''
+
+[tasks."apple:build"]
+description = "Build the iOS and macOS apps"
+depends = ["apple:project", "core:apple"]
+run = '''
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "apple:build: skipping -- the apps can only be built on macOS."
+    exit 0
+fi
+
+# CODE_SIGNING_ALLOWED=NO so this needs no signing identity: CI has none, and a
+# contributor should not need an Apple Developer account to check that the app
+# still compiles. Producing an installable build is a release concern.
+xcrun xcodebuild build \
+    -project beam-apple/Beam.xcodeproj \
+    -scheme "Beam (iOS)" \
+    -destination "${BEAM_IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}" \
+    CODE_SIGNING_ALLOWED=NO
+
+xcrun xcodebuild build \
+    -project beam-apple/Beam.xcodeproj \
+    -scheme "Beam (macOS)" \
+    -destination "platform=macOS" \
+    CODE_SIGNING_ALLOWED=NO
+'''
+
 [tasks.ci]
 description = "Run every check that CI enforces, except coverage and image builds"
 depends = [
@@ -703,4 +1098,10 @@ depends = [
     "android:lint",
     "android:test",
     "android:screenshot",
+    # No-ops on a non-Darwin host, so `mise run ci` stays runnable on Linux
+    # while a Mac runs the same set CI enforces. See the apple:* tasks above.
+    "apple:lint",
+    "apple:test",
+    "apple:snapshot",
+    "apple:build",
 ]

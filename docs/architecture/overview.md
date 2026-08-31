@@ -134,6 +134,12 @@ built for the clients only.
 Kotlin/Compose client for Android phones and tablets, built on `beam-client-core`. Playback is
 Media3; only its `core:ffi` module sees the generated bindings or loads the native library.
 
+**beam-apple**
+SwiftUI client for iOS/iPadOS and macOS, built on `beam-client-core`. Playback runs through two
+engines behind one seam: `AVPlayer` wherever AVFoundation can open the container, and a
+sample-buffer engine over the core's own Matroska demuxer where it cannot — see
+[ADR-0013](decisions/ADR-0013-apple-client-two-engines.md).
+
 **beam-docs**
 Astro/Starlight site publishing Beam's public landing page and its end-user and operator
 documentation, deployed at <https://beam.justinchung.net> (distinct from this `docs/` tree, which
@@ -150,8 +156,11 @@ without a rewrite — see [ADR-0001](decisions/ADR-0001-modular-monolith.md) for
 - Distributed / Kubernetes-native deployment: deferred — tracked in
   [#76](https://github.com/justin13888/beam/issues/76).
 - Remaining native clients: Android TV [#65](https://github.com/justin13888/beam/issues/65) and
-  tvOS/iOS [#66](https://github.com/justin13888/beam/issues/66) are deferred under
-  [#78](https://github.com/justin13888/beam/issues/78); both inherit `beam-client-core`. Android
-  mobile [#67](https://github.com/justin13888/beam/issues/67) has shipped.
+  tvOS (the remainder of [#66](https://github.com/justin13888/beam/issues/66)) are deferred under
+  [#78](https://github.com/justin13888/beam/issues/78); both inherit `beam-client-core`, and both
+  are blocked on the same thing — a native token mint, since neither platform has a web view to
+  lift a session cookie from (NFR-605). Android mobile
+  [#67](https://github.com/justin13888/beam/issues/67) and Apple iOS/macOS
+  [#66](https://github.com/justin13888/beam/issues/66) have shipped.
 - Adaptive-bitrate streaming (HLS/DASH): deferred — tracked in
   [#75](https://github.com/justin13888/beam/issues/75); see `streaming.md`.

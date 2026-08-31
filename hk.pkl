@@ -33,6 +33,20 @@ hooks {
                 check = "ktlint --relative {{files}}"
                 fix = "ktlint --format --relative {{files}}"
             }
+            ["swift-format"] {
+                // The generated UniFFI bindings live under
+                // beam-apple/Packages/BeamKit/Sources/BeamCoreBindings, which
+                // is gitignored and so never reaches a staged set.
+                //
+                // swift-format ships inside Xcode rather than as a pinned mise
+                // tool, so unlike ktlint it simply is not there on Linux. The
+                // guard makes this a no-op where xcrun is absent instead of
+                // failing every commit; the `apple:lint` pre-push step and CI
+                // both run on macOS, so nothing goes unchecked.
+                glob = List("*.swift")
+                check = "! command -v xcrun > /dev/null 2>&1 || xcrun swift-format lint --strict {{files}}"
+                fix = "! command -v xcrun > /dev/null 2>&1 || xcrun swift-format format --in-place {{files}}"
+            }
             ["biome"] {
                 // Generated files (api.gen.ts, routeTree.gen.ts) are gitignored
                 // and so never appear in the staged set.
@@ -137,6 +151,23 @@ hooks {
             ["android-screenshot"] {
                 glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
                 check = "mise run android:screenshot"
+            }
+            // The Apple steps watch beam-client-core for the same reason the
+            // Android ones do: the Swift bindings and the XCFramework are
+            // generated from it, so a change there can break the Apple build
+            // without touching a Swift file. Every one of these is a no-op on
+            // a non-Darwin host, so a Linux contributor pushes as before.
+            ["apple-lint"] {
+                glob = List("*.swift", "beam-apple/**", "beam-client-core/**")
+                check = "mise run apple:lint"
+            }
+            ["apple-test"] {
+                glob = List("*.swift", "beam-apple/**", "beam-client-core/**")
+                check = "mise run apple:test"
+            }
+            ["apple-snapshot"] {
+                glob = List("*.swift", "beam-apple/**", "beam-client-core/**")
+                check = "mise run apple:snapshot"
             }
         }
     }

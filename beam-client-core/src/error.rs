@@ -153,6 +153,84 @@ pub enum StorageError {
     },
 }
 
+/// A failure from the foreign side's byte source.
+///
+/// Separate from [`StorageError`] because the two boundaries fail for
+/// unrelated reasons and the UI response differs: a locked keystore is a
+/// device problem the user can fix, while a byte source that stops mid-file is
+/// a network or disk problem that interrupts playback.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum ByteSourceError {
+    /// The bytes could not be fetched at all.
+    #[error("byte source unavailable: {detail}")]
+    Unavailable {
+        /// The foreign side's explanation.
+        detail: String,
+    },
+
+    /// The requested range lies beyond the end of the source.
+    #[error("byte source range out of bounds: offset {offset}, length {length}")]
+    OutOfBounds {
+        /// Where the read started.
+        offset: u64,
+        /// How many bytes were asked for.
+        length: u64,
+    },
+}
+
+/// A failure while demuxing a container.
+///
+/// Every variant is a permanent property of the file or the request, not a
+/// transient one -- under direct play ([ADR-0004]) there is no server-side
+/// remux to fall back on, so a container the client cannot open is a fact the
+/// viewer needs told, exactly as an undecodable codec is.
+///
+/// [ADR-0004]: ../../docs/architecture/decisions/ADR-0004-never-transcode.md
+// No `Eq`: the `Seek` variant carries the requested position as an `f64`, which
+// is the unit every caller already speaks. Deriving `Eq` would mean rounding the
+// position to something integral purely to satisfy a trait no caller uses.
+#[derive(Debug, Clone, PartialEq, thiserror::Error, uniffi::Error)]
+pub enum ExtractorError {
+    /// The bytes are not a container this extractor understands.
+    #[error("not a readable Matroska container: {detail}")]
+    Malformed {
+        /// What the parser objected to.
+        detail: String,
+    },
+
+    /// The container is well-formed but uses a feature the extractor does not
+    /// implement.
+    #[error("unsupported container feature: {detail}")]
+    Unsupported {
+        /// The feature that was refused.
+        detail: String,
+    },
+
+    /// The underlying byte source failed.
+    #[error("byte source failed: {detail}")]
+    Source {
+        /// The byte source's own explanation.
+        detail: String,
+    },
+
+    /// A seek was requested to a position the container cannot reach.
+    #[error("cannot seek to {seconds}s: {detail}")]
+    Seek {
+        /// The requested position.
+        seconds: f64,
+        /// Why it could not be reached.
+        detail: String,
+    },
+}
+
+impl From<ByteSourceError> for ExtractorError {
+    fn from(error: ByteSourceError) -> Self {
+        Self::Source {
+            detail: error.to_string(),
+        }
+    }
+}
+
 impl From<StorageError> for BeamError {
     fn from(error: StorageError) -> Self {
         Self::Storage {
