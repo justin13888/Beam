@@ -50,6 +50,7 @@ pub mod ports;
 pub mod progress;
 pub mod servers;
 pub mod session;
+pub mod tls;
 pub mod transport;
 pub mod trust;
 pub mod upnext;
@@ -71,6 +72,7 @@ pub use ports::kv::KeyValueStore;
 pub use progress::{ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress};
 pub use servers::{ServerRecord, normalize_base_url, server_id_for};
 pub use session::{SessionEvent, SessionState, UserSummary};
+pub use tls::{TrustDecision, install_crypto_provider};
 pub use trust::CertificateDetails;
 pub use upnext::{UpNextEpisode, UpNextSeason, next_playable_episode};
 

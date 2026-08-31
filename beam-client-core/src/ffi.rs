@@ -59,10 +59,20 @@ pub struct PlaybackHttpConfig {
     pub url: String,
     /// Headers to attach, including the session cookie.
     pub headers: HashMap<String, String>,
-    /// Certificate pins for this server, as OkHttp `sha256/<base64>` values.
-    /// Empty when platform trust already suffices.
-    pub certificate_pins: Vec<String>,
-    /// The host those pins apply to.
+    /// Certificates the user has explicitly accepted for this server, as
+    /// whole-certificate SHA-256 digests in colon-grouped uppercase hex.
+    /// Empty when public trust already suffices.
+    ///
+    /// Deliberately *not* OkHttp `CertificatePinner` values. `CertificatePinner`
+    /// runs after the platform trust manager has already accepted the chain,
+    /// so it can only narrow trust, never widen it -- it cannot rescue the
+    /// self-signed certificate a LAN server presents. The platform player
+    /// needs a trust manager that admits these exact certificates, which is
+    /// what the whole-certificate digest identifies. It is also the digest the
+    /// user was shown when they accepted it.
+    pub trusted_fingerprints: Vec<String>,
+    /// The host those fingerprints apply to. A fingerprint is permission to
+    /// trust one certificate for one server, never a wildcard.
     pub pinned_host: String,
 }
 
@@ -82,6 +92,9 @@ struct ServerContext {
     /// refresh. Held behind its own `Arc` so a lookup can be performed without
     /// keeping the server map locked across an await.
     metadata: Arc<RwLock<HashMap<String, MediaDetail>>>,
+    /// The certificates the user has accepted for this server, and the last
+    /// one the verifier turned away.
+    trust: Arc<crate::tls::TrustDecision>,
 }
 
 impl std::fmt::Debug for ServerContext {
@@ -400,7 +413,75 @@ impl BeamClient {
                 || "This title has no playable files".to_owned(),
                 |first| first.detail.clone(),
             );
-            BeamError::NotFound { detail: detail }
+            BeamError::NotFound { detail }
+        })
+    }
+
+    /// Accept a server certificate the verifier turned away.
+    ///
+    /// Called only after the user has been shown the certificate and has
+    /// agreed to it: nothing here decides to trust anything on their behalf.
+    /// The decision takes effect on the next handshake without rebuilding the
+    /// HTTP client, so the connection pool survives.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::UnknownServer`] when the server is not registered,
+    /// or [`BeamError::Storage`] when the decision cannot be persisted.
+    pub async fn trust_certificate(
+        &self,
+        server_id: String,
+        fingerprint: String,
+    ) -> Result<(), BeamError> {
+        let record = {
+            let mut servers = self.servers.write().expect("servers lock");
+            let context = servers
+                .get_mut(&server_id)
+                .ok_or_else(|| BeamError::UnknownServer {
+                    server_id: server_id.clone(),
+                })?;
+            context.trust.trust(&fingerprint);
+            if !context.record.trusted_fingerprints.contains(&fingerprint) {
+                context.record.trusted_fingerprints.push(fingerprint);
+            }
+            context.record.clone()
+        };
+        self.persist_record(&record).await
+    }
+
+    /// Withdraw trust from every certificate accepted for a server.
+    ///
+    /// The client is rebuilt, because a live `TrustDecision` can only ever be
+    /// widened -- a verifier that had already accepted a connection would
+    /// otherwise keep serving it from the pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::UnknownServer`] when the server is not registered.
+    pub async fn forget_certificates(&self, server_id: String) -> Result<(), BeamError> {
+        let (record, cookie) = {
+            let servers = self.servers.read().expect("servers lock");
+            let context = servers
+                .get(&server_id)
+                .ok_or_else(|| BeamError::UnknownServer {
+                    server_id: server_id.clone(),
+                })?;
+            let mut record = context.record.clone();
+            record.trusted_fingerprints.clear();
+            (record, context.cookie.get())
+        };
+        self.install(record.clone(), cookie.as_deref())?;
+        self.persist_record(&record).await
+    }
+
+    /// The certificates the user has accepted for a server.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::UnknownServer`] when the server is not registered.
+    pub fn trusted_certificates(&self, server_id: String) -> Result<Vec<String>, BeamError> {
+        self.with_context(&server_id, |context| {
+            context.record.trusted_fingerprints.clone()
         })
     }
 
@@ -434,7 +515,7 @@ impl BeamClient {
         Ok(PlaybackHttpConfig {
             url,
             headers,
-            certificate_pins: Vec::new(),
+            trusted_fingerprints: context.record.trusted_fingerprints.clone(),
             pinned_host: host,
         })
     }
@@ -1103,7 +1184,16 @@ impl BeamClient {
         }
         let middleware = Arc::new(SessionMiddleware::new(Arc::clone(&holder)));
 
+        // A `reqwest::Client` built without a preconfigured `ClientConfig`
+        // panics with "No provider set" under the crate's TLS feature set --
+        // it does not return `Err` -- so this is the only path, not a
+        // hardening measure.
+        let trust = Arc::new(crate::tls::TrustDecision::new(
+            record.trusted_fingerprints.clone(),
+        ));
+        let tls = crate::tls::client_config(Arc::clone(&trust))?;
         let http = reqwest::Client::builder()
+            .use_preconfigured_tls(tls)
             .build()
             .map_err(|error| BeamError::Network {
                 detail: format!("could not build an HTTP client: {error}"),
@@ -1143,6 +1233,7 @@ impl BeamClient {
                 throttle: Arc::new(ProgressThrottle::new(Arc::clone(&self.clock))),
                 queue,
                 metadata: Arc::new(RwLock::new(HashMap::new())),
+                trust,
             },
         );
         Ok(())
@@ -1287,6 +1378,14 @@ impl BeamClient {
         if saw_401 {
             let _ = self.apply(server_id, SessionEvent::UnauthorizedObserved);
             return BeamError::SessionExpired;
+        }
+        // Checked before the generic network error, because a rejected
+        // certificate reaches this point as an ordinary transport failure
+        // whose text names neither the certificate nor what to do about it.
+        if let Ok(Some((host, details))) =
+            self.with_context(server_id, |context| context.trust.take_rejection())
+        {
+            return BeamError::UntrustedCertificate { host, details };
         }
         BeamError::Network {
             detail: message.to_owned(),

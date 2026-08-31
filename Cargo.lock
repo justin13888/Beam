@@ -464,11 +464,15 @@ name = "beam-client-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
+ "rcgen",
  "reqwest 0.12.28",
+ "rustls",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "spargen",
  "thiserror 2.0.18",
  "time",
@@ -476,6 +480,8 @@ dependencies = [
  "tracing",
  "uniffi",
  "url",
+ "webpki-roots 1.0.8",
+ "x509-parser",
 ]
 
 [[package]]
