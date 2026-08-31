@@ -29,7 +29,7 @@ sha2 = "0.11"
 async-trait = "0.1"
 chrono = "0.4.45"
 confique = "0.4.0"
-ffmpeg-next = "8.1"
+ffmpeg-next = "9.0"
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 # Kynos does not re-export the stream trait its `Sse` response is generic over.
 # 0.3.32 is spargen's floor for a generated streaming client: its E023
