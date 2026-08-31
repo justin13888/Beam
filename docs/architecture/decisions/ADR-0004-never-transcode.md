@@ -48,8 +48,9 @@ supposed to be a framework-agnostic domain layer — codecs are plain strings/en
   slow connection, serve a lower bitrate of the same source" capability.
 - No adaptive bitrate streaming (HLS/DASH) and no mid-playback seamless quality switching — switching
   quality means switching to a different `files` resource, which surfaces to the user as a discrete
-  action, not an invisible ABR ladder. Revisiting HLS/DASH is tracked in
-  [#75](https://github.com/justin13888/beam/issues/75).
+  action, not an invisible ABR ladder. This is now settled rather than open:
+  [ADR-0014](ADR-0014-adaptive-streaming-rejected.md) rejects adaptive streaming permanently and
+  records what answers the two conditions #75 raised.
 - Some source formats/codecs that a browser cannot natively decode simply will not direct-play
   (some old codec choices, unusual container/subtitle combinations); the mitigation is "index a
   compatible version," not "server transcodes it for you," which is a real, user-visible limitation

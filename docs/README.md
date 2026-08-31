@@ -29,7 +29,7 @@ responsibility.
    - [`kynos-migration-readiness.md`](architecture/kynos-migration-readiness.md) — the blocking
      framework and client-tool contract for the ratified post-Salvo migration; not current state.
    - [`decisions/`](architecture/decisions/) — ADRs recording the settled, non-obvious calls
-     (see its [README](architecture/decisions/README.md); ADR-0001 through ADR-0010).
+     (see its [README](architecture/decisions/README.md), which indexes every ADR).
 3. **[`testing.md`](testing.md)** — zero-dependency unit testing, fakes over mocks, subcutaneous
    e2e, coverage tooling.
 4. **[`operations/`](operations/)** — how to run the system.
