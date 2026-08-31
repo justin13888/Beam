@@ -2,22 +2,27 @@
 
 import cloudflare from "@astrojs/cloudflare";
 import starlight from "@astrojs/starlight";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "astro/config";
 import { ogImageUrl, site } from "./src/site";
 
 // https://astro.build/config
 export default defineConfig({
 	adapter: cloudflare({
-		platformProxy: {
-			enabled: true,
-		},
 		imageService: "compile",
+		// Prerender in Astro's node environment rather than the adapter's default
+		// workerd preview server. workerd resolves the wrangler config first, and
+		// this is a Pages project (`pages_build_output_dir` in wrangler.jsonc), so
+		// it rejects the adapter's generated `ASSETS` binding -- a name Pages
+		// reserves. The site is fully static, so nothing here needs the workerd
+		// runtime at build time.
+		prerenderEnvironment: "node",
 	}),
 	site: "https://beam.justinchung.net",
-	// Tailwind is wired through postcss.config.mjs rather than a Vite plugin -- see the comment
-	// there. It styles only the marketing pages under `src/pages/`, which reach it through
+	// Tailwind styles only the marketing pages under `src/pages/`, which reach it through
 	// `src/layouts/LandingLayout.astro`; Starlight's pages never import that stylesheet, so its
 	// Preflight reset cannot reach them and no `@astrojs/starlight-tailwind` shim is needed.
+	vite: { plugins: [tailwindcss()] },
 	integrations: [
 		starlight({
 			title: "Beam",
