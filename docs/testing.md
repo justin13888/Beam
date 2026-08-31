@@ -310,6 +310,18 @@ everything up to the trait boundary hermetically, and validate the real round-tr
   automated suite is the behaviour of a *specific production* database: its data volume, its
   planner statistics, and its version-specific quirks.
 
+- **Hardware video decoding.** `beam-client-core`'s capability matching is table-tested against
+  synthetic `DeviceProfile`s, and the Android suite runs on the JVM, so no test in CI ever decodes
+  a frame. Whether a device's HEVC, AV1, HDR or passthrough audio decoder behaves as its
+  `MediaCodecList` entry advertises can only be established on real hardware. This is the sharpest
+  edge of the boundary: under direct play ([ADR-0004](architecture/decisions/ADR-0004-never-transcode.md))
+  a wrong capability verdict is the difference between a title playing and a green screen, and the
+  emulator has software decoders only.
+- **The Android UI on a device.** Robolectric renders real pixels on the JVM, which is enough to
+  catch a layout or colour regression, but not to catch a surface-lifecycle bug, a
+  picture-in-picture transition, or a media session that misbehaves against a real notification
+  shade.
+
 This is a deliberate, accepted boundary: the unit suite guarantees "business logic behaves
 correctly given any trait response"; only a real system can guarantee "the real external system
 behaves the way our fakes assume."
@@ -320,6 +332,8 @@ behaves the way our fakes assume."
 |---|---|---|---|
 | Rust workspace | `cargo-llvm-cov` | lines 81%, regions 81%, functions 73% | the `rust:coverage` task in `mise.toml`, run by the `rust-test` job in `.github/workflows/ci.yml` |
 | Web (`beam-web`) | `@vitest/coverage-v8` | lines 79%, functions 72%, branches 70%, statements 76% | `coverage.thresholds` in `beam-web/vitest.config.ts` |
+| Android (`beam-android`) | JUnit + Robolectric | no percentage gate; the suite must pass | the `android:test` task in `mise.toml`, run by the `android-test` job |
+| Android screenshots | Roborazzi | every reference must match | the `android:screenshot` task, run by the `android-screenshot` job |
 
 **Regions, not branches.** `cargo-llvm-cov`'s `--branch` requires
 `-Z coverage-options=branch` and therefore a nightly toolchain, and
@@ -329,7 +343,20 @@ honest stable-toolchain branch gate, and it is the number that tracks mutation s
 `mise run rust:coverage:report`, which prints the per-file Regions / Functions / Lines table without
 enforcing anything.
 
-Run locally with `mise run rust:coverage` and `mise run ts:coverage`. Both use the same commands CI
+`beam-client-core` is part of the Rust workspace and counts towards the gate above, with one
+exclusion: spargen's generated client is emitted into `OUT_DIR` and is excluded by
+`--ignore-filename-regex`, since it is a generator's output rather than hand-written logic. The
+crate's own logic — capability matching, up-next, paging, the progress throttle — is pure and
+exhaustively table-testable, so it raises the workspace number rather than straining the gate.
+
+The Android suite has no percentage threshold, deliberately. A Compose codebase is mostly
+declarative UI, and a line-coverage denominator counting every composable rewards tests that
+instantiate screens without asserting anything about them. The gate is that the behavioural tests
+and the screenshot references both pass; screenshot diffs upload as CI artifacts on failure,
+because a failed screenshot check without the diff tells a reviewer only that something moved.
+
+Run locally with `mise run rust:coverage`, `mise run ts:coverage`, `mise run android:test` and
+`mise run android:screenshot`. Both use the same commands CI
 does, and the Rust one vendors FFmpeg by default on hosts without the system development libraries
 (see `BEAM_CARGO_FEATURES` in `mise.toml` and
 [ADR-0007](architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md)). Reports are CI artifacts;

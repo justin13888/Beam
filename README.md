@@ -22,7 +22,7 @@ Beam originally started as a project to surpass the limitations of Jellyfin, a p
 
 - [ ] Web
 - [ ] Swift (iOS/macOS)
-- [ ] Kotlin (Android)
+- [x] Kotlin (Android)
 - [ ] GTK (Linux)
 
 Not in scope currently: Native Windows client (see [#64](https://github.com/justin13888/Beam/issues/64))

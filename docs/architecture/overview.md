@@ -65,6 +65,10 @@ process, a deliberate scale-appropriate choice
       PostgreSQL                                   Media filesystem (RO)
 ```
 
+`beam-client-core` and `beam-android` are deliberately absent from that diagram: neither is linked
+into the server binary or its container. They are built and shipped separately, and consume
+`beam-server` only across the same public REST API a browser does.
+
 All configuration is environment-driven via `BEAM_*` variables (see
 `../operations/configuration.md`). On startup, `beam-server` applies pending database migrations
 when `BEAM_AUTO_MIGRATE` is set (the default); operators who prefer manual control disable it and
@@ -113,10 +117,22 @@ metadata at index time — never at stream time. See
 [ADR-0007](decisions/ADR-0007-vendored-ffmpeg-local-dev.md).
 
 **beam-web**
-TypeScript/React single-page web client — the reference (and currently only) client of the domain
-API. Consumes the REST API through a generated `openapi-fetch` client (see `api.md`), authenticates
-via the BFF session cookie, and plays media with a client-side player (Vidstack) issuing HTTP Range
-requests directly against `beam-server`.
+TypeScript/React single-page web client — the reference client of the domain API. Consumes the REST
+API through a generated `openapi-fetch` client (see `api.md`), authenticates via the BFF session
+cookie, and plays media with a client-side player (Vidstack) issuing HTTP Range requests directly
+against `beam-server`.
+
+**beam-client-core** (library crate)
+The logic every native client would otherwise reimplement: the generated REST client, auth state,
+TLS trust decisions, codec capability matching, source selection, up-next resolution, the progress
+throttle and its retry queue, and cursor paging. Exposed to Kotlin and Swift over UniFFI. Depends
+on none of `beam-domain`, `beam-index`, or `beam-server` — see
+[ADR-0011](decisions/ADR-0011-native-client-rust-core.md). Not linked into `beam-server`; it is
+built for the clients only.
+
+**beam-android**
+Kotlin/Compose client for Android phones and tablets, built on `beam-client-core`. Playback is
+Media3; only its `core:ffi` module sees the generated bindings or loads the native library.
 
 **beam-docs**
 Astro/Starlight site publishing Beam's public landing page and its end-user and operator
@@ -133,10 +149,9 @@ without a rewrite — see [ADR-0001](decisions/ADR-0001-modular-monolith.md) for
 
 - Distributed / Kubernetes-native deployment: deferred — tracked in
   [#76](https://github.com/justin13888/beam/issues/76).
-- Native (mobile/TV/desktop) clients: deferred — tracked in
-  [#65](https://github.com/justin13888/beam/issues/65),
-  [#66](https://github.com/justin13888/beam/issues/66),
-  [#67](https://github.com/justin13888/beam/issues/67), and
-  [#78](https://github.com/justin13888/beam/issues/78).
+- Remaining native clients: Android TV [#65](https://github.com/justin13888/beam/issues/65) and
+  tvOS/iOS [#66](https://github.com/justin13888/beam/issues/66) are deferred under
+  [#78](https://github.com/justin13888/beam/issues/78); both inherit `beam-client-core`. Android
+  mobile [#67](https://github.com/justin13888/beam/issues/67) has shipped.
 - Adaptive-bitrate streaming (HLS/DASH): deferred — tracked in
   [#75](https://github.com/justin13888/beam/issues/75); see `streaming.md`.

@@ -20,29 +20,32 @@ role.
 | `/v1/health` | GET | Deep health check (public): probes the database and returns `200` `{status:"healthy"}` or `503` `{status:"degraded"}` with per-dependency `checks` and process `uptime_secs` |
 | `/v1/media` | GET | Browse/search catalog (cursor pagination, filters, sort) |
 | `/v1/media/{id}` | GET | Full metadata for one movie or show |
-| `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie, with probed per-stream codecs |
+| `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, with probed per-stream codecs |
+| `/v1/genres` | GET | Every genre in the catalog, for filter chips |
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing and contents |
 | `/v1/files/{fileId}/stream` | GET | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET | Full-file download (attachment) |
 | `/v1/files/{fileId}/progress` | PUT | Report playback position |
 | `/v1/continue-watching` | GET | Resume list for the current user |
-| `/v1/history` | GET | Watch history for the current user |
-| `/v1/genres` | GET | Genre list for filtering |
+| `/v1/history` | GET | Watch history for the current user (limit/offset paged) |
 | `/v1/auth/login`, `/v1/auth/callback` | GET | OIDC login redirect and callback |
 | `/v1/me` | GET | Current user |
 | `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions |
 | `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List / revoke own sessions |
+| `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, recent scans |
+| `/v1/admin/users` | GET | User accounts (limit/offset paged) |
+| `/v1/admin/users/{id}` | PATCH | Block or unblock an account |
 | `/v1/admin/libraries`, `/v1/admin/libraries/{id}`, `/v1/admin/libraries/{id}/scan` | POST, DELETE, POST | Library management and scan trigger |
 | `/v1/admin/media/{id}/refresh` | POST | Re-trigger enrichment for a title |
-| `/v1/admin/users`, `/v1/admin/users/{id}` | GET, PATCH | List users; enable/disable one |
-| `/v1/admin/status` | GET | Catalog counts and enrichment breakdown |
 | `/v1/admin/logs`, `/v1/admin/logs/count` | GET | Admin log view |
 | `/v1/admin/events` | GET | Recent admin events (JSON) |
 | `/v1/admin/events/stream` | GET | Admin event stream (SSE) |
 
 `GET /v1/media/{id}/sources` reports the real probed codec of each stream, mapped to API-visible
 values (`hevc`/`h264`/`av1` → `H265`/`H264`/`AV1`; `aac`/`opus`; anything unrecognized is
-`UNKNOWN`). It supports movies only; show/episode sources are deferred — tracked in
+`UNKNOWN`). It accepts a movie id or an episode id; a show id is rejected with 400, since shows
+have no files of their own. Episode sources landed in
+[#102](https://github.com/justin13888/beam/pull/102), closing
 [#68](https://github.com/justin13888/beam/issues/68).
 
 ## Conventions
