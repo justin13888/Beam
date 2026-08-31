@@ -21,11 +21,11 @@ ffmpeg-next = { workspace = true }
 # recorder (BEAM_ENABLE_METRICS=true).
 metrics = { workspace = true }
 mutants = { workspace = true }
-notify = "6"
+notify = "8"
 num = { version = "0.4.3", features = ["serde"] }
 num_cpus = "1.17.0"
 parking_lot = "0.12.5"
-rayon = "1.11.0"
+rayon = "1.12.0"
 regex = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -35,7 +35,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 walkdir = { workspace = true }
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 
 [dev-dependencies]
 # `test-utils` here (not just under the crate's own `test-utils` feature) so the
@@ -43,11 +43,11 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 # own `#[cfg(test)]` modules: a dependency is not compiled with `cfg(test)`.
 beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
 beam-test-support = { path = "../beam-test-support" }
-futures = "0.3.31"
+futures = "0.3.34"
 metrics-util = { workspace = true }
-mockall = "0.14.0"
+mockall = "0.15.0"
 sea-orm = { workspace = true, features = ["mock"] }
-tempfile = "3.23.0"
+tempfile = "3.27.0"
 
 [features]
 # Opt-in tier: runs the shared repository contracts against a real Postgres.
@@ -65,5 +65,5 @@ vendored-ffmpeg = ["ffmpeg-next/build"]
 mutation-testing = ["vendored-ffmpeg", "test-utils"]
 
 [dependencies.mockall]
-version = "0.14.0"
+version = "0.15.0"
 optional = true

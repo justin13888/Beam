@@ -57,7 +57,7 @@ jobs:
     if: needs.release-please.outputs.prs_created == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
@@ -92,7 +92,7 @@ jobs:
     env:
       BEAM_CARGO_FEATURES: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: jdx/mise-action@v4
@@ -105,7 +105,7 @@ jobs:
 
       - run: mise run codegen:openapi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: openapi-spec
           path: beam-web/openapi.json
@@ -129,12 +129,12 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
       # beam-web/Containerfile expects the spec in the build context.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: openapi-spec
           path: beam-web
@@ -164,7 +164,7 @@ jobs:
           mkdir -p /tmp/digests
           touch "/tmp/digests/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.image }}-${{ matrix.platform.arch }}
           path: /tmp/digests/*
@@ -178,7 +178,7 @@ jobs:
       matrix:
         image: [beam-server, beam-web]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: digests-${{ matrix.image }}-*
           path: /tmp/digests
@@ -224,7 +224,7 @@ jobs:
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: jdx/mise-action@v4
@@ -232,7 +232,7 @@ jobs:
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
 
       # Builds every ABI, unlike a debug build which produces only the
       # emulator's x86_64. An APK missing arm64-v8a installs on a phone and
@@ -249,7 +249,7 @@ jobs:
           done
           cp "$apk" beam-android.apk
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android-apk
           path: beam-android.apk
@@ -261,18 +261,18 @@ jobs:
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: openapi-spec
           path: beam-web
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: android-apk
 
@@ -305,7 +305,7 @@ jobs:
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
           # Starlight's lastUpdated reads git history; a shallow clone renders wrong

@@ -15,14 +15,14 @@ runs:
     # keeps demuxing happily, which makes it look like the caller's bug.
     - name: Cache FFmpeg 8.1 build
       id: cache-ffmpeg
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: /opt/ffmpeg
         key: ffmpeg-8.1-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-v2
 
     - name: Install FFmpeg build dependencies
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-      uses: awalsh128/cache-apt-pkgs-action@latest
+      uses: awalsh128/cache-apt-pkgs-action@v1.6.3
       with:
         packages: >-
           build-essential pkg-config yasm nasm wget ca-certificates
