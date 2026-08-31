@@ -9,34 +9,19 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as ProfileRouteImport } from './routes/profile'
-import { Route as LoginRouteImport } from './routes/login'
-import { Route as HistoryRouteImport } from './routes/history'
-import { Route as ExploreRouteImport } from './routes/explore'
-import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AdminRouteImport } from './routes/admin'
+import { Route as ExploreRouteImport } from './routes/explore'
+import { Route as HistoryRouteImport } from './routes/history'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as LibrariesIndexRouteImport } from './routes/libraries.index'
-import { Route as MediaIdRouteImport } from './routes/media.$id'
 import { Route as LibrariesIdRouteImport } from './routes/libraries.$id'
+import { Route as MediaIdRouteImport } from './routes/media.$id'
 
-const ProfileRoute = ProfileRouteImport.update({
-  id: '/profile',
-  path: '/profile',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LoginRoute = LoginRouteImport.update({
-  id: '/login',
-  path: '/login',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const HistoryRoute = HistoryRouteImport.update({
-  id: '/history',
-  path: '/history',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ExploreRoute = ExploreRouteImport.update({
-  id: '/explore',
-  path: '/explore',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -44,9 +29,24 @@ const AdminRoute = AdminRouteImport.update({
   path: '/admin',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const ExploreRoute = ExploreRouteImport.update({
+  id: '/explore',
+  path: '/explore',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HistoryRoute = HistoryRouteImport.update({
+  id: '/history',
+  path: '/history',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileRoute = ProfileRouteImport.update({
+  id: '/profile',
+  path: '/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LibrariesIndexRoute = LibrariesIndexRouteImport.update({
@@ -54,14 +54,14 @@ const LibrariesIndexRoute = LibrariesIndexRouteImport.update({
   path: '/libraries/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const MediaIdRoute = MediaIdRouteImport.update({
-  id: '/media/$id',
-  path: '/media/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const LibrariesIdRoute = LibrariesIdRouteImport.update({
   id: '/libraries/$id',
   path: '/libraries/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MediaIdRoute = MediaIdRouteImport.update({
+  id: '/media/$id',
+  path: '/media/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -149,32 +149,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/profile': {
-      id: '/profile'
-      path: '/profile'
-      fullPath: '/profile'
-      preLoaderRoute: typeof ProfileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/login': {
-      id: '/login'
-      path: '/login'
-      fullPath: '/login'
-      preLoaderRoute: typeof LoginRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/history': {
-      id: '/history'
-      path: '/history'
-      fullPath: '/history'
-      preLoaderRoute: typeof HistoryRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/explore': {
-      id: '/explore'
-      path: '/explore'
-      fullPath: '/explore'
-      preLoaderRoute: typeof ExploreRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin': {
@@ -184,11 +163,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/explore': {
+      id: '/explore'
+      path: '/explore'
+      fullPath: '/explore'
+      preLoaderRoute: typeof ExploreRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/history': {
+      id: '/history'
+      path: '/history'
+      fullPath: '/history'
+      preLoaderRoute: typeof HistoryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile': {
+      id: '/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof ProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/libraries/': {
@@ -198,18 +198,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LibrariesIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/media/$id': {
-      id: '/media/$id'
-      path: '/media/$id'
-      fullPath: '/media/$id'
-      preLoaderRoute: typeof MediaIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/libraries/$id': {
       id: '/libraries/$id'
       path: '/libraries/$id'
       fullPath: '/libraries/$id'
       preLoaderRoute: typeof LibrariesIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/media/$id': {
+      id: '/media/$id'
+      path: '/media/$id'
+      fullPath: '/media/$id'
+      preLoaderRoute: typeof MediaIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
