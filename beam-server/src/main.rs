@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use eyre::{Result, eyre};
+use kynos::http::forwarded::TrustedProxies;
 use kynos::server::{Server, error::ServerError, shutdown::Shutdown};
 use tracing::info;
 
@@ -130,6 +131,19 @@ async fn main() -> Result<()> {
     // that no two interceptors contribute the same header or status. A router
     // that cannot describe itself never reaches a listener.
     let service = create_router()
+        // Which hops may say who the client is. This is a dispatch-time policy
+        // rather than part of the description, so it is the one thing set here
+        // instead of in `create_router` -- the exported document is unaffected.
+        //
+        // Without it `ByClientAddress` reads the socket peer, and every client
+        // behind a proxy shares one bucket: a per-IP limit that is silently a
+        // global one. With more hops trusted than really exist, a client picks
+        // its own bucket by writing its own `Forwarded`.
+        .trusted_proxies(if config.rate_limit_trust_forwarded_for {
+            TrustedProxies::hops(1)
+        } else {
+            TrustedProxies::none()
+        })
         .build(state)
         .map_err(|e| eyre!("The router does not describe itself: {e}"))?;
 
