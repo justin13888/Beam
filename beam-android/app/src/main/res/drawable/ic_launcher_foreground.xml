@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A beam of light widening from a point, which is both the product's name and
+  what it does. Drawn inside the 66dp safe zone of the 108dp adaptive canvas so
+  no launcher mask can clip it.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- The emitter. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,46 L34,62 A8,8 0 0,1 26,70 L26,38 A8,8 0 0,1 34,46 Z" />
+
+    <!-- The beam, widening as it travels. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.95"
+        android:pathData="M40,48 L74,32 L74,76 L40,60 Z" />
+
+    <!-- Falloff, so the beam reads as light rather than as a solid wedge. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.45"
+        android:pathData="M78,30 L84,27 L84,81 L78,78 Z" />
+</vector>
