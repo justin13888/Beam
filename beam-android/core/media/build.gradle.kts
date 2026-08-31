@@ -1,6 +1,7 @@
 plugins {
     id("beam.android.library")
     id("beam.android.hilt")
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -18,9 +19,11 @@ dependencies {
     // decision the core resolved, so playback and the API agree about who
     // the user is and which certificate is acceptable.
     implementation(libs.androidx.media3.datasource.okhttp)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.kotlinx.coroutines.android)
 
+    testImplementation(projects.core.testing)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.kotlinx.coroutines.test)

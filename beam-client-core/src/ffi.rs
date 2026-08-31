@@ -47,6 +47,26 @@ pub struct ServerSummary {
     pub is_active: bool,
 }
 
+/// How the platform reaches one server, independent of any single file.
+///
+/// Downloads need this and cannot use [`PlaybackHttpConfig`]: Media3's
+/// `DownloadManager` is built with one `DataSource.Factory` for every download
+/// it will ever perform, so a config carrying one specific file's URL is the
+/// wrong shape entirely. The credential and the trust decision are per-server;
+/// only the URL is per-file.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ServerHttpConfig {
+    /// The server's normalised origin.
+    pub base_url: String,
+    /// Headers to attach, including the session cookie.
+    pub headers: HashMap<String, String>,
+    /// Certificates the user has explicitly accepted for this server, as
+    /// whole-certificate SHA-256 digests in colon-grouped uppercase hex.
+    pub trusted_fingerprints: Vec<String>,
+    /// The host those fingerprints apply to.
+    pub host: String,
+}
+
 /// Everything the platform player needs to fetch bytes itself.
 ///
 /// Media3 does its own buffering and range requests, so the core must not sit
@@ -491,6 +511,39 @@ impl BeamClient {
     ///
     /// Returns [`BeamError::Unauthenticated`] when there is no session.
     pub fn playback_config(&self, file_id: String) -> Result<PlaybackHttpConfig, BeamError> {
+        let server = self.server_http_config()?;
+        let ServerHttpConfig {
+            base_url: _,
+            headers,
+            trusted_fingerprints,
+            host,
+        } = server;
+
+        let server_id = self.require_active()?;
+        let url = self.with_context(&server_id, |context| {
+            context
+                .record
+                .absolute_url(&format!("/v1/files/{file_id}/stream"))
+        })??;
+
+        Ok(PlaybackHttpConfig {
+            url,
+            headers,
+            trusted_fingerprints,
+            pinned_host: host,
+        })
+    }
+
+    /// The credential and trust decision for the active server.
+    ///
+    /// Separate from [`Self::playback_config`] because Media3's download
+    /// manager is constructed once with a single data-source factory, long
+    /// before any particular file is chosen.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Unauthenticated`] when there is no session.
+    pub fn server_http_config(&self) -> Result<ServerHttpConfig, BeamError> {
         let server_id = self.require_active()?;
         let servers = self.servers.read().expect("servers lock");
         let context = servers.get(&server_id).ok_or(BeamError::UnknownServer {
@@ -498,10 +551,8 @@ impl BeamClient {
         })?;
 
         let cookie = context.cookie.get().ok_or(BeamError::Unauthenticated)?;
-        let url = context
-            .record
-            .absolute_url(&format!("/v1/files/{file_id}/stream"))?;
-        let host = url::Url::parse(&url)
+        let base_url = context.record.base_url.clone();
+        let host = url::Url::parse(&base_url)
             .ok()
             .and_then(|parsed| parsed.host_str().map(str::to_owned))
             .unwrap_or_default();
@@ -512,11 +563,11 @@ impl BeamClient {
             format!("{}={cookie}", crate::transport::SESSION_COOKIE),
         );
 
-        Ok(PlaybackHttpConfig {
-            url,
+        Ok(ServerHttpConfig {
+            base_url,
             headers,
             trusted_fingerprints: context.record.trusted_fingerprints.clone(),
-            pinned_host: host,
+            host,
         })
     }
 

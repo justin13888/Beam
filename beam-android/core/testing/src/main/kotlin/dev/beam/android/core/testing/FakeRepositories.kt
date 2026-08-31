@@ -96,7 +96,10 @@ public class FakeCatalogRepository : CatalogRepository {
         return files
     }
 
-    override suspend fun upNext(showId: String, currentEpisodeId: String): EpisodeSummary? {
+    override suspend fun upNext(
+        showId: String,
+        currentEpisodeId: String,
+    ): EpisodeSummary? {
         failWith?.let { throw it }
         return nextEpisode
     }
@@ -123,8 +126,15 @@ public class FakePlaybackRepository : PlaybackRepository {
     /** The page returned by [history]. */
     public var historyPage: HistoryPage = HistoryPage(listOf(Fixtures.historyEntry()), 1uL)
 
-    /** Every progress report, in order, as (fileId, position, force). */
-    public val progressReports: MutableList<Triple<String, Double, Boolean>> = mutableListOf()
+    /**
+     * Every progress report, in order.
+     *
+     * Records the duration and the force flag as well as the position, because
+     * the interesting assertions are about *those*: whether a pause forced a
+     * send, and whether an unknown duration was sent as absent rather than as
+     * a confident zero.
+     */
+    public val reportedProgress: MutableList<ProgressReport> = mutableListOf()
 
     /** What [reportProgress] returns. */
     public var progressOutcome: ProgressOutcome = ProgressOutcome.Sent(0.0)
@@ -144,7 +154,10 @@ public class FakePlaybackRepository : PlaybackRepository {
         return sourceList
     }
 
-    override suspend fun selectSource(mediaId: String, policy: QualityPolicy): SourceSelection {
+    override suspend fun selectSource(
+        mediaId: String,
+        policy: QualityPolicy,
+    ): SourceSelection {
         failWith?.let { throw it }
         return selection ?: throw BeamException.NotFound("This title has no playable files")
     }
@@ -154,7 +167,7 @@ public class FakePlaybackRepository : PlaybackRepository {
         return PlaybackHttpConfig(
             url = "https://beam.test/v1/files/$fileId/stream",
             headers = mapOf("Cookie" to "beam_session=test"),
-            certificatePins = emptyList(),
+            trustedFingerprints = emptyList(),
             pinnedHost = "beam.test",
         )
     }
@@ -164,7 +177,10 @@ public class FakePlaybackRepository : PlaybackRepository {
         return continueWatchingRows
     }
 
-    override suspend fun history(limit: UInt?, offset: UInt?): HistoryPage {
+    override suspend fun history(
+        limit: UInt?,
+        offset: UInt?,
+    ): HistoryPage {
         failWith?.let { throw it }
         return historyPage
     }
@@ -175,7 +191,7 @@ public class FakePlaybackRepository : PlaybackRepository {
         durationSecs: Double?,
         force: Boolean,
     ): ProgressOutcome {
-        progressReports += Triple(fileId, positionSecs, force)
+        reportedProgress += ProgressReport(fileId, positionSecs, durationSecs, force)
         failWith?.let { throw it }
         return progressOutcome
     }
@@ -207,13 +223,17 @@ public class FakeServerRepository(
         return state.value
     }
 
-    override suspend fun addServer(baseUrl: String, displayName: String?): ServerSummary {
+    override suspend fun addServer(
+        baseUrl: String,
+        displayName: String?,
+    ): ServerSummary {
         failWith?.let { throw it }
-        val added = Fixtures.server(
-            id = baseUrl.filter { it.isLetterOrDigit() },
-            displayName = displayName ?: baseUrl,
-            state = SessionState.LoggedOut,
-        )
+        val added =
+            Fixtures.server(
+                id = baseUrl.filter { it.isLetterOrDigit() },
+                displayName = displayName ?: baseUrl,
+                state = SessionState.LoggedOut,
+            )
         state.value = state.value.map { it.copy(isActive = false) } + added
         return added
     }
@@ -228,23 +248,27 @@ public class FakeServerRepository(
         state.value = state.value.filterNot { it.id == serverId }
     }
 
-    override suspend fun loginUrl(serverId: String): String =
-        "https://beam.test/v1/auth/login?redirect=/"
+    override suspend fun loginUrl(serverId: String): String = "https://beam.test/v1/auth/login?redirect=/"
 
-    override suspend fun completeLogin(serverId: String, sessionCookie: String): UserSummary {
+    override suspend fun completeLogin(
+        serverId: String,
+        sessionCookie: String,
+    ): UserSummary {
         capturedCookie = sessionCookie
         failWith?.let { throw it }
         val user = Fixtures.user()
-        state.value = state.value.map {
-            if (it.id == serverId) it.copy(state = SessionState.Authenticated(user)) else it
-        }
+        state.value =
+            state.value.map {
+                if (it.id == serverId) it.copy(state = SessionState.Authenticated(user)) else it
+            }
         return user
     }
 
     override suspend fun logout(serverId: String) {
-        state.value = state.value.map {
-            if (it.id == serverId) it.copy(state = SessionState.LoggedOut) else it
-        }
+        state.value =
+            state.value.map {
+                if (it.id == serverId) it.copy(state = SessionState.LoggedOut) else it
+            }
     }
 
     override suspend fun sessionState(serverId: String): SessionState =
@@ -313,17 +337,26 @@ public class FakeAdminRepository : AdminRepository {
         return ServerHealth("ok", "0.1.0", 86_400uL, "ok")
     }
 
-    override suspend fun users(limit: UInt?, offset: UInt?): AdminUserPage {
+    override suspend fun users(
+        limit: UInt?,
+        offset: UInt?,
+    ): AdminUserPage {
         failWith?.let { throw it }
         return userPage
     }
 
-    override suspend fun setUserDisabled(userId: String, disabled: Boolean) {
+    override suspend fun setUserDisabled(
+        userId: String,
+        disabled: Boolean,
+    ) {
         failWith?.let { throw it }
         disableCalls += userId to disabled
     }
 
-    override suspend fun logs(limit: UInt?, offset: UInt?): List<AdminLogEntry> {
+    override suspend fun logs(
+        limit: UInt?,
+        offset: UInt?,
+    ): List<AdminLogEntry> {
         failWith?.let { throw it }
         return logEntries
     }
@@ -338,7 +371,10 @@ public class FakeAdminRepository : AdminRepository {
         return eventEntries
     }
 
-    override suspend fun createLibrary(name: String, rootPath: String): LibrarySummary {
+    override suspend fun createLibrary(
+        name: String,
+        rootPath: String,
+    ): LibrarySummary {
         failWith?.let { throw it }
         return Fixtures.library(name = name)
     }
@@ -357,3 +393,15 @@ public class FakeAdminRepository : AdminRepository {
         failWith?.let { throw it }
     }
 }
+
+/** One position report captured by [FakePlaybackRepository]. */
+public data class ProgressReport(
+    /** The file the position belongs to. */
+    val fileId: String,
+    /** Where the viewer had got to, in seconds. */
+    val positionSecs: Double,
+    /** The title's length, where the player knew it. */
+    val durationSecs: Double?,
+    /** Whether the core was asked to bypass its throttle. */
+    val force: Boolean,
+)
