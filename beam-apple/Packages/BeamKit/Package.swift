@@ -23,7 +23,12 @@ func feature(_ name: String, extra: [Target.Dependency] = []) -> Target {
     )
 }
 
-let features = [
+// Explicitly typed, and the dependency list computed once below. Without the
+// annotations the type-checker has to infer `[Target]` from ten calls whose
+// argument types are themselves inferred, and it gives up: CI failed with
+// "the compiler is unable to type-check this expression in reasonable time"
+// while the same manifest resolved locally on a newer toolchain.
+let features: [Target] = [
     feature("BeamAuth"),
     feature("BeamHome"),
     feature("BeamLibraries"),
@@ -35,6 +40,9 @@ let features = [
     feature("BeamSettings"),
     feature("BeamAdmin"),
 ]
+
+/// Every feature target, as a dependency list.
+let featureDependencies: [Target.Dependency] = features.map { .byName(name: $0.name) }
 
 let package = Package(
     name: "BeamKit",
@@ -100,14 +108,13 @@ let package = Package(
         ),
         .target(
             name: "BeamAppShell",
-            dependencies: uiDependencies + ["BeamPlayback"]
-                + features.map { .byName(name: $0.name) },
+            dependencies: uiDependencies + ["BeamPlayback"] + featureDependencies,
             path: "Sources/BeamAppShell"
         ),
 
         .testTarget(
             name: "BeamKitTests",
-            dependencies: ["BeamAppShell", "BeamTesting"] + features.map { .byName(name: $0.name) },
+            dependencies: ["BeamAppShell", "BeamTesting"] + featureDependencies,
             path: "Tests/BeamKitTests"
         ),
         // Its own target so `apple:test` and `apple:snapshot` can select it:
@@ -119,7 +126,7 @@ let package = Package(
                 "BeamAppShell",
                 "BeamTesting",
                 .product(name: "SnapshotTesting", package: "swift-snapshot-testing"),
-            ] + features.map { .byName(name: $0.name) },
+            ] + featureDependencies,
             path: "Tests/SnapshotTests",
             exclude: ["__Snapshots__"]
         ),
