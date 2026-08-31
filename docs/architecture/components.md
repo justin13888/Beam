@@ -272,9 +272,11 @@ import it, so Tailwind's Preflight cannot reach Starlight's theme and no
 `@astrojs/starlight-tailwind` shim is needed.
 
 Biome lints and formats the site's `.ts` files, but deliberately **not** its `.astro` files: Biome
-2.2.4 parses only an `.astro` file's frontmatter script, so it reports every component import and
-prop as unused and offers to remove the imports — which the `--write` pre-commit hook would act on.
-Revisit at Biome 2.4, which reworked `.astro` handling. `astro check` (`bun run typecheck`)
+parses only an `.astro` file's frontmatter script, so it reports every component import and prop as
+unused and offers to remove the imports — which the `--write` pre-commit hook would act on. Still
+true as of 2.5.11: adding `beam-docs/src/**/*.astro` to `biome.json` reports `noUnusedImports`
+against the `Seo`, `SiteHeader` and `SiteFooter` imports, all marked fixable. Re-test by adding
+that glob and running `mise run ts:check`; the exclusion can go when that comes back clean. `astro check` (`bun run typecheck`)
 validates content; there is no separate test suite, and `mise run docs:build` is the only gate that
 meaningfully exercises the site. Deployment is `astro build && wrangler pages deploy`, run from
 `release.yml` on a release tag; both that job and CI's check out full git history because
