@@ -235,7 +235,7 @@ jobs:
       BEAM_TEST_DATABASE_URL: postgres://beam:password@localhost:5432/beam
     services:
       postgres:
-        image: postgres:18.0
+        image: postgres:18.6
         env:
           POSTGRES_USER: beam
           POSTGRES_PASSWORD: password
