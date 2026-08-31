@@ -205,7 +205,12 @@ pub enum SessionActionError {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn device_hash(user_agent: Option<&str>) -> String {
-    format!("{:x}", Sha256::digest(user_agent.unwrap_or("").as_bytes()))
+    // `beam_auth`'s encoder, not a local one. Session rows are looked up by
+    // equality against this string, and `sha2` 0.11 returns a
+    // `hybrid_array::Array` with no `LowerHex`, so the `{:x}` this used to be
+    // stopped compiling. A second implementation here would be a second thing
+    // that has to keep producing identical bytes.
+    beam_auth::utils::hex::encode_lower(&Sha256::digest(user_agent.unwrap_or("").as_bytes()))
 }
 
 /// The client address, as the deployment's proxy reports it.

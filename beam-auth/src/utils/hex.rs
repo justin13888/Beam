@@ -4,15 +4,20 @@
 //! `GenericArray` of 0.10 -- does not implement `LowerHex`, so the
 //! `format!("{:x}", Sha256::digest(..))` this crate used no longer compiles.
 //!
-//! Both call sites store their result in the database and look rows up by
+//! Every call site stores its result in the database and looks rows up by
 //! equality against it, so the encoding has to stay byte-for-byte what `{:x}`
 //! produced: lowercase, exactly two characters per byte, no separators, no
 //! `0x` prefix. That contract is what the tests below pin.
+//!
+//! Public rather than `pub(crate)` because one of those call sites is no longer
+//! in this crate: the Kynos migration moved the OIDC adapter, and with it
+//! `device_hash`, to `beam-server`. Two implementations of an encoding that
+//! rows are matched on is precisely the mirror that drifts.
 
 const LOWER_HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
 /// Encodes `bytes` as lowercase hexadecimal, two characters per byte.
-pub(crate) fn encode_lower(bytes: &[u8]) -> String {
+pub fn encode_lower(bytes: &[u8]) -> String {
     let mut encoded = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {
         encoded.push(char::from(LOWER_HEX_DIGITS[usize::from(byte >> 4)]));
