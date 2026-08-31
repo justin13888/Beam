@@ -14,7 +14,7 @@ name = "beam-migration"
 path = "src/main.rs"
 
 [dependencies]
-argon2 = "0.5.3"
+argon2 = "0.6.0"
 async-trait = { workspace = true }
 sea-orm-migration = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

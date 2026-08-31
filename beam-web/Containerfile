@@ -7,7 +7,7 @@
 # inside the image would mean compiling FFmpeg and the entire Rust workspace
 # just to emit a JSON file.
 # ----------------------------------------------------
-FROM docker.io/oven/bun:1.3.14-debian AS builder
+FROM docker.io/oven/bun:1.4.0-debian AS builder
 
 # Accept build arguments for environment variables
 ARG C_APP_TITLE=Beam
@@ -43,7 +43,7 @@ RUN bun run build
 # ----------------------------------------------------
 # Serve statically-built web app with HTTP (caching handled externally)
 # ----------------------------------------------------
-FROM docker.io/caddy:2-alpine
+FROM docker.io/caddy:2.11.4-alpine
 
 # Copy built assets from builder stage (bun run build outputs to /app/beam-web/dist)
 COPY --from=builder /app/beam-web/dist /srv

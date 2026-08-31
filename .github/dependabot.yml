@@ -32,3 +32,17 @@ updates:
           - "patch"
           - "minor"
     open-pull-requests-limit: 10
+
+  # beam-android resolves through gradle/libs.versions.toml. Without this
+  # ecosystem the catalog drifts silently -- the cargo, bun and github-actions
+  # entries above never see it.
+  - package-ecosystem: "gradle"
+    directory: "/beam-android"
+    schedule:
+      interval: "weekly"
+    groups:
+      gradle-patch-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    open-pull-requests-limit: 10

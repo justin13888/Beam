@@ -8,11 +8,11 @@
 min_version = "2025.1.0"
 
 [tools]
-bun = "1.3.14"
-hk = "1.50.0"
-"github:convco/convco" = "0.7.0"
+bun = "1.4.0"
+hk = "1.57.0"
+"github:convco/convco" = "0.7.1"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
-"github:taiki-e/cargo-llvm-cov" = "0.8.7"
+"github:taiki-e/cargo-llvm-cov" = "0.9.0"
 # Mutation testing (ADR-0011). Advisory only -- see the `rust:mutants*` tasks and
 # docs/testing.md; `ci-ok` in .github/workflows/ci.yml must never depend on them.
 #

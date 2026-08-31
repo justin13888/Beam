@@ -56,7 +56,7 @@ tokio = { workspace = true }
 
 # Optional: feature-gated
 async-trait = { workspace = true, optional = true }
-base64 = { version = "0.22.1", optional = true }
+base64 = { version = "0.23.1", optional = true }
 beam-domain = { path = "../beam-domain", optional = true }
 beam-entity = { path = "../beam-entity", optional = true }
 chrono = { workspace = true, features = ["serde"], optional = true }

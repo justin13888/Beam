@@ -1,4 +1,4 @@
-amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
+amends "package://github.com/jdx/hk/releases/download/v1.57.0/hk@1.57.0#/Config.pkl"
 
 // Git hooks for beam. Every non-trivial step shells out to a `mise run <task>`
 // so the hooks, the GitHub Actions workflows, and a human at a terminal all run
@@ -8,7 +8,7 @@ amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.
 // runs `hk install --mise`. HK_MISE=1 in mise.toml wraps hook execution in
 // `mise x`, so contributors without mise activated still get the pinned tools.
 
-min_hk_version = "1.50.0"
+min_hk_version = "1.57.0"
 
 default_branch = "master"
 
