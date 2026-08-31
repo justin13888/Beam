@@ -5,19 +5,19 @@ pub mod admin;
 pub mod api_error;
 pub mod auth;
 pub mod genres;
+pub mod health;
 pub mod media;
 pub mod playback;
 pub mod stream;
-pub mod health;
 pub mod tags;
 
 pub use admin::*;
 pub use auth::*;
 pub use genres::*;
+pub use health::*;
 pub use media::*;
 pub use playback::*;
 pub use stream::*;
-pub use health::*;
 
 use kynos::prelude::*;
 

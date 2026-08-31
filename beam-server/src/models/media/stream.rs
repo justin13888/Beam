@@ -1,5 +1,5 @@
-use rust_decimal::Decimal;
 use kynos::Schema;
+use rust_decimal::Decimal;
 use serde::Serialize;
 
 use super::{OutputAudioCodec, OutputSubtitleCodec, OutputVideoCodec, Resolution};

@@ -230,13 +230,7 @@ pub struct ClientHeaders {
     pub x_real_ip: Option<String>,
 }
 
-fn build_cookie(
-    name: &str,
-    value: String,
-    path: &str,
-    secure: bool,
-    max_age: Duration,
-) -> Cookie {
+fn build_cookie(name: &str, value: String, path: &str, secure: bool, max_age: Duration) -> Cookie {
     let cookie = Cookie::new(name.to_owned(), value)
         .path(path.to_owned())
         .http_only()
@@ -663,7 +657,10 @@ mod helper_tests {
 
     #[test]
     fn an_absolute_url_falls_back_to_root() {
-        assert_eq!(sanitize_redirect_path(Some("https://evil.example.com")), "/");
+        assert_eq!(
+            sanitize_redirect_path(Some("https://evil.example.com")),
+            "/"
+        );
         assert_eq!(sanitize_redirect_path(None), "/");
     }
 

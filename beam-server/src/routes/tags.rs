@@ -19,15 +19,24 @@ pub struct Auth;
 
 /// Browsing and reading the media catalogue.
 #[derive(Tag)]
-#[tag(name = "media", description = "Discovery, detail, and library contents")]
+#[tag(
+    name = "media",
+    description = "Discovery, detail, and library contents"
+)]
 pub struct Media;
 
 /// Delivery, progress, and history.
 #[derive(Tag)]
-#[tag(name = "playback", description = "Streaming, download, progress, and history")]
+#[tag(
+    name = "playback",
+    description = "Streaming, download, progress, and history"
+)]
 pub struct Playback;
 
 /// Everything gated behind the admin scope.
 #[derive(Tag)]
-#[tag(name = "admin", description = "Library, user, and system administration")]
+#[tag(
+    name = "admin",
+    description = "Library, user, and system administration"
+)]
 pub struct Admin;

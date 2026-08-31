@@ -217,7 +217,12 @@ pub async fn delete_library(
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, MutationError> {
-    if state.services.library.delete_library(path.id.clone()).await? {
+    if state
+        .services
+        .library
+        .delete_library(path.id.clone())
+        .await?
+    {
         Ok(NoContent)
     } else {
         Err(MutationError::NotFound(format!(
@@ -314,8 +319,10 @@ pub struct StreamHeaders {
 pub async fn stream_admin_events(
     _auth: AdminAuth,
     Inject(state): Inject<AppState>,
-) -> WithHeaders<Sse<impl futures_core::Stream<Item = Result<Event<AdminEventDto>, Infallible>>>, StreamHeaders>
-{
+) -> WithHeaders<
+    Sse<impl futures_core::Stream<Item = Result<Event<AdminEventDto>, Infallible>>>,
+    StreamHeaders,
+> {
     let mut receiver = state.services.notification.subscribe();
 
     let events = stream! {
@@ -454,8 +461,18 @@ pub async fn get_admin_status(
     let internal = |e: sea_orm::DbErr| InternalError::Internal(e.to_string());
 
     let users = state.services.user_repo.count().await.map_err(internal)?;
-    let libraries = state.services.library_repo.count().await.map_err(internal)?;
-    let files = state.services.file_repo.count_all().await.map_err(internal)?;
+    let libraries = state
+        .services
+        .library_repo
+        .count()
+        .await
+        .map_err(internal)?;
+    let files = state
+        .services
+        .file_repo
+        .count_all()
+        .await
+        .map_err(internal)?;
     let enrichment = state
         .services
         .enrichment_repo
