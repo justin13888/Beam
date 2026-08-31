@@ -161,7 +161,7 @@ fn generate_session_token() -> String {
 /// Hashes a plaintext session token for at-rest storage/lookup. The
 /// plaintext token is never persisted.
 fn hash_token(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
+    crate::utils::hex::encode_lower(&Sha256::digest(token.as_bytes()))
 }
 
 fn to_session_data(model: &beam_entity::session::Model) -> SessionData {
@@ -541,4 +541,29 @@ mod contract_over_in_memory {
     }
 
     crate::session_store_contract!(setup);
+}
+
+#[cfg(test)]
+mod token_hashing_tests {
+    use super::hash_token;
+
+    #[test]
+    fn a_token_hashes_to_the_lowercase_sha256_hex_of_its_bytes() {
+        // Ground truth from `printf 'session-token-example' | sha256sum`, not
+        // from this crate. Session rows are looked up by this string, so a
+        // change to the digest or its encoding silently invalidates every
+        // stored session -- the failure this test exists to catch.
+        assert_eq!(
+            hash_token("session-token-example"),
+            "467bb7ff1ca961ab8a9bf090853e52da11c3ce8a4eddb0c7f57e3b67e9259505"
+        );
+    }
+
+    #[test]
+    fn the_plaintext_token_does_not_survive_hashing() {
+        let hashed = hash_token("session-token-example");
+
+        assert!(!hashed.contains("session-token"), "{hashed}");
+        assert_eq!(hashed.len(), 64, "a SHA-256 digest is 64 hex characters");
+    }
 }

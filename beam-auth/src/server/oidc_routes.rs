@@ -78,7 +78,7 @@ fn device_hash_from_request(req: &Request) -> String {
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    format!("{:x}", Sha256::digest(user_agent.as_bytes()))
+    crate::utils::hex::encode_lower(&Sha256::digest(user_agent.as_bytes()))
 }
 
 fn extract_client_ip(req: &Request) -> String {
