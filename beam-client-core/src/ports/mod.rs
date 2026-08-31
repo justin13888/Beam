@@ -5,4 +5,5 @@
 //! runtime -- the same trait-plus-fake discipline `beam-server` applies to its
 //! repositories.
 
+pub mod byte_source;
 pub mod kv;

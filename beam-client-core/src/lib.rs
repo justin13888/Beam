@@ -43,6 +43,7 @@ pub mod api {
 pub mod capability;
 pub mod catalog;
 pub mod clock;
+pub mod demux;
 pub mod error;
 pub mod ffi;
 pub mod paging;

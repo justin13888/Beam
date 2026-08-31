@@ -8,7 +8,13 @@ publish.workspace = true
 [lib]
 # "lib" alongside "cdylib" is load-bearing: without it `cargo test` and
 # `cargo llvm-cov` cannot link the crate, so the workspace gates would skip it.
-crate-type = ["cdylib", "lib"]
+#
+# "staticlib" is what the Apple client links (#66). An XCFramework embedding a
+# dynamic library has to be code-signed and copied into the app bundle at build
+# time; a static one is just an archive the linker consumes, which is both the
+# UniFFI convention and one less thing to get wrong per target. Android keeps
+# using the cdylib, because a JNI library must be loadable by `System.loadLibrary`.
+crate-type = ["cdylib", "staticlib", "lib"]
 
 # The runtime dependency contract the generated client requires. spargen audits
 # this manifest against its tested floors and fails with E023 before rustc runs,
@@ -23,6 +29,11 @@ time = { version = "0.3.55", features = ["formatting", "parsing", "serde"] }
 # Core-owned dependencies, beyond the generated client's contract above.
 async-trait = { workspace = true }
 base64 = "0.22.1"
+# The Matroska demuxer behind `crate::demux`. Pure Rust with no dependencies of
+# its own, which is what makes it viable in a static library that has to link
+# into an iOS app -- and permissively licensed (Zlib OR MIT OR Apache-2.0), so
+# it needs no `deny.toml` exception.
+matroska-demuxer = "0.8.1"
 # Provides `#[mutants::skip]` for the test-only doubles; see the workspace
 # manifest and `mise run check:mutants-skip-fakes` for why they need it.
 mutants = { workspace = true }

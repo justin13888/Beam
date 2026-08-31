@@ -110,20 +110,50 @@ pub struct DeviceProfile {
     pub allow_software_decode: bool,
 }
 
+impl DecoderCapability {
+    /// The video codec this decoder handles, whichever vocabulary named it.
+    ///
+    /// [`DecoderCapability::mime_type`] holds whatever the platform calls the
+    /// decoder: an Android `MediaCodecList` MIME type, or an Apple
+    /// `CMVideoCodecType` four-character code. Normalising against only one of
+    /// those would make every profile built by the other platform match
+    /// nothing at all -- and the symptom would not be an error but a library
+    /// in which every title is reported unplayable.
+    ///
+    /// Android is tried first because its MIME types are the longer, more
+    /// distinctive strings; a four-character code cannot be mistaken for one.
+    #[must_use]
+    pub fn video_codec(&self) -> VideoCodec {
+        match VideoCodec::from_android_mime(&self.mime_type) {
+            VideoCodec::Unknown => VideoCodec::from_apple_fourcc(&self.mime_type),
+            known => known,
+        }
+    }
+
+    /// The audio codec this decoder handles, whichever vocabulary named it.
+    #[must_use]
+    pub fn audio_codec(&self) -> AudioCodec {
+        match AudioCodec::from_android_mime(&self.mime_type) {
+            AudioCodec::Unknown => AudioCodec::from_apple_fourcc(&self.mime_type),
+            known => known,
+        }
+    }
+}
+
 impl DeviceProfile {
     /// The best decoder for `codec`, preferring hardware.
     #[must_use]
     pub fn video_decoder_for(&self, codec: VideoCodec) -> Option<&DecoderCapability> {
-        best_decoder(&self.video_decoders, |mime| {
-            VideoCodec::from_android_mime(mime) == codec
+        best_decoder(&self.video_decoders, |decoder| {
+            decoder.video_codec() == codec
         })
     }
 
     /// The best decoder for `codec`, preferring hardware.
     #[must_use]
     pub fn audio_decoder_for(&self, codec: AudioCodec) -> Option<&DecoderCapability> {
-        best_decoder(&self.audio_decoders, |mime| {
-            AudioCodec::from_android_mime(mime) == codec
+        best_decoder(&self.audio_decoders, |decoder| {
+            decoder.audio_codec() == codec
         })
     }
 
@@ -151,11 +181,11 @@ impl DeviceProfile {
 
 fn best_decoder(
     decoders: &[DecoderCapability],
-    matches: impl Fn(&str) -> bool,
+    matches: impl Fn(&DecoderCapability) -> bool,
 ) -> Option<&DecoderCapability> {
     decoders
         .iter()
-        .filter(|decoder| matches(&decoder.mime_type))
+        .filter(|decoder| matches(decoder))
         // Hardware first, then the most capable of the remainder.
         .max_by_key(|decoder| {
             (
@@ -242,5 +272,64 @@ mod tests {
         // sniffs the content regardless.
         let profile = DeviceProfileBuilder::new().containers(&["mkv"]).build();
         assert!(profile.supports_container(""));
+    }
+
+    #[test]
+    fn a_decoder_named_in_either_platform_vocabulary_resolves_to_the_same_codec() {
+        // `mime_type` holds whatever the platform calls the decoder: an
+        // Android MediaCodecList MIME, or an Apple CMVideoCodecType
+        // four-character code. Normalising against only one of them would make
+        // every profile built by the other platform match nothing -- and the
+        // symptom is not an error but a library where every title reports as
+        // unplayable.
+        for (android, apple, expected) in [
+            ("video/avc", "avc1", VideoCodec::H264),
+            ("video/hevc", "hvc1", VideoCodec::H265),
+            ("video/av01", "av01", VideoCodec::Av1),
+        ] {
+            let android_profile = DeviceProfileBuilder::new()
+                .hardware_video(android, 3840, 2160)
+                .build();
+            let apple_profile = DeviceProfileBuilder::new()
+                .hardware_video(apple, 3840, 2160)
+                .build();
+
+            assert!(
+                android_profile.video_decoder_for(expected).is_some(),
+                "{android} did not resolve to {expected:?}"
+            );
+            assert!(
+                apple_profile.video_decoder_for(expected).is_some(),
+                "{apple} did not resolve to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_apple_audio_decoder_resolves_the_same_way_an_android_one_does() {
+        for (android, apple, expected) in [
+            ("audio/mp4a-latm", "aac ", AudioCodec::Aac),
+            ("audio/ac3", "ac-3", AudioCodec::Ac3),
+            ("audio/eac3", "ec-3", AudioCodec::Eac3),
+        ] {
+            let android_profile = DeviceProfileBuilder::new().hardware_audio(android).build();
+            let apple_profile = DeviceProfileBuilder::new().hardware_audio(apple).build();
+
+            assert!(android_profile.audio_decoder_for(expected).is_some());
+            assert!(apple_profile.audio_decoder_for(expected).is_some());
+        }
+    }
+
+    #[test]
+    fn a_decoder_name_from_neither_vocabulary_matches_nothing() {
+        // Falling back across tables must not become "match anything": a
+        // profile listing an unrecognised decoder should offer no decoder at
+        // all, not the first one in the list.
+        let profile = DeviceProfileBuilder::new()
+            .hardware_video("video/nonsense", 3840, 2160)
+            .build();
+
+        assert!(profile.video_decoder_for(VideoCodec::H264).is_none());
+        assert!(profile.video_decoder_for(VideoCodec::Unknown).is_some());
     }
 }
