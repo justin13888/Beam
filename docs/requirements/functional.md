@@ -30,7 +30,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
   clears the session cookie.
 - **FR-110**: For local development, the identity provider MUST be satisfiable by Dex running via
   `compose.dependencies.yaml`, configured with static test users, requiring no external network
-  dependency.
+  dependency. Dex MUST be opt-in rather than part of the default stack — Beam is
+  bring-your-own-IdP (FR-101), so a default `compose up` MUST start no identity provider. When
+  enabled, the bundled Dex MUST be reachable at one issuer URL that is valid both from the browser
+  and from inside the server container.
 
 ## FR-2xx — Library & Indexing
 

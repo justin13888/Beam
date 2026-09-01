@@ -135,8 +135,10 @@ requirements (referenced below as FR-xxx).
   surface, from which the TypeScript client types consumed by `beam-web` are generated, keeping the
   client and server contract in sync without hand-maintained duplicate type definitions.
 - **NFR-406**: Local development dependencies (Postgres, Dex) MUST be runnable via
-  `compose.dependencies.yaml`. No external service dependency may be added there without a
-  corresponding in-memory trait implementation for the test suite (NFR-604).
+  `compose.dependencies.yaml`, with the dev-only identity provider gated behind the `dev-idp`
+  compose profile so it is absent from the default stack (FR-110). No external service dependency
+  may be added there without a corresponding in-memory trait implementation for the test suite
+  (NFR-604).
 
 ## NFR-5xx — Privacy
 

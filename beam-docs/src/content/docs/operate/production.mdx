@@ -31,7 +31,8 @@ before you depend on an instance.
 **Identity**
 
 - Use a real identity provider. **Dex is for local testing only** — its users are static and
-  defined in this repository.
+  defined in this repository. It does not start unless you enable the `dev-idp` Compose profile;
+  never enable it in production.
 - Set `BEAM_OIDC_ADMIN_CLAIM`, or nobody will be an admin.
 
 **Exposure**

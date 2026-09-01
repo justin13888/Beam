@@ -34,7 +34,8 @@ rather than your only copy.
 - PostgreSQL — the Compose file brings one up for you.
 - **An OpenID Connect identity provider.** Beam has no passwords of its own and cannot sign
   anyone in without one. If you do not already run something like Keycloak, Authentik or
-  Authelia, budget time for it. Dex is bundled for local testing only.
+  Authelia, budget time for it. The default stack starts no provider at all. Dex is bundled for
+  local testing only, and is opt-in behind the `dev-idp` Compose profile.
 - A directory of video files that Beam can read.
 
 ## What Beam deliberately does not do

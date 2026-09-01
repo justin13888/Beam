@@ -139,7 +139,7 @@ pub struct ServerConfig {
     #[config(env = "BEAM_METADATA_LANGUAGE")]
     pub metadata_language: Option<String>,
 
-    /// OIDC issuer URL (e.g. Dex in dev: `http://localhost:5556/dex`). OIDC
+    /// OIDC issuer URL (e.g. the opt-in dev Dex: `http://dex.beam.localhost:5556/dex`). OIDC
     /// login is disabled -- returning a clear error rather than panicking --
     /// unless this, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are all set
     /// (see ADR-0003).

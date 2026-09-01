@@ -38,8 +38,14 @@ required together** — Beam treats OIDC as unconfigured unless it has all of th
 	above. The issuer is Authelia's root URL.
 	</TabItem>
 	<TabItem label="Dex (local only)">
-	`compose.dependencies.yaml` runs Dex with static test users so you can develop without an
-	external provider. It is **not** for production — the users are fixed and defined in the repo.
+	`mise run dev:up` starts Dex with static test users, so you can develop without an external
+	provider. It is opt-in: it sits behind the `dev-idp` Compose profile and is absent from the
+	default stack.
+
+	It is **not** for production — the users are fixed and defined in the repo, and Dex's builtin
+	connector cannot assert group membership for them, so there is no per-user admin claim to
+	point `BEAM_OIDC_ADMIN_CLAIM` at. The dev setup aims it at `email_verified`, which makes
+	*every* Dex user an admin.
 	</TabItem>
 </Tabs>
 
