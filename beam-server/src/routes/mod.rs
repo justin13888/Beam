@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod api_error;
 pub mod auth;
+pub mod delivery;
 pub mod genres;
 pub mod health;
 pub mod media;

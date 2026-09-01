@@ -20,16 +20,15 @@ use std::path::{Path as FsPath, PathBuf};
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use kynos::extract::media::MediaType;
 use kynos::http::etag::ETag;
 use kynos::prelude::*;
-use kynos::response::range::served::{Conditions, Delivery, Served};
+use kynos::response::range::served::{Conditions, Served};
 use kynos::response::range::source::ByteSource;
-use kynos::response::{IntoResponse, Responses};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::error;
 
 use crate::routes::api_error::{DeliveryError, SessionAuth};
+use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::tags::Playback;
 use crate::state::AppState;
 
@@ -89,117 +88,19 @@ impl ByteSource for FileByteSource {
     }
 }
 
-/// The media type the range engine is parameterised by.
+/// The media-type ranges a source-file delivery answers with.
 ///
 /// Beam serves whatever the indexer detected, which is decided per file and
-/// cannot be a `const`. [`MediaDelivery`] therefore overrides the header at
-/// request time and describes the range of types honestly.
-struct AnyMedia;
+/// cannot be a `const`; `application/octet-stream` is what an unrecognised
+/// container falls back to.
+pub struct SourceFileRanges;
 
-impl MediaType for AnyMedia {
-    const MEDIA_TYPE: &'static str = "application/octet-stream";
+impl MediaRanges for SourceFileRanges {
+    const RANGES: &'static [&'static str] = &["video/*", "audio/*", "application/octet-stream"];
 }
 
-/// A ranged delivery whose `Content-Type` is the file's, not the type
-/// parameter's.
-///
-/// `Delivery<M>` carries its media type at the type level so it can describe
-/// itself, which is right for an operation serving one representation and wrong
-/// for a media server: Beam's content type comes from the file being read. This
-/// wrapper keeps Kynos's range engine and replaces only that header, then
-/// describes the media-type ranges Beam actually answers with.
-///
-/// Nothing here is an escape hatch. `IntoResponse` and `Responses` are the
-/// public traits every response type implements, and `delivery_responses` is
-/// public precisely so a wrapper can build on it -- the description stays
-/// accurate rather than being waived, and the `unchecked` feature stays off.
-///
-/// It is still a gap worth closing upstream: a ranged delivery whose media type
-/// is chosen at request time is a normal thing for a file server to want, and
-/// Kynos has no way to say it. Recorded in
-/// `docs/architecture/kynos-migration-readiness.md`.
-pub struct MediaDelivery {
-    inner: Delivery<AnyMedia>,
-    content_type: String,
-}
-
-impl MediaDelivery {
-    const fn new(inner: Delivery<AnyMedia>, content_type: String) -> Self {
-        Self {
-            inner,
-            content_type,
-        }
-    }
-}
-
-impl IntoResponse for MediaDelivery {
-    fn into_response(self) -> kynos::http::Response {
-        let Self {
-            inner,
-            content_type,
-        } = self;
-
-        let status = inner.status();
-        let mut response = inner.into_response();
-
-        // Only the two statuses that actually carry the media bytes get the
-        // media's content type. Everything else keeps whatever the range engine
-        // labelled it.
-        //
-        // The check used to be `!= 304`, which was right about 304 -- a
-        // response with no representation carries no content type, RFC 9110
-        // section 15.4.5 -- and wrong about everything else the engine can
-        // produce. A `Range` that cannot be satisfied answers 416 with an
-        // RFC 9457 problem document, and that was being relabelled
-        // `video/mp4`: a JSON body announced as video, which a client is
-        // entitled to fail on. Naming the two statuses that mean "here is the
-        // file" states the rule positively, so a status added later is
-        // excluded by default rather than mislabelled by default.
-        if matches!(
-            status,
-            kynos::http::StatusCode::OK | kynos::http::StatusCode::PARTIAL_CONTENT
-        ) && let Ok(value) = content_type.parse()
-        {
-            response
-                .headers_mut()
-                .insert(kynos::http::header::CONTENT_TYPE, value);
-        }
-
-        response
-    }
-}
-
-impl Responses for MediaDelivery {
-    /// The same 200/206/304 shape `Delivery` describes, widened to the media
-    /// types Beam can answer with.
-    ///
-    /// `video/*` and `audio/*` are media-type ranges, which OpenAPI permits as
-    /// `content` keys; `application/octet-stream` is what an unrecognised
-    /// container falls back to. Listing all three is the honest description of
-    /// "whatever the indexer detected".
-    fn responses(registry: &mut kynos::schema::registry::Registry) -> kynos::openapi::Responses {
-        use kynos::openapi::{MediaType as OpenApiMediaType, RefOr, Schema, StatusPattern};
-
-        let _ = registry;
-        let mut responses = kynos::response::range::delivery_responses("video/*");
-
-        for status in [200, 206] {
-            if let Some(RefOr::Item(response)) = responses
-                .responses
-                .get_mut(&StatusPattern::Code(status).to_string())
-            {
-                for media_type in ["audio/*", "application/octet-stream"] {
-                    response.content.insert(
-                        media_type.to_owned(),
-                        OpenApiMediaType::new(Schema::Object(Box::default())),
-                    );
-                }
-            }
-        }
-
-        responses
-    }
-}
+/// A ranged delivery of one indexed source file.
+pub type MediaDelivery = RuntimeDelivery<SourceFileRanges>;
 
 /// Resolve `file_id` to the file's on-disk path and detected content type.
 ///
