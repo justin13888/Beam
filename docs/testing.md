@@ -111,8 +111,9 @@ could never see a request the app made, and that is *why* every test had mocked 
 `apiClient` now resolves `fetch` per call.
 
 **This suite is currently not run.** `ts:typecheck` and `ts:test` are switched off in `mise.toml`
-and in `.github/workflows/ci.yml` with a `#118-followup` TODO: `api.gen.ts` is generated from the
-server's OpenAPI document, `openapi-typescript` cannot read the 3.2 document Kynos emits (see
+and in `.github/workflows/ci.yml` with a [#146](https://github.com/justin13888/beam/issues/146)
+TODO: `api.gen.ts` is generated from the server's OpenAPI document, `openapi-typescript` cannot
+read the 3.2 document Kynos emits (see
 [architecture/api.md](architecture/api.md#openapi-docs-and-codegen)), and every schema key the file
 names was renamed by the migration. `beam-web` is being rewritten shortly, so the gates are off
 rather than the references renamed twice. `ts:check` stays on — Biome excludes the generated file

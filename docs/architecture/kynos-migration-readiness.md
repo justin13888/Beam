@@ -219,9 +219,9 @@ not as the plan.
 
 `beam-web` is therefore **not regenerated**. `api.gen.ts` is stale — every schema key it names still
 carries the old dotted prefix — and `codegen:openapi`'s client step, plus the `ts:typecheck` and
-`ts:test` gates, are switched off with a `#118-followup` TODO naming this paragraph. That is a
-deliberate stand-down rather than a mechanical rename, because `beam-web` is being rewritten
-shortly and renaming ~55 references across 20 files twice buys nothing. `ts:check` stays on:
+`ts:test` gates, are switched off with a [#146](https://github.com/justin13888/beam/issues/146)
+TODO. That is a deliberate stand-down rather than a mechanical rename, because `beam-web` is being
+rewritten shortly and renaming ~55 references across 20 files twice buys nothing. `ts:check` stays on:
 `biome.json` excludes the generated file and does not type-check.
 
 ### `spargen`

@@ -8,7 +8,7 @@ import { env } from "@/env";
  * Regenerate types with: `bun run codegen:openapi:full`
  * (exports openapi.json from the backend, then generates src/api.gen.ts)
  *
- * TODO(#118-followup): `src/api.gen.ts` is STALE and does not describe the
+ * TODO(#146): `src/api.gen.ts` is STALE and does not describe the
  * server.
  *
  * The Kynos migration moved the contract to OpenAPI 3.2 and renamed every

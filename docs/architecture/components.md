@@ -178,8 +178,8 @@ regenerate the typed client from it.
 7.13.0 cannot read the OpenAPI 3.2 document the Kynos migration produces (see
 [api.md](api.md#openapi-docs-and-codegen)), and `beam-web` is being rewritten shortly, so it is
 stood down rather than mechanically renamed: the codegen step and the `ts:typecheck`/`ts:test` gates
-carry a `#118-followup` TODO. Everything below describes the app as it stands, not a client
-regenerated against the current contract.
+carry a [#146](https://github.com/justin13888/beam/issues/146) TODO. Everything below describes the
+app as it stands, not a client regenerated against the current contract.
 
 - **Routes** (`src/routes/`, file-based via `createFileRoute`): `index.tsx` (home /
   continue-watching), `libraries.tsx` / `libraries.$id.tsx`, `media.$id.tsx` (detail + player),
