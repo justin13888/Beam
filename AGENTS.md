@@ -138,7 +138,8 @@ mise run rust:coverage:report           # the between-runs proxy
    declaration. A local exception -- a hand-written response, a second router, a patched schema, an `unchecked` waiver --
    is exactly how the document stops describing the server, which is the failure [ADR-0010](docs/architecture/decisions/ADR-0010-openapi-3-2-kynos.md)
    and [ADR-0012](docs/architecture/decisions/ADR-0012-native-client-rust-core.md) exist to prevent. File the issue
-   upstream, pin the revision that fixes it, and leave a comment here naming the issue.
+   upstream, then take the fix from a published release: Beam tracks both as crates.io version requirements, never
+   git revisions. Until a release carries it, record the gap in a comment naming the issue.
 
    Using a different *supported* API is not a workaround. When `kynos` accepted a route-level `tag = ...` and silently
    dropped it, the fix was to declare the tags on group scopes -- where Kynos does read them -- and file the bug, not to
