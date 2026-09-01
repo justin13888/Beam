@@ -132,6 +132,54 @@ impl DownloadRecord {
     }
 }
 
+/// One download as a platform engine currently sees it.
+///
+/// Exists so a whole engine sweep is applied in a single pass. Media3 reports
+/// every download on every callback, and calling a per-file method for each
+/// would reload and rewrite the entire catalogue twice per download per tick --
+/// quadratic in the number of downloads, on the hot path of a progress bar.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DownloadReport {
+    /// Which download.
+    pub file_id: String,
+    /// Bytes fetched so far.
+    pub downloaded_bytes: u64,
+    /// Total bytes, or `None` where the engine has not been told yet.
+    pub total_bytes: Option<u64>,
+    /// The engine's own view of where the transfer has got to.
+    pub state: DownloadState,
+}
+
+/// Fraction complete in `0.0..=1.0`, or `None` while the total is unknown.
+///
+/// A free function because UniFFI records are plain data on the foreign side:
+/// a method on `DownloadRecord` would not cross the boundary, and both clients
+/// would then compute this themselves -- which is how they came to disagree in
+/// the first place.
+#[uniffi::export]
+#[must_use]
+pub fn download_fraction(record: &DownloadRecord) -> Option<f64> {
+    record.fraction()
+}
+
+/// Whether the file can be played with no network.
+///
+/// See [`download_fraction`] for why this is a free function.
+#[uniffi::export]
+#[must_use]
+pub fn download_is_playable_offline(record: &DownloadRecord) -> bool {
+    record.is_playable_offline()
+}
+
+/// The name the file is stored under on disk.
+///
+/// See [`download_fraction`] for why this is a free function.
+#[uniffi::export]
+#[must_use]
+pub fn download_stored_name(record: &DownloadRecord) -> String {
+    record.stored_name()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

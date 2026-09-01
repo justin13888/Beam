@@ -312,6 +312,9 @@ public final class FakePlaybackRepository: PlaybackRepository, @unchecked Sendab
         var history: [HistoryEntry] = []
         var reports: [(fileId: String, position: Double, forced: Bool)] = []
         var profile: DeviceProfile?
+        /// Real catalogue state, so a test can queue through one method and
+        /// assert through another rather than against a canned answer.
+        var downloads: [DownloadRecord] = []
         var failure: BeamFailure?
     }
 
@@ -412,6 +415,75 @@ public final class FakePlaybackRepository: PlaybackRepository, @unchecked Sendab
     public func pendingProgressCount() async throws -> UInt32 {
         try state.withLock {
             try $0.check(); return 0
+        }
+    }
+
+    public func downloads() async throws -> [DownloadRecord] {
+        try state.withLock { state in
+            try state.check()
+            return state.downloads
+        }
+    }
+
+    public func recordDownloadQueued(_ record: DownloadRecord) async throws {
+        try state.withLock { state in
+            try state.check()
+            state.downloads.removeAll { $0.fileId == record.fileId }
+            state.downloads.append(record)
+        }
+    }
+
+    @discardableResult
+    public func setDownloadState(
+        fileId: String,
+        state newState: DownloadState
+    ) async throws -> DownloadRecord? {
+        try state.withLock { state in
+            try state.check()
+            guard let index = state.downloads.firstIndex(where: { $0.fileId == fileId }) else {
+                return nil
+            }
+            state.downloads[index].state = newState
+            return state.downloads[index]
+        }
+    }
+
+    @discardableResult
+    public func recordDownloadProgress(
+        fileId: String,
+        downloadedBytes: UInt64,
+        totalBytes: UInt64?
+    ) async throws -> DownloadRecord? {
+        try state.withLock { state in
+            try state.check()
+            guard let index = state.downloads.firstIndex(where: { $0.fileId == fileId }) else {
+                return nil
+            }
+            state.downloads[index].downloadedBytes = downloadedBytes
+            if let totalBytes {
+                state.downloads[index].totalBytes = totalBytes
+            }
+            switch state.downloads[index].state {
+            case .queued, .downloading, .waitingForNetwork:
+                state.downloads[index].state = .downloading
+            case .paused, .completed, .failed:
+                break
+            }
+            return state.downloads[index]
+        }
+    }
+
+    public func forgetDownload(fileId: String) async throws {
+        try state.withLock { state in
+            try state.check()
+            state.downloads.removeAll { $0.fileId == fileId }
+        }
+    }
+
+    public func forgetAllDownloads() async throws {
+        try state.withLock { state in
+            try state.check()
+            state.downloads.removeAll()
         }
     }
 

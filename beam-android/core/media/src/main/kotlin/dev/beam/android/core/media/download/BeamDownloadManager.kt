@@ -21,11 +21,14 @@ import androidx.media3.exoplayer.scheduler.Requirements
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.beamDataSourceFactory
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
+import uniffi.beam_client_core.BeamClient
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadReport
+import uniffi.beam_client_core.DownloadState
 import uniffi.beam_client_core.ServerHttpConfig
 import java.io.File
 import java.util.concurrent.Executors
@@ -46,16 +49,46 @@ import java.util.concurrent.Executors
  */
 public class BeamDownloadManager internal constructor(
     private val manager: DownloadManager,
-    private val titles: DownloadTitleStore,
+    private val client: BeamClient,
 ) {
     /** The underlying manager, for the foreground service that drives it. */
     internal val raw: DownloadManager get() = manager
 
-    /** Every download, re-emitted whenever any of them changes. */
+    /**
+     * Every download, re-emitted whenever any of them changes.
+     *
+     * Media3 is authoritative for state and byte counts -- it owns the
+     * transfer and its own persistent index -- so each callback pushes what it
+     * reports into the core catalogue, and the catalogue is what is emitted.
+     * Reading back rather than mapping in place is what makes this screen and
+     * the Apple one render the same records: the display fields live only in
+     * the core, and merging them here would be the second implementation this
+     * module exists to remove.
+     */
     public val downloads: Flow<List<DownloadRecord>> =
         callbackFlow {
-            fun publish() {
-                trySend(manager.currentDownloads.map { it.toRecord(titles) })
+            // The listener is an anonymous object, so `this` inside its methods
+            // is the listener rather than the producer scope. Naming the scope
+            // is what lets a callback start the suspending publish.
+            val scope = this
+
+            suspend fun publish() {
+                // One call, not two per download: this runs on every progress
+                // tick, and a per-file method would reload and rewrite the
+                // whole catalogue twice for each download in the list.
+                val reports =
+                    manager.currentDownloads.map { download ->
+                        DownloadReport(
+                            fileId = download.request.id,
+                            downloadedBytes = download.bytesDownloaded.toULong(),
+                            // Media3 reports a negative length until the server
+                            // has answered with a Content-Length. `null` means
+                            // "not yet known", which the core will not unlearn.
+                            totalBytes = download.contentLength.takeIf { it >= 0L }?.toULong(),
+                            state = download.state.toDownloadState(),
+                        )
+                    }
+                trySend(client.applyDownloadReports(reports))
             }
 
             val listener =
@@ -64,14 +97,20 @@ public class BeamDownloadManager internal constructor(
                         downloadManager: DownloadManager,
                         download: Download,
                         finalException: Exception?,
-                    ) = publish()
+                    ) {
+                        scope.launch { publish() }
+                    }
 
                     override fun onDownloadRemoved(
                         downloadManager: DownloadManager,
                         download: Download,
-                    ) = publish()
+                    ) {
+                        scope.launch { publish() }
+                    }
 
-                    override fun onIdle(downloadManager: DownloadManager) = publish()
+                    override fun onIdle(downloadManager: DownloadManager) {
+                        scope.launch { publish() }
+                    }
                 }
 
             manager.addListener(listener)
@@ -96,14 +135,19 @@ public class BeamDownloadManager internal constructor(
         repository: PlaybackRepository,
     ) {
         val config = repository.playbackConfig(fileId)
-        titles.put(
-            DownloadTitle(
+        client.recordDownloadQueued(
+            DownloadRecord(
                 fileId = fileId,
                 serverId = serverId,
                 mediaId = mediaId,
+                episodeId = null,
                 title = title,
                 subtitle = subtitle,
                 posterUrl = posterUrl,
+                fileName = config.url.toUri().lastPathSegment,
+                state = DownloadState.Queued,
+                downloadedBytes = 0uL,
+                totalBytes = null,
             ),
         )
         val request = DownloadRequest.Builder(fileId, config.url.toUri()).build()
@@ -123,12 +167,13 @@ public class BeamDownloadManager internal constructor(
     /** Delete a download and its bytes. */
     public suspend fun remove(fileId: String) {
         manager.removeDownload(fileId)
-        titles.remove(fileId)
+        client.forgetDownload(fileId)
     }
 
     /** Delete every download. */
-    public fun removeAll() {
+    public suspend fun removeAll() {
         manager.removeAllDownloads()
+        client.forgetAllDownloads()
     }
 
     /**
@@ -162,7 +207,7 @@ public class BeamDownloadManager internal constructor(
             context: Context,
             clients: BeamHttpClientFactory,
             cache: Cache,
-            titles: DownloadTitleStore,
+            client: BeamClient,
             server: ServerHttpConfig,
         ): BeamDownloadManager {
             val manager =
@@ -180,7 +225,7 @@ public class BeamDownloadManager internal constructor(
                 ).apply {
                     maxParallelDownloads = PARALLEL_DOWNLOADS
                 }
-            return BeamDownloadManager(manager, titles)
+            return BeamDownloadManager(manager, client)
         }
 
         /**
@@ -200,37 +245,44 @@ public class BeamDownloadManager internal constructor(
     }
 }
 
-private fun Download.toRecord(titles: DownloadTitleStore): DownloadRecord {
-    val title = titles.get(request.id)
-    return DownloadRecord(
-        fileId = request.id,
-        mediaId = title?.mediaId.orEmpty(),
-        episodeId = title?.episodeId,
-        serverId = title?.serverId.orEmpty(),
-        title = title?.title ?: request.id,
-        subtitle = title?.subtitle,
-        posterUrl = title?.posterUrl,
-        state =
-            when (state) {
-                Download.STATE_QUEUED -> DownloadState.Queued
-                Download.STATE_DOWNLOADING -> DownloadState.Downloading
-                Download.STATE_COMPLETED -> DownloadState.Completed
-                Download.STATE_FAILED -> DownloadState.Failed
-                Download.STATE_STOPPED -> DownloadState.Paused
-                Download.STATE_RESTARTING -> DownloadState.Downloading
-                Download.STATE_REMOVING -> DownloadState.Paused
-                else -> DownloadState.Queued
-            },
-        downloadedBytes = bytesDownloaded,
-        // Media3 reports a negative length until the server has answered with
-        // a Content-Length, and a negative total would render as a nonsense
-        // progress bar.
-        totalBytes = contentLength.coerceAtLeast(0L),
-        failureMessage =
-            if (state == Download.STATE_FAILED) {
-                "The download stopped. It will resume when you retry it."
-            } else {
-                null
-            },
-    )
-}
+/**
+ * Media3's download state, in the core's vocabulary.
+ *
+ * `STATE_REMOVING` maps to `Paused` rather than to a state of its own: it is a
+ * transient step the viewer never needs to act on, and the record is about to
+ * disappear anyway.
+ */
+private fun Int.toDownloadState(): DownloadState =
+    when (this) {
+        Download.STATE_QUEUED -> {
+            DownloadState.Queued
+        }
+
+        Download.STATE_DOWNLOADING -> {
+            DownloadState.Downloading
+        }
+
+        Download.STATE_COMPLETED -> {
+            DownloadState.Completed
+        }
+
+        Download.STATE_FAILED -> {
+            DownloadState.Failed("The download stopped. It will resume when you retry it.")
+        }
+
+        Download.STATE_STOPPED -> {
+            DownloadState.Paused
+        }
+
+        Download.STATE_RESTARTING -> {
+            DownloadState.Downloading
+        }
+
+        Download.STATE_REMOVING -> {
+            DownloadState.Paused
+        }
+
+        else -> {
+            DownloadState.Queued
+        }
+    }

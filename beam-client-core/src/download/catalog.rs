@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::error::StorageError;
 use crate::ports::kv::KeyValueStore;
 
-use super::record::{DownloadRecord, DownloadState};
+use super::record::{DownloadRecord, DownloadReport, DownloadState};
 
 /// The catalogue of downloads for one server.
 #[derive(Debug)]
@@ -144,6 +144,53 @@ impl DownloadCatalog {
         let updated = record.clone();
         self.persist(&records).await?;
         Ok(Some(updated))
+    }
+
+    /// Apply a platform engine's whole view of its downloads in one pass.
+    ///
+    /// The engine is treated as authoritative here, unlike
+    /// [`Self::record_progress`]: Media3 owns the transfer *and* its own
+    /// persistent index, so when it says a download failed or completed, it
+    /// did. `record_progress` guards against reviving a finished download
+    /// because a straggling `URLSession` callback can arrive after the fact;
+    /// an engine sweep carries no such straggler.
+    ///
+    /// One load and one write regardless of how many downloads are reported,
+    /// which is the point -- this runs on every progress tick.
+    ///
+    /// Reports for files the catalogue does not know are skipped rather than
+    /// inserted: without the display fields, a record would render as a bare
+    /// identifier, and those are only resolvable while online.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage failures.
+    pub async fn apply_reports(
+        &self,
+        reports: &[DownloadReport],
+    ) -> Result<Vec<DownloadRecord>, StorageError> {
+        let mut records = self.list().await?;
+        let mut changed = false;
+
+        for report in reports {
+            let Some(record) = records.iter_mut().find(|r| r.file_id == report.file_id) else {
+                continue;
+            };
+            record.downloaded_bytes = report.downloaded_bytes;
+            if report.total_bytes.is_some() {
+                record.total_bytes = report.total_bytes;
+            }
+            record.state = report.state.clone();
+            changed = true;
+        }
+
+        // A sweep that changed nothing must not write: the engines report on a
+        // timer even when idle, and rewriting the catalogue every tick would
+        // burn flash for no reason.
+        if changed {
+            self.persist(&records).await?;
+        }
+        Ok(records)
     }
 
     /// Forget one download. Removing an unknown file succeeds.
@@ -347,6 +394,105 @@ mod tests {
 
         assert_eq!(updated.total_bytes, Some(2_048));
         assert_eq!(updated.downloaded_bytes, 1_024);
+    }
+
+    /// The batch path is what Android uses on every progress tick, and it
+    /// treats the engine as authoritative -- including moving a download to a
+    /// terminal state the per-file progress path deliberately refuses to.
+    #[tokio::test]
+    async fn applying_an_engine_sweep_updates_every_reported_download() {
+        let (catalog, _) = catalog();
+        catalog.upsert(record("file-1")).await.unwrap();
+        catalog.upsert(record("file-2")).await.unwrap();
+
+        let updated = catalog
+            .apply_reports(&[
+                DownloadReport {
+                    file_id: "file-1".to_owned(),
+                    downloaded_bytes: 512,
+                    total_bytes: Some(2_048),
+                    state: DownloadState::Downloading,
+                },
+                DownloadReport {
+                    file_id: "file-2".to_owned(),
+                    downloaded_bytes: 4_096,
+                    total_bytes: Some(4_096),
+                    state: DownloadState::Completed,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[0].fraction(), Some(0.25));
+        assert_eq!(updated[1].state, DownloadState::Completed);
+    }
+
+    /// A report for a file the catalogue never heard of carries no display
+    /// fields, so inserting it would render a bare identifier on a screen that
+    /// cannot go and look the title up.
+    #[tokio::test]
+    async fn an_engine_sweep_skips_downloads_the_catalogue_does_not_know() {
+        let (catalog, _) = catalog();
+        catalog.upsert(record("file-1")).await.unwrap();
+
+        let updated = catalog
+            .apply_reports(&[DownloadReport {
+                file_id: "stranger".to_owned(),
+                downloaded_bytes: 1,
+                total_bytes: Some(2),
+                state: DownloadState::Downloading,
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].file_id, "file-1");
+    }
+
+    /// The engines report on a timer even when nothing is happening. Writing
+    /// the catalogue on every one of those ticks would burn flash for nothing.
+    #[tokio::test]
+    async fn an_engine_sweep_that_changes_nothing_does_not_write() {
+        let (catalog, storage) = catalog();
+        catalog.upsert(record("file-1")).await.unwrap();
+        storage.set_failure(FailureMode::FailWrites);
+
+        let updated = catalog.apply_reports(&[]).await;
+
+        assert!(
+            updated.is_ok(),
+            "an empty sweep must not attempt a write, so failing writes cannot break it"
+        );
+    }
+
+    /// Same rule as the per-file path: the engines omit the total in some
+    /// callbacks, and a determinate bar must not flip to indeterminate.
+    #[tokio::test]
+    async fn an_engine_sweep_never_unlearns_a_total() {
+        let (catalog, _) = catalog();
+        catalog.upsert(record("file-1")).await.unwrap();
+        catalog
+            .apply_reports(&[DownloadReport {
+                file_id: "file-1".to_owned(),
+                downloaded_bytes: 512,
+                total_bytes: Some(2_048),
+                state: DownloadState::Downloading,
+            }])
+            .await
+            .unwrap();
+
+        let updated = catalog
+            .apply_reports(&[DownloadReport {
+                file_id: "file-1".to_owned(),
+                downloaded_bytes: 1_024,
+                total_bytes: None,
+                state: DownloadState::Downloading,
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(updated[0].total_bytes, Some(2_048));
     }
 
     #[tokio::test]

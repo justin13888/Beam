@@ -153,6 +153,45 @@ public struct BeamRepositories: ServerRepository, CatalogRepository, PlaybackRep
         try await mapping { try await client.pendingProgressCount() }
     }
 
+    public func downloads() async throws -> [DownloadRecord] {
+        try await mapping { try await client.downloads() }
+    }
+
+    public func recordDownloadQueued(_ record: DownloadRecord) async throws {
+        try await mapping { try await client.recordDownloadQueued(record: record) }
+    }
+
+    @discardableResult
+    public func setDownloadState(
+        fileId: String,
+        state: DownloadState
+    ) async throws -> DownloadRecord? {
+        try await mapping { try await client.setDownloadState(fileId: fileId, state: state) }
+    }
+
+    @discardableResult
+    public func recordDownloadProgress(
+        fileId: String,
+        downloadedBytes: UInt64,
+        totalBytes: UInt64?
+    ) async throws -> DownloadRecord? {
+        try await mapping {
+            try await client.recordDownloadProgress(
+                fileId: fileId,
+                downloadedBytes: downloadedBytes,
+                totalBytes: totalBytes
+            )
+        }
+    }
+
+    public func forgetDownload(fileId: String) async throws {
+        try await mapping { try await client.forgetDownload(fileId: fileId) }
+    }
+
+    public func forgetAllDownloads() async throws {
+        try await mapping { try await client.forgetAllDownloads() }
+    }
+
     public func continueWatching(limit: UInt32?) async throws -> [ContinueWatchingEntry] {
         try await mapping { try await client.continueWatching(limit: limit) }
     }

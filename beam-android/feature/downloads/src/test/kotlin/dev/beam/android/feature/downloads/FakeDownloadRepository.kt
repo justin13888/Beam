@@ -1,10 +1,10 @@
 package dev.beam.android.feature.downloads
 
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 
 /**
  * Downloads held in memory.
@@ -45,9 +45,11 @@ internal class FakeDownloadRepository(
                 title = title,
                 subtitle = subtitle,
                 posterUrl = posterUrl,
+                episodeId = null,
+                fileName = null,
                 state = DownloadState.Queued,
-                downloadedBytes = 0L,
-                totalBytes = 0L,
+                downloadedBytes = 0uL,
+                totalBytes = null,
             )
     }
 
@@ -95,13 +97,17 @@ internal fun downloadRecord(
     fileId: String = "file-1",
     title: String = "Arrival",
     state: DownloadState = DownloadState.Downloading,
-    downloadedBytes: Long = 0L,
-    totalBytes: Long = 0L,
+    downloadedBytes: ULong = 0uL,
+    totalBytes: ULong? = null,
 ) = DownloadRecord(
     fileId = fileId,
-    mediaId = "media-1",
     serverId = "server-1",
+    mediaId = "media-1",
+    episodeId = null,
     title = title,
+    subtitle = null,
+    posterUrl = null,
+    fileName = null,
     state = state,
     downloadedBytes = downloadedBytes,
     totalBytes = totalBytes,

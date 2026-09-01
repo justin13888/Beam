@@ -1,5 +1,6 @@
 import BeamCore
 import BeamDesignSystem
+import BeamFFI
 import BeamModel
 import BeamPlayback
 import BeamUI
@@ -48,7 +49,7 @@ public struct DownloadsScreen: View {
     private func section(_ title: String, records: [DownloadRecord]) -> some View {
         if !records.isEmpty {
             Section(title) {
-                ForEach(records) { record in
+                ForEach(records, id: \.fileId) { record in
                     DownloadRow(
                         record: record,
                         onPlay: { onPlay(record) },
@@ -68,7 +69,7 @@ public struct DownloadsScreen: View {
     private var inProgress: [DownloadRecord] {
         coordinator.records.filter { record in
             switch record.state {
-            case .queued, .downloading, .paused: true
+            case .queued, .downloading, .paused, .waitingForNetwork: true
             default: false
             }
         }
@@ -126,8 +127,11 @@ struct DownloadRow: View {
         case .queued:
             Text("Waiting").font(.caption)
                 .foregroundStyle(BeamTheme.Colors.onGlassSecondary)
-        case .downloading(let fraction), .paused(let fraction):
-            ProgressView(value: fraction ?? record.fraction)
+        case .waitingForNetwork:
+            Text("Waiting for Wi-Fi").font(.caption)
+                .foregroundStyle(BeamTheme.Colors.onGlassSecondary)
+        case .downloading, .paused:
+            ProgressView(value: downloadFraction(record: record))
                 .progressViewStyle(.linear)
                 .tint(BeamTheme.Colors.accent)
         case .failed(let message):
@@ -157,7 +161,7 @@ struct DownloadRow: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.glass)
-        case .queued:
+        case .queued, .waitingForNetwork:
             ProgressView()
         }
     }

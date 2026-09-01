@@ -14,7 +14,6 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.http.BeamHttpClientFactory
-import dev.beam.android.core.model.DownloadRecord
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
@@ -22,6 +21,8 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import uniffi.beam_client_core.BeamClient
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -76,7 +77,6 @@ internal class MediaDownloadRepository
         private val playback: PlaybackRepository,
         private val clients: BeamHttpClientFactory,
         private val cache: Cache,
-        private val titles: DownloadTitleStore,
     ) : DownloadRepository,
         DownloadManagerHolder {
         private var delegate: BeamDownloadManager? = null
@@ -118,7 +118,8 @@ internal class MediaDownloadRepository
         }
 
         override suspend fun isDownloaded(fileId: String): Boolean =
-            titles.get(fileId) != null && cache.getCachedSpans(fileId).isNotEmpty()
+            client.download(fileId)?.state == DownloadState.Completed &&
+                cache.getCachedSpans(fileId).isNotEmpty()
 
         /**
          * The raw manager the download service drives.
@@ -136,7 +137,7 @@ internal class MediaDownloadRepository
                         context = context,
                         clients = clients,
                         cache = cache,
-                        titles = titles,
+                        client = client,
                         server = client.serverHttpConfig(),
                     ).also { delegate = it }
             }

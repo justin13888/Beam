@@ -15,7 +15,7 @@ use crate::catalog::{
     LibraryFileSummary, LibrarySummary, MediaDetail, MediaPage, ServerHealth, browse_params,
 };
 use crate::clock::{Clock, SystemClock};
-use crate::download::{DownloadCatalog, DownloadRecord, DownloadState};
+use crate::download::{DownloadCatalog, DownloadRecord, DownloadReport, DownloadState};
 use crate::error::BeamError;
 use crate::ports::kv::KeyValueStore;
 use crate::progress::{
@@ -1046,6 +1046,24 @@ impl BeamClient {
         Ok(catalog
             .record_progress(&file_id, downloaded_bytes, total_bytes)
             .await?)
+    }
+
+    /// Apply a platform engine's whole view of its downloads in one pass, and
+    /// return the catalogue as it now stands.
+    ///
+    /// This is the hot path: Media3 reports every download on every progress
+    /// tick, and a per-file call would reload and rewrite the whole catalogue
+    /// twice for each one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the catalogue cannot be written.
+    pub async fn apply_download_reports(
+        &self,
+        reports: Vec<DownloadReport>,
+    ) -> Result<Vec<DownloadRecord>, BeamError> {
+        let catalog = self.active_downloads()?;
+        Ok(catalog.apply_reports(&reports).await?)
     }
 
     /// Forget one download. The caller deletes the bytes.

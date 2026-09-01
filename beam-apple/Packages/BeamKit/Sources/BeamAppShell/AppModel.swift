@@ -59,6 +59,15 @@ public final class AppModel {
         hasRestored = true
     }
 
+    /// The server subsequent calls act on, when there is one.
+    ///
+    /// Downloads are recorded against it so that removing a server can take
+    /// its downloads with it -- the core scopes the catalogue per server, and
+    /// a record without one could never be reconciled.
+    public var activeServerId: String? {
+        (try? services.servers.listServers())?.first { $0.isActive }?.id
+    }
+
     /// Apply a preferences change everywhere it has an effect.
     ///
     /// The device profile is rebuilt because `allowSoftwareDecode` changes

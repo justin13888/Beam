@@ -163,6 +163,8 @@ public struct BeamRootView: View {
                 onDownload: { fileId, title in
                     model.downloads.enqueue(
                         fileId: fileId,
+                        serverId: model.activeServerId ?? "",
+                        mediaId: mediaId,
                         title: title,
                         subtitle: nil,
                         sizeBytes: nil

@@ -22,8 +22,6 @@ import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.download.BeamDownloadManager
 import dev.beam.android.core.media.download.DownloadManagerHolder
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.media.download.DownloadTitleStore
-import dev.beam.android.core.media.download.FileDownloadTitleStore
 import dev.beam.android.core.media.download.MediaDownloadRepository
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.player.BeamPlayer
@@ -92,12 +90,6 @@ internal object MediaModule {
     fun downloadCache(
         @ApplicationContext context: Context,
     ): Cache = BeamDownloadManager.cache(context)
-
-    @Provides
-    @Singleton
-    fun downloadTitles(
-        @ApplicationContext context: Context,
-    ): DownloadTitleStore = FileDownloadTitleStore(context)
 }
 
 @Module

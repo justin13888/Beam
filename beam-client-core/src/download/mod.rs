@@ -19,4 +19,7 @@ mod catalog;
 mod record;
 
 pub use catalog::DownloadCatalog;
-pub use record::{DownloadRecord, DownloadState};
+pub use record::{
+    DownloadRecord, DownloadReport, DownloadState, download_fraction, download_is_playable_offline,
+    download_stored_name,
+};

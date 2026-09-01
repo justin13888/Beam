@@ -1,6 +1,5 @@
 package dev.beam.android.feature.downloads
 
-import dev.beam.android.core.model.DownloadState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -15,6 +14,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import uniffi.beam_client_core.DownloadState
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DownloadsTest {
@@ -49,7 +49,7 @@ class DownloadsTest {
                         downloadRecord(fileId = "c", state = DownloadState.Paused),
                         downloadRecord(fileId = "d", state = DownloadState.WaitingForNetwork),
                         downloadRecord(fileId = "e", state = DownloadState.Queued),
-                        downloadRecord(fileId = "f", state = DownloadState.Failed),
+                        downloadRecord(fileId = "f", state = DownloadState.Failed("stopped")),
                     ),
                 )
             val viewModel = DownloadsViewModel(repository)
@@ -144,8 +144,8 @@ class DownloadsTest {
         val record =
             downloadRecord(
                 state = DownloadState.Downloading,
-                downloadedBytes = 500L * 1024 * 1024,
-                totalBytes = 4L * 1024 * 1024 * 1024,
+                downloadedBytes = 500uL * 1024uL * 1024uL,
+                totalBytes = 4uL * 1024uL * 1024uL * 1024uL,
             )
 
         assertTrue(record.statusLine().contains(" of "))
@@ -156,8 +156,8 @@ class DownloadsTest {
         val record =
             downloadRecord(
                 state = DownloadState.Downloading,
-                downloadedBytes = 1024L,
-                totalBytes = 0L,
+                downloadedBytes = 1024uL,
+                totalBytes = null,
             )
 
         assertTrue(!record.statusLine().contains(" of "))
@@ -166,8 +166,11 @@ class DownloadsTest {
     @Test
     fun `a failed download explains that retrying resumes rather than restarts`() {
         val record =
-            downloadRecord(state = DownloadState.Failed).copy(
-                failureMessage = "The download stopped. It will resume when you retry it.",
+            downloadRecord(
+                state =
+                    DownloadState.Failed(
+                        "The download stopped. It will resume when you retry it.",
+                    ),
             )
 
         assertTrue(record.statusLine().contains("resume"))

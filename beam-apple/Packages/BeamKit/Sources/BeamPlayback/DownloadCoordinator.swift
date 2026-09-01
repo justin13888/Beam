@@ -26,8 +26,6 @@ public final class DownloadCoordinator: NSObject {
     private let directory: URL
     private var session: URLSession?
     private var tasksByFile: [String: URLSessionDownloadTask] = [:]
-    private var metadata: [String: DownloadMetadata] = [:]
-    private var receivedBytes: [String: UInt64] = [:]
     private var allowsCellular: Bool
 
     /// A coordinator writing under Application Support.
@@ -51,8 +49,18 @@ public final class DownloadCoordinator: NSObject {
         super.init()
 
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        loadMetadata()
-        rebuildRecords()
+        Task { await refresh() }
+    }
+
+    /// Re-read the catalogue the core owns.
+    ///
+    /// The core is the only place a download's display fields and state live,
+    /// so this is the only thing that populates `records`. A catalogue that
+    /// cannot be read leaves the list as it was rather than blanking a screen
+    /// the viewer is looking at.
+    public func refresh() async {
+        guard let latest = try? await playback.downloads() else { return }
+        records = latest.sorted { $0.title < $1.title }
     }
 
     /// Whether transfers may run without Wi-Fi.
@@ -67,7 +75,20 @@ public final class DownloadCoordinator: NSObject {
     }
 
     /// Start downloading `fileId`.
-    public func enqueue(fileId: String, title: String, subtitle: String?, sizeBytes: UInt64?) {
+    ///
+    /// The identifiers travel with the record because the core catalogue is
+    /// what a removed server is reconciled against, and because the downloads
+    /// screen offers "play" straight into the title it belongs to.
+    public func enqueue(
+        fileId: String,
+        serverId: String,
+        mediaId: String,
+        episodeId: String? = nil,
+        title: String,
+        subtitle: String?,
+        posterUrl: String? = nil,
+        sizeBytes: UInt64?
+    ) {
         guard tasksByFile[fileId] == nil, !isDownloaded(fileId: fileId) else { return }
         guard let config = try? playback.playbackConfig(fileId: fileId),
             let url = downloadURL(from: config)
@@ -87,15 +108,23 @@ public final class DownloadCoordinator: NSObject {
         task.taskDescription = fileId
         tasksByFile[fileId] = task
 
-        metadata[fileId] = DownloadMetadata(
+        let record = DownloadRecord(
             fileId: fileId,
+            serverId: serverId,
+            mediaId: mediaId,
+            episodeId: episodeId,
             title: title,
             subtitle: subtitle,
-            totalBytes: sizeBytes,
-            fileName: url.lastPathComponent
+            posterUrl: posterUrl,
+            fileName: url.lastPathComponent,
+            state: .queued,
+            downloadedBytes: 0,
+            totalBytes: sizeBytes
         )
-        saveMetadata()
-        rebuildRecords(overriding: [fileId: .queued])
+        Task {
+            try? await playback.recordDownloadQueued(record)
+            await refresh()
+        }
         task.resume()
     }
 
@@ -105,28 +134,37 @@ public final class DownloadCoordinator: NSObject {
         if let url = localURL(for: fileId) {
             try? FileManager.default.removeItem(at: url)
         }
-        metadata.removeValue(forKey: fileId)
-        receivedBytes.removeValue(forKey: fileId)
-        saveMetadata()
-        rebuildRecords()
+        Task {
+            try? await playback.forgetDownload(fileId: fileId)
+            await refresh()
+        }
     }
 
     /// Pause a transfer, keeping what has been written.
     public func pause(fileId: String) {
         tasksByFile[fileId]?.suspend()
-        rebuildRecords(overriding: [fileId: .paused(fraction: nil)])
+        Task {
+            try? await playback.setDownloadState(fileId: fileId, state: .paused)
+            await refresh()
+        }
     }
 
     /// Resume a paused transfer.
     public func resume(fileId: String) {
         tasksByFile[fileId]?.resume()
-        rebuildRecords(overriding: [fileId: .downloading(fraction: nil)])
+        Task {
+            try? await playback.setDownloadState(fileId: fileId, state: .downloading)
+            await refresh()
+        }
     }
 
     /// Where a completed download lives, or `nil` when it is not on disk.
+    ///
+    /// The name is composed by the core, so both clients store a file under the
+    /// same name for the same download.
     public func localURL(for fileId: String) -> URL? {
-        guard let entry = metadata[fileId] else { return nil }
-        let url = directory.appendingPathComponent(entry.storedName)
+        guard let record = records.first(where: { $0.fileId == fileId }) else { return nil }
+        let url = directory.appendingPathComponent(downloadStoredName(record: record))
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
@@ -191,14 +229,21 @@ public final class DownloadCoordinator: NSObject {
     }
 
     fileprivate func finished(fileId: String, movedFrom location: URL) {
-        guard let entry = metadata[fileId] else { return }
-        let destination = directory.appendingPathComponent(entry.storedName)
+        guard let record = records.first(where: { $0.fileId == fileId }) else { return }
+        let destination = directory.appendingPathComponent(downloadStoredName(record: record))
         try? FileManager.default.removeItem(at: destination)
         do {
             try FileManager.default.moveItem(at: location, to: destination)
         } catch {
             tasksByFile.removeValue(forKey: fileId)
-            rebuildRecords(overriding: [fileId: .failed(error.localizedDescription)])
+            let message = error.localizedDescription
+            Task {
+                try? await playback.setDownloadState(
+                    fileId: fileId,
+                    state: .failed(message: message)
+                )
+                await refresh()
+            }
             return
         }
         // Downloads are explicit user choices, so they are excluded from
@@ -210,81 +255,39 @@ public final class DownloadCoordinator: NSObject {
         try? url.setResourceValues(values)
 
         tasksByFile.removeValue(forKey: fileId)
-        rebuildRecords()
+        Task {
+            try? await playback.setDownloadState(fileId: fileId, state: .completed)
+            await refresh()
+        }
     }
 
     fileprivate func progressed(fileId: String, received: Int64, expected: Int64) {
-        receivedBytes[fileId] = UInt64(max(0, received))
-        // The server's own size is preferred where it sent one; this is
-        // URLSession's view, which is only available once bytes are moving.
-        let total = metadata[fileId]?.totalBytes ?? UInt64(max(0, expected))
-        let fraction = total > 0 ? Double(received) / Double(total) : nil
-        rebuildRecords(overriding: [fileId: .downloading(fraction: fraction)])
+        // `expected` is -1 until the server has answered with a length. `nil`
+        // means "not yet known", which the core will not unlearn once it is --
+        // and the fraction itself is the core's to compute, so that this screen
+        // and the Android one cannot disagree about it.
+        let total = expected > 0 ? UInt64(expected) : nil
+        Task {
+            try? await playback.recordDownloadProgress(
+                fileId: fileId,
+                downloadedBytes: UInt64(max(0, received)),
+                totalBytes: total
+            )
+            await refresh()
+        }
     }
 
     fileprivate func failed(fileId: String, message: String) {
         tasksByFile.removeValue(forKey: fileId)
-        rebuildRecords(overriding: [fileId: .failed(message)])
-    }
-
-    private func rebuildRecords(overriding overrides: [String: DownloadState] = [:]) {
-        records = metadata.values
-            .sorted { $0.title < $1.title }
-            .map { entry in
-                let url = localURL(for: entry.fileId)
-                let state =
-                    overrides[entry.fileId] ?? (url != nil ? .completed : .queued)
-                return DownloadRecord(
-                    fileId: entry.fileId,
-                    title: entry.title,
-                    subtitle: entry.subtitle,
-                    totalBytes: entry.totalBytes,
-                    // Per file. A single figure applied to every row would show
-                    // one download's progress against every other title in the
-                    // list.
-                    receivedBytes: receivedBytes[entry.fileId] ?? 0,
-                    state: state,
-                    localURL: url
-                )
-            }
-    }
-
-    private var metadataURL: URL {
-        directory.appendingPathComponent("downloads.json")
-    }
-
-    private func loadMetadata() {
-        guard let data = try? Data(contentsOf: metadataURL),
-            let entries = try? JSONDecoder().decode([String: DownloadMetadata].self, from: data)
-        else {
-            return
+        Task {
+            try? await playback.setDownloadState(
+                fileId: fileId,
+                state: .failed(message: message)
+            )
+            await refresh()
         }
-        metadata = entries
     }
 
-    private func saveMetadata() {
-        guard let data = try? JSONEncoder().encode(metadata) else { return }
-        try? data.write(to: metadataURL, options: .atomic)
-    }
-}
-
-/// What the downloads screen needs that the file itself does not carry.
-private struct DownloadMetadata: Codable {
-    let fileId: String
-    let title: String
-    let subtitle: String?
-    let totalBytes: UInt64?
-    let fileName: String
-
-    /// The name on disk.
-    ///
-    /// Keyed by file id rather than by the server's filename: two titles can
-    /// share a filename, and the extension is kept because both engines and
-    /// `EngineSelector` read it when the catalogue did not record a container.
-    var storedName: String {
-        let ext = (fileName as NSString).pathExtension
-        return ext.isEmpty ? fileId : "\(fileId).\(ext)"
-    }
 }
 
 /// Bridges `URLSession`'s callbacks back to the coordinator.

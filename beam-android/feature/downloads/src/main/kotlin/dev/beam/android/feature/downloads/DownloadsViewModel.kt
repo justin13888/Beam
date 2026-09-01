@@ -4,14 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 import javax.inject.Inject
 
 /** Offline downloads, grouped by what the viewer can do with them. */
@@ -39,18 +39,20 @@ public class DownloadsViewModel
             downloads.downloads
                 .map { records ->
                     DownloadsUiState(
-                        completed = records.filter { it.state == DownloadState.Completed },
+                        completed = records.filter { it.state is DownloadState.Completed },
                         inProgress =
                             records.filter {
-                                it.state in
-                                    setOf(
-                                        DownloadState.Queued,
-                                        DownloadState.Downloading,
-                                        DownloadState.Paused,
-                                        DownloadState.WaitingForNetwork,
-                                    )
+                                when (it.state) {
+                                    is DownloadState.Queued,
+                                    is DownloadState.Downloading,
+                                    is DownloadState.Paused,
+                                    is DownloadState.WaitingForNetwork,
+                                    -> true
+
+                                    is DownloadState.Completed, is DownloadState.Failed -> false
+                                }
                             },
-                        failed = records.filter { it.state == DownloadState.Failed },
+                        failed = records.filter { it.state is DownloadState.Failed },
                     )
                 }
                 // A download store that cannot be opened -- no session yet, or a

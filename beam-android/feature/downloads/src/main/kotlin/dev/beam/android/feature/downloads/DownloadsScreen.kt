@@ -26,9 +26,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.beam.android.core.designsystem.BeamSpacing
 import dev.beam.android.core.designsystem.component.BeamEmptyState
 import dev.beam.android.core.designsystem.component.SectionHeader
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.ui.Format
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
+import uniffi.beam_client_core.downloadFraction
+import uniffi.beam_client_core.downloadIsPlayableOffline
 
 /** Downloads, wired to its view model. */
 @Composable
@@ -112,7 +114,7 @@ private fun DownloadRow(
         headlineContent = { Text(record.title) },
         supportingContent = {
             Text(record.statusLine())
-            val progress = record.progress
+            val progress = downloadFraction(record)?.toFloat()
             if (record.state == DownloadState.Downloading) {
                 if (progress != null) {
                     LinearProgressIndicator(
@@ -136,19 +138,22 @@ private fun DownloadRow(
         },
         trailingContent = {
             when (record.state) {
-                DownloadState.Downloading, DownloadState.Queued -> {
+                is DownloadState.Downloading, is DownloadState.Queued -> {
                     IconButton(onClick = onPause) {
                         Icon(Icons.Rounded.Pause, contentDescription = "Pause")
                     }
                 }
 
-                DownloadState.Paused, DownloadState.Failed, DownloadState.WaitingForNetwork -> {
+                is DownloadState.Paused,
+                is DownloadState.Failed,
+                is DownloadState.WaitingForNetwork,
+                -> {
                     IconButton(onClick = onResume) {
                         Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume")
                     }
                 }
 
-                DownloadState.Completed -> {
+                is DownloadState.Completed -> {
                     IconButton(onClick = onRemove) {
                         Icon(Icons.Rounded.Delete, contentDescription = "Delete")
                     }
@@ -159,39 +164,44 @@ private fun DownloadRow(
             Modifier
                 .fillMaxWidth()
                 .then(
-                    if (record.isPlayableOffline) Modifier.clickable(onClick = onPlay) else Modifier,
+                    if (downloadIsPlayableOffline(record)) {
+                        Modifier.clickable(onClick = onPlay)
+                    } else {
+                        Modifier
+                    },
                 ),
     )
 }
 
 /** "1.2 GB of 4.0 GB", or why it stopped. */
 internal fun DownloadRecord.statusLine(): String =
-    when (state) {
-        DownloadState.Completed -> {
-            Format.fileSize(totalBytes.toULong())
+    when (val current = state) {
+        is DownloadState.Completed -> {
+            Format.fileSize(totalBytes ?: downloadedBytes)
         }
 
-        DownloadState.Failed -> {
-            failureMessage ?: "Stopped"
+        is DownloadState.Failed -> {
+            current.message
         }
 
-        DownloadState.WaitingForNetwork -> {
+        is DownloadState.WaitingForNetwork -> {
             "Waiting for Wi-Fi"
         }
 
-        DownloadState.Paused -> {
-            "Paused · ${Format.fileSize(downloadedBytes.toULong())}"
+        is DownloadState.Paused -> {
+            "Paused · ${Format.fileSize(downloadedBytes)}"
         }
 
-        DownloadState.Queued -> {
+        is DownloadState.Queued -> {
             "Waiting to start"
         }
 
-        DownloadState.Downloading -> {
-            if (totalBytes > 0L) {
-                "${Format.fileSize(downloadedBytes.toULong())} of ${Format.fileSize(totalBytes.toULong())}"
+        is DownloadState.Downloading -> {
+            val total = totalBytes
+            if (total != null && total > 0uL) {
+                "${Format.fileSize(downloadedBytes)} of ${Format.fileSize(total)}"
             } else {
-                Format.fileSize(downloadedBytes.toULong())
+                Format.fileSize(downloadedBytes)
             }
         }
     }

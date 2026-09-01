@@ -80,6 +80,25 @@ public protocol PlaybackRepository: Sendable {
     func flushProgress() async throws -> UInt32
     /// How much the queue is holding.
     func pendingProgressCount() async throws -> UInt32
+    /// Every download the core knows about, for the active server.
+    func downloads() async throws -> [DownloadRecord]
+    /// Record a download the platform engine has accepted, with the display
+    /// fields resolved while a connection that can resolve them still exists.
+    func recordDownloadQueued(_ record: DownloadRecord) async throws
+    /// Move a download to a new state.
+    @discardableResult
+    func setDownloadState(fileId: String, state: DownloadState) async throws -> DownloadRecord?
+    /// Record bytes transferred.
+    @discardableResult
+    func recordDownloadProgress(
+        fileId: String,
+        downloadedBytes: UInt64,
+        totalBytes: UInt64?
+    ) async throws -> DownloadRecord?
+    /// Forget one download. The caller deletes the bytes.
+    func forgetDownload(fileId: String) async throws
+    /// Forget every download. The caller deletes the bytes.
+    func forgetAllDownloads() async throws
     /// Titles this person is part way through.
     func continueWatching(limit: UInt32?) async throws -> [ContinueWatchingEntry]
     /// One page of watch history.
