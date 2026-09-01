@@ -10,7 +10,10 @@
 //! exists to fix. So the URL is stable and the *validator* moves instead: the
 //! `ETag` is the cache key, which is a digest of the provider URL, so it
 //! changes precisely when the artwork does. Revalidation costs one primary-key
-//! row read and a 304 with no body.
+//! row read and a read of the cached file, which the OS page cache is holding;
+//! the 304 itself carries no body. The validator comes from the row alone, but
+//! `Served::deliver` asks the source for its complete length before it
+//! evaluates `If-None-Match`, so [`deliver`] has the bytes in hand by then.
 //!
 //! **Why there is no SSRF surface.** The only URL ever fetched is one that
 //! enrichment itself wrote onto a row. Nothing a client sends is a URL -- it is

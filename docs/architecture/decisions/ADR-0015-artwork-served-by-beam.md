@@ -60,7 +60,13 @@ changing what the API means.
 `immutable`, but it changes whenever enrichment refreshes a title's art -- and clients store these
 URLs, which is the whole of the offline case. The URL is therefore stable and the *validator* moves:
 the strong `ETag` is the cache key, a digest of the provider URL, so it changes exactly when the
-artwork does. Revalidation costs one primary-key row read and a `304` with no body.
+artwork does. Revalidation costs one primary-key row read and a read of the cached file, which the
+OS page cache is holding; the `304` itself carries no body. The validator is derivable from the row
+alone, but Kynos's range engine asks a source for its complete length before it evaluates
+`If-None-Match`, so the bytes are in hand by the time the `304` is decided. Avoiding that read would
+mean a source that answers its length from the index and opens the file only when octets are
+actually sent -- worth doing if artwork revalidation ever shows up in a profile, and not worth the
+extra seam before then.
 
 **One cache, and no invalidation.** Images are stored one file per key under
 `BEAM_DATA_DIR/artwork`, keyed by a digest of the upstream URL, evicted least-recently-used against
