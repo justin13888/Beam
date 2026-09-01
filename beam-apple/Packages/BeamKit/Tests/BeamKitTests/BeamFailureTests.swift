@@ -51,17 +51,30 @@ struct BeamFailureTests {
         #expect(!failure.isRetryable)
     }
 
-    /// A 5xx is worth retrying; a 400 is not.
-    @Test("retryability follows what the server said")
-    func retryabilityFollowsTheStatus() {
-        let server = BeamFailure.from(
-            BeamError.Server(status: 503, detail: "down", code: "about:blank")
+    /// Retryability is read off the error, not re-derived from the status.
+    ///
+    /// The core decides it in `classify` and carries it on `Server`, the way
+    /// it already did on `Network`. This asserts the mapping reads it both
+    /// ways round: deriving it here answered "retryable" for every status,
+    /// which offered a retry for a 415 the server refuses identically forever.
+    @Test("retryability is carried by the error, not re-derived")
+    func retryabilityIsCarriedByTheError() {
+        let transient = BeamFailure.from(
+            BeamError.Server(
+                status: 503, retryable: true, detail: "down", code: "about:blank"
+            )
+        )
+        let refused = BeamFailure.from(
+            BeamError.Server(
+                status: 415, retryable: false, detail: "no", code: "about:blank"
+            )
         )
         let malformed = BeamFailure.from(
             BeamError.BadRequest(detail: "not a valid identifier", code: "about:blank")
         )
 
-        #expect(server.isRetryable)
+        #expect(transient.isRetryable)
+        #expect(!refused.isRetryable)
         #expect(!malformed.isRetryable)
     }
 }

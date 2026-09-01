@@ -108,10 +108,13 @@ class BeamErrorsTest {
     }
 
     @Test
-    fun `a server fault is retryable but a malformed reply is not`() {
-        // A 500 may be transient. A response the client cannot parse will
-        // parse the same way every time.
-        assertTrue(BeamException.Server(500u, "boom", ABOUT_BLANK).toFailure().retryable)
+    fun `a server fault carries its retryability rather than restating it`() {
+        // `retryable` is decided in the core (`classify`) and travels on the
+        // error, so this asserts that the mapping *reads* it -- both ways
+        // round. It used to answer `true` for every Server status, which put a
+        // retry button on a 415 that will be refused identically forever.
+        assertTrue(BeamException.Server(500u, true, "boom", ABOUT_BLANK).toFailure().retryable)
+        assertFalse(BeamException.Server(415u, false, "no", ABOUT_BLANK).toFailure().retryable)
         assertFalse(BeamException.Protocol("missing field").toFailure().retryable)
     }
 
@@ -138,7 +141,7 @@ class BeamErrorsTest {
                 BeamException.NotFound("gone", ABOUT_BLANK),
                 BeamException.BadRequest("bad", ABOUT_BLANK),
                 BeamException.RateLimited(5uL),
-                BeamException.Server(503u, "down", ABOUT_BLANK),
+                BeamException.Server(503u, true, "down", ABOUT_BLANK),
                 BeamException.Network("offline", true),
                 BeamException.UntrustedCertificate("beam.local", certificate()),
                 BeamException.Protocol("garbled"),

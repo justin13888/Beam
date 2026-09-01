@@ -94,7 +94,7 @@ class AdminTest {
                     .libraries
                     .first()
 
-            admin.failWith = BeamException.Server(500u, "scan failed", "about:blank")
+            admin.failWith = BeamException.Server(500u, true, "scan failed", "about:blank")
             viewModel.scan(library.id)
             testScheduler.advanceUntilIdle()
 
