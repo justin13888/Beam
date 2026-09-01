@@ -108,19 +108,30 @@ impl Index {
         Some(*entry)
     }
 
-    fn insert(&mut self, key: CacheKey, format: ImageFormat, size: u64) {
+    /// Indexes an entry, returning the one it displaced.
+    ///
+    /// The caller needs the whole displaced entry rather than only its size,
+    /// because one displaced under a *different* format names a different
+    /// file: [`ArtworkCache::path_for`] derives one path per key from the
+    /// format the index holds, so the moment the new format is indexed the old
+    /// file is unreachable -- never read, never chosen by eviction, and
+    /// counted by nothing. Only the caller has the path, so only the caller
+    /// can delete it.
+    fn insert(&mut self, key: CacheKey, format: ImageFormat, size: u64) -> Option<Entry> {
         self.ticks += 1;
-        if let Some(previous) = self.entries.insert(
+        let displaced = self.entries.insert(
             key,
             Entry {
                 format,
                 size,
                 last_used: self.ticks,
             },
-        ) {
-            self.total_bytes = self.total_bytes.saturating_sub(previous.size);
+        );
+        if let Some(displaced) = displaced {
+            self.total_bytes = self.total_bytes.saturating_sub(displaced.size);
         }
         self.total_bytes = self.total_bytes.saturating_add(size);
+        displaced
     }
 
     /// The key that should go next when the cache is over its ceiling.
@@ -241,7 +252,22 @@ impl ArtworkCache {
                 if !metadata.is_file() {
                     continue;
                 }
-                index.insert(CacheKey(stem.to_string()), format, metadata.len());
+                let displaced = index.insert(CacheKey(stem.to_string()), format, metadata.len());
+
+                // Two formats for one key, which a directory can hold if an
+                // eviction failed to unlink a file and the provider later
+                // answered the same URL with a different format. Only one is
+                // reachable -- the index holds one format per key -- so the
+                // other would sit here unread and unevictable, keeping the
+                // cache permanently above its ceiling. Whichever the directory
+                // yielded first loses; both are valid images of the same URL,
+                // so it does not matter which survives.
+                if let Some(displaced) = displaced
+                    && displaced.format != format
+                {
+                    let stale = path.with_extension(displaced.format.extension());
+                    Self::remove_stale_file(&stale).await;
+                }
             }
         }
 
@@ -362,11 +388,21 @@ impl ArtworkCache {
             };
         }
 
-        self.index.lock().expect("artwork index poisoned").insert(
+        let displaced = self.index.lock().expect("artwork index poisoned").insert(
             key.clone(),
             format,
             bytes.len() as u64,
         );
+
+        // The same key under a different format was just written to a
+        // different filename, so the file the old one named is now unreachable.
+        // See `Index::insert`.
+        if let Some(displaced) = displaced
+            && displaced.format != format
+        {
+            Self::remove_stale_file(&self.path_for(key, displaced.format)).await;
+        }
+
         self.evict_to_ceiling().await;
 
         CachedImage {
@@ -385,6 +421,20 @@ impl ArtworkCache {
         let staged = path.with_extension("part");
         tokio::fs::write(&staged, bytes).await?;
         tokio::fs::rename(&staged, path).await
+    }
+
+    /// Unlinks a cache file nothing can reach any more.
+    ///
+    /// Best-effort by design: the entry it belonged to is already out of the
+    /// index, so a file that cannot be removed costs disk rather than
+    /// correctness, and failing a request a viewer is waiting on to report it
+    /// would be the worse trade.
+    async fn remove_stale_file(path: &Path) {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => debug!(?path, "removed superseded artwork cache entry"),
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => warn!(?path, %err, "could not remove superseded artwork cache entry"),
+        }
     }
 
     /// Evicts least-recently-used entries until the cache is under its

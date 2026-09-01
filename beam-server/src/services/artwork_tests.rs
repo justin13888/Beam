@@ -205,6 +205,60 @@ mod tests {
         assert_eq!(fetcher.call_count(), 1, "a restart is not a cache flush");
     }
 
+    /// A directory can hold two formats for one key: an eviction that failed to
+    /// unlink a file leaves it behind, and the provider can later answer the
+    /// same URL with a different format. Only one of the two is reachable --
+    /// the index holds one format per key -- so the other would sit there
+    /// unread and unevictable, keeping the cache above its ceiling for good.
+    #[tokio::test]
+    async fn a_key_left_with_two_formats_keeps_only_the_one_it_can_serve() {
+        let root = TempDir::new().unwrap();
+        let key = CacheKey::for_url(POSTER);
+        let shard = root.path().join("artwork").join(&key.as_str()[..2]);
+        tokio::fs::create_dir_all(&shard).await.unwrap();
+        for (extension, bytes) in [("jpg", b"as-jpeg"), ("webp", b"as-webp")] {
+            tokio::fs::write(shard.join(format!("{key}.{extension}")), bytes)
+                .await
+                .unwrap();
+        }
+
+        // An empty provider, so anything served has to have come off disk.
+        let fetcher = Arc::new(InMemoryArtworkFetcher::new());
+        let cache = cache(
+            &root,
+            1_000_000,
+            fetcher.clone(),
+            Arc::new(TestClock::new()),
+        )
+        .await;
+
+        let mut left = Vec::new();
+        let mut files = tokio::fs::read_dir(&shard).await.unwrap();
+        while let Some(file) = files.next_entry().await.unwrap() {
+            left.push(file.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(
+            left.len(),
+            1,
+            "the unreachable duplicate must not survive the scan, found {left:?}",
+        );
+
+        let served = cache.get(POSTER).await.expect("the survivor is served");
+        assert_eq!(
+            fetcher.call_count(),
+            0,
+            "it came off disk, not the provider"
+        );
+        // Derived from what was served rather than named outright: the point is
+        // that the file left on disk is the one the index points at, whichever
+        // of the two that turned out to be.
+        assert_eq!(
+            left[0],
+            format!("{key}.{}", served.format.extension()),
+            "the survivor must be the format the cache serves",
+        );
+    }
+
     #[tokio::test]
     async fn a_failing_provider_is_asked_once_per_ttl_not_once_per_request() {
         let root = TempDir::new().unwrap();
