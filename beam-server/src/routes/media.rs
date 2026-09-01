@@ -5,6 +5,7 @@
 
 use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::models::search::{MediaConnection, MediaSortField, MediaTypeFilter, SortOrder};
 use crate::models::{MediaMetadata, MediaSource};
@@ -115,12 +116,20 @@ pub async fn get_media_detail(
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaMetadata>, MediaLookupError> {
+    // Parsed here rather than inside the lookup: `get_media_metadata` returns
+    // `Option`, so a malformed id and a well-formed miss arrive
+    // indistinguishable and both used to answer 404 -- while `/sources` and the
+    // refresh route, sharing this same path parameter, answered 400. Doing it
+    // before the call is what lets the two be told apart at all.
+    if Uuid::parse_str(&path.id).is_err() {
+        return Err(MediaLookupError::InvalidMediaId(format!(
+            "{} is not a valid media id",
+            path.id
+        )));
+    }
+
     match state.services.metadata.get_media_metadata(&path.id).await {
         Some(metadata) => Ok(Json(metadata)),
-        // `get_media_metadata` returns `Option`, so a malformed id and a
-        // well-formed miss are indistinguishable by the time they reach here
-        // and both answer 404. The sibling routes tell them apart -- see the
-        // note in the error reference under `invalid-media-id`.
         None => Err(MediaLookupError::MediaNotFound(format!(
             "media {} not found",
             path.id

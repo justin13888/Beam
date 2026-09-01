@@ -91,6 +91,22 @@ pub enum InternalError {
 /// `GET /v1/media/{id}`.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum MediaLookupError {
+    /// The `{id}` in the path is not a UUID.
+    ///
+    /// `GET /v1/media/{id}` used to answer this 404, because
+    /// `get_media_metadata` returns `Option` and the parse failure was folded
+    /// into the miss -- while `/sources` and the refresh route, which share the
+    /// same path parameter, answered 400. Three routes, one condition, two
+    /// answers. The parse now happens in the handler, before the lookup that
+    /// cannot report it.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-media-id",
+        title = "Invalid media id"
+    )]
+    InvalidMediaId(String),
+
     #[error("{0}")]
     #[problem(
         status = 404,

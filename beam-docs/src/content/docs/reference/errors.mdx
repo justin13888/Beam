@@ -53,9 +53,10 @@ rescan removed it, in which case reloading the list is the right response.
 
 **400.** The media id in the path is not a UUID.
 
-**What to do.** Fix the caller. Note that `GET /v1/media/{id}` answers a malformed id with
-[`media-not-found`](#media-not-found) instead: it resolves the id through a lookup that cannot
-distinguish "malformed" from "absent". The `/sources` and refresh routes do distinguish them.
+**What to do.** Fix the caller. Every route taking a media id — the detail route, `/sources`, and
+the admin refresh — answers this, so the three now agree. `GET /v1/media/{id}` used to answer
+[`media-not-found`](#media-not-found) here instead, because it resolved the id through a lookup that
+could not tell "malformed" from "absent".
 
 ### sources-not-available-for-show
 
@@ -146,6 +147,12 @@ reporting a provider CDN timeout that way tells an operator to go looking in the
 ### invalid-file-id
 
 **400.** The file id in the path is not a UUID.
+
+Only from the delivery routes — `/v1/files/{id}/stream` and `/download`. `PUT
+/v1/files/{id}/progress` takes the same parameter but answers a malformed one with `about:blank`
+and no code: its id is typed as a UUID, so the framework rejects it before Beam sees it, and a
+framework rejection carries no type Beam can name. The delivery routes take theirs as a string
+precisely so this code can exist there.
 
 ### login-attempt-invalid
 
