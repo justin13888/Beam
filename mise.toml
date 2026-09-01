@@ -1192,7 +1192,14 @@ description = "Bring up the dev stack, including the bundled Dex IdP"
 # for both static users, which makes *every* dev user an admin. Acceptable for
 # a dev fixture -- without it nobody can reach the admin surface at all -- and
 # precisely why the bundled Dex is not a production IdP.
-env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_WEB_URL = "{{ env.BEAM_WEB_URL | default(value='http://localhost:8080') }}", BEAM_OIDC_ADMIN_CLAIM = "email_verified" }
+#
+# BEAM_WEB_URL is deliberately *not* set here. compose.beam.yaml already
+# supplies `${BEAM_WEB_URL:-http://localhost:8080}`, and setting it from mise
+# would defeat that `:-` for anyone who configured the web port in `.env`:
+# shell env outranks `.env` for compose interpolation, so the redirect target
+# and the CSRF allowed-origin set would both point at :8080 while the app was
+# published somewhere else.
+env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_OIDC_ADMIN_CLAIM = "email_verified" }
 run = '''
 set -eu
 compose_cmd=${BEAM_COMPOSE:-}
@@ -1203,9 +1210,18 @@ compose() { $compose_cmd "$@"; }
 # is unreachable, so losing this race costs a restart rather than a retry.
 compose --profile dev-idp up -d --wait postgres dex
 compose --profile dev-idp up -d --wait
+# Read the published ports back off the running containers rather than
+# restating the compose defaults: WEB_HOST_PORT and BEAM_SERVER_HOST_PORT are
+# documented overrides, and printing a URL the stack is not on is worse than
+# printing none.
+published() {
+    $compose_cmd --profile dev-idp port "$1" "$2" 2>/dev/null \
+        | tail -n1 \
+        | sed 's|^0\.0\.0\.0:|localhost:|; s|^\[::\]:|localhost:|; s|^|http://|'
+}
 echo
-echo "Web      http://localhost:8080"
-echo "API      http://localhost:8000"
+echo "Web      $(published web 80)"
+echo "API      $(published server 8000)"
 echo "Sign in  admin@beam.localhost / password   (also user@beam.localhost)"
 '''
 
@@ -1259,13 +1275,23 @@ echo "issuer: $issuer"
 # which leg broke is the whole diagnostic value here.
 # stderr is deliberately not silenced: without it a DNS failure, a refused
 # connection and a genuine issuer mismatch all render as the same one-line FAIL.
+# `grep -F` on whitespace-stripped JSON, not `grep -E`: the issuer is data, and
+# interpolating it into a regex makes `.` match any character -- so a document
+# reporting `dexXbeamXlocalhost` would satisfy an ERE comparison, and an issuer
+# containing `[` would make grep error rather than report a mismatch.
+issuer_field() { printf '%s' "$1" | tr -d ' \t' | grep -qF "\"issuer\":\"$2\""; }
+
 doc=$(compose exec -T server curl -fsS "$issuer/.well-known/openid-configuration" || true)
-rc=0; printf '%s' "$doc" | grep -Eq "\"issuer\"[[:space:]]*:[[:space:]]*\"$issuer\"" || rc=$?
+rc=0; issuer_field "$doc" "$issuer" || rc=$?
 check "$rc" "discovery from inside the server container reports the configured issuer"
 
-# The browser leg: the very same URL has to resolve from the host.
-rc=0; curl -fsS -o /dev/null "$issuer/.well-known/openid-configuration" || rc=$?
-check "$rc" "discovery reachable from the host at the same URL"
+# The browser leg: the very same URL has to resolve from the host *and* report
+# the same issuer. Asserting only reachability would pass against a host
+# /etc/hosts entry pointing dex.beam.localhost at some other IdP, which is
+# precisely the identity this check exists to prove.
+host_doc=$(curl -fsS "$issuer/.well-known/openid-configuration" || true)
+rc=0; issuer_field "$host_doc" "$issuer" || rc=$?
+check "$rc" "discovery from the host reports the same issuer at the same URL"
 
 # The flow: /v1/auth/login must hand the browser an authorize URL on that host.
 # A real GET, not `curl -I`: the route is declared GET-only and kynos dispatches
@@ -1274,7 +1300,14 @@ check "$rc" "discovery reachable from the host at the same URL"
 # keeps the headers and discards the body; curl does not follow the redirect
 # without -L. The GET costs one pending_auths row and a state cookie.
 authority=$(printf '%s' "$issuer" | sed 's|^[a-z][a-z0-9+.-]*://||; s|/.*||')
-rc=0; curl -sS -o /dev/null -D - http://localhost:8000/v1/auth/login \
+# The API base is read off the running container, not hardcoded:
+# BEAM_SERVER_HOST_PORT is a documented override, and against a stack published
+# anywhere but :8000 a hardcoded URL reports FAIL for a healthy server.
+api_base=$(compose port server 8000 2>/dev/null \
+    | tail -n1 \
+    | sed 's|^0\.0\.0\.0:|localhost:|; s|^\[::\]:|localhost:|; s|^|http://|')
+[ -n "$api_base" ] || api_base="http://localhost:8000"
+rc=0; curl -sS -o /dev/null -D - "$api_base/v1/auth/login" \
     | grep -iqF "location: $issuer" || rc=$?
 check "$rc" "GET /v1/auth/login redirects to the IdP at $authority"
 
