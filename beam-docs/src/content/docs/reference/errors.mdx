@@ -1,119 +1,243 @@
 ---
 title: Error reference
-description: Every HTTP status Beam returns, what the response body looks like, and what to do about it.
+description: Every error code Beam returns, what the response body looks like, and what to do about it.
 ---
 
 import { Aside, LinkCard } from "@astrojs/starlight/components";
 
 ## How to read this page
 
-**Beam has no error codes.** There is no stable machine-readable identifier in an error response —
-the HTTP status is the entire contract. Everything else is prose for a human reading devtools or a
-log.
+Every failure is an **RFC 9457 problem document**, served as
+`application/problem+json`, on every endpoint and for every status:
 
-**Do not parse, match on, or branch on the message text.** Messages are free-form, frequently
-include an interpolated internal error, and change without notice or a deprecation. If you are
-writing a client, branch on **status plus endpoint**.
+```json
+{
+  "type": "https://beam.justinchung.net/reference/errors/#source-file-missing",
+  "title": "Source file missing from disk",
+  "status": 404,
+  "detail": "Source video file not found"
+}
+```
 
-Every message quoted below is an *example* of what that condition can produce, not an exhaustive
-list.
+- **`type` is the contract.** It is a stable, machine-readable identifier, and it is the thing to
+  branch on. Each one links to a section below.
+- **`status` is the contract.** It agrees with the HTTP status line.
+- **`title` is a fixed summary** of what the `type` means. It does not vary between occurrences.
+- **`detail` is not a contract.** It is a sentence for a person reading devtools or a log. It
+  changes without notice, and it often interpolates an internal message. Do not parse it, match on
+  it, or show it to a user without deciding first whether it reads as an explanation.
 
-## The response body shapes
+`type` may also be **`about:blank`**, which RFC 9457 defines as "the status code is the whole
+story". Beam returns it wherever no finer distinction exists — see [Responses with no
+code](#responses-with-no-code).
 
-Which shape you get depends on **which endpoint you called**, not which status you received.
-
-| Shape | Content type | Body | Endpoints |
-|---|---|---|---|
-| JSON error | `application/json` | `{"error": "<message>"}` | `/v1/media*`, `/v1/genres`, `/v1/libraries*`, `/v1/continue-watching`, `/v1/history`, `/v1/files/{id}/progress`, all `/v1/admin/*`, and rate-limit rejections |
-| Plain text | `text/plain` | the message alone | `/v1/files/{id}/stream`, `/v1/files/{id}/download`, `/v1/auth/*`, `/v1/me`, `/v1/logout`, `/v1/logout-all`, `/v1/sessions*`, and same-origin rejections |
-| Health object | `application/json` | the full health object | `/v1/health`, on both `200` and `503` |
-
-<Aside type="caution" title="A fourth shape for unmatched routes">
-A request to a path that matches **no route at all** is answered by the web framework, not by
-Beam, and does not use any shape above. With `Accept: application/json` it returns a *nested*
-object — `{"error":{"code":404,"name":"Not Found","brief":"…"}}` — and to a browser it returns an
-HTML error page. A client cannot deserialise Beam's 404s and a wrong-URL 404 with the same type.
-
-Relatedly, a request to a real path with the wrong HTTP method returns **405**, not 404.
+<Aside type="note" title="One shape, everywhere">
+Earlier releases answered with three different body shapes chosen by *which endpoint you called* —
+a JSON `{"error": "…"}` envelope, bare `text/plain`, and a nested object from the web framework for
+an unmatched route — and carried no machine-readable identifier at all. All of that is gone. One
+type deserialises every failure Beam can produce, including those the framework answers directly.
 </Aside>
 
-## 400 Bad Request
+## Codes
 
-The request itself was malformed.
+Each heading is the code exactly as it appears after the `#` in `type`.
 
-- **JSON**, from the REST API: an identifier that is not a valid UUID — `invalid file id`,
-  `invalid user id: …`.
-- **Plain text**, from a stream or download URL: `Invalid range header`.
-- **Plain text**, from `/v1/auth/callback`: `Missing state cookie`, `Missing state parameter`,
-  `Unknown, already-used, or expired login attempt`, `Missing code parameter`, `Nonce mismatch`,
-  or `Login failed: …`.
+### media-not-found
 
-**What to do.** A 400 from the callback nearly always means a stale or replayed sign-in: the
-callback URL is single-use, so reloading it fails by design. Start again from the app. If it
-happens every time, the browser is dropping the short-lived state cookie — third-party cookie
-blocking, or a `BEAM_COOKIE_SECURE` setting that does not match your scheme.
+**404.** No movie or show has this id.
 
-## 401 Unauthorized
+**What to do.** Check the id. A title can also disappear between a browse and a detail request if a
+rescan removed it, in which case reloading the list is the right response.
 
-No usable session.
+### invalid-media-id
 
-- **JSON**: `Missing session cookie`, `Invalid or expired session`, `user no longer exists`.
-- **Plain text**, from the auth and session endpoints: the same conditions.
+**400.** The media id in the path is not a UUID.
 
-<Aside type="note" title="401 on a media URL does not mean what it says">
-On `/v1/files/{id}/stream` and `/v1/files/{id}/download`, a *forbidden* condition is reported as
-**401 rather than 403** — the file-delivery path collapses the two. So a 401 from a media URL does
-not prove your session is missing or expired; you may simply not be allowed that file.
+**What to do.** Fix the caller. Note that `GET /v1/media/{id}` answers a malformed id with
+[`media-not-found`](#media-not-found) instead: it resolves the id through a lookup that cannot
+distinguish "malformed" from "absent". The `/sources` and refresh routes do distinguish them.
+
+### sources-not-available-for-show
+
+**400.** Sources were requested for a *show* id. A show has no files of its own.
+
+**What to do.** Ask for the sources of one of its episode ids. An episode that has no files yet is
+not this error — it returns an empty list.
+
+### library-not-found
+
+**404.** No library has this id.
+
+### invalid-library-id
+
+**400.** The library id in the path is not a UUID.
+
+### library-path-not-found
+
+**400.** The root path does not exist, or could not be resolved.
+
+**What to do.** The path is resolved **on the server**, not on the machine running the request.
+Check that the directory exists inside the container and that the bind mount is present. A rescan
+can also raise this if the root has gone since the library was registered.
+
+### library-path-outside-root
+
+**400.** The root path resolves outside the directory Beam is permitted to serve from.
+
+**What to do.** Put the library under `BEAM_VIDEO_DIR`, or widen that setting. The check follows
+symlinks and `..` before deciding, so a path that *looks* contained can still fail this — which is
+the point.
+
+### user-not-found
+
+**404.** No user has this id.
+
+### cannot-disable-self
+
+**400.** An administrator tried to disable their own account.
+
+**What to do.** Have another administrator do it. This exists so the last administrator cannot lock
+everyone out of the server.
+
+### file-not-found
+
+**404.** No file has this id.
+
+### source-file-missing
+
+**404.** The file *is* in the catalogue. The path it names is not on disk.
+
+**What to do.** This one is an operator's problem, not a viewer's, and no amount of retrying will
+change it: Beam's catalogue and your storage have diverged. A bind mount is missing, the library
+moved, or the file was deleted outside Beam. Check the mount first, then rescan the library.
+
+It is deliberately distinct from [`file-not-found`](#file-not-found), which means the catalogue
+never had the file. A client that shows both as "not found" tells the viewer to go looking for
+something they cannot fix.
+
+### invalid-file-id
+
+**400.** The file id in the path is not a UUID.
+
+### login-attempt-invalid
+
+**400.** From `/v1/auth/callback`. The round-trip cannot be matched to one this server started: the
+state cookie or the state parameter is missing, the two disagree, the pending record was already
+used or has expired, or the authorization code is absent.
+
+**What to do.** Start again from the app. This is nearly always a stale or replayed sign-in — the
+callback URL is single-use, so reloading it fails by design. If it happens *every* time, the
+browser is dropping the short-lived state cookie: check third-party cookie blocking, and that
+`BEAM_COOKIE_SECURE` matches your scheme.
+
+One code covers all five conditions deliberately. A caller does the same thing for each of them,
+and naming which half of a CSRF check failed tells an attacker more than it tells a user.
+
+### login-failed
+
+**400.** From `/v1/auth/callback`. The identity provider returned an error, or the token exchange
+did not verify.
+
+**What to do.** Read the server log for the provider's own message. A nonce mismatch here usually
+means two sign-ins raced in the same browser.
+
+### account-disabled
+
+**403.** The identity verified, and the local account is disabled. No session is created.
+
+**What to do.** An administrator re-enables the account.
+
+### oidc-unavailable
+
+**503.** From `/v1/auth/login`. Beam could not start a sign-in flow.
+
+**What to do.** Beam needs `BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID` and `BEAM_OIDC_CLIENT_SECRET`
+**all three** set, and must be able to reach the issuer's `.well-known/openid-configuration`. This
+is a 503 rather than a 500 because the server is working and the identity provider is not.
+
+### account-removed
+
+**401.** From `/v1/me`. The session is valid and the account behind it no longer exists.
+
+**What to do.** Sign in again. This is distinct from an ordinary 401 because the session was not the
+problem.
+
+### session-not-found
+
+**401.** From `DELETE /v1/sessions/{id}`. No such session.
+
+**What to do.** Nothing. A session id that does not exist and one belonging to somebody else answer
+identically and deliberately, so that this endpoint cannot be used to enumerate other people's
+sessions.
+
+### malformed-origin
+
+**403.** The `Origin` or `Referer` header could not be parsed.
+
+**What to do.** Usually a reverse proxy rewriting the header. See
+[`cross-origin-rejected`](#cross-origin-rejected).
+
+### cross-origin-rejected
+
+**403.** A state-changing request carried an `Origin`/`Referer` that is not allowed.
+
+**What to do.** The value must match `BEAM_WEB_URL`, `BEAM_SERVER_URL`, or an entry in
+`BEAM_EXTRA_ALLOWED_ORIGINS`. The usual causes are a reverse proxy rewriting the header and reaching
+Beam on a hostname it was never told about. A request carrying *neither* header is allowed through —
+non-browser clients send neither, and `SameSite=Lax` on the session cookie is what actually stops
+the browser case.
+
+### metrics-unavailable
+
+**503.** `GET /metrics` was called and no metrics recorder is installed.
+
+**What to do.** Enable metrics in the server configuration. This is a 503 rather than a 404 so that
+a scrape can tell "not enabled" from "wrong URL".
+
+### internal
+
+**500.** A server fault. Always Beam's problem, never the caller's.
+
+**What to do.** Nothing client-side. Read the server log around the timestamp: a 500's `detail` is
+deliberately terse and the log line carries the real cause. The usual causes are PostgreSQL being
+unreachable and a schema/migration mismatch. Worth [reporting](/help/support/) if neither applies.
+
+## Responses with no code
+
+Some responses carry `"type": "about:blank"`. That is not an omission — RFC 9457 uses it to mean the
+status code is the whole story, and for each of these there is no finer distinction Beam could draw.
+
+| Status | When | What to do |
+|---|---|---|
+| `400` | A path or query parameter, header, cookie or body could not be parsed | Fix the request |
+| `401` | No session cookie, or one the server does not recognise | Sign in |
+| `403` | An administrator-only endpoint called by a non-administrator | Fix the admin claim at your identity provider, then **sign out and back in** — admin is recalculated only at sign-in |
+| `404` | The URL matches no route at all | Check the path |
+| `405` | A real path, wrong method | Check the method |
+| `415` / `422` | Unsupported request media type, or a body that does not satisfy the schema | Fix the request |
+| `416` | The requested byte range cannot be satisfied | See below |
+| `429` | Rate limited | See below |
+
+<Aside type="caution" title="The admin 403 cannot be identified yet">
+The `403` for "administrator access required" is one Beam would like to name, and currently cannot:
+it is produced by the framework's authorization layer, which offers no way for the application to
+supply a `type`. It is [filed upstream](https://github.com/getkono/kynos/issues). Until it lands, a
+client tells it apart from [`cross-origin-rejected`](#cross-origin-rejected) and
+[`account-disabled`](#account-disabled) by their codes rather than by its own.
 </Aside>
 
-**What to do.** Sign in again. If it happens immediately after signing in successfully, the
-session cookie is not reaching the server: check that `BEAM_SERVER_URL` and `BEAM_WEB_URL` are the
-real public origins and that the cookie's `Secure` flag matches your scheme. Sessions also expire
-on idle and at an absolute age.
+### 416 Range Not Satisfiable
 
-## 403 Forbidden
+Only from `/v1/files/{id}/stream` and `/download`: the range starts past the end of the file, is
+inverted, or **the file is zero bytes**, which is refused whether or not a range was asked for.
 
-Authenticated, but not allowed.
+**What to do.** Check the file's size on disk first — a zero-byte file is usually a failed copy or a
+broken symlink. Otherwise this is typically a player working from a stale cached length, so
+hard-reload; if it persists, the file changed since it was indexed and the library needs a rescan.
 
-- **JSON**: `admin access required`, from `/v1/admin/*`.
-- **Plain text**, from `/v1/auth/callback`: `This account has been disabled. Contact an
-  administrator.` The identity verified; the local account is disabled and no session is created.
-- **Plain text**, from the same-origin check on any state-changing request:
-  `Malformed Origin/Referer header` or `Cross-origin request rejected`.
+### 429 Too Many Requests
 
-**What to do.** For `admin access required`, fix the claim at your identity provider and then
-**sign out and back in** — admin is recalculated only at sign-in, so nothing changes in a live
-session. For a cross-origin rejection, the request's `Origin`/`Referer` does not match
-`BEAM_WEB_URL`, `BEAM_SERVER_URL` or `BEAM_EXTRA_ALLOWED_ORIGINS`; the usual causes are a reverse
-proxy rewriting the header, or reaching Beam on a hostname it was never told about.
-
-## 404 Not Found
-
-- **JSON**: `media <id> not found`, `library <id> not found`, `user <id> not found`.
-- **Plain text**, from a stream or download URL: `File not found` — no such file record.
-- **Plain text**: **`Source video file not found`** — this one is different and worth knowing. The
-  database has the file but **the path on disk does not exist**.
-
-**What to do.** `Source video file not found` means your library and Beam's catalogue have
-diverged: a bind mount is missing, the library moved, or the file was deleted outside Beam.
-Check the mount, then rescan the library.
-
-## 416 Range Not Satisfiable
-
-Only from stream and download URLs: the requested range starts past the end of the file, the range
-is inverted, or **the file is zero bytes**, which is rejected whether or not a range was asked for.
-
-**What to do.** Check the file's size on disk first — a zero-byte file is usually a failed copy or
-a broken symlink, and no amount of reloading will fix it. Otherwise this is typically a player
-working from a stale cached length, so hard-reload; if it persists, the file changed since it was
-indexed and the library needs a rescan.
-
-## 429 Too Many Requests
-
-JSON `{"error": "Rate limit exceeded"}`, with a **`Retry-After`** header giving the number of
-seconds to wait.
-
-Only three endpoints are limited:
+Carries **`Retry-After`** in seconds, plus `X-RateLimit-Limit`, `-Remaining` and `-Reset`.
 
 | Class | Endpoints | Default |
 |---|---|---|
@@ -122,45 +246,25 @@ Only three endpoints are limited:
 
 The allowance is also the burst: a client starts with a full bucket that refills steadily, so the
 auth default is ten immediately and then one more every six seconds. **Streaming and download are
-deliberately never limited** — a player legitimately issues a burst of range requests, and
-limiting it would break seeking.
+deliberately never limited** — a player legitimately issues a burst of range requests, and limiting
+it would break seeking.
 
 **What to do.** Wait for `Retry-After`. Operators: raise `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` or
 `BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`. If every user shares one bucket because they arrive through a
 proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only behind a proxy that **overwrites**
 `X-Forwarded-For`, since a proxy that appends lets a client forge the header and evade the limit.
 
-## 500 Internal Server Error
+## The one endpoint that does not use this shape
 
-Always a server fault. JSON on the REST API, plain text on the stream and auth paths. Recurring
-messages include `Server state unavailable`, `Failed to look up file`, `Failed to provision user:
-…`, and `Invalid redirect URL`.
-
-**What to do.** Nothing client-side. Read the server logs around the timestamp — a 500's response
-body is deliberately terse, but the log line carries the real cause. The usual causes are
-PostgreSQL unreachable and a schema/migration mismatch. `Server state unavailable` indicates a
-wiring bug rather than a configuration problem and is worth [reporting](/help/support/).
-
-## 503 Service Unavailable
-
-Two unrelated sources:
-
-- **`/v1/health`** returns the full health object with a degraded status, and `checks` naming the
-  failing dependency.
-- **`/v1/auth/login`** returns plain text `OIDC login unavailable: …` when it cannot start a
-  sign-in flow.
-
-**What to do.** For health, read `checks` — in practice the database. For login, Beam needs
-`BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID` and `BEAM_OIDC_CLIENT_SECRET` **all three** set, and
-must be able to reach the issuer's `.well-known/openid-configuration`.
+`GET /v1/health` answers **both** `200` and `503` with the full health object rather than a problem
+document, because a monitor needs the per-dependency `checks` in either case. A `503` there means a
+dependency is unhealthy — in practice, the database.
 
 ## Stability
 
-To restate the thing this page most wants you to take away:
-
-- **Statuses are the contract.** Branch on status and endpoint.
-- **Messages are not.** They are diagnostic text and will change.
-- **There are no error codes** to match on, in any response.
+- **`type` and `status` are the contract.** Branch on `type`; fall back to `status`.
+- **`detail` is not.** It is diagnostic text and it will change.
+- A code is never repurposed. If a condition splits into two, the new one gets a new code.
 
 <LinkCard
 	title="API conventions"

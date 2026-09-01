@@ -76,34 +76,57 @@ have no files of their own. Episode sources landed in
   items.
 - **Errors:** every failure is an **RFC 9457 problem document** — one body shape for every status,
   on every route, including Kynos's own extractor rejections. There is no second envelope and no
-  hook to render one, which is what closed [#123](https://github.com/justin13888/beam/issues/123):
+  hook to render one, which closed half of [#123](https://github.com/justin13888/beam/issues/123):
   the Salvo implementation had four error enums rendering three shapes chosen by endpoint rather
   than by status, plus a framework catcher whose shape was none of them.
 
-  `type` is a **stable, machine-readable URI** under
-  `https://beam.justinchung.net/reference/errors/` (`ERROR_BASE` in `routes/api_error.rs`), written
-  out per variant rather than derived from the variant name, so the same failure carries the same
-  code whichever operation it reaches a client through. Branch on `type`, or on status; `detail`
-  stays human-facing, non-contractual, and often an interpolated internal message.
+  `type` is a **stable, machine-readable URI** and it names the *condition*, not the status.
+  `media-not-found`, `library-not-found`, `user-not-found`, `file-not-found` and
+  `source-file-missing` are five codes that were one `not-found`; that last one — the catalogue has
+  the file, the disk does not — is the one an operator can act on, and a client that cannot tell it
+  from the others sends a viewer looking for something they cannot fix. Codes that merely restate
+  the status were the remaining half of #123: they gave a client nothing beyond status plus
+  endpoint, which is the complaint the issue opened with.
 
-  The error types are a small family, not one union, and that is deliberate: Kynos derives an
+  Every code hangs under `ERROR_BASE` in `routes/api_error.rs`, which is **anchor-shaped** —
+  `https://beam.justinchung.net/reference/errors/#` — so each `type` dereferences to the section of
+  `beam-docs`' [`reference/errors`](https://beam.justinchung.net/reference/errors/) describing it.
+  It was previously a path prefix, and no such path has ever been served, so every identifier Beam
+  published resolved to a 404. Branch on `type`, or on status; `detail` stays human-facing,
+  non-contractual, and often an interpolated internal message.
+
+  The URI is written out per variant rather than derived from the variant name. Kynos can compose
+  one from `#[problem(base = ...)]` plus the variant's name, but then a rename silently changes the
+  published contract with no string to diff, and the same code is deliberately emitted from several
+  enums — `media-not-found` from three, `internal` from ten — which an implicit convention would
+  hide. `routes/taxonomy_tests.rs` asserts that every literal starts with `ERROR_BASE` and that the
+  set of codes matches the set of sections on the published page, in both directions.
+
+  The error types are a **family, one per operation shape**, not one union. Kynos derives an
   operation's `responses` from its return type, so a shared union would make `GET /v1/genres`
-  advertise a `416` it cannot reach and turn that into dead retry logic in a generated client. Each
-  operation names the narrowest type covering what it can actually answer with —
-  `InternalError`, `LookupError`, `InputError`, `MutationError`, `DeliveryError`. `401` and `403`
-  are absent from all of them because they arrive from the `SessionAuth`/`AdminAuth` extractors,
+  advertise a `416` it cannot reach. Sharpening the codes made the split load-bearing rather than
+  merely tidy: Kynos carries one response per status and titles it from the *first* variant
+  declaring that status, so a shared `MutationError` holding both `MediaNotFound` and
+  `LibraryNotFound` documented `deleteLibrary`'s 404 as "Media not found". `401` and `403` are
+  absent from almost all of them because they arrive from the `SessionAuth`/`AdminAuth` extractors,
   which is what makes taking the extractor and documenting the requirement one act.
+
+  **Framework-originated statuses carry `about:blank`, and that is correct rather than a gap.** For
+  the extractor `400`/`415`/`422`, `RangeRejection`'s `416`, the `404`/`405` fallback, the rate
+  limiter's `429` and `SessionAuth`'s `401`, the status genuinely is the whole story — RFC 9457's
+  own reading. The one real exception is the **admin `403`**: `SessionAuthenticator::authorize`
+  returns `AuthRejection::Forbidden`, and Kynos offers no way for an application to name it, so the
+  most actionable 403 on the surface is the one code Beam cannot publish. Filed upstream.
 
   Statuses in use: `400`, `401`, `403`, `404`, `416` (stream/download range), `429` (rate limiter,
   with `Retry-After` and `X-RateLimit-Limit`/`-Remaining`/`-Reset`), `500`, `503` (health,
   `/v1/auth/login` when OIDC is unconfigured, and `/metrics` when metrics are disabled). A wrong
-  method on a real path returns `405`. Two statuses were corrected by the migration: a file
-  resolving outside its library root is a `403` (`DeliveryError::Forbidden`), where the Salvo
-  handler collapsed it into a `401`; and the same-origin check's `403` is now declared on every
-  operation it covers rather than existing only at run time. `GET /v1/health` is the one endpoint
-  that answers with a domain body rather than a problem document on failure: it renders the full
-  `HealthStatus` JSON on both `200` and `503`, because a monitor needs the per-dependency `checks`.
-  This bullet is the contract; `beam-docs`'
+  method on a real path returns `405`. The `416` is declared on `MediaDelivery` rather than on
+  `DeliveryError`, because `Served::deliver` resolves an unsatisfiable range into a problem document
+  and returns it as an `Ok` delivery — the handler never sees an error to convert. `GET /v1/health`
+  is the one endpoint that answers with a domain body rather than a problem document on failure: it
+  renders the full `HealthStatus` JSON on both `200` and `503`, because a monitor needs the
+  per-dependency `checks`. This bullet is the contract; `beam-docs`'
   [`reference/errors`](https://beam.justinchung.net/reference/errors/) is its public explanation,
   and a change to any error enum is not complete until both are updated.
 
