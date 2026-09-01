@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_library_propagates_validator_validation_error() {
+    async fn test_create_library_propagates_a_path_outside_the_root() {
         let video_dir = PathBuf::from("/media/videos");
         let service = LocalLibraryService::new(
             Arc::new(InMemoryLibraryRepository::default()),
@@ -238,7 +238,9 @@ mod tests {
             video_dir.clone(),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::validation_error("path escapes root")),
+            Arc::new(InMemoryPathValidator::path_outside_root(
+                "path escapes root",
+            )),
         );
 
         let result = service

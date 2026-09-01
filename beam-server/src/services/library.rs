@@ -71,7 +71,7 @@ pub mod in_memory {
     pub enum InMemoryPathValidatorResult {
         Success(PathBuf),
         PathNotFound(String),
-        ValidationError(String),
+        PathOutsideRoot(String),
     }
 
     #[derive(Debug)]
@@ -92,9 +92,9 @@ pub mod in_memory {
             }
         }
 
-        pub fn validation_error(msg: impl Into<String>) -> Self {
+        pub fn path_outside_root(msg: impl Into<String>) -> Self {
             Self {
-                result: InMemoryPathValidatorResult::ValidationError(msg.into()),
+                result: InMemoryPathValidatorResult::PathOutsideRoot(msg.into()),
             }
         }
     }
@@ -110,7 +110,7 @@ pub mod in_memory {
                 InMemoryPathValidatorResult::PathNotFound(msg) => {
                     Err(LibraryError::PathNotFound(msg.clone()))
                 }
-                InMemoryPathValidatorResult::ValidationError(msg) => {
+                InMemoryPathValidatorResult::PathOutsideRoot(msg) => {
                     Err(LibraryError::PathOutsideRoot(msg.clone()))
                 }
             }
