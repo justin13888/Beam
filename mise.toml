@@ -915,12 +915,17 @@ cd beam-android && ./gradlew lintDebug
 description = "Rewrite the Kotlin sources to satisfy ktlint"
 run = "ktlint --format --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'"
 
+# The three Gradle tasks are ordered against each other for the same reason the
+# pre-push hook chains them: they drive ./gradlew against one project, which
+# serialises on its own lock anyway, so running them at once only contends.
 [tasks."android:test"]
 description = "Run the Android unit tests (JVM and Robolectric)"
+wait_for = ["android:lint"]
 run = "cd beam-android && ./gradlew testDebugUnitTest"
 
 [tasks."android:screenshot"]
 description = "Check the rendered screens against the recorded references"
+wait_for = ["android:lint", "android:test"]
 run = "cd beam-android && ./gradlew verifyRoborazziDebug"
 
 [tasks."android:screenshot:record"]
@@ -1070,6 +1075,12 @@ xcrun xcodebuild test \
 [tasks."apple:snapshot"]
 description = "Check the rendered screens against the recorded references"
 depends = ["core:apple"]
+# Every xcodebuild here shares one DerivedData, and two at once fail with
+# "unable to attach DB ... database is locked". `mise run ci` schedules
+# apple:test, apple:snapshot and apple:build together, so they are ordered
+# against each other. wait_for rather than depends: it orders these only when
+# they are already scheduled, so running one alone still runs only that one.
+wait_for = ["apple:test"]
 dir = "beam-apple/Packages/BeamKit"
 run = '''
 set -eu
@@ -1125,6 +1136,8 @@ echo "References rewritten. Review \`git diff\` before committing them."
 [tasks."apple:build"]
 description = "Build the iOS and macOS apps"
 depends = ["apple:project", "core:apple"]
+# Last of the xcodebuild tier -- see apple:snapshot for why these are ordered.
+wait_for = ["apple:test", "apple:snapshot"]
 run = '''
 set -eu
 
