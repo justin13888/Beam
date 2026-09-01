@@ -106,8 +106,10 @@ export function MediaDetailPage({
 				"Metadata refresh queued -- it will be re-fetched on the next enrichment sweep",
 			);
 		},
-		onError: () => {
-			toast.error("Failed to request a metadata refresh");
+		onError: (error) => {
+			// The thrown ApiError already carries the server's explanation and
+			// its fallback; re-stating a fixed string here discarded it.
+			toast.error(error.message);
 		},
 	});
 

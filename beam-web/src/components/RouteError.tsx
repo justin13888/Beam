@@ -1,6 +1,7 @@
 import { useRouter } from "@tanstack/react-router";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ApiError } from "@/lib/problem";
 
 export function RouteError({
 	error,
@@ -23,10 +24,24 @@ export function RouteError({
 				<h2 className="text-xl font-semibold text-white">
 					Something went wrong
 				</h2>
-				{import.meta.env.DEV && (
-					<p className="text-red-400 text-sm max-w-md mx-auto font-mono bg-gray-900/60 rounded p-3">
+				{/*
+				 * An ApiError's message has already been through `apiError`,
+				 * which shows the server's own `detail` only for a Beam
+				 * problem document below 500 -- so it is a sentence written
+				 * for a viewer, and showing it is the entire point of the
+				 * error taxonomy. Anything else is an unvetted exception
+				 * message and stays behind the DEV gate (NFR-108).
+				 */}
+				{error instanceof ApiError ? (
+					<p className="text-gray-300 text-sm max-w-md mx-auto">
 						{error.message}
 					</p>
+				) : (
+					import.meta.env.DEV && (
+						<p className="text-red-400 text-sm max-w-md mx-auto font-mono bg-gray-900/60 rounded p-3">
+							{error.message}
+						</p>
+					)
 				)}
 				<Button
 					onClick={handleRetry}
