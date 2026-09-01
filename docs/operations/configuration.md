@@ -84,9 +84,16 @@ Read by the compose files, not by application code:
 | `WEB_HOST_PORT` | `8080` | Host port for the web app. |
 | `DEX_HOST_PORT` | `5556` | Host port for the dev-only Dex IdP. Only meaningful with the `dev-idp` compose profile enabled; see [`deployment.md`](deployment.md). Not freely overridable: `5556` is part of the issuer URL in `dex/config.yaml` and in the `dev:up` task, and OIDC discovery compares issuer strings byte-for-byte, so changing this alone breaks login. Change all three together. |
 | `TRAEFIK_HTTP_PORT` / `TRAEFIK_HTTPS_PORT` / `TRAEFIK_DASHBOARD_PORT` | `80` / `443` / `8888` | Traefik entrypoints (dashboard is loopback-only). |
-| `BEAM_COMPOSE` | `podman compose` if `podman` is on `PATH`, else `docker compose` | Container runtime the `dev:*` mise tasks drive. Set it (e.g. `docker compose`) when both are installed but only one is usable. |
 | `HOST_VIDEO_DIR` | `server_videos` named volume | Host path mounted read-only at `BEAM_VIDEO_DIR`. |
 | `HOST_DATA_DIR` | `server_data` named volume | Host path mounted at `BEAM_DATA_DIR`. |
+
+## Task-only variables
+
+Read by the `mise` tasks, not by the compose files or by application code:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BEAM_COMPOSE` | `podman compose` if `podman` is on `PATH`, else `docker compose` | Container runtime the `dev:*` mise tasks drive. Set it (e.g. `docker compose`) when both are installed but only one is usable. |
 
 ## Validation
 
