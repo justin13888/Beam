@@ -945,10 +945,17 @@ impl BeamClient {
                     sent = sent.saturating_add(1);
                 }
                 Err(error) => {
-                    queue.record_failure(&entry.file_id, None).await?;
+                    let failure = TransportFailure::of(&error);
+                    // The server's own interval, where it sent one. Passing
+                    // `None` here fell back to blind exponential backoff and
+                    // ignored a 429's `Retry-After` -- which this crate reads,
+                    // parses, and carried as far as this line before dropping.
+                    queue
+                        .record_failure(&entry.file_id, failure.retry_after_secs)
+                        .await?;
                     // A queue drain stops at the first failure rather than
                     // hammering an unreachable server with the whole backlog.
-                    let _ = self.map_error(&server_id, &TransportFailure::of(&error));
+                    let _ = self.map_error(&server_id, &failure);
                     break;
                 }
             }
