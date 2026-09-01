@@ -12,13 +12,13 @@ default-run = "beam-server"
 #
 # Every `#[kynos::get(...)]` emits a `relative_uri` doc comment whose second
 # paragraph is indented eight spaces. Markdown reads a 4+ space indent as a code
-# block and rustdoc compiles an unannotated code block as Rust, so each of the
-# 34 route attributes produces a doctest that tries to compile an English
+# block and rustdoc compiles an unannotated code block as Rust, so every route
+# attribute in this crate produces a doctest that tries to compile an English
 # sentence and fails -- which fails `cargo test --workspace`.
 #
-# This costs nothing today: all 34 doctests are macro-generated and this crate
-# has no hand-written ones. Restore the default the moment it is fixed, or a
-# doctest written later will be silently skipped.
+# This costs nothing today: every one of those doctests is macro-generated and
+# this crate has no hand-written ones. Restore the default the moment it is
+# fixed, or a doctest written later will be silently skipped.
 doctest = false
 
 [dependencies]

@@ -128,10 +128,10 @@ read a 3.2 document: it delegates to `@redocly/openapi-core` 1.34.8, whose `dete
 3.0 and 3.1 and throws `Unsupported OpenAPI version: 3.2.0`. Redocly 2.x speaks 3.2; the generator
 has not bumped to it. Since `beam-web` is being rewritten shortly, it is stood down rather than
 worked around: the client codegen step and the `ts:typecheck`/`ts:test` gates carry a
-`#118-followup` TODO, and the schema keys in `api.gen.ts` still use the pre-migration dotted names.
-While that holds, the TypeScript compiler is **not** a contract check for `beam-web`; the Rust side
-of the contract is checked by `codegen:openapi:check` and by the router refusing to build if it
-cannot describe itself.
+[#146](https://github.com/justin13888/beam/issues/146) TODO, and the schema keys in `api.gen.ts`
+still use the pre-migration dotted names. While that holds, the TypeScript compiler is **not** a
+contract check for `beam-web`; the Rust side of the contract is checked by `codegen:openapi:check`
+and by the router refusing to build if it cannot describe itself.
 
 ## Server-Sent Events
 

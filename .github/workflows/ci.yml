@@ -328,7 +328,7 @@ jobs:
   ts-typecheck:
     name: TypeScript type check
     needs: [changes, openapi]
-    # TODO(#118-followup): re-enable once beam-web is regenerated against the
+    # TODO(#146): re-enable once beam-web is regenerated against the
     # Kynos contract. `api.gen.ts` cannot be regenerated until the TypeScript
     # toolchain reads OpenAPI 3.2 (see the codegen:openapi task), and every
     # schema key it names was renamed by the port. A skipped job still
@@ -348,7 +348,7 @@ jobs:
   ts-test:
     name: Web tests
     needs: [changes, openapi]
-    # TODO(#118-followup): re-enable once beam-web is regenerated against the
+    # TODO(#146): re-enable once beam-web is regenerated against the
     # Kynos contract. `api.gen.ts` cannot be regenerated until the TypeScript
     # toolchain reads OpenAPI 3.2 (see the codegen:openapi task), and every
     # schema key it names was renamed by the port. A skipped job still
@@ -376,7 +376,7 @@ jobs:
   ts-build:
     name: Web build
     needs: [changes, openapi]
-    # TODO(#118-followup): re-enable once beam-web is regenerated against the
+    # TODO(#146): re-enable once beam-web is regenerated against the
     # Kynos contract. `api.gen.ts` cannot be regenerated until the TypeScript
     # toolchain reads OpenAPI 3.2 (see the codegen:openapi task), and every
     # schema key it names was renamed by the port. A skipped job still

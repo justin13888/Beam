@@ -121,7 +121,7 @@ hooks {
                 glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json")
                 check = "mise run ts:check"
             }
-            // TODO(#118-followup): restore `ts-typecheck` and `ts-test`.
+            // TODO(#146): restore `ts-typecheck` and `ts-test`.
             //
             // Disabled in step with the `ci` task in mise.toml, which is the point of
             // routing both through `mise run`: the hook and CI must not disagree about

@@ -381,7 +381,7 @@ run = [
     # checked -- so beam-client-core could silently keep generating a client
     # for a server that no longer existed.
     "cp beam-web/openapi.json beam-client-core/api/openapi.json",
-    # TODO(#118-followup): regenerate the TypeScript client.
+    # TODO(#146): regenerate the TypeScript client.
     #
     # `openapi-typescript` 7.13.0 cannot read this document. Its own version
     # gate accepts 3.2, but it delegates to @redocly/openapi-core 1.34.8, whose
@@ -1118,7 +1118,7 @@ depends = [
     "check:mutants-skip-fakes",
     "codegen:openapi:check",
     "ts:check",
-    # TODO(#118-followup): restore "ts:typecheck" and "ts:test".
+    # TODO(#146): restore "ts:typecheck" and "ts:test".
     #
     # beam-web is generated from `api.gen.ts`, which cannot be regenerated
     # until the TypeScript toolchain reads OpenAPI 3.2 (see codegen:openapi).

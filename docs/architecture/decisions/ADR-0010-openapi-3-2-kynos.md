@@ -84,7 +84,11 @@ What shipped, and where it differs from the decision above.
 
 - **Kynos arrived as a crates.io release, not a pinned revision.** The decision text required a
   pinned Kynos revision because Kynos was pre-release when this was written. 0.1.0 published, so the
-  dependency is a version requirement like any other and the pin is moot.
+  dependency is a version requirement like any other and the pin is moot. That is now the standing
+  policy for both first-party tools: Beam tracks `kynos` and `spargen` as crates.io version
+  requirements, not git revisions. A gap still goes upstream first, but Beam consumes the fix from a
+  release rather than pinning the revision that carries it -- a git pin takes an unreviewed slice of
+  upstream `master` along with the one fix, which is how a dependency stops being a decision.
 - **`/metrics` is described, not hidden.** Under Salvo it was a plain handler `merge_router` could
   not see, so it stayed out of the spec by accident of the framework. Kynos routes and describes
   from one declaration, and the only ways to keep it out are the `unchecked` feature — which stamps
