@@ -95,5 +95,12 @@ volumes:
   dex:
 
 networks:
+  # Declared explicitly even though Compose would create `default` implicitly:
+  # `dex` attaches to it by name to carry the `dex.beam.localhost` alias, and
+  # podman-compose refuses a project whose services reference a network no file
+  # declares (`RuntimeError: missing networks: default`). Docker Compose accepts
+  # the implicit form, so this is the one line that keeps `podman compose` --
+  # which mise.toml prefers and the README documents first -- a working runtime.
+  default:
   beam_proxy:
     name: beam_proxy
