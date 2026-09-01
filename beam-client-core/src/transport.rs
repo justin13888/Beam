@@ -253,40 +253,62 @@ pub const ABOUT_BLANK: &str = "about:blank";
 /// enum implements.
 #[derive(Debug)]
 pub(crate) struct TransportFailure {
-    /// The response status, where the request reached a response.
-    ///
-    /// `None` is what actually distinguishes a network failure from a server
-    /// one: no response arrived, so there is no status to reason about and no
-    /// problem document to read.
-    pub(crate) status: Option<u16>,
+    /// What kind of failure this was, where no response arrived to speak for
+    /// itself.
+    pub(crate) kind: FailureKind,
     /// `Retry-After`, in whole seconds, when the response carried a usable one.
     pub(crate) retry_after_secs: Option<u64>,
     /// The transport's own description, used only when there is no response.
     pub(crate) message: String,
 }
 
+/// The three answers a failed request can give, before its body is read.
+///
+/// Split because `is_retryable` drives the progress queue, and its own doc
+/// comment warns that a permanently-failing sample must not be able to occupy
+/// that queue forever. Collapsing all of these into one retryable network error
+/// is exactly how it would.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FailureKind {
+    /// A response arrived, with this status. Its body decides the rest.
+    Answered(u16),
+    /// No response arrived, and the same request could plausibly get one:
+    /// connection refused, TLS handshake, timeout, a stream that stopped.
+    Unreachable,
+    /// The request or the response could not be made sense of: a base URL that
+    /// will not build, a body that does not match the contract the client was
+    /// generated from. Retrying reproduces it exactly.
+    Malformed,
+}
+
 impl TransportFailure {
     pub(crate) fn of<E: std::fmt::Display>(error: &crate::api::Error<E>) -> Self {
         use crate::api::Error;
 
-        let (status, headers) = match error {
-            Error::Api(value) => (Some(value.status()), Some(value.headers())),
+        let (kind, headers) = match error {
+            Error::Api(value) => (
+                FailureKind::Answered(value.status().as_u16()),
+                Some(value.headers()),
+            ),
             Error::UnexpectedStatus {
                 status, headers, ..
-            } => (Some(*status), Some(headers)),
-            // No response arrived: connection refused, TLS failure, timeout,
-            // redirect exhaustion, a body that would not decode.
-            Error::RequestConstruction(_)
-            | Error::Transport(_)
+            } => (FailureKind::Answered(status.as_u16()), Some(headers)),
+
+            Error::Transport(_)
             | Error::Timeout(_)
-            | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::Decode { .. }
-            | Error::InterruptedBody(_) => (None, None),
+            | Error::InterruptedBody(_) => (FailureKind::Unreachable, None),
+
+            // A URL that will not build and a body that will not decode are
+            // both permanent: the identical request produces the identical
+            // failure, so offering a retry would be a dead end.
+            Error::RequestConstruction(_) | Error::Protocol(_) | Error::Decode { .. } => {
+                (FailureKind::Malformed, None)
+            }
         };
 
         Self {
-            status: status.map(|status| status.as_u16()),
+            kind,
             retry_after_secs: headers.and_then(retry_after_secs),
             message: error.to_string(),
         }
@@ -582,6 +604,31 @@ mod tests {
             BeamError::RateLimited { retry_after_secs } => assert!(retry_after_secs > 0),
             other => panic!("expected rate limiting, got {other:?}"),
         }
+    }
+
+    /// A failure with no response is not automatically worth retrying.
+    ///
+    /// `is_retryable` decides whether the playback-progress queue enqueues or
+    /// drops, and its own doc comment says a permanently-failing sample must
+    /// not be able to occupy that queue forever. A body that will not decode
+    /// and a base URL that will not build both reproduce exactly on a retry,
+    /// so they are `Protocol`, not a retryable `Network`.
+    #[test]
+    fn a_permanent_failure_is_not_classified_as_a_retryable_network_error() {
+        use crate::api::Error;
+
+        let decode: Error<std::convert::Infallible> = Error::Decode {
+            path: "$.id".to_owned(),
+            body: bytes::Bytes::from_static(b"{"),
+            truncated: false,
+        };
+        assert_eq!(TransportFailure::of(&decode).kind, FailureKind::Malformed);
+
+        let unbuildable: Error<std::convert::Infallible> = Error::request_message("not a base URL");
+        assert_eq!(
+            TransportFailure::of(&unbuildable).kind,
+            FailureKind::Malformed
+        );
     }
 
     #[test]

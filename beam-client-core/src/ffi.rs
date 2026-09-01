@@ -23,7 +23,7 @@ use crate::progress::{
 use crate::servers::{ServerRecord, normalize_base_url, server_id_for};
 use crate::session::{SessionEvent, SessionState, UserSummary};
 use crate::transport::{
-    ABOUT_BLANK, SessionCookieHolder, SessionMiddleware, TransportFailure, classify,
+    ABOUT_BLANK, FailureKind, SessionCookieHolder, SessionMiddleware, TransportFailure, classify,
 };
 use crate::upnext::{UpNextSeason, next_playable_episode};
 use std::collections::HashMap;
@@ -1502,11 +1502,19 @@ impl BeamClient {
             .ok()
             .flatten();
 
-        match failure.status {
-            Some(status) => classify(status, problem.as_ref(), failure.retry_after_secs),
-            None => BeamError::Network {
+        match failure.kind {
+            FailureKind::Answered(status) => {
+                classify(status, problem.as_ref(), failure.retry_after_secs)
+            }
+            FailureKind::Unreachable => BeamError::Network {
                 detail: failure.message.clone(),
                 retryable: true,
+            },
+            // Not `Network { retryable: false }`: this is not the network, and
+            // `Protocol` is the variant that already means "the response did
+            // not match the contract the client was generated from".
+            FailureKind::Malformed => BeamError::Protocol {
+                detail: failure.message.clone(),
             },
         }
     }
