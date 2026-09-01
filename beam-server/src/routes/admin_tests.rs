@@ -131,7 +131,15 @@ impl MetadataService for StubMetadataService {
             },
         }
     }
-    async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
+    async fn refresh_metadata(&self, filter: MediaFilter) -> Result<(), MetadataError> {
+        // Part of the trait's contract rather than a shortcut, the same way
+        // the media and stream stubs honour it: a malformed id is `InvalidId`,
+        // which the route owes a 400. While this stub ignored its argument
+        // entirely, the route test below could assert 204 for `some-id` and
+        // pass -- codifying the answer production had just stopped giving.
+        if let MediaFilter::ByMediaId(media_id) = &filter {
+            uuid::Uuid::parse_str(media_id).map_err(|_| MetadataError::InvalidId)?;
+        }
         Ok(())
     }
     async fn get_media_sources(
@@ -697,12 +705,33 @@ async fn refreshing_media_metadata_as_an_admin_is_204() {
     let token = seed_user_session(&fixture, true).await;
 
     let response = client
-        .post("/v1/admin/media/some-id/refresh")
+        .post("/v1/admin/media/0199a1f0-0000-7000-8000-000000000001/refresh")
         .cookie("beam_session", &token)
         .send()
         .await;
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+/// The route half of the malformed-id fix, which had no test at all.
+///
+/// The 204 case above used to pass `some-id` -- not a UUID -- and assert 204,
+/// codifying the answer production had stopped giving. It only passed because
+/// this file's stub ignored its argument while the two sibling stubs had been
+/// taught to honour it.
+#[tokio::test]
+async fn refreshing_a_malformed_media_id_is_400() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    client
+        .post("/v1/admin/media/not-a-uuid/refresh")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
 }
 
 // ─── Admin users & system status (issue #85) ─────────────────────────────────
