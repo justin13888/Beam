@@ -43,6 +43,14 @@ const ABOUT_BLANK = "about:blank";
 const SOURCE_FILE_MISSING = "#source-file-missing";
 
 /**
+ * The path every Beam problem type hangs under, whatever origin serves it.
+ *
+ * Matched rather than a whole origin for the same reason `SOURCE_FILE_MISSING`
+ * is a suffix: the deployment moves the origin, the path is the stable half.
+ */
+const BEAM_CODE_PATH = "/reference/errors/#";
+
+/**
  * Read a problem document out of whatever `openapi-fetch` put in `error`.
  *
  * Takes `unknown` and returns a fresh object rather than narrowing its
@@ -113,7 +121,15 @@ export function apiError(error: unknown, fallback: string): ApiError {
 		);
 	}
 
+	// `problem.status` is a member of the very body being judged, so on its own
+	// it is not a safe input to a leak guard: a response whose transport status
+	// is 500 but whose document claims `"status": 400` would talk its diagnostic
+	// `detail` straight past this check (NFR-108). beam-server writes both from
+	// one StatusCode, so the status *is* trustworthy -- once the document is
+	// known to be Beam's, which is what the path check establishes. A proxy or
+	// gateway page gets the fallback whatever it claims about itself.
 	const usable =
+		problem.type.includes(BEAM_CODE_PATH) &&
 		problem.status < 500 &&
 		problem.detail !== undefined &&
 		problem.detail.trim() !== "";

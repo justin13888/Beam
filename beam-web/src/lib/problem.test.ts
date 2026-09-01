@@ -111,4 +111,22 @@ describe("apiError", () => {
 
 		expect(error.message).toBe("Failed to load media");
 	});
+
+	// The leak guard reads `status` out of the body it is judging, so a
+	// document is free to understate its own status. beam-server never does --
+	// kynos writes both from one StatusCode -- but a proxy sitting in front of
+	// it can, and NFR-108 is what stops diagnostic text reaching a viewer.
+	// Trusting `status` is only safe once the document is known to be Beam's.
+	it("does not show detail from a document that is not Beam's", () => {
+		const error = apiError(
+			{
+				type: "https://proxy.example.com/errors#upstream",
+				status: 400,
+				detail: "connect ECONNREFUSED 10.0.0.7:5432",
+			},
+			"Failed to load libraries",
+		);
+
+		expect(error.message).toBe("Failed to load libraries");
+	});
 });
