@@ -47,6 +47,8 @@ pub enum BeamError {
     Forbidden {
         /// The server's explanation.
         detail: String,
+        /// The problem document's `type`. See [`BeamError::NotFound`].
+        code: String,
     },
 
     /// The resource does not exist, or was removed by a rescan.
@@ -54,6 +56,16 @@ pub enum BeamError {
     NotFound {
         /// The server's explanation.
         detail: String,
+        /// The problem document's `type`: the stable identifier for *which*
+        /// failure this is, where the status alone cannot say.
+        ///
+        /// `media-not-found` and `source-file-missing` are both 404s and want
+        /// different words in front of a viewer -- the second means the
+        /// library and the disk have diverged, which is an operator's problem
+        /// rather than the viewer's. `about:blank` when the framework answered
+        /// rather than the application, which RFC 9457 defines as "the status
+        /// code is the whole story".
+        code: String,
     },
 
     /// The server rejected the request as malformed.
@@ -61,6 +73,8 @@ pub enum BeamError {
     BadRequest {
         /// The server's explanation.
         detail: String,
+        /// The problem document's `type`. See [`BeamError::NotFound`].
+        code: String,
     },
 
     /// Rate limited. `beam-server` applies this to the browse/search class and
@@ -78,6 +92,8 @@ pub enum BeamError {
         status: u16,
         /// The server's explanation, where it sent one.
         detail: String,
+        /// The problem document's `type`. See [`BeamError::NotFound`].
+        code: String,
     },
 
     /// The request never produced a response.
@@ -268,6 +284,7 @@ mod tests {
                 BeamError::Server {
                     status,
                     detail: String::new(),
+                    code: String::new(),
                 }
                 .is_retryable(),
                 "{status} should be retryable"
@@ -278,6 +295,7 @@ mod tests {
             !BeamError::Server {
                 status: 418,
                 detail: String::new(),
+                code: String::new(),
             }
             .is_retryable()
         );
@@ -295,7 +313,8 @@ mod tests {
         assert!(!BeamError::Unauthenticated.is_retryable());
         assert!(
             !BeamError::NotFound {
-                detail: String::new()
+                detail: String::new(),
+                code: String::new(),
             }
             .is_retryable()
         );

@@ -1017,6 +1017,8 @@ pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParam
         Some(0) => {
             return Err(BeamError::BadRequest {
                 detail: "a page size of zero would return nothing".to_owned(),
+                // Refused before the wire, so there is no server type.
+                code: crate::transport::ABOUT_BLANK.to_owned(),
             });
         }
         Some(value) => Some(i64::from(value)),
