@@ -132,6 +132,21 @@ pub enum MutationError {
 /// there is no 403 for this type to carry.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum DeliveryError {
+    /// The `{file_id}` in the path is not a UUID.
+    ///
+    /// `stream.rs` swallowed this into a 500 by catching every `LibraryError`
+    /// from the lookup as an internal fault (issue #123). The path parameter
+    /// is typed `String` rather than `Uuid` deliberately -- a `Uuid` would let
+    /// Kynos answer the 400 first, but then the problem document would carry
+    /// no type Beam can name.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/bad-request",
+        title = "Bad request"
+    )]
+    InvalidFileId(String),
+
     #[error("{0}")]
     #[problem(
         status = 404,

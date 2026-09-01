@@ -191,6 +191,10 @@ impl LibraryService for StubLibraryService {
         unimplemented!("not called in stream route tests")
     }
     async fn get_file_by_id(&self, file_id: String) -> Result<Option<LibraryFile>, LibraryError> {
+        // The trait's contract, not a convenience: a malformed id is
+        // `InvalidId` rather than a miss, and the delivery routes answer the
+        // two with different statuses.
+        uuid::Uuid::parse_str(&file_id).map_err(|_| LibraryError::InvalidId)?;
         Ok(self.files.iter().find(|f| f.id == file_id).cloned())
     }
 }
@@ -470,6 +474,44 @@ async fn stream_file_unknown_to_the_library_is_404() {
         .send()
         .await
         .assert_status(StatusCode::NOT_FOUND);
+}
+
+/// A `{file_id}` that is not a UUID is the caller's mistake, so it must be a
+/// 400 rather than the 500 the delivery path used to answer with.
+///
+/// `locate_file` caught every `LibraryError` from the lookup as an internal
+/// fault, so a typo in a URL was reported as a server failure -- retryable to
+/// a client that reads the status, and noise in the logs to an operator
+/// (issue #123). It also has to stay distinct from the 404 the two tests
+/// above cover: "you asked for something malformed" and "no such file" lead a
+/// client somewhere different.
+#[tokio::test]
+async fn stream_file_with_a_malformed_id_is_400_not_500() {
+    let fixture = make_test_state(vec![]);
+    let client = build_client(&fixture);
+    let token = seed_session_token(&fixture).await;
+
+    client
+        .get("/v1/files/not-a-uuid/stream")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+}
+
+/// The same for the download route, which shares `locate_file`.
+#[tokio::test]
+async fn download_file_with_a_malformed_id_is_400_not_500() {
+    let fixture = make_test_state(vec![]);
+    let client = build_client(&fixture);
+    let token = seed_session_token(&fixture).await;
+
+    client
+        .get("/v1/files/not-a-uuid/download")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
 }
 
 /// No session cookie at all must return 401.

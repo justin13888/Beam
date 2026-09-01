@@ -71,6 +71,9 @@ impl MetadataService for StubMetadataService {
     }
 
     async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError> {
+        // Part of the trait's contract rather than a shortcut: a malformed id
+        // is `InvalidId`, which the route owes a 400.
+        uuid::Uuid::parse_str(media_id).map_err(|_| MetadataError::InvalidId)?;
         if let Some(msg) = self.unsupported.get(media_id) {
             return Err(MetadataError::Unsupported(msg.clone()));
         }
@@ -322,6 +325,25 @@ async fn sources_for_a_show_id_are_a_400() {
 
     client
         .get(&format!("/v1/media/{SHOW_ID}/sources"))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/bad-request");
+}
+
+/// A malformed media id is a 400, where it used to be a 500.
+///
+/// The service folded the failed UUID parse into `InternalError`, so a typo in
+/// a URL was reported as a server fault on this route while the very same typo
+/// on `/v1/media/{id}` answered 404 -- three operations over one resource
+/// giving three answers to one condition (issue #123).
+#[tokio::test]
+async fn sources_for_a_malformed_id_are_a_400_not_a_500() {
+    let (client, token) = signed_in(StubMetadataService::default()).await;
+
+    client
+        .get("/v1/media/not-a-uuid/sources")
         .cookie("beam_session", &token)
         .send()
         .await

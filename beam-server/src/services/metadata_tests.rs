@@ -581,6 +581,60 @@ mod tests {
         assert!(matches!(result, Err(MetadataError::MediaNotFound)));
     }
 
+    /// A malformed id is the caller's mistake, and must stay distinguishable
+    /// from both a well-formed miss and a server fault.
+    ///
+    /// It was folded into `InternalError`, which the routes render as a 500 --
+    /// so `/v1/media/{id}/sources` answered a typo with "the server broke"
+    /// while `/v1/media/{id}` answered the same typo with 404 (issue #123).
+    #[tokio::test]
+    async fn test_get_media_sources_malformed_id_is_distinct_from_a_miss() {
+        use crate::services::metadata::MetadataError;
+
+        let service = make_service();
+
+        let malformed = service.get_media_sources("not-a-uuid").await;
+        assert!(
+            matches!(malformed, Err(MetadataError::InvalidId)),
+            "a malformed id must be InvalidId, got {malformed:?}"
+        );
+
+        let missing = service.get_media_sources(&Uuid::new_v4().to_string()).await;
+        assert!(
+            matches!(missing, Err(MetadataError::MediaNotFound)),
+            "a well-formed id that resolves to nothing stays MediaNotFound"
+        );
+    }
+
+    /// The refresh path parses the same id and had the same defect.
+    ///
+    /// Needs an enrichment repo: without one `refresh_metadata` is documented
+    /// to be a no-op and returns `Ok(())` before it ever reads the id, so a
+    /// service built without one cannot exercise the parse at all.
+    #[tokio::test]
+    async fn test_refresh_metadata_malformed_id_is_not_an_internal_error() {
+        use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
+
+        use crate::services::metadata::{MediaFilter, MetadataError};
+
+        let service = DbMetadataService::new(
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        )
+        .with_enrichment_repo(Arc::new(InMemoryEnrichmentStateRepository::default()));
+
+        let result = service
+            .refresh_metadata(MediaFilter::ByMediaId("not-a-uuid".to_owned()))
+            .await;
+
+        assert!(
+            matches!(result, Err(MetadataError::InvalidId)),
+            "expected InvalidId, got {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_get_media_sources_show_id_returns_unsupported() {
         use crate::services::metadata::MetadataError;

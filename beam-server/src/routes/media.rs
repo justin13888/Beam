@@ -138,6 +138,10 @@ pub async fn get_media_sources(
 ) -> Result<Json<Vec<MediaSource>>, MutationError> {
     match state.services.metadata.get_media_sources(&path.id).await {
         Ok(sources) => Ok(Json(sources)),
+        Err(MetadataError::InvalidId) => Err(MutationError::BadRequest(format!(
+            "media id {} is not a valid identifier",
+            path.id
+        ))),
         Err(MetadataError::MediaNotFound) => Err(MutationError::NotFound(format!(
             "media {} not found",
             path.id

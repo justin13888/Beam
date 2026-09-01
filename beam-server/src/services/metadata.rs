@@ -38,6 +38,10 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     /// Movie ids and episode ids are both accepted (a show id is not -- it has
     /// no files of its own; callers use its episode ids instead). An episode
     /// with no files yet resolves to an empty list rather than an error.
+    ///
+    /// A `media_id` that is not a UUID is [`MetadataError::InvalidId`], kept
+    /// distinct from `MediaNotFound` because the routes answer them 400 and
+    /// 404 respectively.
     async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError>;
 }
 
@@ -595,8 +599,7 @@ impl MetadataService for DbMetadataService {
                 Ok(())
             }
             MediaFilter::ByMediaId(media_id) => {
-                let id = Uuid::parse_str(&media_id)
-                    .map_err(|_| MetadataError::InternalError("invalid media id".to_string()))?;
+                let id = Uuid::parse_str(&media_id).map_err(|_| MetadataError::InvalidId)?;
 
                 let target = if matches!(self.movie_repo.find_by_id(id).await, Ok(Some(_))) {
                     EnrichmentTargetId::Movie(id)
@@ -627,8 +630,7 @@ impl MetadataService for DbMetadataService {
     }
 
     async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError> {
-        let id = Uuid::parse_str(media_id)
-            .map_err(|_| MetadataError::InternalError("invalid media id".to_string()))?;
+        let id = Uuid::parse_str(media_id).map_err(|_| MetadataError::InvalidId)?;
 
         if matches!(self.movie_repo.find_by_id(id).await, Ok(Some(_))) {
             let entries = self
@@ -732,6 +734,14 @@ impl DbMetadataService {
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
+    /// The caller's media id is not a UUID.
+    ///
+    /// Its own variant because it is the caller's mistake, not the server's:
+    /// folding it into `InternalError` is what made a malformed id a 500 on
+    /// `/v1/media/{id}/sources` and `/v1/admin/media/{id}/refresh` (issue
+    /// #123).
+    #[error("invalid media id")]
+    InvalidId,
     #[error("Media not found")]
     MediaNotFound,
     #[error("Internal metadata service error: {0}")]

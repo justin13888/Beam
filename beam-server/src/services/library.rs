@@ -136,7 +136,12 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     async fn get_library_files(&self, library_id: String)
     -> Result<Vec<LibraryFile>, LibraryError>;
 
-    /// Get a single file by its ID
+    /// Get a single file by its ID.
+    ///
+    /// A `file_id` that is not a UUID is [`LibraryError::InvalidId`], not
+    /// `Ok(None)`: the caller sent something malformed rather than named a
+    /// file that does not exist, and the delivery routes answer the two
+    /// differently (400 against 404).
     async fn get_file_by_id(&self, file_id: String) -> Result<Option<LibraryFile>, LibraryError>;
 
     /// Create a new library

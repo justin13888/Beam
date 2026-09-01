@@ -33,6 +33,7 @@ use crate::state::AppState;
 impl From<MetadataError> for MutationError {
     fn from(err: MetadataError) -> Self {
         match err {
+            MetadataError::InvalidId => Self::BadRequest(err.to_string()),
             MetadataError::MediaNotFound => Self::NotFound(err.to_string()),
             MetadataError::Unsupported(msg) => Self::BadRequest(msg),
             MetadataError::InternalError(msg) => Self::Internal(msg),
