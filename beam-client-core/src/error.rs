@@ -131,21 +131,50 @@ pub enum BeamError {
     },
 }
 
+/// Whether retrying the identical request could plausibly succeed.
+///
+/// A free function because the platforms cannot reach the inherent method:
+/// `BeamError` is a `uniffi::Error`, and an `impl` block on one is not
+/// exported -- `#[uniffi::export]` wants an object receiver. So Kotlin and
+/// Swift each hand-wrote their own table, and all three disagreed. Rust said a
+/// `Server` below 500 was not retryable while both clients said it was, which
+/// put a retry button on a 415 that will be rejected identically forever; and
+/// Rust said `Storage` was not retryable while Kotlin said it was, each with a
+/// stated rationale, in tests that could not see each other.
+///
+/// One answer, computed here.
+#[uniffi::export]
+#[must_use]
+pub fn is_retryable(error: BeamError) -> bool {
+    error.is_retryable()
+}
+
 impl BeamError {
     /// Whether retrying the identical request could plausibly succeed.
     ///
-    /// Used by the playback-progress queue to decide between enqueueing and
-    /// dropping. Deliberately conservative: an error whose retryability is
-    /// unclear is treated as *not* retryable, so a permanently-failing sample
-    /// cannot occupy the queue forever.
+    /// Consulted by the playback-progress queue, which drops rather than
+    /// enqueues a failure this reports false for, and exported to the
+    /// platforms as [`is_retryable`]. Deliberately conservative: an error
+    /// whose retryability is unclear is treated as *not* retryable, so a
+    /// permanently-failing sample cannot occupy the queue forever.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Network { retryable, .. } => *retryable,
             Self::RateLimited { .. } => true,
             // 5xx is the server failing to handle a request it accepted;
-            // the same request may well succeed later.
+            // the same request may well succeed later. A 4xx that reached
+            // here -- a 415 or a 422 on the three operations that declare
+            // them -- is the request itself being refused, and resending it
+            // unchanged fails identically.
             Self::Server { status, .. } => *status >= 500,
+            // The device could not write, not the server could not be asked.
+            // A full disk or a locked keystore clears, and the viewer who
+            // frees space has a real path to success -- so this is stated
+            // rather than left to the catch-all below, which had it backwards.
+            // Android said retryable here and gave that reason; Rust said not
+            // and gave none, because `Storage` simply fell through `_`.
+            Self::Storage { .. } => true,
             _ => false,
         }
     }
@@ -327,6 +356,10 @@ mod tests {
         }
         .into();
         assert!(matches!(widened, BeamError::Storage { .. }));
-        assert!(!widened.is_retryable());
+        // Retryable: the keystore unlocks, the disk is emptied. This used to
+        // assert the opposite while `BeamErrorsTest.kt` asserted this, in the
+        // same change -- neither could see the other, because the core's
+        // verdict never crossed the FFI.
+        assert!(widened.is_retryable());
     }
 }

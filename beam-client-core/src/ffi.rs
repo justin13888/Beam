@@ -893,6 +893,22 @@ impl BeamClient {
                 // sample would be held back behind an interval that never
                 // produced a request. Clearing it lets the retry happen.
                 throttle.reset(&file_id);
+                let mapped = self.map_error(&server_id, &TransportFailure::of(&error));
+
+                // A rejected body, a forbidden file, a title that no longer
+                // exists: the identical request fails identically forever.
+                // Queuing one occupied a slot in a bounded queue and never
+                // retired, because `enqueue` replaces the entry and resets
+                // `attempts` -- so while a title played and sampled every
+                // fifteen seconds, MAX_ATTEMPTS was reset before it could
+                // count. `Dropped` existed for exactly this and had no
+                // producer.
+                if !mapped.is_retryable() {
+                    return Ok(ProgressOutcome::Dropped {
+                        reason: mapped.to_string(),
+                    });
+                }
+
                 queue
                     .enqueue(QueuedProgress {
                         file_id,
@@ -903,7 +919,6 @@ impl BeamClient {
                         not_before_unix: self.clock.now_unix(),
                     })
                     .await?;
-                let _ = self.map_error(&server_id, &TransportFailure::of(&error));
                 let pending = queue.len().await?;
                 Ok(ProgressOutcome::Queued {
                     pending: u32::try_from(pending).unwrap_or(u32::MAX),

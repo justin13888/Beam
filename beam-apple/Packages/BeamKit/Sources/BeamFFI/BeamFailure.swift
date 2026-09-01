@@ -64,7 +64,27 @@ public struct BeamFailure: Error, Equatable, Sendable {
     }
 
     /// Flatten a core failure.
+    ///
+    /// The message and the sign-in and certificate affordances are decided
+    /// here, because they are UI copy. Whether a retry is honest is decided by
+    /// the core and read back through `isRetryable(_:)`. This file used to
+    /// answer that itself and disagreed with the core on every `Server` status
+    /// below 500 -- so a 415 or a 422, which three operations declare, got a
+    /// retry button for a body the server will refuse identically forever.
     public static func from(_ error: BeamError) -> BeamFailure {
+        let presented = presentation(error)
+        return BeamFailure(
+            message: presented.message,
+            isRetryable: BeamCoreBindings.isRetryable(error),
+            requiresSignIn: presented.requiresSignIn,
+            isForbidden: presented.isForbidden,
+            untrustedCertificate: presented.untrustedCertificate,
+            untrustedHost: presented.untrustedHost
+        )
+    }
+
+    /// Everything about a failure except whether it is worth retrying.
+    private static func presentation(_ error: BeamError) -> BeamFailure {
         switch error {
         case .NoActiveServer:
             return BeamFailure(
@@ -108,18 +128,15 @@ public struct BeamFailure: Error, Equatable, Sendable {
             return BeamFailure(message: detail)
         case .RateLimited(let retryAfterSecs):
             return BeamFailure(
-                message: "Too many requests. Try again in \(retryAfterSecs)s.",
-                isRetryable: true
+                message: "Too many requests. Try again in \(retryAfterSecs)s."
             )
         case .Server(let status, _, _):
             return BeamFailure(
-                message: "The server had a problem (\(status)). Try again shortly.",
-                isRetryable: true
+                message: "The server had a problem (\(status)). Try again shortly."
             )
-        case .Network(let detail, let retryable):
+        case .Network(let detail, _):
             return BeamFailure(
-                message: "Could not reach the server: \(detail)",
-                isRetryable: retryable
+                message: "Could not reach the server: \(detail)"
             )
         case .UntrustedCertificate(let host, let details):
             return BeamFailure(

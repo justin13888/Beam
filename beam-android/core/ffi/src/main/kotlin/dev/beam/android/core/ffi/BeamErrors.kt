@@ -1,6 +1,7 @@
 package dev.beam.android.core.ffi
 
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.isRetryable
 
 /**
  * A failure, already phrased for a person.
@@ -31,34 +32,43 @@ private const val SOURCE_FILE_MISSING = "#source-file-missing"
  * Deliberately exhaustive over [BeamException] rather than falling back to
  * `toString()`: an error surfaced to a user should read as a sentence about
  * their situation, not as a debug representation of ours.
+ *
+ * The *message* is decided here, because it is UI copy. Whether a retry is
+ * honest is decided by the core and read back through [isRetryable]. This file
+ * used to answer that itself, and it disagreed with the core in both
+ * directions: it offered a retry for every `Server` status, including a 415
+ * that will be rejected identically forever, and it called `Storage`
+ * retryable where the core called it permanent. Nothing could catch either,
+ * because the core's answer never crossed the FFI.
  */
-public fun BeamException.toFailure(): BeamFailure =
-    when (this) {
+public fun BeamException.toFailure(): BeamFailure {
+    val retryable = isRetryable(this)
+    return when (this) {
         is BeamException.NoActiveServer -> {
             BeamFailure(
                 message = "No server selected. Add a Beam server to get started.",
-                retryable = false,
+                retryable = retryable,
             )
         }
 
         is BeamException.UnknownServer -> {
             BeamFailure(
                 message = "That server is no longer set up on this device.",
-                retryable = false,
+                retryable = retryable,
             )
         }
 
         is BeamException.InvalidServerUrl -> {
             BeamFailure(
                 message = "That address does not look like a Beam server.",
-                retryable = false,
+                retryable = retryable,
             )
         }
 
         is BeamException.Unauthenticated -> {
             BeamFailure(
                 message = "Sign in to continue.",
-                retryable = false,
+                retryable = retryable,
                 requiresSignIn = true,
             )
         }
@@ -66,7 +76,7 @@ public fun BeamException.toFailure(): BeamFailure =
         is BeamException.SessionExpired -> {
             BeamFailure(
                 message = "Your session expired. Sign in again to continue.",
-                retryable = false,
+                retryable = retryable,
                 requiresSignIn = true,
             )
         }
@@ -74,7 +84,7 @@ public fun BeamException.toFailure(): BeamFailure =
         is BeamException.Forbidden -> {
             BeamFailure(
                 message = "You do not have permission to do that.",
-                retryable = false,
+                retryable = retryable,
             )
         }
 
@@ -94,7 +104,7 @@ public fun BeamException.toFailure(): BeamFailure =
                     message =
                         "This title is in the library but its file is missing from the " +
                             "server. Ask an administrator to rescan the library.",
-                    retryable = false,
+                    retryable = retryable,
                 )
             } else {
                 BeamFailure(message = detail, retryable = false)
@@ -108,14 +118,14 @@ public fun BeamException.toFailure(): BeamFailure =
         is BeamException.RateLimited -> {
             BeamFailure(
                 message = "The server is busy. Try again in $retryAfterSecs seconds.",
-                retryable = true,
+                retryable = retryable,
             )
         }
 
         is BeamException.Server -> {
             BeamFailure(
                 message = "The server had a problem handling that.",
-                retryable = true,
+                retryable = retryable,
             )
         }
 
@@ -131,21 +141,22 @@ public fun BeamException.toFailure(): BeamFailure =
         is BeamException.UntrustedCertificate -> {
             BeamFailure(
                 message = "This server's security certificate is not trusted.",
-                retryable = false,
+                retryable = retryable,
             )
         }
 
         is BeamException.Protocol -> {
             BeamFailure(
                 message = "The server replied in a way this app did not understand.",
-                retryable = false,
+                retryable = retryable,
             )
         }
 
         is BeamException.Storage -> {
             BeamFailure(
                 message = "This device could not save that.",
-                retryable = true,
+                retryable = retryable,
             )
         }
     }
+}
