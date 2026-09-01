@@ -45,6 +45,12 @@ public final class NowPlayingCenter {
     /// How far the skip commands move, in seconds.
     public static let skipInterval: Double = 15
 
+    /// Credentials for Beam's artwork endpoint, set by
+    /// ``configureArtworkAccess(headers:trustedFingerprints:pinnedHost:)``.
+    private var artworkHeaders: [String: String] = [:]
+    private var artworkTrust: TrustingSessionDelegate?
+    private var artworkSession: URLSession?
+
     /// A centre with nothing playing.
     public init() {}
 
@@ -135,6 +141,42 @@ public final class NowPlayingCenter {
         #endif
     }
 
+    /// Tell the centre how to reach Beam for artwork.
+    ///
+    /// Beam serves poster art itself now (ADR-0015), so the lock screen's
+    /// image is a first-party authenticated fetch rather than an anonymous CDN
+    /// one: it needs the session cookie, and on a LAN server with a self-signed
+    /// certificate it needs the trust decision the viewer already made. Both
+    /// travel on the `PlaybackItem` already being played, so this is fed from
+    /// there rather than reaching for a second source of the same facts.
+    public func configureArtworkAccess(
+        headers: [String: String],
+        trustedFingerprints: [String],
+        pinnedHost: String
+    ) {
+        artworkHeaders = headers
+        artworkTrust = TrustingSessionDelegate(
+            evaluator: CertificateTrustEvaluator(
+                trustedFingerprints: trustedFingerprints,
+                pinnedHost: pinnedHost
+            )
+        )
+        artworkSession?.finishTasksAndInvalidate()
+        artworkSession = nil
+    }
+
+    /// The session artwork is fetched over, built once per trust decision.
+    private func artworkFetchSession() -> URLSession {
+        if let artworkSession { return artworkSession }
+        let created = URLSession(
+            configuration: .default,
+            delegate: artworkTrust,
+            delegateQueue: nil
+        )
+        artworkSession = created
+        return created
+    }
+
     private func loadArtworkIfNeeded(from urlString: String?) {
         guard artworkTask == nil,
             let urlString,
@@ -143,8 +185,14 @@ public final class NowPlayingCenter {
             return
         }
 
+        var request = URLRequest(url: url)
+        for (field, value) in artworkHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        let session = artworkFetchSession()
+
         artworkTask = Task { [weak self] in
-            guard let (data, _) = try? await URLSession.shared.data(from: url) else { return }
+            guard let (data, _) = try? await session.data(for: request) else { return }
             guard !Task.isCancelled, self != nil else { return }
             await MainActor.run {
                 guard let image = PlatformImage(data: data) else { return }

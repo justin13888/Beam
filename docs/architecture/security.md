@@ -115,7 +115,19 @@ to be hotlinked.
 file server — no external process invocation with attacker-influenceable inputs. See
 [ADR-0004](decisions/ADR-0004-never-transcode.md).
 
-**Accepted residual risk: unproxied image URLs.** Poster/backdrop URLs are direct TMDB/AniList CDN
-links, so the viewer's browser (and IP) touches those third-party CDNs — a deliberate tradeoff
-recorded in [ADR-0008](decisions/ADR-0008-image-cdn-direct.md). A server-side image proxy is
-deferred — tracked in [#70](https://github.com/justin13888/beam/issues/70).
+**Artwork does not leave the deployment.** Poster and backdrop URLs are Beam's own
+`/v1/artwork` paths: the server fetches each image from the provider once and serves it from its
+cache, so no viewer's client contacts TMDB or AniList and neither CDN can observe who is browsing
+what ([ADR-0015](decisions/ADR-0015-artwork-served-by-beam.md), NFR-501). This replaces the
+residual risk [ADR-0008](decisions/ADR-0008-image-cdn-direct.md) accepted.
+
+**The artwork endpoint is not an open proxy.** The only URL it will fetch is one enrichment itself
+wrote onto a row; a client sends a title id and two enum variants, never a URL, so there is no
+allowlist to maintain and no bypass to find. The outbound fetch additionally refuses anything that
+is not `https`, will not follow a redirect off `https`, refuses an over-large body before reading
+it, accepts only image content types, and carries no Beam credential (NFR-502) — the client is
+built with no cookie jar, so there is nowhere for the session cookie to be attached from.
+
+**Why a cookie works for an `<img>` tag.** The same reason it works for `<video>` above: artwork is
+a subresource request, and every supported deployment is same-site, so `SameSite=Lax` attaches the
+session cookie without it ever reaching page JavaScript.

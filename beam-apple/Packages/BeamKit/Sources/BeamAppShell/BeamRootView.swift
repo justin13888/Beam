@@ -24,9 +24,18 @@ import SwiftUI
 public struct BeamRootView: View {
     @State private var model: AppModel
 
+    /// How artwork reaches the views.
+    ///
+    /// Held here rather than constructed per view: it owns a `URLSession`, and
+    /// one per poster would defeat connection reuse and the shared `URLCache`.
+    @State private var artworkLoader: AuthenticatedArtworkLoader
+
     /// Build the root over a service graph.
     public init(services: ServiceContainer) {
         _model = State(wrappedValue: AppModel(services: services))
+        _artworkLoader = State(
+            wrappedValue: AuthenticatedArtworkLoader(playback: services.playback)
+        )
     }
 
     public var body: some View {
@@ -42,6 +51,7 @@ public struct BeamRootView: View {
                 )
             }
         }
+        .environment(\.artworkLoader, artworkLoader)
         .task { await model.start() }
         .preferredColorScheme(colorScheme)
         .fullScreenCoverCompat(item: $model.player) { presentation in

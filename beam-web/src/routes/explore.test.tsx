@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { components } from "@/api.gen";
+import { env } from "@/env";
 import * as factory from "@/test/factories";
 import { BASE_URL, meUnauthenticatedHandler } from "@/test/handlers";
 import { renderRoute, waitForRouter } from "@/test/harness";
@@ -127,6 +128,31 @@ describe("/explore", () => {
 		expect(query.get("min_rating")).toBe("80");
 		// An unset cursor must be absent, not the string "undefined".
 		expect(query.has("after")).toBe(false);
+	});
+
+	it("renders artwork from the API origin, not the app's", async () => {
+		serveExplore({
+			mediaPages: [
+				connectionPage(
+					[
+						showEdge("s1", "Severance", "cursor-1", [
+							{ poster_url: "/v1/artwork/season/abc/poster" },
+						]),
+					],
+					{ hasNext: false, endCursor: "cursor-1" },
+				),
+			],
+		});
+		renderRoute("/explore");
+
+		const poster = await screen.findByRole("img", { name: "Severance" });
+		// The server sends a relative path; an unresolved `<img src>` would
+		// resolve it against the app origin and 404 in development, where the
+		// two are different ports.
+		const src = new URL(poster.getAttribute("src") as string);
+		expect(src.origin).toBe(new URL(env.C_STREAM_SERVER_URL).origin);
+		expect(src.origin).not.toBe(window.location.origin);
+		expect(src.pathname).toBe("/v1/artwork/season/abc/poster");
 	});
 
 	it("defaults to alphabetical title sort when browsing without a query", async () => {

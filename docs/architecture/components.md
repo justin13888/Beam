@@ -193,8 +193,10 @@ app as it stands, not a client regenerated against the current contract.
   a title's file versions, resume-from-position, and periodic progress beacons
   (`usePlaybackBeacon`). Transport is plain HTTP Range requests against the streaming route — no
   manifests, since the server never transcodes
-  ([ADR-0004](decisions/ADR-0004-never-transcode.md)); artwork loads directly from the provider
-  CDN ([ADR-0008](decisions/ADR-0008-image-cdn-direct.md)).
+  ([ADR-0004](decisions/ADR-0004-never-transcode.md)); artwork loads from Beam's own
+  `/v1/artwork` route, never from a provider CDN
+  ([ADR-0015](decisions/ADR-0015-artwork-served-by-beam.md)), which is why an `<img src>` is
+  resolved against the API origin rather than the app's.
 - **Tooling:** Biome (repo-root `biome.json`) is the sole lint/format tool.
 
 **Testing:** vitest + MSW (`src/test/`) + Testing Library in jsdom — the REST boundary is mocked,

@@ -1,7 +1,7 @@
 use sea_orm::DatabaseConnection;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::{
@@ -10,8 +10,10 @@ use beam_auth::utils::{
     repository::{SqlUserRepository, UserRepository},
     session_store::{PgSessionStore, SessionStore},
 };
+use beam_domain::providers::artwork::ArtworkFetcher;
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
 use beam_domain::services::{Clock, RealClock};
+use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
@@ -21,6 +23,7 @@ use crate::{
     config::ServerConfig,
     services::{
         admin_log::{AdminLogService, LocalAdminLogService},
+        artwork::{ArtworkCache, ArtworkCacheConfig},
         hash::{HashConfig, HashService, LocalHashService},
         health::DependencyProbe,
         library::{LibraryService, LocalLibraryService, OsPathValidator},
@@ -136,6 +139,16 @@ pub struct AppServices {
     pub library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
     pub file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
     pub enrichment_repo: Arc<dyn beam_domain::repositories::EnrichmentStateRepository>,
+    /// Read directly by the artwork endpoint, which resolves a title id to the
+    /// provider URL enrichment stored on it. Same precedent as the repositories
+    /// above; shared with the metadata and playback services.
+    pub movie_repo: Arc<dyn beam_domain::repositories::MovieRepository>,
+    pub show_repo: Arc<dyn beam_domain::repositories::ShowRepository>,
+    /// Poster and backdrop art, served by Beam rather than by a provider CDN
+    /// (ADR-0015). Concrete rather than a trait object: its two boundaries --
+    /// the network and the database -- already have seams, and the repository
+    /// tests filesystem code against a real `TempDir` rather than a fake.
+    pub artwork: Arc<ArtworkCache>,
     /// Backs the `beam_session` cookie -- the only credential the server
     /// issues (see ADR-0003/ADR-0005).
     pub session_store: Arc<dyn SessionStore>,
@@ -282,6 +295,30 @@ impl AppServices {
             show_repo.clone(),
         ));
 
+        // Artwork is served by Beam, not by a provider CDN (ADR-0015). The
+        // cache lives beside the rest of the server's state and is restored
+        // from disk here, so a restart after a deploy does not re-fetch a
+        // whole library's art. A directory that cannot be read is fatal: the
+        // alternative is a server that silently re-fetches every poster on
+        // every request.
+        let artwork_fetcher: Arc<dyn ArtworkFetcher> =
+            Arc::new(ReqwestArtworkFetcher::new(ArtworkFetchLimits {
+                timeout: Duration::from_secs(config.artwork_fetch_timeout_secs),
+                max_bytes: config.artwork_max_image_bytes,
+            })?);
+        let artwork = Arc::new(
+            ArtworkCache::open(
+                ArtworkCacheConfig {
+                    root: config.data_dir.join("artwork"),
+                    max_bytes: config.artwork_cache_max_bytes,
+                    negative_ttl: Duration::from_secs(config.artwork_negative_ttl_secs),
+                },
+                artwork_fetcher,
+                Arc::new(RealClock),
+            )
+            .await?,
+        );
+
         let services = Self {
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
@@ -293,8 +330,13 @@ impl AppServices {
                 Arc::new(OsPathValidator),
             )),
             metadata: Arc::new(
-                DbMetadataService::new(movie_repo, show_repo, file_repo.clone(), stream_repo)
-                    .with_enrichment_repo(enrichment_repo.clone()),
+                DbMetadataService::new(
+                    movie_repo.clone(),
+                    show_repo.clone(),
+                    file_repo.clone(),
+                    stream_repo,
+                )
+                .with_enrichment_repo(enrichment_repo.clone()),
             ),
             notification: notification_service,
             admin_log: admin_log_service,
@@ -304,6 +346,9 @@ impl AppServices {
             library_repo,
             file_repo,
             enrichment_repo,
+            movie_repo,
+            show_repo,
+            artwork,
             session_store,
             oidc_client,
             pending_auth_store,

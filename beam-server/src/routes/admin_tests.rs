@@ -238,6 +238,13 @@ fn make_test_state_with_notification(notification: Arc<dyn NotificationService>)
         library_repo,
         file_repo: file_repo.clone(),
         enrichment_repo: enrichment_repo.clone(),
+        movie_repo: Arc::new(
+            beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
+        ),
+        show_repo: Arc::new(
+            beam_domain::repositories::show::in_memory::InMemoryShowRepository::default(),
+        ),
+        artwork: crate::routes::test_support::cold_artwork_cache(),
         session_store: session_store.clone(),
         oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
         pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
