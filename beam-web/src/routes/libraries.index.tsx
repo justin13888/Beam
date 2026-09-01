@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
+import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 
 type Library = components["schemas"]["beam_server.models.library.Library"];
@@ -97,7 +98,7 @@ export function LibrariesPage() {
 			const { data, error } = await apiClient.GET("/v1/libraries", {
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load libraries");
+			if (error) throw apiError(error, "Failed to load libraries");
 			return data;
 		},
 		enabled: isAuthenticated,
@@ -112,7 +113,7 @@ export function LibrariesPage() {
 				body: { name: vars.name, root_path: vars.rootPath },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to create library");
+			if (error) throw apiError(error, "Failed to create library");
 			return data;
 		},
 	});
@@ -123,7 +124,7 @@ export function LibrariesPage() {
 				params: { path: { id: libraryId } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to scan library");
+			if (error) throw apiError(error, "Failed to scan library");
 		},
 	});
 
@@ -136,7 +137,8 @@ export function LibrariesPage() {
 					credentials: "include",
 				},
 			);
-			if (error || !response.ok) throw new Error("Failed to delete library");
+			if (error || !response.ok)
+				throw apiError(error, "Failed to delete library");
 		},
 	});
 

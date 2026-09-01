@@ -10,6 +10,7 @@ import { env } from "@/env";
 import { useAuth } from "@/hooks/auth";
 import { usePlaybackBeacon } from "@/hooks/usePlaybackBeacon";
 import { apiClient } from "@/lib/apiClient";
+import { apiError } from "@/lib/problem";
 import { nextPlayableEpisode } from "@/lib/upNext";
 import { formatDuration } from "@/lib/utils";
 
@@ -31,7 +32,7 @@ const mediaQueryOptions = (mediaId: string) =>
 				credentials: "include",
 			});
 			if (response.status === 404) return null;
-			if (error) throw new Error("Failed to load media metadata");
+			if (error) throw apiError(error, "Failed to load media metadata");
 			return data ?? null;
 		},
 	});
@@ -96,7 +97,7 @@ export function MediaDetailPage({
 				},
 			);
 			if (error || !response.ok) {
-				throw new Error("Failed to request a metadata refresh");
+				throw apiError(error, "Failed to request a metadata refresh");
 			}
 		},
 		onSuccess: () => {
@@ -141,7 +142,7 @@ export function MediaDetailPage({
 				},
 			);
 			if (response.status === 404 || response.status === 400) return [];
-			if (error) throw new Error("Failed to load media sources");
+			if (error) throw apiError(error, "Failed to load media sources");
 			return data ?? [];
 		},
 		enabled: !!playableId,
@@ -165,7 +166,7 @@ export function MediaDetailPage({
 				params: { query: { limit: 100 } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load playback progress");
+			if (error) throw apiError(error, "Failed to load playback progress");
 			return data ?? [];
 		},
 	});

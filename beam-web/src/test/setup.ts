@@ -56,6 +56,53 @@ if (!("ResizeObserver" in globalThis)) {
 	vi.stubGlobal("ResizeObserver", NoopResizeObserver);
 }
 
+// The same kind of gap, for web storage, and the one that actually bit.
+//
+// On Node >= 26 the bare `localStorage` global is Node's own experimental one,
+// which is `undefined` unless `--localstorage-file` is passed -- and because
+// vitest's jsdom environment makes `window === globalThis`, it shadows jsdom's
+// implementation rather than sitting beside it. Both `globalThis.localStorage`
+// and `window.localStorage` are therefore `undefined`, so there is nothing to
+// point at and one has to be supplied.
+//
+// `@vidstack/react` reads `localStorage.getItem` at module scope, so every
+// suite that transitively imports the video player -- which is every route
+// test, since `renderRoute` mounts the real route tree -- died on import with
+// `Cannot read properties of undefined (reading 'getItem')`. Twelve of the
+// twenty suites never ran. It went unnoticed because `ts:test` has been
+// switched off since #146.
+//
+// This is the environment, not a double for anything beam-web owns: auth is
+// cookie-only and nothing here writes web storage. A per-test reset is still
+// unnecessary for that reason.
+if (globalThis.localStorage === undefined) {
+	class MemoryStorage implements Storage {
+		#entries = new Map<string, string>();
+
+		get length() {
+			return this.#entries.size;
+		}
+		key(index: number) {
+			return [...this.#entries.keys()][index] ?? null;
+		}
+		getItem(key: string) {
+			return this.#entries.get(key) ?? null;
+		}
+		setItem(key: string, value: string) {
+			this.#entries.set(key, String(value));
+		}
+		removeItem(key: string) {
+			this.#entries.delete(key);
+		}
+		clear() {
+			this.#entries.clear();
+		}
+	}
+
+	vi.stubGlobal("localStorage", new MemoryStorage());
+	vi.stubGlobal("sessionStorage", new MemoryStorage());
+}
+
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 // No localStorage/sessionStorage reset here: auth is cookie-only and nothing
 // in beam-web writes web storage. (On Node >= 26 the bare `localStorage`

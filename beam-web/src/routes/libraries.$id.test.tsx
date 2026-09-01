@@ -6,6 +6,7 @@ import type { components } from "@/api.gen";
 import * as factory from "@/test/factories";
 import { BASE_URL } from "@/test/handlers";
 import { renderRoute } from "@/test/harness";
+import { problem } from "@/test/problem";
 import { server } from "@/test/server";
 
 type LibraryFile =
@@ -66,10 +67,7 @@ function serveLibrary({ filesStatus = 200 }: { filesStatus?: number } = {}) {
 		http.get(`${BASE_URL}/v1/libraries/:id/files`, () =>
 			filesStatus === 200
 				? HttpResponse.json(files)
-				: HttpResponse.json(
-						{ message: "boom", code: "internal" },
-						{ status: filesStatus },
-					),
+				: problem(filesStatus, "boom", "#internal"),
 		),
 	);
 }

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import * as factory from "@/test/factories";
 import { BASE_URL } from "@/test/handlers";
 import { renderRoute } from "@/test/harness";
+import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
@@ -17,10 +18,7 @@ describe("RouteError", () => {
 	it("replaces the failed route with a retry affordance", async () => {
 		server.use(
 			http.get(`${BASE_URL}/v1/media/:id`, () =>
-				HttpResponse.json(
-					{ message: "boom", code: "internal" },
-					{ status: 500 },
-				),
+				problem(500, "boom", "#internal"),
 			),
 		);
 		renderRoute("/media/movie-1");
@@ -39,10 +37,7 @@ describe("RouteError", () => {
 			http.get(`${BASE_URL}/v1/media/:id`, () => {
 				attempts += 1;
 				return attempts === 1
-					? HttpResponse.json(
-							{ message: "boom", code: "internal" },
-							{ status: 500 },
-						)
+					? problem(500, "boom", "#internal")
 					: HttpResponse.json({
 							Movie: factory.movie({
 								id: "movie-1",

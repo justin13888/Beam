@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import type { components } from "@/api.gen";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { apiClient } from "@/lib/apiClient";
+import { apiError } from "@/lib/problem";
 
 type MediaTypeFilter =
 	components["schemas"]["beam_server.services.metadata.MediaTypeFilter"];
@@ -178,7 +179,7 @@ export function ExplorePage({
 			const { data, error } = await apiClient.GET("/v1/genres", {
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load genres");
+			if (error) throw apiError(error, "Failed to load genres");
 			return data;
 		},
 		staleTime: 5 * 60 * 1000,
@@ -233,7 +234,7 @@ export function ExplorePage({
 				credentials: "include",
 			});
 			if (error || data === undefined) {
-				throw new Error("Failed to search media");
+				throw apiError(error, "Failed to search media");
 			}
 			return data;
 		},

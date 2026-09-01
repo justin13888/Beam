@@ -6,6 +6,7 @@ import type { components } from "@/api.gen";
 import * as factory from "@/test/factories";
 import { BASE_URL, meUnauthenticatedHandler } from "@/test/handlers";
 import { renderRoute, waitForRouter } from "@/test/harness";
+import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
@@ -41,7 +42,7 @@ function serveSessions(status = 200) {
 		http.get(`${BASE_URL}/v1/sessions`, () =>
 			status === 200
 				? HttpResponse.json([sessionA, sessionB])
-				: HttpResponse.json({ message: "boom", code: "internal" }, { status }),
+				: problem(status, "boom", "#internal"),
 		),
 	);
 }

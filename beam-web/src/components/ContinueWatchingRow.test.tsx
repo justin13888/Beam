@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import * as factory from "@/test/factories";
 import { BASE_URL, meUnauthenticatedHandler } from "@/test/handlers";
 import { renderRoute, waitForRouter } from "@/test/harness";
+import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
@@ -24,10 +25,7 @@ function serveContinueWatching(
 			const found = media[String(params.id)];
 			return found
 				? HttpResponse.json(found)
-				: HttpResponse.json(
-						{ message: "Not found", code: "not_found" },
-						{ status: 404 },
-					);
+				: problem(404, "Not found", "#media-not-found");
 		}),
 	);
 }
