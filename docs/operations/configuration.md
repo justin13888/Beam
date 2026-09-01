@@ -31,6 +31,7 @@ optional variables unset/commented rather than blank.
 | `BEAM_WATCH_ENABLED` | `true` | Run the inotify filesystem watcher for near-real-time index updates. |
 | `BEAM_WATCH_DEBOUNCE_MS` | `2000` | Debounce window for watcher events on the same path. |
 | `BEAM_ENRICH_INTERVAL_SECS` | `300` | Interval between metadata-enrichment sweeps (new titles are also swept immediately when queued). |
+| `BEAM_AUTH_GC_INTERVAL_SECS` | `3600` | Interval between sweeps that delete expired sessions and abandoned pending authorizations. Expired rows are never read regardless of this setting; it only governs how promptly they are reclaimed. |
 | `BEAM_ENRICH_BATCH_SIZE` | `25` | Maximum titles processed per enrichment sweep. Larger batches drain a backlog faster but lengthen each sweep and lean harder on provider rate limits. Must be ≥ 1. |
 | `BEAM_ENRICH_MIN_CONFIDENCE` | `0.7` | Minimum overall match confidence, in `(0.0, 1.0]`, a candidate must reach before its metadata is applied. Higher is stricter (fewer false matches, more titles left un-enriched). |
 | `BEAM_TMDB_API_TOKEN` | unset | TMDB read-access token for `cameo` enrichment. Absent → TMDB-eligible titles are left un-enriched (never fails a scan). |

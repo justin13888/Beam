@@ -42,6 +42,16 @@ pub trait PendingAuthStore: Send + Sync + std::fmt::Debug {
     /// `state`, so it can be consumed at most once. Returns `None` if the
     /// state is unknown, already consumed, or expired.
     async fn consume(&self, state: &str) -> Result<Option<PendingAuth>>;
+
+    /// Deletes every pending authorization whose expiry has passed, returning
+    /// how many rows went.
+    ///
+    /// `consume` already refuses an expired row, so this is a storage concern
+    /// rather than a correctness one: a login that is begun and abandoned
+    /// leaves a row nothing will ever collect, and an authorization endpoint is
+    /// reachable by anyone who can reach the server. Without a sweep the table
+    /// grows without bound.
+    async fn delete_expired(&self) -> Result<u64>;
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +121,17 @@ impl PendingAuthStore for SqlPendingAuthStore {
 
         Ok(Some(to_pending_auth(model)))
     }
+
+    async fn delete_expired(&self) -> Result<u64> {
+        use sea_orm::{ColumnTrait, QueryFilter};
+
+        let deleted = PendingAuthEntity::delete_many()
+            .filter(beam_entity::pending_auth::Column::ExpiresAt.lt(self.clock.now()))
+            .exec(self.db.as_ref())
+            .await?;
+
+        Ok(deleted.rows_affected)
+    }
 }
 
 /// In-memory pending-auth store for tests.
@@ -163,6 +184,14 @@ pub mod in_memory {
                 Some((auth, expires_at)) if expires_at >= now => Ok(Some(auth)),
                 _ => Ok(None),
             }
+        }
+
+        async fn delete_expired(&self) -> Result<u64> {
+            let now = self.clock.now();
+            let mut entries = self.entries.lock().unwrap();
+            let before = entries.len();
+            entries.retain(|_, (_, expires_at)| *expires_at >= now);
+            Ok((before - entries.len()) as u64)
         }
     }
 }

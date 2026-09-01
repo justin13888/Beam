@@ -748,6 +748,81 @@ macro_rules! session_store_contract {
                     .is_none()
             );
         }
+
+        /// The sweep removes what reads already refuse, so it must be
+        /// observable only as row count -- never as a session disappearing
+        /// while it is still valid.
+        #[tokio::test]
+        async fn delete_expired_removes_idle_expired_sessions_and_spares_live_ones() {
+            let fixture = $setup().await;
+            let store = fixture.store();
+            let live_user = fixture.new_user().await;
+            let doomed_user = fixture.new_user().await;
+
+            let doomed = store
+                .create(&session_for(&doomed_user), IDLE_TTL, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+
+            // Past the first session's idle expiry, then mint a second one so
+            // that only the first is dead when the sweep runs.
+            fixture.clock().advance(Duration::from_secs(IDLE_TTL + 1));
+            let live = store
+                .create(&session_for(&live_user), IDLE_TTL, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                store.delete_expired().await.unwrap(),
+                1,
+                "exactly the idle-expired session is collected"
+            );
+            assert!(
+                store.get(&live).await.unwrap().is_some(),
+                "a session still inside its idle window survives the sweep"
+            );
+            assert!(store.get(&doomed).await.unwrap().is_none());
+        }
+
+        /// A session touched often enough never trips its idle expiry, so the
+        /// absolute ceiling is the only thing that can collect it.
+        #[tokio::test]
+        async fn delete_expired_collects_a_session_past_its_absolute_ceiling() {
+            let fixture = $setup().await;
+            let store = fixture.store();
+            let user = fixture.new_user().await;
+
+            let token = store
+                .create(&session_for(&user), IDLE_TTL, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+
+            fixture
+                .clock()
+                .advance(Duration::from_secs(ABSOLUTE_TTL + 1));
+
+            assert_eq!(store.delete_expired().await.unwrap(), 1);
+            assert!(store.get(&token).await.unwrap().is_none());
+        }
+
+        /// Nothing to collect must be a no-op rather than an error, since the
+        /// sweep runs on a timer against a store that is usually clean.
+        #[tokio::test]
+        async fn delete_expired_is_a_no_op_when_every_session_is_live() {
+            let fixture = $setup().await;
+            let store = fixture.store();
+            let user = fixture.new_user().await;
+            store
+                .create(&session_for(&user), IDLE_TTL, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+
+            assert_eq!(store.delete_expired().await.unwrap(), 0);
+            assert_eq!(
+                store.list_for_user(&user.to_string()).await.unwrap().len(),
+                1
+            );
+        }
     };
 }
 
@@ -872,6 +947,45 @@ macro_rules! pending_auth_store_contract {
 
             let consumed = fixture.store().consume(&state).await.unwrap().unwrap();
             assert_eq!(consumed.redirect_path, None);
+        }
+
+        /// The abandoned-login sweep. `consume` already refuses an expired
+        /// state, so this is about the table not growing forever: every
+        /// authorization that is begun and never completed leaves a row behind.
+        #[tokio::test]
+        async fn delete_expired_collects_abandoned_authorizations_only() {
+            let fixture = $setup().await;
+            let store = fixture.store();
+
+            let abandoned = ::uuid::Uuid::new_v4().to_string();
+            store.create(&pending(&abandoned), TTL).await.unwrap();
+
+            fixture.clock().advance(Duration::from_secs(TTL + 1));
+
+            // Minted after the clock moved, so this one is still inside its TTL.
+            let fresh = ::uuid::Uuid::new_v4().to_string();
+            store.create(&pending(&fresh), TTL).await.unwrap();
+
+            assert_eq!(
+                store.delete_expired().await.unwrap(),
+                1,
+                "only the expired authorization is collected"
+            );
+            assert!(
+                store.consume(&fresh).await.unwrap().is_some(),
+                "an authorization still inside its TTL survives the sweep"
+            );
+        }
+
+        /// The sweep runs on a timer against a store that is usually clean.
+        #[tokio::test]
+        async fn delete_expired_is_a_no_op_when_nothing_has_expired() {
+            let fixture = $setup().await;
+            let state = ::uuid::Uuid::new_v4().to_string();
+            fixture.store().create(&pending(&state), TTL).await.unwrap();
+
+            assert_eq!(fixture.store().delete_expired().await.unwrap(), 0);
+            assert!(fixture.store().consume(&state).await.unwrap().is_some());
         }
     };
 }

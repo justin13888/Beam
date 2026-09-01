@@ -127,6 +127,21 @@ async fn main() -> Result<()> {
 
     let state = beam_server::state::AppState::new(config.clone(), services, probe, metrics_handle);
 
+    // Collect expired sessions and abandoned pending authorizations. Every read
+    // already filters both out, so this changes nothing a client can observe --
+    // it is what stops the two tables growing for the life of the deployment.
+    // Spawned from the state so it shares the clock every other expiry policy
+    // reads, rather than introducing a second view of time.
+    {
+        let gc = std::sync::Arc::new(beam_auth::utils::gc::AuthGcService::new(
+            state.services.session_store.clone(),
+            state.services.pending_auth_store.clone(),
+            state.clock().clone(),
+        ));
+        let interval = std::time::Duration::from_secs(config.auth_gc_interval_secs);
+        tokio::spawn(async move { gc.run(interval).await });
+    }
+
     // `build` is where Kynos checks that every operation can be described and
     // that no two interceptors contribute the same header or status. A router
     // that cannot describe itself never reaches a listener.

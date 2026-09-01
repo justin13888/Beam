@@ -137,6 +137,15 @@ pub trait SessionStore: Send + Sync + std::fmt::Debug {
     /// guessing an id). Returns `true` if a session was deleted.
     async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool>;
 
+    /// Deletes every session that has passed either its idle or its absolute
+    /// expiry, returning how many rows went.
+    ///
+    /// Reads already filter on both expiries, so this changes no behaviour a
+    /// caller can observe -- an expired row is unusable either way. What it
+    /// changes is that the table stops growing forever: every sign-in adds a
+    /// row, and nothing removed one unless the user explicitly signed out.
+    async fn delete_expired(&self) -> Result<u64>;
+
     /// The store's own view of the current time.
     ///
     /// Every expiry this store enforces is relative to it, so a caller that
@@ -321,6 +330,23 @@ impl SessionStore for PgSessionStore {
             .await?;
         Ok(result.rows_affected > 0)
     }
+
+    async fn delete_expired(&self) -> Result<u64> {
+        let now = self.clock.now();
+        // Either expiry having passed is enough: `idle_expires_at` is slid
+        // forward by `touch` and `absolute_expires_at` is the ceiling it can
+        // never pass, so a row is dead as soon as the earlier of the two is
+        // behind us -- which is exactly what every read here already filters on.
+        let result: DeleteResult = SessionEntity::delete_many()
+            .filter(
+                Column::IdleExpiresAt
+                    .lt(now)
+                    .or(Column::AbsoluteExpiresAt.lt(now)),
+            )
+            .exec(self.db.as_ref())
+            .await?;
+        Ok(result.rows_affected)
+    }
 }
 
 /// In-memory session store for use in tests and offline scenarios.
@@ -476,6 +502,14 @@ pub mod in_memory {
                 }
                 None => Ok(false),
             }
+        }
+
+        async fn delete_expired(&self) -> Result<u64> {
+            let now = self.clock.now();
+            let mut sessions = self.lock_sessions();
+            let before = sessions.len();
+            sessions.retain(|_, s| s.idle_expires_at >= now && s.absolute_expires_at >= now);
+            Ok((before - sessions.len()) as u64)
         }
     }
 }

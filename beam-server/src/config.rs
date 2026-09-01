@@ -107,6 +107,14 @@ pub struct ServerConfig {
     #[config(env = "BEAM_ENRICH_INTERVAL_SECS", default = 300)]
     pub enrich_interval_secs: u64,
 
+    /// Interval between sweeps that collect expired sessions and abandoned
+    /// pending authorizations, in seconds. Neither table is read past its
+    /// expiry regardless, so this only governs how promptly dead rows are
+    /// reclaimed; hourly is frequent enough for storage and infrequent enough
+    /// to be invisible.
+    #[config(env = "BEAM_AUTH_GC_INTERVAL_SECS", default = 3600)]
+    pub auth_gc_interval_secs: u64,
+
     /// Maximum number of titles processed per metadata-enrichment sweep.
     /// Larger batches drain a backlog faster but make each sweep longer and
     /// lean harder on the provider's rate limits. Must be at least 1.
@@ -249,6 +257,7 @@ impl fmt::Debug for ServerConfig {
             watch_enabled,
             watch_debounce_ms,
             enrich_interval_secs,
+            auth_gc_interval_secs,
             enrich_batch_size,
             enrich_min_confidence,
             tmdb_api_token,
@@ -286,6 +295,7 @@ impl fmt::Debug for ServerConfig {
             .field("watch_enabled", watch_enabled)
             .field("watch_debounce_ms", watch_debounce_ms)
             .field("enrich_interval_secs", enrich_interval_secs)
+            .field("auth_gc_interval_secs", auth_gc_interval_secs)
             .field("enrich_batch_size", enrich_batch_size)
             .field("enrich_min_confidence", enrich_min_confidence)
             .field("tmdb_api_token", &redact_option(tmdb_api_token))
