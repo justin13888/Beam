@@ -140,14 +140,17 @@ requirements (referenced below as FR-xxx).
 
 ## NFR-5xx — Privacy
 
-- **NFR-501**: Poster and backdrop images are served to the browser as direct URLs pointing at the
-  TMDB/AniList CDN — a deliberate, documented tradeoff in which third-party CDNs can observe which
-  viewer requests which title's artwork
-  ([ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md)). A server-side image proxy is
-  deferred — tracked in [#70](https://github.com/justin13888/beam/issues/70).
+- **NFR-501**: No third party may observe which viewer requests which title's artwork. Artwork is
+  fetched from the provider by the server and served from its own cache, so a viewer's client never
+  connects to TMDB or AniList
+  ([ADR-0015](../architecture/decisions/ADR-0015-artwork-served-by-beam.md), FR-310). This replaces
+  the opposite tradeoff, recorded in
+  [ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md) and revisited in
+  [#70](https://github.com/justin13888/beam/issues/70).
 - **NFR-502**: The server MUST NOT forward any first-party session cookie, auth header, or other
-  Beam-specific credential to TMDB/AniList when resolving enrichment data or when the client fetches
-  CDN image URLs directly.
+  Beam-specific credential to TMDB/AniList — when resolving enrichment data, and when fetching an
+  image for the artwork cache. The outbound artwork client is built with no cookie jar, so there is
+  nowhere for a session cookie to be attached from even by accident.
 
 ## NFR-6xx — Extensibility
 
