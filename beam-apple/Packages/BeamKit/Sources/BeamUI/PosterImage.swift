@@ -46,7 +46,10 @@ public struct BeamArtwork: View {
     private var content: some View {
         if let image {
             Image(platformImage: image).resizable().scaledToFill()
-        } else if failed || url == nil {
+        } else if failed {
+            // Only a *failed* load earns the icon. A title that simply has no
+            // artwork gets the bare placeholder, which is what `AsyncImage`
+            // did -- a nil URL left it in `.empty` forever, never `.failure`.
             placeholder(systemImage: "photo")
         } else {
             placeholder(systemImage: nil)
