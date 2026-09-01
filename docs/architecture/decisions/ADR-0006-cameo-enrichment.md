@@ -25,7 +25,8 @@ SDK for both providers, from the same author as Beam — behind a provider-agnos
 network: an in-memory fake `EnrichmentProvider` drives all pipeline tests. Enrichment attempts are
 tracked per-title in the `metadata_enrichment` queue/status table with retry/backoff, and the
 previously-dead genre tables are populated as a direct result. Poster/backdrop URLs are stored as
-direct CDN links — no server-side image proxy, a documented tradeoff (see ADR-0008).
+the provider URLs enrichment found, and are never served to a client: Beam fetches and serves the
+images itself (see ADR-0015, which supersedes ADR-0008).
 Re-enrichment of a title is available as a user-triggerable admin action.
 
 ## Consequences
@@ -52,9 +53,10 @@ Re-enrichment of a title is available as a user-triggerable admin action.
   for obscure titles, non-English releases, or unusually-formatted filenames — the retry/backoff and
   admin re-enrich action exist specifically because this is expected to happen, not as a
   belt-and-suspenders extra.
-- No server-side image proxy means poster/backdrop rendering depends on TMDB/AniList's CDNs being
-  reachable from the end user's browser, and leaks the viewing user's IP to those third parties on
-  every poster render — an accepted, documented tradeoff rather than an oversight.
+- Poster/backdrop rendering once depended on TMDB/AniList's CDNs being reachable from the end
+  user's browser, and leaked the viewing user's IP to those third parties on every render. That was
+  an accepted, documented tradeoff rather than an oversight, and ADR-0015 has since removed it: the
+  server fetches each image once and serves it from its own cache.
 - `cameo`'s `cache` feature (a bundled-SQLite response cache) is disabled, discovered while wiring
   the adapter: its `rusqlite` dependency hard-pins `libsqlite3-sys` to a version range that conflicts
   with the one `sea-orm-migration`'s CLI tooling pulls in transitively via `sqlx-sqlite` (always

@@ -236,6 +236,13 @@ fn make_test_state(files: Vec<LibraryFile>) -> TestFixture {
         enrichment_repo: Arc::new(
             beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
         ),
+        movie_repo: Arc::new(
+            beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
+        ),
+        show_repo: Arc::new(
+            beam_domain::repositories::show::in_memory::InMemoryShowRepository::default(),
+        ),
+        artwork: crate::routes::test_support::cold_artwork_cache(),
         session_store: session_store.clone(),
         oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
         pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),

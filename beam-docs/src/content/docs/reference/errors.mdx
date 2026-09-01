@@ -115,6 +115,34 @@ It is deliberately distinct from [`file-not-found`](#file-not-found), which mean
 never had the file. A client that shows both as "not found" tells the viewer to go looking for
 something they cannot fix.
 
+### artwork-not-found
+
+**404.** No image for this title.
+
+Three conditions share this code: the title's row carries no artwork URL, the variant does not apply
+to that kind (a season has no backdrop, an episode has no poster), or the provider no longer serves
+the image enrichment recorded.
+
+**What to do.** Nothing. This is the ordinary case, not a fault -- draw your placeholder. It is
+deliberately *not* [`source-file-missing`](#source-file-missing): a title without a poster says
+nothing about whether its video file is on disk, and telling a viewer to ask an administrator to
+rescan the library because a show has no backdrop sends them after a problem that does not exist.
+
+Beam remembers a failed upstream fetch for a short while, so a grid of clients does not re-ask a
+dead provider once per render.
+
+### artwork-upstream-failed
+
+**502.** Beam asked the provider for the image and could not use what came back.
+
+The provider returned a non-image content type, a body over the configured ceiling
+(`BEAM_ARTWORK_MAX_IMAGE_BYTES`), an unhappy status, or nothing at all; or the stored URL was one
+Beam declined to fetch.
+
+**What to do.** Retry later, and draw the placeholder meanwhile. A 502 rather than
+[`internal`](#internal) because the fault is not Beam's -- `internal` means Beam broke, and
+reporting a provider CDN timeout that way tells an operator to go looking in the wrong place.
+
 ### invalid-file-id
 
 **400.** The file id in the path is not a UUID.
@@ -228,8 +256,10 @@ client tells it apart from [`cross-origin-rejected`](#cross-origin-rejected) and
 
 ### 416 Range Not Satisfiable
 
-Only from `/v1/files/{id}/stream` and `/download`: the range starts past the end of the file, is
-inverted, or **the file is zero bytes**, which is refused whether or not a range was asked for.
+From `/v1/files/{id}/stream`, `/download`, and `/v1/artwork/{kind}/{id}/{variant}` — every response
+Beam serves through its range engine: the range starts past the end of the representation, is
+inverted, or **the representation is zero bytes**, which is refused whether or not a range was asked
+for.
 
 **What to do.** Check the file's size on disk first — a zero-byte file is usually a failed copy or a
 broken symlink. Otherwise this is typically a player working from a stale cached length, so

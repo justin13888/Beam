@@ -888,4 +888,159 @@ mod tests {
         assert_eq!(metadata.audio_tracks[0].codec, OutputAudioCodec::Opus);
         assert_eq!(metadata.audio_tracks[1].codec, OutputAudioCodec::Unknown);
     }
+
+    // ---------------------------------------------------------------------------
+    // Artwork addressing (ADR-0015)
+    // ---------------------------------------------------------------------------
+
+    /// The privacy claim, asserted rather than assumed: what a client is handed
+    /// must not be a provider URL, because a browser that is handed one fetches
+    /// it and TMDB learns who is browsing what.
+    #[tokio::test]
+    async fn a_movie_points_at_beam_for_its_artwork_not_at_the_provider() {
+        use crate::models::MediaMetadata;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let mut movie = make_movie("Arrival", Some(2016));
+        movie.poster_url = Some("https://image.tmdb.org/t/p/w500/poster.jpg".to_string());
+        movie.backdrop_url = Some("https://image.tmdb.org/t/p/w1280/backdrop.jpg".to_string());
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+
+        let service = DbMetadataService::new(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let Some(MediaMetadata::Movie(movie)) =
+            service.get_media_metadata(&movie_id.to_string()).await
+        else {
+            panic!("the movie resolves");
+        };
+
+        assert_eq!(
+            movie.poster_url.as_deref(),
+            Some(format!("/v1/artwork/movie/{movie_id}/poster").as_str()),
+        );
+        assert_eq!(
+            movie.backdrop_url.as_deref(),
+            Some(format!("/v1/artwork/movie/{movie_id}/backdrop").as_str()),
+        );
+        for url in [movie.poster_url, movie.backdrop_url].into_iter().flatten() {
+            assert!(
+                !url.contains("tmdb.org"),
+                "a provider URL reached the client: {url}",
+            );
+        }
+    }
+
+    /// A title with no art must stay `None` rather than becoming a link that
+    /// every client dutifully requests and every request 404s.
+    #[tokio::test]
+    async fn a_movie_with_no_artwork_is_given_no_artwork_url() {
+        use crate::models::MediaMetadata;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let movie = make_movie("Un-enriched", None);
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+
+        let service = DbMetadataService::new(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let Some(MediaMetadata::Movie(movie)) =
+            service.get_media_metadata(&movie_id.to_string()).await
+        else {
+            panic!("the movie resolves");
+        };
+        assert_eq!(movie.poster_url, None);
+        assert_eq!(movie.backdrop_url, None);
+    }
+
+    /// Season posters and episode stills are addressed by their own rows, which
+    /// is why a season carries its id: `beam-web` falls back to a season poster
+    /// whenever a show has none, so without the id that fallback has nothing to
+    /// build a URL from.
+    #[tokio::test]
+    async fn seasons_and_episodes_address_their_own_artwork() {
+        use crate::models::MediaMetadata;
+
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let show = Show {
+            id: Uuid::new_v4(),
+            title: "Severance".to_string(),
+            title_localized: None,
+            description: None,
+            year: Some(2022),
+            poster_url: None,
+            backdrop_url: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            anilist_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let show_id = show.id;
+        show_repo.shows.lock().unwrap().insert(show.id, show);
+
+        let season = Season {
+            id: Uuid::new_v4(),
+            show_id,
+            season_number: 1,
+            poster_url: Some("https://image.tmdb.org/t/p/w500/season.jpg".to_string()),
+            first_aired: None,
+            last_aired: None,
+        };
+        let season_id = season.id;
+        show_repo.seasons.lock().unwrap().insert(season.id, season);
+
+        let episode = Episode {
+            id: Uuid::new_v4(),
+            season_id,
+            episode_number: 1,
+            title: "Good News About Hell".to_string(),
+            description: None,
+            air_date: None,
+            runtime: None,
+            thumbnail_url: Some("https://image.tmdb.org/t/p/w300/still.jpg".to_string()),
+            created_at: chrono::Utc::now(),
+        };
+        let episode_id = episode.id;
+        show_repo
+            .episodes
+            .lock()
+            .unwrap()
+            .insert(episode.id, episode);
+
+        let service = DbMetadataService::new(
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let Some(MediaMetadata::Show(show)) =
+            service.get_media_metadata(&show_id.to_string()).await
+        else {
+            panic!("the show resolves");
+        };
+        let season = show.seasons.first().expect("one season");
+
+        assert_eq!(season.id, season_id.to_string());
+        assert_eq!(
+            season.poster_url.as_deref(),
+            Some(format!("/v1/artwork/season/{season_id}/poster").as_str()),
+        );
+        assert_eq!(
+            season.episodes[0].thumbnail_url.as_deref(),
+            Some(format!("/v1/artwork/episode/{episode_id}/thumbnail").as_str()),
+        );
+    }
 }

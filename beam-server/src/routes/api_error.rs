@@ -394,6 +394,57 @@ pub enum DeliveryError {
     Internal(String),
 }
 
+/// What `/v1/artwork/{kind}/{id}/{variant}` can fail with.
+///
+/// Separate from [`DeliveryError`] even though both deliver bytes through
+/// `RuntimeDelivery`, because the conditions do not mean the same thing to a
+/// client. `file-not-found` and `source-file-missing` are about an indexed file
+/// a viewer asked to play; a title with no poster is neither -- it is the
+/// ordinary case a client renders as a placeholder. Reusing the delivery codes
+/// would tell a viewer to ask an administrator to rescan the library because a
+/// show has no backdrop.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum ArtworkError {
+    /// No image for this title: the row carries no stored URL, the variant does
+    /// not apply to that kind, or the provider no longer serves it.
+    ///
+    /// One code for all three because a client acts identically on each -- it
+    /// draws the placeholder. Splitting them would publish a distinction no
+    /// caller can use.
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#artwork-not-found",
+        title = "Artwork not found"
+    )]
+    NotFound(String),
+
+    /// The provider answered unusably: a non-image content type, a body over
+    /// the ceiling, a refused URL, an unhappy upstream status, or nothing at
+    /// all.
+    ///
+    /// A 502 rather than a 500 because the fault is not Beam's, and `internal`
+    /// is documented as meaning that it is. A provider CDN timing out reported
+    /// as a Beam 500 is the mislabelling issue #123 was opened on.
+    #[error("{0}")]
+    #[problem(
+        status = 502,
+        type = "https://beam.justinchung.net/reference/errors/#artwork-upstream-failed",
+        title = "Artwork provider failed"
+    )]
+    UpstreamFailed(String),
+
+    /// Beam's own fault: the title lookup failed, or the cached file could not
+    /// be read back.
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 // Widening conversions. Each is total and each maps like to like; there is no
 // arm here that sends a not-found to a 500 to satisfy the compiler.
 

@@ -4,8 +4,9 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::models::{
-    AudioSourceInfo, EpisodeMetadata, ExternalIdentifiers, MediaMetadata, MediaSource,
-    MovieMetadata, Ratings, SeasonMetadata, ShowDates, ShowMetadata, Title, VideoSourceInfo,
+    ArtworkKind, ArtworkVariant, AudioSourceInfo, EpisodeMetadata, ExternalIdentifiers,
+    MediaMetadata, MediaSource, MovieMetadata, Ratings, SeasonMetadata, ShowDates, ShowMetadata,
+    Title, VideoSourceInfo, artwork_path,
 };
 use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::repositories::{
@@ -160,8 +161,14 @@ impl DbMetadataService {
             }),
             runtime: movie.runtime.map(|d| (d.as_secs() / 60) as u32),
             duration,
-            poster_url: movie.poster_url.clone(),
-            backdrop_url: movie.backdrop_url.clone(),
+            poster_url: movie
+                .poster_url
+                .as_ref()
+                .map(|_| artwork_path(ArtworkKind::Movie, movie.id, ArtworkVariant::Poster)),
+            backdrop_url: movie
+                .backdrop_url
+                .as_ref()
+                .map(|_| artwork_path(ArtworkKind::Movie, movie.id, ArtworkVariant::Backdrop)),
             genres: vec![],
             ratings,
             identifiers,
@@ -222,7 +229,9 @@ impl DbMetadataService {
                     title: ep.title,
                     description: ep.description,
                     air_date: ep.air_date,
-                    thumbnail_url: ep.thumbnail_url,
+                    thumbnail_url: ep.thumbnail_url.as_ref().map(|_| {
+                        artwork_path(ArtworkKind::Episode, ep.id, ArtworkVariant::Thumbnail)
+                    }),
                     duration,
                     streams: ep_streams,
                     file_id,
@@ -245,11 +254,15 @@ impl DbMetadataService {
             };
 
             seasons.push(SeasonMetadata {
+                id: season.id.to_string(),
                 season_number: season.season_number,
                 dates,
                 episode_runtime: None,
                 episodes,
-                poster_url: season.poster_url,
+                poster_url: season
+                    .poster_url
+                    .as_ref()
+                    .map(|_| artwork_path(ArtworkKind::Season, season.id, ArtworkVariant::Poster)),
                 genres: vec![],
                 ratings: None,
                 identifiers: None,
@@ -455,8 +468,12 @@ impl MetadataService for DbMetadataService {
                             release_date: None,
                             runtime: movie.runtime.map(|d| (d.as_secs() / 60) as u32),
                             duration: None,
-                            poster_url: movie.poster_url.clone(),
-                            backdrop_url: movie.backdrop_url.clone(),
+                            poster_url: movie.poster_url.as_ref().map(|_| {
+                                artwork_path(ArtworkKind::Movie, movie.id, ArtworkVariant::Poster)
+                            }),
+                            backdrop_url: movie.backdrop_url.as_ref().map(|_| {
+                                artwork_path(ArtworkKind::Movie, movie.id, ArtworkVariant::Backdrop)
+                            }),
                             genres: vec![],
                             ratings: movie.rating_tmdb.map(|r| Ratings {
                                 tmdb: Some((r * 10.0) as u32),

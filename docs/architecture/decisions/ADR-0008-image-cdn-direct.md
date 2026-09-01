@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Superseded by [ADR-0015](ADR-0015-artwork-served-by-beam.md), which settles the revisit
+condition below and has Beam serve artwork itself. Everything that follows describes the
+decision as it stood, and why it was taken; it is kept for that record rather than because it
+still describes the system.
 
 ## Context
 
@@ -44,6 +47,8 @@ context on why it was skipped.
 - Self-hosting purists who prefer a fully "phones-home to nothing but configured providers at
   enrichment time" model will notice that browsing the library still generates ongoing third-party
   network traffic for images, which is a different privacy posture than an image proxy would provide.
-- A server-side image proxy remains a legitimate future addition, not rejected outright, if this
-  tradeoff proves unacceptable to operators in practice — tracked in
-  [#70](https://github.com/justin13888/beam/issues/70).
+- A server-side image proxy remained a legitimate future addition, not rejected outright, if this
+  tradeoff proved unacceptable in practice — tracked in
+  [#70](https://github.com/justin13888/beam/issues/70). It did: two of the three conditions above
+  were met, and [ADR-0015](ADR-0015-artwork-served-by-beam.md) builds the proxy, records which
+  evidence answered which condition, and states what is still outstanding.

@@ -58,18 +58,32 @@ time than the smaller batch would have.
 
 ## Artwork and viewer privacy
 
-Beam stores providers' image URLs and serves those URLs to the browser. **It does not proxy or
-cache the images**, so every viewer's browser connects directly to TMDB's or AniList's CDN and
-those CDNs see viewers' IP addresses and which artwork they requested.
+**Beam serves artwork itself.** Your server fetches each poster, backdrop and episode still from
+the provider once, stores it, and serves it to your viewers from its own cache. Nobody's browser,
+phone or TV ever connects to TMDB or AniList, so neither provider can see who is browsing what —
+or that your server exists at all beyond the enrichment lookups it makes on its own behalf.
 
-This is a deliberate, recorded trade-off
-([ADR-0008](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0008-image-cdn-direct.md)),
-not an oversight — and worth knowing if you run Beam precisely so that nothing leaves your
-network. No Beam cookie or credential is ever sent to a provider, so they learn viewing patterns
-by IP, not identities.
+This replaces the earlier behaviour, where Beam handed out provider CDN links and every viewer's
+device connected to them directly. If you run Beam precisely so that nothing leaves your network,
+that gap is closed
+([ADR-0015](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0015-artwork-served-by-beam.md)).
+No Beam cookie or credential is ever sent to a provider, in this or any other request.
 
-There is currently no opt-out short of disabling enrichment. A server-side image proxy is tracked
-in [#70](https://github.com/justin13888/beam/issues/70).
+The cache lives in `BEAM_DATA_DIR/artwork` and is capped by `BEAM_ARTWORK_CACHE_MAX_BYTES`
+(1 GiB by default); once it is full the least recently shown images are dropped and re-fetched if
+they are needed again. Setting it smaller than your library's artwork costs a little bandwidth,
+never a broken poster. It needs no pruning or invalidation of its own: when enrichment finds
+different artwork for a title, that is a different image, and the old one ages out on its own.
+
+Two things follow that are worth knowing:
+
+- **Artwork now uses your server's bandwidth.** If viewers watch from outside your network, the
+  posters they see travel from your uplink rather than from a CDN. Posters are small and clients
+  cache them hard, so this is usually unnoticeable — but it is not zero on a metered connection.
+- **Downloaded titles do not yet show artwork offline.** The Android app caches the images it has
+  shown, but does not deliberately fetch a title's poster when you download it, so a title
+  downloaded and then opened with no connection may show a placeholder. Tracked in
+  [#152](https://github.com/justin13888/beam/issues/152).
 
 <LinkCard
 	title="Why enrichment works this way"

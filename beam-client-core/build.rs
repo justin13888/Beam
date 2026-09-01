@@ -36,11 +36,32 @@ const MEDIA_DELIVERY: [(OmitMethod, &str); 4] = [
     (OmitMethod::Head, "/v1/files/{file_id}/download"),
 ];
 
+/// The artwork operations, which this client does not call either.
+///
+/// Poster and backdrop art is fetched by the platform's image loader -- Coil
+/// on Android, `URLSession` on Apple -- because those cache to disk, decode
+/// incrementally and size to the view. This crate's part is already done by
+/// `ServerRecord::absolute_url`, which turns the relative artwork path the
+/// catalog carries into the absolute URL the loader is handed (see
+/// `catalog.rs`). A generated method returning a `Vec<u8>` of a poster would
+/// be a method with no caller, for the same reason as the four above.
+///
+/// The spargen gap here is real and separate, and is filed as
+/// getkono/spargen#82: `classify_media` has no arm for a media type *range*,
+/// so `image/*` -- the only honest description of a response whose concrete
+/// type is chosen per request -- is rejected as `E009`. Naming an exact type
+/// instead does not help; `image/jpeg` is not classified either. When that
+/// lands, these rules stay for the reason in the paragraph above.
+const ARTWORK: [(OmitMethod, &str); 2] = [
+    (OmitMethod::Get, "/v1/artwork/{kind}/{id}/{variant}"),
+    (OmitMethod::Head, "/v1/artwork/{kind}/{id}/{variant}"),
+];
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
 
     let mut spec = spargen::Spec::new("api/openapi.json").carve(false);
-    for (method, path) in MEDIA_DELIVERY {
+    for (method, path) in MEDIA_DELIVERY.into_iter().chain(ARTWORK) {
         spec = spec.omit_rule(OmitRule::operation(method, path));
     }
 

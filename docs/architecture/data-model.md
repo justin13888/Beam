@@ -91,8 +91,8 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `year` | INTEGER | yes | |
 | `release_date` | DATE | yes | |
 | `runtime_mins` | INTEGER | yes | |
-| `poster_url` | TEXT | yes | direct CDN URL (TMDB/AniList), not proxied — see [ADR-0008](decisions/ADR-0008-image-cdn-direct.md) |
-| `backdrop_url` | TEXT | yes | direct CDN URL |
+| `poster_url` | TEXT | yes | the **provider** URL enrichment found. Never served to a client: the artwork endpoint resolves a title to it, fetches it once and serves the bytes — see [ADR-0015](decisions/ADR-0015-artwork-served-by-beam.md) |
+| `backdrop_url` | TEXT | yes | as `poster_url` |
 | `tmdb_id` | INTEGER | yes | unique |
 | `imdb_id` | TEXT | yes | unique |
 | `tvdb_id` | INTEGER | yes | unique |

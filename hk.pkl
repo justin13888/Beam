@@ -153,12 +153,18 @@ hooks {
                 glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
                 check = "mise run android:lint"
             }
+            // Chained rather than parallel: all three drive `./gradlew` against the
+            // same beam-android project, and Gradle serialises concurrent builds on
+            // its own project lock anyway. Running them in parallel buys nothing and
+            // spends three daemons contending for one lock.
             ["android-test"] {
                 glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
+                depends = List("android-lint")
                 check = "mise run android:test"
             }
             ["android-screenshot"] {
                 glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
+                depends = List("android-test")
                 check = "mise run android:screenshot"
             }
             // The Apple steps watch beam-client-core for the same reason the
@@ -174,8 +180,19 @@ hooks {
                 glob = List("*.swift", "beam-apple/**", "beam-client-core/**")
                 check = "mise run apple:test"
             }
+            // `apple-test` and `apple-snapshot` both drive `xcodebuild` against the
+            // same DerivedData, and running them at once fails with "unable to
+            // attach DB ... database is locked". CI never sees it -- there they are
+            // separate jobs on separate machines -- so the hook is the only place
+            // the two collide.
+            //
+            // `depends` rather than `exclusive`: exclusive is a global barrier that
+            // would also serialise these against the Rust, TypeScript and docs
+            // steps, which share nothing with them. `apple-lint` stays parallel
+            // because it runs swift-format over the sources and never opens Xcode.
             ["apple-snapshot"] {
                 glob = List("*.swift", "beam-apple/**", "beam-client-core/**")
+                depends = List("apple-test")
                 check = "mise run apple:snapshot"
             }
         }

@@ -4,6 +4,7 @@ import { Play } from "lucide-react";
 import type { components } from "@/api.gen";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
+import { artworkSrc } from "@/lib/artwork";
 import { apiError } from "@/lib/problem";
 import { formatDuration } from "@/lib/utils";
 
@@ -71,9 +72,11 @@ export function ContinueWatchingRow() {
 					const isMovie = "Movie" in metadata;
 					const media = isMovie ? metadata.Movie : metadata.Show;
 					const title = media.title.original;
-					const poster = isMovie
-						? metadata.Movie.poster_url
-						: (metadata.Show.seasons[0]?.poster_url ?? null);
+					const poster = artworkSrc(
+						isMovie
+							? metadata.Movie.poster_url
+							: (metadata.Show.seasons[0]?.poster_url ?? null),
+					);
 					const progressPct = item.duration_secs
 						? Math.min(100, (item.position_secs / item.duration_secs) * 100)
 						: 0;

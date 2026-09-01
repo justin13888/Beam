@@ -10,6 +10,7 @@ import { env } from "@/env";
 import { useAuth } from "@/hooks/auth";
 import { usePlaybackBeacon } from "@/hooks/usePlaybackBeacon";
 import { apiClient } from "@/lib/apiClient";
+import { artworkSrc } from "@/lib/artwork";
 import { apiError } from "@/lib/problem";
 import { nextPlayableEpisode } from "@/lib/upNext";
 import { formatDuration } from "@/lib/utils";
@@ -197,9 +198,9 @@ export function MediaDetailPage({
 	const title = media.title.original;
 	const year = media.year;
 	const description = media.description ?? null;
-	const posterUrl = movie
-		? movie.poster_url
-		: (show?.seasons[0]?.poster_url ?? null);
+	const posterUrl = artworkSrc(
+		movie ? movie.poster_url : (show?.seasons[0]?.poster_url ?? null),
+	);
 
 	const streamUrl = selectedSource
 		? absoluteUrl(selectedSource.stream_url)

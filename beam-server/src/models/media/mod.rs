@@ -1,6 +1,7 @@
 use kynos::Schema;
 use serde::Serialize;
 
+mod artwork;
 mod codec;
 mod format;
 mod movie;
@@ -8,6 +9,7 @@ mod show;
 mod source;
 mod stream;
 
+pub use artwork::*;
 pub use codec::*;
 pub use format::*;
 pub use movie::*;

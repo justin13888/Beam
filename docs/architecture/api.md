@@ -29,6 +29,7 @@ role.
 | `/v1/media/{id}` | GET | Full metadata for one movie or show |
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, with probed per-stream codecs |
 | `/v1/genres` | GET | Every genre in the catalog, for filter chips |
+| `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`; `variant` is `poster`/`backdrop`/`thumbnail` |
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing and contents |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
@@ -60,6 +61,16 @@ values (`hevc`/`h264`/`av1` → `H265`/`H264`/`AV1`; `aac`/`opus`; anything unre
 have no files of their own. Episode sources landed in
 [#102](https://github.com/justin13888/beam/pull/102), closing
 [#68](https://github.com/justin13888/beam/issues/68).
+
+`GET /v1/artwork/{kind}/{id}/{variant}` is what `poster_url`, `backdrop_url` and `thumbnail_url`
+point at: those fields carry this path, never a provider URL, so a viewer's client never contacts
+TMDB or AniList ([ADR-0015](decisions/ADR-0015-artwork-served-by-beam.md), NFR-501). The path is
+stable across re-enrichment — a client that stored one, such as an offline download record, still
+resolves it — and freshness rides on a strong `ETag` derived from the provider URL, which changes
+exactly when a title's artwork does. Conditional requests are honoured, so a client that holds the
+current validator gets a `304`. A title with no artwork, an id that does not exist, and a variant
+that does not apply to that kind of title (a season has no backdrop, an episode no poster) are all
+`404`; every client renders a placeholder for that.
 
 ## Conventions
 
