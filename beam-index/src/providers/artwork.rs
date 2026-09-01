@@ -30,6 +30,13 @@ const MAX_REDIRECTS: usize = 3;
 
 /// The `Accept` Beam offers a provider, derived from the formats it is
 /// actually willing to store so the two cannot drift apart.
+///
+/// Load-bearing for the cache, and not obviously so: TMDB content-negotiates
+/// on this, returning WebP for a `.jpg` path when WebP is offered. A provider
+/// URL therefore names one representation *per `Accept`*, not one absolutely.
+/// The cache stays correct because this header is constant -- the same URL
+/// always yields the same bytes for Beam -- so keep it derived from
+/// `ImageFormat::ALL` rather than varying it per request. See ADR-0015.
 fn accept_header() -> String {
     ImageFormat::ALL
         .iter()
@@ -117,9 +124,12 @@ impl ReqwestArtworkFetcher {
     /// CDN cannot walk Beam down to cleartext.
     pub fn new(limits: ArtworkFetchLimits) -> Result<Self, reqwest::Error> {
         let redirect = reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                attempt.stop()
-            } else if attempt.url().scheme() != "https" {
+            // Named rather than chained, because the two reasons to refuse are
+            // different -- one is a redirect loop, the other a downgrade to
+            // cleartext -- while the answer to both is the same.
+            let looping = attempt.previous().len() >= MAX_REDIRECTS;
+            let downgraded = attempt.url().scheme() != "https";
+            if looping || downgraded {
                 attempt.stop()
             } else {
                 attempt.follow()

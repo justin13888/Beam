@@ -78,6 +78,15 @@ different `ETag` and fresh bytes -- and which strands the old entry for the LRU 
 turnover costs one extra cache entry, never a stale poster. If that assumption ever fails, the fix
 is a TTL on a cache entry, not a redesign.
 
+One qualification, found by fetching a real poster rather than by reasoning: **TMDB content-
+negotiates on `Accept`**, and returns WebP for a `.jpg` path when WebP is offered. So a URL does not
+name one representation in general -- it names one *per `Accept` header*. Beam's is constant,
+derived from the formats it is willing to store, so the cache stays correct: the same URL always
+yields the same bytes for Beam. The consequence to know is that widening that set does not
+retroactively re-fetch anything already cached, since the key and therefore the `ETag` are unchanged.
+That is harmless -- a cached entry records the format it was stored as and is served under it -- but
+it is the reason the key is a digest of the URL alone rather than of the URL and the `Accept`.
+
 **No SSRF surface, and not because of an allowlist.** The only URL ever fetched is one enrichment
 itself wrote onto a row. Nothing a client sends is a URL -- only an id and two enum variants -- so
 there is no allowlist to maintain and no bypass to find. The fetcher additionally refuses anything
