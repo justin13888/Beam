@@ -1,6 +1,14 @@
 import BeamCoreBindings
 import Foundation
 
+/// The one problem type this layer reads.
+///
+/// Matched as a suffix rather than as a whole URI: the type is a fragment on
+/// beam-server's published error reference, so the origin in front of it moves
+/// with the deployment while the code after the `#` is the stable half.
+/// Mirrors `SOURCE_FILE_MISSING` in `BeamErrors.kt`.
+private let sourceFileMissing = "#source-file-missing"
+
 /// A core failure, in the shape a screen needs to react to it.
 ///
 /// The generated `BeamError` has fifteen cases and a screen cares about four
@@ -80,20 +88,30 @@ public struct BeamFailure: Error, Equatable, Sendable {
                 message: "Your session has expired. Sign in again to continue.",
                 requiresSignIn: true
             )
-        case .Forbidden(let detail):
+        case .Forbidden(let detail, _):
             return BeamFailure(message: detail, isForbidden: true)
+        // Both of these are 404s, so the status cannot tell them apart -- which
+        // is what the problem type is for. `source-file-missing` means the
+        // catalogue still lists the title and the server no longer has its
+        // file: nothing the viewer does fixes it, and phrasing it as "removed
+        // by a scan" sends them looking in the wrong place.
+        case .NotFound(_, let code) where code.hasSuffix(sourceFileMissing):
+            return BeamFailure(
+                message: "This title is in the library but its file is missing from the server. "
+                    + "Ask an administrator to rescan the library."
+            )
         case .NotFound:
             return BeamFailure(
                 message: "That is no longer in the library. It may have been removed by a scan."
             )
-        case .BadRequest(let detail):
+        case .BadRequest(let detail, _):
             return BeamFailure(message: detail)
         case .RateLimited(let retryAfterSecs):
             return BeamFailure(
                 message: "Too many requests. Try again in \(retryAfterSecs)s.",
                 isRetryable: true
             )
-        case .Server(let status, _):
+        case .Server(let status, _, _):
             return BeamFailure(
                 message: "The server had a problem (\(status)). Try again shortly.",
                 isRetryable: true
