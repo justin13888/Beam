@@ -71,6 +71,11 @@ public final class PlayerModel {
             self?.apply(snapshot)
         }
 
+        nowPlaying.configureArtworkAccess(
+            headers: item.headers,
+            trustedFingerprints: item.trustedFingerprints,
+            pinnedHost: item.pinnedHost
+        )
         nowPlaying.activate(
             commands: NowPlayingCenter.Commands(
                 play: { [weak self] in self?.play() },
