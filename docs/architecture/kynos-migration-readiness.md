@@ -177,6 +177,15 @@ seam instead. That is not a gap to file: `RateLimitPolicy` exists precisely so a
 replace the algorithm, and Kynos's own documentation points at it. The seam is the part that
 mattered.
 
+Two things about that `429` *are* gaps, both found while giving the rest of the surface a
+machine-readable taxonomy ([#123](https://github.com/justin13888/beam/issues/123)) and both filed as
+[getkono/kynos#104](https://github.com/getkono/kynos/issues/104). The response Kynos *declares*
+carries the headers and **no content**, while the one it *sends* is a problem document — so for this
+one status the emitted document misdescribes the server, which is the failure ADR-0010 exists to
+prevent. And `Decision` carries nowhere for an application to put a `type`, so the `429` is the one
+Beam response that cannot be named. `rate_limit_tests.rs` asserts both, and is expected to fail when
+they are fixed.
+
 *The conformance test.* It is obsolete by construction, which is the outcome the requirement was
 reaching for. `routes/contract_tests.rs` parsed Salvo's `Router` `Debug` output to prove the route
 table and the merged document agreed, because under Salvo they were two passes that could diverge.

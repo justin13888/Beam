@@ -102,6 +102,17 @@ have no files of their own. Episode sources landed in
   hide. `routes/taxonomy_tests.rs` asserts that every literal starts with `ERROR_BASE` and that the
   set of codes matches the set of sections on the published page, in both directions.
 
+  **The codes do not reach the OpenAPI document yet**, and that is the one thing about this
+  contract still worth knowing. Kynos's `ApiError` derive uses `type` when it renders a problem but
+  attaches an unconstrained `Problem` schema to every declared response, so `openapi.json` describes
+  every error as `$ref: '#/components/schemas/Problem'` with nothing narrowing `type`. The codes are
+  correct on the wire and invisible to a generated client, which is why `taxonomy_tests` pins them
+  against the published page rather than against the spec. The OpenAPI-correct expression is `type`
+  as a `const` per response, and a `oneOf` of const-narrowed problems where several variants share
+  one status; filed as [getkono/kynos#103](https://github.com/getkono/kynos/issues/103). When it
+  lands, that test should read `openapi.json` instead, and `codegen:openapi:check` starts catching a
+  renamed code on its own.
+
   The error types are a **family, one per operation shape**, not one union. Kynos derives an
   operation's `responses` from its return type, so a shared union would make `GET /v1/genres`
   advertise a `416` it cannot reach. Sharpening the codes made the split load-bearing rather than
@@ -116,7 +127,8 @@ have no files of their own. Episode sources landed in
   limiter's `429` and `SessionAuth`'s `401`, the status genuinely is the whole story — RFC 9457's
   own reading. The one real exception is the **admin `403`**: `SessionAuthenticator::authorize`
   returns `AuthRejection::Forbidden`, and Kynos offers no way for an application to name it, so the
-  most actionable 403 on the surface is the one code Beam cannot publish. Filed upstream.
+  most actionable 403 on the surface is the one code Beam cannot publish. Filed as
+  [getkono/kynos#105](https://github.com/getkono/kynos/issues/105).
 
   Statuses in use: `400`, `401`, `403`, `404`, `416` (stream/download range), `429` (rate limiter,
   with `Retry-After` and `X-RateLimit-Limit`/`-Remaining`/`-Reset`), `500`, `503` (health,

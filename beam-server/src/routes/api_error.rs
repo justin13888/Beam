@@ -70,7 +70,7 @@ pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 // requirement one act. Those carry no `type` of their own -- kynos renders
 // every rejection as `about:blank`, which is the right reading of RFC 9457
 // where the status is the whole story, and a gap only for the admin 403
-// (getkono/kynos, see the note on `SessionAuthenticator::authorize`).
+// (getkono/kynos#105, and the note on `SessionAuthenticator::authorize`).
 
 /// A read whose only failure is infrastructural.
 ///
@@ -111,9 +111,12 @@ pub enum MediaLookupError {
 /// `GET /v1/media/{id}/sources`.
 ///
 /// Two 400s share one declared response, and `InvalidMediaId` is written first
-/// deliberately: it is the broader of the two and the one a client that did not
-/// read this page will hit. Narrowing `type` per branch is what a `oneOf` of
-/// const-constrained problems would express, which kynos cannot emit yet.
+/// deliberately: kynos carries one response per status and titles it from the
+/// first variant declaring that status, so declaration order is part of the
+/// published document. Narrowing `type` per branch is what a `oneOf` of
+/// const-constrained problems would express, which kynos cannot emit --
+/// getkono/kynos#103. Until it can, the codes below are correct on the wire
+/// and absent from the contract, and `taxonomy_tests` is what pins them.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum MediaSourcesError {
     #[error("{0}")]
@@ -543,6 +546,14 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
     /// Beam's only scope is `admin`, checked against the user row rather than
     /// against anything carried in the credential -- a session outlives a
     /// change to the flag, and the row is the truth.
+    ///
+    /// The `Forbidden` returned below is the one condition on the whole
+    /// surface Beam would like to name and cannot. `AuthRejection` carries no
+    /// type, so this 403 reaches a client as `about:blank` and is
+    /// indistinguishable from the same-origin refusals -- and it is the 403
+    /// with the clearest next step for a user, since admin is recalculated
+    /// only at sign-in. Filed as getkono/kynos#105; there is no local fix that
+    /// would not be a second error path around the extractor that declares it.
     async fn authorize(
         &self,
         credential: &AuthenticatedUser,

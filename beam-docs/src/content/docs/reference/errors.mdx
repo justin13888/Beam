@@ -221,7 +221,7 @@ status code is the whole story, and for each of these there is no finer distinct
 <Aside type="caution" title="The admin 403 cannot be identified yet">
 The `403` for "administrator access required" is one Beam would like to name, and currently cannot:
 it is produced by the framework's authorization layer, which offers no way for the application to
-supply a `type`. It is [filed upstream](https://github.com/getkono/kynos/issues). Until it lands, a
+supply a `type`. It is [filed upstream](https://github.com/getkono/kynos/issues/105). Until it lands, a
 client tells it apart from [`cross-origin-rejected`](#cross-origin-rejected) and
 [`account-disabled`](#account-disabled) by their codes rather than by its own.
 </Aside>
