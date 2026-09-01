@@ -17,6 +17,15 @@ public data class BeamFailure(
 )
 
 /**
+ * The one problem type this layer reads.
+ *
+ * Matched as a suffix rather than as a whole URI: the type is a fragment on
+ * beam-server's published error reference, so the origin in front of it moves
+ * with the deployment while the code after the `#` is the stable half.
+ */
+private const val SOURCE_FILE_MISSING = "#source-file-missing"
+
+/**
  * Turn a core error into something a screen can render.
  *
  * Deliberately exhaustive over [BeamException] rather than falling back to
@@ -71,8 +80,25 @@ public fun BeamException.toFailure(): BeamFailure =
 
         // These two already carry the server's own explanation, which is more
         // specific than anything this layer could substitute for it.
+        //
+        // The one exception is the 404 that is not about what the viewer
+        // asked for. `source-file-missing` means the catalogue still lists
+        // the file and the disk no longer has it, so the server's "Source
+        // video file not found" would read to a viewer as though they had
+        // asked for the wrong thing. Nothing they do fixes it; someone with
+        // access to the server has to. Telling the two apart is what the
+        // problem type is for -- the status cannot.
         is BeamException.NotFound -> {
-            BeamFailure(message = detail, retryable = false)
+            if (code.endsWith(SOURCE_FILE_MISSING)) {
+                BeamFailure(
+                    message =
+                        "This title is in the library but its file is missing from the " +
+                            "server. Ask an administrator to rescan the library.",
+                    retryable = false,
+                )
+            } else {
+                BeamFailure(message = detail, retryable = false)
+            }
         }
 
         is BeamException.BadRequest -> {

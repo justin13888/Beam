@@ -47,7 +47,7 @@ class AdminTest {
             // dashboard would suggest the server had nothing on it.
             val admin =
                 FakeAdminRepository().apply {
-                    failWith = BeamException.Forbidden("admin only")
+                    failWith = BeamException.Forbidden("admin only", "about:blank")
                 }
             val viewModel = AdminViewModel(admin, FakeCatalogRepository())
             testScheduler.advanceUntilIdle()
@@ -94,7 +94,7 @@ class AdminTest {
                     .libraries
                     .first()
 
-            admin.failWith = BeamException.Server(500u, "scan failed")
+            admin.failWith = BeamException.Server(500u, "scan failed", "about:blank")
             viewModel.scan(library.id)
             testScheduler.advanceUntilIdle()
 
@@ -131,7 +131,7 @@ class AdminTest {
         runTest {
             // The counts and the libraries are the point of the screen; the user
             // list is one section of it.
-            val admin = FakeAdminRepository().apply { usersFailWith = BeamException.Forbidden("no") }
+            val admin = FakeAdminRepository().apply { usersFailWith = BeamException.Forbidden("no", "about:blank") }
             val viewModel = AdminViewModel(admin, FakeCatalogRepository())
             testScheduler.advanceUntilIdle()
 

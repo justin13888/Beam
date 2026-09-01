@@ -102,7 +102,7 @@ public class FakeCatalogRepository : CatalogRepository {
     override suspend fun detail(mediaId: String): MediaDetail {
         failWith?.let { throw it }
         return details[mediaId]
-            ?: throw BeamException.NotFound("No title with id $mediaId")
+            ?: throw BeamException.NotFound("No title with id $mediaId", "about:blank")
     }
 
     override suspend fun genres(): List<String> {
@@ -119,7 +119,7 @@ public class FakeCatalogRepository : CatalogRepository {
     override suspend fun library(libraryId: String): LibrarySummary {
         failWith?.let { throw it }
         return libraryList.firstOrNull { it.id == libraryId }
-            ?: throw BeamException.NotFound("No library with id $libraryId")
+            ?: throw BeamException.NotFound("No library with id $libraryId", "about:blank")
     }
 
     override suspend fun libraryFiles(libraryId: String): List<LibraryFileSummary> {
@@ -196,7 +196,7 @@ public class FakePlaybackRepository : PlaybackRepository {
     ): SourceSelection {
         selectionPolicy = policy
         failWith?.let { throw it }
-        return selection ?: throw BeamException.NotFound("This title has no playable files")
+        return selection ?: throw BeamException.NotFound("This title has no playable files", "about:blank")
     }
 
     override suspend fun playbackConfig(fileId: String): PlaybackHttpConfig {
