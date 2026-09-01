@@ -171,16 +171,24 @@ impl IntoResponse for MediaDelivery {
 
 impl Responses for MediaDelivery {
     /// The same 200/206/304 shape `Delivery` describes, widened to the media
-    /// types Beam can answer with.
+    /// types Beam can answer with, plus the 416 the range engine answers with
+    /// directly.
     ///
     /// `video/*` and `audio/*` are media-type ranges, which OpenAPI permits as
     /// `content` keys; `application/octet-stream` is what an unrecognised
     /// container falls back to. Listing all three is the honest description of
     /// "whatever the indexer detected".
+    ///
+    /// The 416 belongs here rather than on [`DeliveryError`] because this is
+    /// where it is produced: `Served::deliver` resolves an unsatisfiable range
+    /// into a problem document and returns it as an `Ok` delivery, so the
+    /// handler never sees an error to convert. It was previously declared by a
+    /// `DeliveryError` variant that nothing constructed -- the document was
+    /// right by accident, and deleting the dead variant would have silently
+    /// dropped a status the server still returns.
     fn responses(registry: &mut kynos::schema::registry::Registry) -> kynos::openapi::Responses {
         use kynos::openapi::{MediaType as OpenApiMediaType, RefOr, Schema, StatusPattern};
 
-        let _ = registry;
         let mut responses = kynos::response::range::delivery_responses("video/*");
 
         for status in [200, 206] {
@@ -196,6 +204,15 @@ impl Responses for MediaDelivery {
                 }
             }
         }
+
+        responses = responses.with(
+            416,
+            kynos::openapi::Response::with_content(
+                "the requested range cannot be satisfied",
+                kynos::openapi::model::body::mime_names::APPLICATION_PROBLEM_JSON,
+                OpenApiMediaType::new(registry.resolve::<kynos::Problem>()),
+            ),
+        );
 
         responses
     }

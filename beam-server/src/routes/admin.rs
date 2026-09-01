@@ -47,7 +47,7 @@ impl From<LibraryError> for MutationError {
             LibraryError::InvalidId
             | LibraryError::PathNotFound(_)
             | LibraryError::Validation(_) => Self::BadRequest(err.to_string()),
-            LibraryError::UserNotFound | LibraryError::Db(_) => Self::Internal(err.to_string()),
+            LibraryError::Db(_) => Self::Internal(err.to_string()),
         }
     }
 }
@@ -103,16 +103,22 @@ pub struct UsersQuery {
 // ── Library reads (any authenticated user) ─────────────────────────────────
 
 /// Every library the caller can see.
+///
+/// `InternalError` rather than `MutationError`: this reads a collection and
+/// parses no identifier, so `get_libraries` can only fail on the database.
+/// Returning the wider type made the operation advertise a 400 and a 404 it
+/// has no way to produce, which a generated client turns into dead branches.
 #[kynos::get("/libraries", tag = Admin, operation_id = "listLibraries")]
 pub async fn list_libraries(
     auth: SessionAuth,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<Library>>, MutationError> {
+) -> Result<Json<Vec<Library>>, InternalError> {
     let libraries = state
         .services
         .library
         .get_libraries(auth.0.user_id.clone())
-        .await?;
+        .await
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
     Ok(Json(libraries))
 }
 

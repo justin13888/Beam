@@ -1250,8 +1250,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "the requested range cannot be satisfied",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1260,8 +1260,8 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "Not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1480,8 +1480,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "the requested range cannot be satisfied",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1490,8 +1490,8 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "Not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1712,8 +1712,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "the requested range cannot be satisfied",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1722,8 +1722,8 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "Not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1942,8 +1942,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "the requested range cannot be satisfied",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1952,8 +1952,8 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "Not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1986,6 +1986,7 @@
           "admin"
         ],
         "summary": "Every library the caller can see.",
+        "description": "`InternalError` rather than `MutationError`: this reads a collection and\nparses no identifier, so `get_libraries` can only fail on the database.\nReturning the wider type made the operation advertise a 400 and a 404 it\nhas no way to produce, which a generated client turns into dead branches.",
         "operationId": "listLibraries",
         "parameters": [
           {
@@ -2041,26 +2042,6 @@
                     "$ref": "#/components/schemas/Library"
                   },
                   "type": "array"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -3667,28 +3648,18 @@
               }
             }
           },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Login unavailable",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
           "500": {
             "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Malformed Origin/Referer header",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3759,26 +3730,6 @@
                 "required": true,
                 "schema": {
                   "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Login unavailable",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }

@@ -339,8 +339,6 @@ impl LibraryService for LocalLibraryService {
 
 #[derive(Debug, Error)]
 pub enum LibraryError {
-    #[error("User not found")]
-    UserNotFound,
     #[error("Database error: {0}")]
     Db(#[from] DbErr),
     #[error("Library not found")]

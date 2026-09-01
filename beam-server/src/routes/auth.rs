@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::routes::api_error::{SESSION_COOKIE, SessionAuth};
+use crate::routes::api_error::{InternalError, SESSION_COOKIE, SessionAuth};
 use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
@@ -119,14 +119,25 @@ pub struct SetCookie {
     set_cookie: String,
 }
 
+/// A `Set-Cookie` value that could not be rendered as header text.
+///
+/// Its own type rather than a variant of any handler's error, because every
+/// handler that writes a cookie needs it and none of them should widen to the
+/// rest of another's statuses to get it. `oidc_logout` returned `AuthError`
+/// solely to carry this, and so advertised a 400, a 403 and a 503 it could not
+/// produce.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct CookieEncodingError(String);
+
 impl SetCookie {
-    fn new(cookie: &Cookie) -> Result<Self, AuthError> {
+    fn new(cookie: &Cookie) -> Result<Self, CookieEncodingError> {
         let encoded = cookie
             .encode()
-            .ok_or_else(|| AuthError::Internal("could not encode session cookie".into()))?;
+            .ok_or_else(|| CookieEncodingError("could not encode session cookie".into()))?;
         let set_cookie = encoded
             .to_str()
-            .map_err(|_| AuthError::Internal("session cookie is not valid header text".into()))?
+            .map_err(|_| CookieEncodingError("session cookie is not valid header text".into()))?
             .to_owned();
         Ok(Self { set_cookie })
     }
@@ -200,6 +211,27 @@ pub enum SessionActionError {
         title = "Internal server error"
     )]
     Internal(String),
+}
+
+// A cookie that cannot be rendered is a server fault wherever it happens, so
+// each of these is the same 500 reached through a different handler's type.
+
+impl From<CookieEncodingError> for AuthError {
+    fn from(e: CookieEncodingError) -> Self {
+        Self::Internal(e.to_string())
+    }
+}
+
+impl From<CookieEncodingError> for SessionActionError {
+    fn from(e: CookieEncodingError) -> Self {
+        Self::Internal(e.to_string())
+    }
+}
+
+impl From<CookieEncodingError> for InternalError {
+    fn from(e: CookieEncodingError) -> Self {
+        Self::Internal(e.to_string())
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -519,7 +551,7 @@ pub async fn oidc_me(
 pub async fn oidc_logout(
     Cookies(cookies): Cookies<AuthCookies>,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<WithHeaders<NoContent, SetCookie>, AuthError> {
+) -> Result<WithHeaders<NoContent, SetCookie>, InternalError> {
     if let Some(token) = cookies.beam_session {
         let _ = session_store.delete(&token).await;
     }
@@ -535,11 +567,11 @@ pub async fn oidc_logout(
 pub async fn oidc_logout_all(
     auth: SessionAuth,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<WithHeaders<NoContent, SetCookie>, AuthError> {
+) -> Result<WithHeaders<NoContent, SetCookie>, InternalError> {
     session_store
         .delete_all_for_user(&auth.0.user_id)
         .await
-        .map_err(|e| AuthError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
 
     Ok(WithHeaders::new(
         NoContent,
@@ -552,11 +584,11 @@ pub async fn oidc_logout_all(
 pub async fn oidc_list_sessions(
     auth: SessionAuth,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<Json<Vec<SessionSummary>>, SessionActionError> {
+) -> Result<Json<Vec<SessionSummary>>, InternalError> {
     let sessions = session_store
         .list_for_user(&auth.0.user_id)
         .await
-        .map_err(|e| SessionActionError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
 
     Ok(Json(
         sessions
@@ -612,8 +644,7 @@ pub async fn oidc_delete_session(
     if still_valid {
         Ok(SessionRevoked::Kept(NoContent))
     } else {
-        let cleared = SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))
-            .map_err(|_| SessionActionError::Internal("could not clear session cookie".into()))?;
+        let cleared = SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))?;
         Ok(SessionRevoked::SignedOut(WithHeaders::new(
             NoContent, cleared,
         )))

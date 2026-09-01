@@ -87,26 +87,6 @@ pub enum LookupError {
     Internal(String),
 }
 
-/// A read whose parameters may not make sense.
-#[derive(Debug, thiserror::Error, ApiError)]
-pub enum InputError {
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/bad-request",
-        title = "Bad request"
-    )]
-    BadRequest(String),
-
-    #[error("{0}")]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/internal",
-        title = "Internal server error"
-    )]
-    Internal(String),
-}
-
 /// A write against a resource that may not exist, with a body that may not
 /// validate.
 #[derive(Debug, thiserror::Error, ApiError)]
@@ -138,29 +118,20 @@ pub enum MutationError {
 
 /// Byte-range file delivery.
 ///
-/// `Forbidden` here is not "you are not signed in" -- that is `SessionAuth`'s
-/// 401 -- but "this file resolves outside its library root". Issue #123
-/// recorded that the Salvo implementation collapsed that case into a 401 on
-/// `/v1/files/{id}/stream` and `/download`, so a 401 there did not mean what it
-/// said. It is a 403 now.
+/// Three of the statuses these operations answer with are not here, and each
+/// absence is deliberate. The 401 and 403 arrive from `SessionAuth` and
+/// `EnforceSameOrigin`. The 416 is declared on [`MediaDelivery`], because
+/// `Served::deliver` resolves an unsatisfiable range into a problem document
+/// and hands it back as an `Ok` delivery -- the handler never sees an error to
+/// convert. Variants for all three existed here and nothing constructed them.
+///
+/// Issue #123 recorded that the Salvo implementation reported a *forbidden*
+/// file as 401 on `/v1/files/{id}/stream` and `/download`. That collapse is
+/// gone, and so is the case it described: a file resolving outside its library
+/// root is refused at registration (`services::library`), not at delivery, so
+/// there is no 403 for this type to carry.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum DeliveryError {
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/bad-request",
-        title = "Bad request"
-    )]
-    BadRequest(String),
-
-    #[error("{0}")]
-    #[problem(
-        status = 403,
-        type = "https://beam.justinchung.net/reference/errors/forbidden",
-        title = "Forbidden"
-    )]
-    Forbidden(String),
-
     #[error("{0}")]
     #[problem(
         status = 404,
@@ -168,14 +139,6 @@ pub enum DeliveryError {
         title = "Not found"
     )]
     NotFound(String),
-
-    #[error("{0}")]
-    #[problem(
-        status = 416,
-        type = "https://beam.justinchung.net/reference/errors/range-not-satisfiable",
-        title = "Range not satisfiable"
-    )]
-    RangeNotSatisfiable(String),
 
     #[error("{0}")]
     #[problem(
