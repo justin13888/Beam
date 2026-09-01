@@ -18,6 +18,7 @@ import { toast } from "sonner";
 import type { components } from "@/api.gen";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
+import { artworkSrc } from "@/lib/artwork";
 
 type HistoryItem =
 	components["schemas"]["beam_server.services.playback.HistoryItem"];
@@ -174,10 +175,12 @@ export function HistoryPage() {
 							const title = media.title.original;
 							// A show's first season can lack art, so take the first
 							// season that actually has a poster (matching explore).
-							const poster = isMovie
-								? metadata.Movie.poster_url
-								: (metadata.Show.seasons.find((s) => s.poster_url)
-										?.poster_url ?? null);
+							const poster = artworkSrc(
+								isMovie
+									? metadata.Movie.poster_url
+									: (metadata.Show.seasons.find((s) => s.poster_url)
+											?.poster_url ?? null),
+							);
 							const progressPct = item.duration_secs
 								? Math.min(100, (item.position_secs / item.duration_secs) * 100)
 								: 0;
