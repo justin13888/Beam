@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::search::{MediaConnection, MediaSortField, MediaTypeFilter, SortOrder};
 use crate::models::{MediaMetadata, MediaSource};
-use crate::routes::api_error::{LookupError, MutationError, SessionAuth};
+use crate::routes::api_error::{MediaLookupError, MediaSourcesError, SessionAuth};
 use crate::routes::tags::Media;
 use crate::services::metadata::{MediaSearchFilters, MetadataError};
 use crate::state::AppState;
@@ -114,10 +114,14 @@ pub async fn get_media_detail(
     _auth: SessionAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<MediaMetadata>, LookupError> {
+) -> Result<Json<MediaMetadata>, MediaLookupError> {
     match state.services.metadata.get_media_metadata(&path.id).await {
         Some(metadata) => Ok(Json(metadata)),
-        None => Err(LookupError::NotFound(format!(
+        // `get_media_metadata` returns `Option`, so a malformed id and a
+        // well-formed miss are indistinguishable by the time they reach here
+        // and both answer 404. The sibling routes tell them apart -- see the
+        // note in the error reference under `invalid-media-id`.
+        None => Err(MediaLookupError::MediaNotFound(format!(
             "media {} not found",
             path.id
         ))),
@@ -135,19 +139,21 @@ pub async fn get_media_sources(
     _auth: SessionAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<MediaSource>>, MutationError> {
+) -> Result<Json<Vec<MediaSource>>, MediaSourcesError> {
     match state.services.metadata.get_media_sources(&path.id).await {
         Ok(sources) => Ok(Json(sources)),
-        Err(MetadataError::InvalidId) => Err(MutationError::BadRequest(format!(
+        Err(MetadataError::InvalidId) => Err(MediaSourcesError::InvalidMediaId(format!(
             "media id {} is not a valid identifier",
             path.id
         ))),
-        Err(MetadataError::MediaNotFound) => Err(MutationError::NotFound(format!(
+        Err(MetadataError::MediaNotFound) => Err(MediaSourcesError::MediaNotFound(format!(
             "media {} not found",
             path.id
         ))),
-        Err(MetadataError::Unsupported(msg)) => Err(MutationError::BadRequest(msg)),
-        Err(MetadataError::InternalError(msg)) => Err(MutationError::Internal(msg)),
+        Err(MetadataError::Unsupported(msg)) => {
+            Err(MediaSourcesError::SourcesNotAvailableForShow(msg))
+        }
+        Err(MetadataError::InternalError(msg)) => Err(MediaSourcesError::Internal(msg)),
     }
 }
 

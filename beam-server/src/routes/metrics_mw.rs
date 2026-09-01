@@ -129,7 +129,7 @@ pub enum MetricsUnavailable {
     #[error("metrics are disabled; set BEAM_ENABLE_METRICS=true to install a recorder")]
     #[problem(
         status = 503,
-        type = "https://beam.justinchung.net/reference/errors/metrics-unavailable",
+        type = "https://beam.justinchung.net/reference/errors/#metrics-unavailable",
         title = "Metrics unavailable"
     )]
     NoRecorder,

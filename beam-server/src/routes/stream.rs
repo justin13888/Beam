@@ -57,7 +57,7 @@ impl FileByteSource {
     async fn open(path: PathBuf) -> Result<(Self, SystemTime, u64), DeliveryError> {
         let metadata = tokio::fs::metadata(&path).await.map_err(|err| {
             error!(?path, ?err, "failed to read source file metadata");
-            DeliveryError::NotFound("Source video file not found".into())
+            DeliveryError::SourceFileMissing("Source video file not found".into())
         })?;
 
         let length = metadata.len();
@@ -233,7 +233,7 @@ async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String
         .await
     {
         Ok(Some(file)) => file,
-        Ok(None) => return Err(DeliveryError::NotFound("File not found".into())),
+        Ok(None) => return Err(DeliveryError::FileNotFound("File not found".into())),
         // Matched rather than caught: `InvalidId` is the caller's malformed
         // `{file_id}`, and the catch-all this replaces reported it as a 500.
         Err(LibraryError::InvalidId) => {
@@ -250,7 +250,7 @@ async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String
     let path = PathBuf::from(&file.path);
     if !path.exists() {
         error!(?path, "source video file not found");
-        return Err(DeliveryError::NotFound(
+        return Err(DeliveryError::SourceFileMissing(
             "Source video file not found".into(),
         ));
     }

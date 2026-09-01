@@ -245,7 +245,7 @@ mod tests {
             .create_library("Outside".to_string(), "/etc/secret".to_string())
             .await;
 
-        assert!(matches!(result, Err(LibraryError::Validation(_))));
+        assert!(matches!(result, Err(LibraryError::PathOutsideRoot(_))));
     }
 
     #[tokio::test]
@@ -733,7 +733,7 @@ mod os_path_validator {
         // canonicalize step and must be caught by the containment check itself.
         let err = validate(Path::new("movies/../.."), &root).expect_err("escapes root");
         assert!(
-            matches!(err, LibraryError::Validation(_)),
+            matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
     }
@@ -751,7 +751,7 @@ mod os_path_validator {
         let outside = TempDir::new().expect("other temp dir");
         let err = validate(outside.path(), &root).expect_err("outside root");
         assert!(
-            matches!(err, LibraryError::Validation(_)),
+            matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
     }
@@ -768,7 +768,7 @@ mod os_path_validator {
         // This is the case a naive starts_with on the *requested* path would miss.
         let err = validate(Path::new("escape"), &root).expect_err("symlink escapes root");
         assert!(
-            matches!(err, LibraryError::Validation(_)),
+            matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
     }
@@ -796,7 +796,7 @@ mod os_path_validator {
 
         let err = validate(&evil, &root).expect_err("sibling is not inside root");
         assert!(
-            matches!(err, LibraryError::Validation(_)),
+            matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
     }

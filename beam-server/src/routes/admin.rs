@@ -24,31 +24,78 @@ use crate::models::{
     AdminUserDto, AdminUserListResponse, CreateLibraryRequest, EnrichmentQueueCounts, Library,
     LibraryFile, RecentScanDto, ScanLibraryResponse, UpdateAdminUserRequest,
 };
-use crate::routes::api_error::{AdminAuth, InternalError, MutationError, SessionAuth};
+use crate::routes::api_error::{
+    AdminAuth, AdminUserError, InternalError, LibraryCreateError, LibraryRefError,
+    LibraryScanError, MediaRefreshError, SessionAuth,
+};
 use crate::routes::tags::Admin;
 use crate::services::library::LibraryError;
 use crate::services::metadata::{MediaFilter, MetadataError};
 use crate::state::AppState;
 
-impl From<MetadataError> for MutationError {
+// The service errors are one vocabulary per service; the route errors are one
+// type per operation shape. These conversions are where the two meet, and each
+// is written for the operations that use it rather than shared across all of
+// them -- that is what lets `deleteLibrary`'s 404 mean "library not found"
+// instead of inheriting whichever 404 was declared first.
+//
+// An arm marked unreachable maps to 500 rather than to a plausible-looking 4xx.
+// A `PathOutsideRoot` arriving from an operation that resolves an id would be a
+// bug in this crate, and blaming the caller for it is how a 500 gets reported
+// as a 400 and stops being investigated.
+
+impl From<MetadataError> for MediaRefreshError {
     fn from(err: MetadataError) -> Self {
         match err {
-            MetadataError::InvalidId => Self::BadRequest(err.to_string()),
-            MetadataError::MediaNotFound => Self::NotFound(err.to_string()),
-            MetadataError::Unsupported(msg) => Self::BadRequest(msg),
-            MetadataError::InternalError(msg) => Self::Internal(msg),
+            MetadataError::InvalidId => Self::InvalidMediaId(err.to_string()),
+            MetadataError::MediaNotFound => Self::MediaNotFound(err.to_string()),
+            // `refresh_metadata` applies to any media id; there is no
+            // show-level restriction for it to report.
+            MetadataError::Unsupported(msg) | MetadataError::InternalError(msg) => {
+                Self::Internal(msg)
+            }
         }
     }
 }
 
-impl From<LibraryError> for MutationError {
+impl From<LibraryError> for LibraryRefError {
     fn from(err: LibraryError) -> Self {
         match err {
-            LibraryError::LibraryNotFound => Self::NotFound(err.to_string()),
-            LibraryError::InvalidId
-            | LibraryError::PathNotFound(_)
-            | LibraryError::Validation(_) => Self::BadRequest(err.to_string()),
-            LibraryError::Db(_) => Self::Internal(err.to_string()),
+            LibraryError::InvalidId => Self::InvalidLibraryId(err.to_string()),
+            LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
+            // Unreachable: a path is only validated when a library is
+            // registered or rescanned, never when one is resolved by id.
+            LibraryError::PathNotFound(_)
+            | LibraryError::PathOutsideRoot(_)
+            | LibraryError::Db(_) => Self::Internal(err.to_string()),
+        }
+    }
+}
+
+impl From<LibraryError> for LibraryCreateError {
+    fn from(err: LibraryError) -> Self {
+        match err {
+            LibraryError::PathNotFound(_) => Self::PathNotFound(err.to_string()),
+            LibraryError::PathOutsideRoot(_) => Self::PathOutsideRoot(err.to_string()),
+            // Unreachable: creation names no existing library and parses no id.
+            LibraryError::InvalidId | LibraryError::LibraryNotFound | LibraryError::Db(_) => {
+                Self::Internal(err.to_string())
+            }
+        }
+    }
+}
+
+impl From<LibraryError> for LibraryScanError {
+    fn from(err: LibraryError) -> Self {
+        match err {
+            LibraryError::InvalidId => Self::InvalidLibraryId(err.to_string()),
+            LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
+            // Reachable here: a rescan revisits the root, which may have gone.
+            LibraryError::PathNotFound(_) => Self::PathNotFound(err.to_string()),
+            // Unreachable: containment is decided at registration.
+            LibraryError::PathOutsideRoot(_) | LibraryError::Db(_) => {
+                Self::Internal(err.to_string())
+            }
         }
     }
 }
@@ -105,7 +152,7 @@ pub struct UsersQuery {
 
 /// Every library the caller can see.
 ///
-/// `InternalError` rather than `MutationError`: this reads a collection and
+/// `InternalError` rather than one of the library error types: this reads a collection and
 /// parses no identifier, so `get_libraries` can only fail on the database.
 /// Returning the wider type made the operation advertise a 400 and a 404 it
 /// has no way to produce, which a generated client turns into dead branches.
@@ -129,7 +176,7 @@ pub async fn get_library(
     _auth: SessionAuth,
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Library>, MutationError> {
+) -> Result<Json<Library>, LibraryRefError> {
     match state
         .services
         .library
@@ -137,7 +184,7 @@ pub async fn get_library(
         .await?
     {
         Some(library) => Ok(Json(library)),
-        None => Err(MutationError::NotFound(format!(
+        None => Err(LibraryRefError::LibraryNotFound(format!(
             "library {} not found",
             path.id
         ))),
@@ -154,7 +201,7 @@ pub async fn get_library_files(
     _auth: SessionAuth,
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<LibraryFile>>, MutationError> {
+) -> Result<Json<Vec<LibraryFile>>, LibraryRefError> {
     let files = state.services.library.get_library_files(path.id).await?;
     Ok(Json(files))
 }
@@ -167,7 +214,7 @@ pub async fn create_library(
     _auth: AdminAuth,
     Inject(state): Inject<AppState>,
     Json(body): Json<CreateLibraryRequest>,
-) -> Result<Json<Library>, MutationError> {
+) -> Result<Json<Library>, LibraryCreateError> {
     let library = state
         .services
         .library
@@ -186,7 +233,7 @@ pub async fn scan_library(
     _auth: AdminAuth,
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<ScanLibraryResponse>, MutationError> {
+) -> Result<Json<ScanLibraryResponse>, LibraryScanError> {
     let added = state.services.library.scan_library(path.id).await?;
     Ok(Json(ScanLibraryResponse { added }))
 }
@@ -204,7 +251,7 @@ pub async fn refresh_media_metadata(
     _auth: AdminAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
-) -> Result<NoContent, MutationError> {
+) -> Result<NoContent, MediaRefreshError> {
     state
         .services
         .metadata
@@ -223,7 +270,7 @@ pub async fn delete_library(
     _auth: AdminAuth,
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
-) -> Result<NoContent, MutationError> {
+) -> Result<NoContent, LibraryRefError> {
     if state
         .services
         .library
@@ -232,7 +279,7 @@ pub async fn delete_library(
     {
         Ok(NoContent)
     } else {
-        Err(MutationError::NotFound(format!(
+        Err(LibraryRefError::LibraryNotFound(format!(
             "library {} not found",
             path.id
         )))
@@ -413,8 +460,8 @@ pub async fn update_admin_user(
     Path(path): Path<UserPath>,
     Inject(state): Inject<AppState>,
     Json(body): Json<UpdateAdminUserRequest>,
-) -> Result<NoContent, MutationError> {
-    let internal = |e: sea_orm::DbErr| MutationError::Internal(e.to_string());
+) -> Result<NoContent, AdminUserError> {
+    let internal = |e: sea_orm::DbErr| AdminUserError::Internal(e.to_string());
 
     let target = state
         .services
@@ -422,10 +469,10 @@ pub async fn update_admin_user(
         .find_by_id(path.id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| MutationError::NotFound(format!("user {} not found", path.id)))?;
+        .ok_or_else(|| AdminUserError::UserNotFound(format!("user {} not found", path.id)))?;
 
     if body.disabled && target.id.to_string() == auth.0.user_id {
-        return Err(MutationError::BadRequest(
+        return Err(AdminUserError::CannotDisableSelf(
             "cannot disable your own account".to_owned(),
         ));
     }
@@ -445,7 +492,7 @@ pub async fn update_admin_user(
             .session_store
             .delete_all_for_user(&target.id.to_string())
             .await
-            .map_err(|e| MutationError::Internal(e.to_string()))?;
+            .map_err(|e| AdminUserError::Internal(e.to_string()))?;
     }
 
     Ok(NoContent)

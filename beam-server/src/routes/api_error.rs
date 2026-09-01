@@ -32,85 +32,293 @@ pub const SESSION_COOKIE: &str = "beam_session";
 /// The base every `type` URI shares.
 ///
 /// Published rather than internal: the whole point of a stable identifier is
-/// that a client branches on it, so it belongs to the contract.
-pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/";
+/// that a client branches on it, so it belongs to the contract. The trailing
+/// `#` is load-bearing -- each code is a fragment on the one error-reference
+/// page, so `type` dereferences to the section describing it. Before that it
+/// pointed at `/reference/errors/<code>`, a path that has never existed, so
+/// every identifier Beam published resolved to a 404.
+///
+/// It cannot appear in the attributes below: kynos parses `#[problem(type =
+/// ...)]` and `#[problem(base = ...)]` as string literals, not paths. The
+/// prefix is therefore written out per variant, and `contract_tests` asserts
+/// that every literal starts with this constant.
+pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 //
-// Not one enum but a small family, and the split is deliberate. Kynos derives
-// an operation's `responses` from its return type, so a single shared error
-// union would make every endpoint advertise every status Beam can produce --
-// `GET /v1/genres` would claim a 416 it cannot reach, and a generated client
-// turns that into dead retry logic. Each operation names the narrowest type
-// that covers what it can actually answer with.
+// Not one enum but a family, one per distinct set of reachable failures. Kynos
+// derives an operation's `responses` from its return type, so a shared union
+// makes every endpoint advertise every status any of them can produce -- `GET
+// /v1/genres` would claim a 416 it cannot reach, and a generated client turns
+// that into dead retry logic.
+//
+// Sharpening the codes made the split load-bearing rather than merely tidy.
+// Kynos carries one response per status and titles it from the *first* variant
+// declaring that status, so a `MutationError` holding both `MediaNotFound` and
+// `LibraryNotFound` would document `deleteLibrary`'s 404 as "Media not found".
+// One enum per operation shape is what keeps each description true.
 //
 // The `type` URI is written out per variant rather than derived from the
-// variant name, so the same failure carries the same stable code no matter
-// which enum it reaches a client through. That code is what issue #123 asked
-// for; the message stays human-facing and non-contractual.
+// variant name. Kynos can compose one from `#[problem(base = ...)]` plus the
+// variant's name, but then a rename silently changes the published contract
+// with no string to diff and nothing for a reviewer to catch -- and the same
+// code is deliberately emitted by several enums (`media-not-found` by three,
+// `internal` by ten), which an implicit convention would hide.
 //
-// 401 and 403 are deliberately absent from all of these: they arrive from
-// `SessionAuth` and `AdminAuth` respectively, which is what makes taking the
-// extractor and documenting the requirement one act. The exception is
-// `DeliveryError::Forbidden`, which is an authorization decision about a *file*
-// rather than about the caller.
+// 401 and 403 are almost always absent here: they arrive from `SessionAuth`
+// and `AdminAuth`, which is what makes taking the extractor and documenting the
+// requirement one act. Those carry no `type` of their own -- kynos renders
+// every rejection as `about:blank`, which is the right reading of RFC 9457
+// where the status is the whole story, and a gap only for the admin 403
+// (getkono/kynos, see the note on `SessionAuthenticator::authorize`).
 
 /// A read whose only failure is infrastructural.
+///
+/// `GET /v1/genres`, `GET /v1/libraries`, `GET /v1/continue-watching`,
+/// `GET /v1/history`, the admin read endpoints, and the three session
+/// operations that only ever fail on the store.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum InternalError {
     #[error("{0}")]
     #[problem(
         status = 500,
-        type = "https://beam.justinchung.net/reference/errors/internal",
+        type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
     Internal(String),
 }
 
-/// A read of one resource that may not exist.
+/// `GET /v1/media/{id}`.
 #[derive(Debug, thiserror::Error, ApiError)]
-pub enum LookupError {
+pub enum MediaLookupError {
     #[error("{0}")]
     #[problem(
         status = 404,
-        type = "https://beam.justinchung.net/reference/errors/not-found",
-        title = "Not found"
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
     )]
-    NotFound(String),
+    MediaNotFound(String),
 
     #[error("{0}")]
     #[problem(
         status = 500,
-        type = "https://beam.justinchung.net/reference/errors/internal",
+        type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
     Internal(String),
 }
 
-/// A write against a resource that may not exist, with a body that may not
-/// validate.
+/// `GET /v1/media/{id}/sources`.
+///
+/// Two 400s share one declared response, and `InvalidMediaId` is written first
+/// deliberately: it is the broader of the two and the one a client that did not
+/// read this page will hit. Narrowing `type` per branch is what a `oneOf` of
+/// const-constrained problems would express, which kynos cannot emit yet.
 #[derive(Debug, thiserror::Error, ApiError)]
-pub enum MutationError {
+pub enum MediaSourcesError {
     #[error("{0}")]
     #[problem(
         status = 400,
-        type = "https://beam.justinchung.net/reference/errors/bad-request",
-        title = "Bad request"
+        type = "https://beam.justinchung.net/reference/errors/#invalid-media-id",
+        title = "Invalid media id"
     )]
-    BadRequest(String),
+    InvalidMediaId(String),
+
+    /// A show has no files of its own; the caller wants an episode id.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#sources-not-available-for-show",
+        title = "Sources are not available at the show level"
+    )]
+    SourcesNotAvailableForShow(String),
 
     #[error("{0}")]
     #[problem(
         status = 404,
-        type = "https://beam.justinchung.net/reference/errors/not-found",
-        title = "Not found"
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
     )]
-    NotFound(String),
+    MediaNotFound(String),
 
     #[error("{0}")]
     #[problem(
         status = 500,
-        type = "https://beam.justinchung.net/reference/errors/internal",
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `POST /v1/admin/media/{id}/refresh`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum MediaRefreshError {
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-media-id",
+        title = "Invalid media id"
+    )]
+    InvalidMediaId(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
+    )]
+    MediaNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// An operation naming one library by id: `GET /v1/libraries/{id}`, its
+/// `/files` subresource, and `DELETE /v1/admin/libraries/{id}`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum LibraryRefError {
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-library-id",
+        title = "Invalid library id"
+    )]
+    InvalidLibraryId(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
+        title = "Library not found"
+    )]
+    LibraryNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `POST /v1/admin/libraries`. No 404: nothing is looked up by id.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum LibraryCreateError {
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#library-path-not-found",
+        title = "Library path not found"
+    )]
+    PathNotFound(String),
+
+    /// The root escapes the directory Beam is allowed to serve from.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#library-path-outside-root",
+        title = "Library path is outside the permitted root"
+    )]
+    PathOutsideRoot(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `POST /v1/admin/libraries/{id}/scan`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum LibraryScanError {
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-library-id",
+        title = "Invalid library id"
+    )]
+    InvalidLibraryId(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#library-path-not-found",
+        title = "Library path not found"
+    )]
+    PathNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
+        title = "Library not found"
+    )]
+    LibraryNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `PATCH /v1/admin/users/{id}`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum AdminUserError {
+    /// An administrator cannot lock themselves out.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#cannot-disable-self",
+        title = "An administrator cannot disable their own account"
+    )]
+    CannotDisableSelf(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#user-not-found",
+        title = "User not found"
+    )]
+    UserNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `PUT /v1/files/{file_id}/progress`.
+///
+/// The path parameter is typed `Uuid`, so a malformed id is Kynos's
+/// `PathRejection` rather than anything this type carries.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum ProgressError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#file-not-found",
+        title = "File not found"
+    )]
+    FileNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
     Internal(String),
@@ -130,60 +338,115 @@ pub enum MutationError {
 /// gone, and so is the case it described: a file resolving outside its library
 /// root is refused at registration (`services::library`), not at delivery, so
 /// there is no 403 for this type to carry.
+///
+/// `FileNotFound` is written before `SourceFileMissing` because both are 404s
+/// sharing one declared response, and "File not found" is the description that
+/// covers the pair. They are separate codes because the operator response
+/// differs: one means the catalogue never had the file, the other that the
+/// catalogue and the disk have diverged.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum DeliveryError {
     /// The `{file_id}` in the path is not a UUID.
     ///
     /// `stream.rs` swallowed this into a 500 by catching every `LibraryError`
-    /// from the lookup as an internal fault (issue #123). The path parameter
-    /// is typed `String` rather than `Uuid` deliberately -- a `Uuid` would let
-    /// Kynos answer the 400 first, but then the problem document would carry
-    /// no type Beam can name.
+    /// from the lookup as an internal fault (issue #123). The path parameter is
+    /// typed `String` rather than `Uuid` deliberately -- a `Uuid` would let
+    /// Kynos answer the 400 first, but its problem document carries no type
+    /// Beam can name.
     #[error("{0}")]
     #[problem(
         status = 400,
-        type = "https://beam.justinchung.net/reference/errors/bad-request",
-        title = "Bad request"
+        type = "https://beam.justinchung.net/reference/errors/#invalid-file-id",
+        title = "Invalid file id"
     )]
     InvalidFileId(String),
 
     #[error("{0}")]
     #[problem(
         status = 404,
-        type = "https://beam.justinchung.net/reference/errors/not-found",
-        title = "Not found"
+        type = "https://beam.justinchung.net/reference/errors/#file-not-found",
+        title = "File not found"
     )]
-    NotFound(String),
+    FileNotFound(String),
+
+    /// The catalogue has the file; the path it names is not on disk.
+    ///
+    /// Its own code because it is the one 404 here an operator can act on: a
+    /// bind mount is missing, the library moved, or the file was deleted
+    /// outside Beam.
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#source-file-missing",
+        title = "Source file missing from disk"
+    )]
+    SourceFileMissing(String),
 
     #[error("{0}")]
     #[problem(
         status = 500,
-        type = "https://beam.justinchung.net/reference/errors/internal",
+        type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
     Internal(String),
 }
 
-impl From<InternalError> for LookupError {
+// Widening conversions. Each is total and each maps like to like; there is no
+// arm here that sends a not-found to a 500 to satisfy the compiler.
+
+impl From<InternalError> for MediaLookupError {
     fn from(e: InternalError) -> Self {
         let InternalError::Internal(m) = e;
         Self::Internal(m)
     }
 }
 
-impl From<InternalError> for MutationError {
+impl From<InternalError> for MediaSourcesError {
     fn from(e: InternalError) -> Self {
         let InternalError::Internal(m) = e;
         Self::Internal(m)
     }
 }
 
-impl From<LookupError> for MutationError {
-    fn from(e: LookupError) -> Self {
-        match e {
-            LookupError::NotFound(m) => Self::NotFound(m),
-            LookupError::Internal(m) => Self::Internal(m),
-        }
+impl From<InternalError> for MediaRefreshError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for LibraryRefError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for LibraryCreateError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for LibraryScanError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for AdminUserError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for ProgressError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
     }
 }
 

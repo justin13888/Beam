@@ -70,7 +70,7 @@ pub enum CrossOriginRejected {
     #[error("Malformed Origin/Referer header")]
     #[problem(
         status = 403,
-        type = "https://beam.justinchung.net/reference/errors/malformed-origin",
+        type = "https://beam.justinchung.net/reference/errors/#malformed-origin",
         title = "Malformed Origin/Referer header"
     )]
     Malformed,
@@ -78,7 +78,7 @@ pub enum CrossOriginRejected {
     #[error("Cross-origin request rejected")]
     #[problem(
         status = 403,
-        type = "https://beam.justinchung.net/reference/errors/cross-origin",
+        type = "https://beam.justinchung.net/reference/errors/#cross-origin-rejected",
         title = "Cross-origin request rejected"
     )]
     NotAllowed,

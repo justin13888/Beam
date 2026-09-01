@@ -221,7 +221,7 @@ async fn an_unknown_id_is_a_404_problem_document() {
         .send()
         .await
         .assert_status(StatusCode::NOT_FOUND)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/not-found");
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#media-not-found");
 }
 
 #[tokio::test]
@@ -329,7 +329,9 @@ async fn sources_for_a_show_id_are_a_400() {
         .send()
         .await
         .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/bad-request");
+        .assert_problem_type(
+            "https://beam.justinchung.net/reference/errors/#sources-not-available-for-show",
+        );
 }
 
 /// A malformed media id is a 400, where it used to be a 500.
@@ -348,7 +350,7 @@ async fn sources_for_a_malformed_id_are_a_400_not_a_500() {
         .send()
         .await
         .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/bad-request");
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
 }
 
 #[tokio::test]

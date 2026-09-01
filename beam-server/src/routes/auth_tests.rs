@@ -590,7 +590,9 @@ mod tests {
         // the stable half of it -- the message never was contractual.
         response
             .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type("https://beam.justinchung.net/reference/errors/bad-request");
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#login-attempt-invalid",
+            );
     }
 
     #[tokio::test]
@@ -692,7 +694,7 @@ mod tests {
         let response = do_callback(&harness, &state_cookie2, &begin2.state).await;
         response
             .assert_status(StatusCode::FORBIDDEN)
-            .assert_problem_type("https://beam.justinchung.net/reference/errors/forbidden");
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#account-disabled");
         assert!(
             live_cookie(&response, SESSION_COOKIE).is_none(),
             "a disabled account must not receive a session cookie"

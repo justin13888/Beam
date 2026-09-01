@@ -44,7 +44,7 @@ use crate::services::metadata::{
 };
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::playback::{
-    ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackService,
+    ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackReadError, PlaybackService,
 };
 use crate::state::{AppServices, AppState};
 
@@ -67,7 +67,7 @@ impl PlaybackService for StubPlaybackService {
         &self,
         _user_id: uuid::Uuid,
         _limit: u32,
-    ) -> Result<Vec<ContinueWatchingItem>, PlaybackError> {
+    ) -> Result<Vec<ContinueWatchingItem>, PlaybackReadError> {
         unimplemented!("not called in stream route tests")
     }
 
@@ -76,7 +76,7 @@ impl PlaybackService for StubPlaybackService {
         _user_id: uuid::Uuid,
         _limit: u64,
         _offset: u64,
-    ) -> Result<(Vec<crate::services::playback::HistoryItem>, u64), PlaybackError> {
+    ) -> Result<(Vec<crate::services::playback::HistoryItem>, u64), PlaybackReadError> {
         unimplemented!("not called in stream route tests")
     }
 }

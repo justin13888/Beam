@@ -14,7 +14,7 @@ use beam_index::services::index::{IndexError, IndexService};
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
     /// Validates that `requested` is within `root`, returning the canonical absolute path.
     /// Returns `LibraryError::PathNotFound` if the path does not exist.
-    /// Returns `LibraryError::Validation` if the path escapes root.
+    /// Returns `LibraryError::PathOutsideRoot` if the path escapes root.
     fn validate_library_path(&self, requested: &Path, root: &Path)
     -> Result<PathBuf, LibraryError>;
 }
@@ -44,7 +44,7 @@ impl PathValidator for OsPathValidator {
         })?;
 
         if !canonical_target.starts_with(&canonical_root) {
-            return Err(LibraryError::Validation(format!(
+            return Err(LibraryError::PathOutsideRoot(format!(
                 "Library path must be within the video directory: {}",
                 root.display()
             )));
@@ -111,7 +111,7 @@ pub mod in_memory {
                     Err(LibraryError::PathNotFound(msg.clone()))
                 }
                 InMemoryPathValidatorResult::ValidationError(msg) => {
-                    Err(LibraryError::Validation(msg.clone()))
+                    Err(LibraryError::PathOutsideRoot(msg.clone()))
                 }
             }
         }
@@ -352,8 +352,8 @@ pub enum LibraryError {
     InvalidId,
     #[error("Path not found: {0}")]
     PathNotFound(String),
-    #[error("Validation error: {0}")]
-    Validation(String),
+    #[error("Library path is outside the permitted root: {0}")]
+    PathOutsideRoot(String),
 }
 
 impl From<IndexError> for LibraryError {

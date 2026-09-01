@@ -8,26 +8,27 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::playback::{ContinueWatchingItem, HistoryItem, PlaybackProgressDto};
-use crate::routes::api_error::{InternalError, MutationError, SessionAuth};
+use crate::routes::api_error::{InternalError, ProgressError, SessionAuth};
 use crate::routes::tags::Playback;
-use crate::services::playback::PlaybackError;
+use crate::services::playback::{PlaybackError, PlaybackReadError};
 use crate::state::AppState;
 
-impl From<PlaybackError> for MutationError {
+impl From<PlaybackError> for ProgressError {
     fn from(err: PlaybackError) -> Self {
         match err {
-            PlaybackError::FileNotFound => Self::NotFound(err.to_string()),
+            PlaybackError::FileNotFound => Self::FileNotFound(err.to_string()),
             PlaybackError::Db(_) => Self::Internal(err.to_string()),
         }
     }
 }
 
-impl From<PlaybackError> for InternalError {
-    /// `get_continue_watching` and `get_history` never look up one file, so
-    /// `FileNotFound` is unreachable for them -- but it is still mapped rather
-    /// than panicked on, because an unreachable arm that lies is worse than one
-    /// that is merely unused.
-    fn from(err: PlaybackError) -> Self {
+impl From<PlaybackReadError> for InternalError {
+    /// Total without an unreachable arm, now that the reads have a type that
+    /// cannot express `FileNotFound`. This conversion used to take the whole
+    /// of `PlaybackError` and flatten a legitimate 404 into a 500 for callers
+    /// that could never produce one.
+    fn from(err: PlaybackReadError) -> Self {
+        let PlaybackReadError::Db(_) = &err;
         Self::Internal(err.to_string())
     }
 }
@@ -99,7 +100,7 @@ pub async fn report_playback_progress(
     Path(path): Path<FilePath>,
     Inject(state): Inject<AppState>,
     Json(body): Json<ReportProgressRequest>,
-) -> Result<Json<PlaybackProgressDto>, MutationError> {
+) -> Result<Json<PlaybackProgressDto>, ProgressError> {
     let user_id = parse_user_id(&auth.0.user_id)?;
 
     let progress = state
