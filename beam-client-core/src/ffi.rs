@@ -15,6 +15,7 @@ use crate::catalog::{
     LibraryFileSummary, LibrarySummary, MediaDetail, MediaPage, ServerHealth, browse_params,
 };
 use crate::clock::{Clock, SystemClock};
+use crate::download::{DownloadCatalog, DownloadRecord, DownloadState};
 use crate::error::BeamError;
 use crate::ports::kv::KeyValueStore;
 use crate::progress::{
@@ -105,6 +106,8 @@ struct ServerContext {
     state: SessionState,
     throttle: Arc<ProgressThrottle>,
     queue: Arc<ProgressQueue>,
+    /// What has been downloaded from this server, and where each one got to.
+    downloads: Arc<DownloadCatalog>,
     /// Titles already resolved for this server.
     ///
     /// The playback endpoints return bare identifiers, so every
@@ -276,6 +279,12 @@ impl BeamClient {
             .await?;
         self.storage
             .remove(format!("progress_queue/{server_id}"))
+            .await?;
+        // A removed server takes its downloads with it. The bytes belong to
+        // the platform, which is told separately; what goes here is the
+        // catalogue that would otherwise describe files nothing can reach.
+        self.storage
+            .remove(format!("downloads/{server_id}"))
             .await?;
 
         // The guard is taken and released before the await: holding a
@@ -960,6 +969,108 @@ impl BeamClient {
         Ok(u32::try_from(queue.len().await?).unwrap_or(u32::MAX))
     }
 
+    // -- downloads --------------------------------------------------------
+    //
+    // The platform moves the bytes -- Media3's `DownloadManager` on Android,
+    // a background `URLSession` on Apple -- because each writes somewhere its
+    // own player can read from and keeps going while the app is suspended.
+    // What a download *is*, and where it has got to, lives here so the two
+    // clients cannot disagree about it.
+
+    /// Every download for the active server, in the order they were queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the catalogue cannot be read.
+    pub async fn downloads(&self) -> Result<Vec<DownloadRecord>, BeamError> {
+        let catalog = self.active_downloads()?;
+        Ok(catalog.list().await?)
+    }
+
+    /// One download, by the file it is for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the catalogue cannot be read.
+    pub async fn download(&self, file_id: String) -> Result<Option<DownloadRecord>, BeamError> {
+        let catalog = self.active_downloads()?;
+        Ok(catalog.get(&file_id).await?)
+    }
+
+    /// Record that a download has been queued with the platform engine.
+    ///
+    /// Called *after* the engine has accepted the transfer, with the display
+    /// fields resolved while the connection that can resolve them still
+    /// exists. Re-recording a file replaces its entry, which is how a failed
+    /// download is retried.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the catalogue cannot be written.
+    pub async fn record_download_queued(&self, record: DownloadRecord) -> Result<(), BeamError> {
+        let catalog = self.active_downloads()?;
+        catalog.upsert(record).await?;
+        Ok(())
+    }
+
+    /// Move a download to a new state.
+    ///
+    /// Returns `None` when the catalogue has never heard of the file, which
+    /// happens whenever the engine reports against a download the viewer
+    /// removed a moment earlier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the catalogue cannot be written.
+    pub async fn set_download_state(
+        &self,
+        file_id: String,
+        state: DownloadState,
+    ) -> Result<Option<DownloadRecord>, BeamError> {
+        let catalog = self.active_downloads()?;
+        Ok(catalog.set_state(&file_id, state).await?)
+    }
+
+    /// Record transfer progress reported by the platform engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the catalogue cannot be written.
+    pub async fn record_download_progress(
+        &self,
+        file_id: String,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    ) -> Result<Option<DownloadRecord>, BeamError> {
+        let catalog = self.active_downloads()?;
+        Ok(catalog
+            .record_progress(&file_id, downloaded_bytes, total_bytes)
+            .await?)
+    }
+
+    /// Forget one download. The caller deletes the bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the catalogue cannot be written.
+    pub async fn forget_download(&self, file_id: String) -> Result<(), BeamError> {
+        let catalog = self.active_downloads()?;
+        catalog.remove(&file_id).await?;
+        Ok(())
+    }
+
+    /// Forget every download for the active server. The caller deletes the
+    /// bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the catalogue cannot be written.
+    pub async fn forget_all_downloads(&self) -> Result<(), BeamError> {
+        let catalog = self.active_downloads()?;
+        catalog.clear().await?;
+        Ok(())
+    }
+
     // -- sessions ---------------------------------------------------------
 
     /// Every device signed in as this user.
@@ -1312,6 +1423,7 @@ impl BeamClient {
             Arc::clone(&self.clock),
             &record.id,
         ));
+        let downloads = Arc::new(DownloadCatalog::new(Arc::clone(&self.storage), &record.id));
         self.servers.write().expect("servers lock").insert(
             record.id.clone(),
             ServerContext {
@@ -1322,6 +1434,7 @@ impl BeamClient {
                 state,
                 throttle: Arc::new(ProgressThrottle::new(Arc::clone(&self.clock))),
                 queue,
+                downloads,
                 metadata: Arc::new(RwLock::new(HashMap::new())),
                 trust,
             },
@@ -1373,6 +1486,12 @@ impl BeamClient {
             (context.client.clone(), context.record.clone())
         })?;
         Ok((server_id, client, record))
+    }
+
+    /// The download catalogue belonging to the active server.
+    fn active_downloads(&self) -> Result<Arc<DownloadCatalog>, BeamError> {
+        let server_id = self.require_active()?;
+        self.with_context(&server_id, |context| Arc::clone(&context.downloads))
     }
 
     /// The metadata cache belonging to one server.
