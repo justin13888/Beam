@@ -36,6 +36,10 @@ optional variables unset/commented rather than blank.
 | `BEAM_TMDB_API_TOKEN` | unset | TMDB read-access token for `cameo` enrichment. Absent → TMDB-eligible titles are left un-enriched (never fails a scan). |
 | `BEAM_ANILIST_ENABLED` | `true` | Toggle AniList-sourced enrichment (needs no token). |
 | `BEAM_METADATA_LANGUAGE` | unset | Preferred metadata language as a BCP-47 tag, e.g. `en` or `en-US` (lowercase language, uppercase region). Affects TMDB only — AniList has no language concept. Unset or empty → the provider's default. An invalid tag **fails startup** with an error naming the bad tag (an explicitly-set knob is never silently ignored; leaving it unset keeps the graceful warn-and-disable behavior for other cameo build failures). |
+| `BEAM_ARTWORK_CACHE_MAX_BYTES` | `1073741824` | Ceiling for the on-disk artwork cache under `BEAM_DATA_DIR/artwork`. Past it, the least recently served images are deleted. Sizing it below a library's artwork costs re-fetches, never correctness. |
+| `BEAM_ARTWORK_FETCH_TIMEOUT_SECS` | `10` | How long to wait on a provider CDN for one image. |
+| `BEAM_ARTWORK_MAX_IMAGE_BYTES` | `16777216` | Largest single image accepted from a provider; a larger response is refused rather than buffered. |
+| `BEAM_ARTWORK_NEGATIVE_TTL_SECS` | `300` | How long a failed artwork fetch is remembered, so a provider that is down (or art deleted upstream) is not re-requested once per client per grid render. |
 | `BEAM_OIDC_ISSUER` | unset | OIDC issuer URL. All three `BEAM_OIDC_*` values are required together; until then login is disabled with a clear error (not a crash). |
 | `BEAM_OIDC_CLIENT_ID` | unset | OIDC client id registered with the IdP. |
 | `BEAM_OIDC_CLIENT_SECRET` | unset | OIDC client secret. Secret — never logged (startup config logging redacts it). |

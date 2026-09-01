@@ -94,9 +94,6 @@ television until that is fixed.
   [#67](https://github.com/justin13888/beam/issues/67) and Apple iOS/macOS
   [#66](https://github.com/justin13888/beam/issues/66) have shipped; both remaining clients inherit
   `beam-client-core`, and both need a native token mint before they can sign in at all.
-- Server-side image proxy for poster/backdrop art (currently direct CDN links, see NFR-501 and
-  [ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md)) —
-  [#70](https://github.com/justin13888/beam/issues/70).
 - Automated browser e2e tests (Playwright) — [#74](https://github.com/justin13888/beam/issues/74).
 - Kubernetes/Helm deployment — [#76](https://github.com/justin13888/beam/issues/76).
 

@@ -10,6 +10,7 @@ use beam_auth::utils::{
     oidc::NotConfiguredOidcClient, pending_auth_store::in_memory::InMemoryPendingAuthStore,
     repository::in_memory::InMemoryUserRepository, session_store::in_memory::InMemorySessionStore,
 };
+use beam_domain::providers::artwork::test_utils::InMemoryArtworkFetcher;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
@@ -17,6 +18,7 @@ use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackPro
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
+use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig};
 use crate::services::hash::HashService;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::services::library::LibraryError;
@@ -173,6 +175,24 @@ pub(crate) fn make_app_state_with_probe(
     )
 }
 
+/// An artwork cache that serves nothing, for the fixtures that do not exercise
+/// artwork.
+///
+/// Cold and never written to: the fetcher has no images, so every request is a
+/// 404 and the directory is never touched -- which is why naming one that does
+/// not exist is safe rather than sloppy.
+pub(crate) fn cold_artwork_cache() -> Arc<ArtworkCache> {
+    Arc::new(ArtworkCache::new(
+        ArtworkCacheConfig {
+            root: PathBuf::from("/nonexistent/artwork"),
+            max_bytes: 0,
+            negative_ttl: std::time::Duration::from_secs(300),
+        },
+        Arc::new(InMemoryArtworkFetcher::new()),
+        Arc::new(beam_domain::services::RealClock),
+    ))
+}
+
 /// Every seam at once. The three wrappers above name the one they vary.
 pub(crate) fn make_app_state_full(
     adjust: impl FnOnce(&mut crate::config::ServerConfig),
@@ -192,9 +212,10 @@ pub(crate) fn make_app_state_full(
         Arc::new(DbPlaybackService::new(
             Arc::new(InMemoryPlaybackProgressRepository::default()),
             file_repo,
-            movie_repo,
-            show_repo,
+            movie_repo.clone(),
+            show_repo.clone(),
         ));
+    let artwork = cold_artwork_cache();
 
     let services = AppServices {
         hash: Arc::new(StubHashService),
@@ -214,6 +235,9 @@ pub(crate) fn make_app_state_full(
         enrichment_repo: Arc::new(
             beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
         ),
+        movie_repo,
+        show_repo,
+        artwork,
         session_store: Arc::new(InMemorySessionStore::default()),
         oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in routing tests")),
         pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),

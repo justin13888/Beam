@@ -76,6 +76,15 @@ metrics-util = { version = "0.20.4", default-features = false, features = [
 mutants = "0.0.4"
 rand = "0.10.2"
 regex = "1.13.1"
+# Artwork fetching (ADR-0015). Deliberately the same major and TLS backend as
+# the one `cameo` already resolves, so beam-index gains a direct dependency
+# rather than the workspace gaining a second HTTP and TLS stack. `charset` and
+# `cookies` stay off: an artwork response is bytes, and NFR-502 forbids
+# carrying any cookie to a provider at all.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "http2",
+] }
 sea-orm = { version = "1.1", features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",

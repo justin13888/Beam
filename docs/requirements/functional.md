@@ -85,10 +85,17 @@ strength. Each requirement is independently testable. See `product.md` for narra
   [#71](https://github.com/justin13888/beam/issues/71).
 - **FR-309**: The server MUST emit enrichment progress/status-change events over SSE, in the same
   manner as scan progress (FR-208).
-- **FR-310**: Poster and backdrop images MUST be served to the client as direct URLs to the
-  TMDB/AniList CDN; the server does not proxy, cache, or re-host them
-  ([ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md), NFR-501). A server-side image
-  proxy is deferred — tracked in [#70](https://github.com/justin13888/beam/issues/70).
+- **FR-310**: The server MUST serve every piece of artwork itself — movie and show posters and
+  backdrops, season posters, episode thumbnails — from `/v1/artwork/{kind}/{id}/{variant}`, fetching
+  each image from the provider once and caching it on disk. `poster_url`, `backdrop_url` and
+  `thumbnail_url` MUST carry that path, never a provider URL, so no client contacts TMDB or AniList
+  ([ADR-0015](../architecture/decisions/ADR-0015-artwork-served-by-beam.md), NFR-501). A title with
+  no artwork, an unknown id, and a variant that does not apply to that kind of title MUST all be
+  `404`; clients render a placeholder.
+- **FR-311**: An artwork URL MUST remain stable when enrichment refreshes a title's art, so that a
+  client which stored one — a download record, rendered offline — still resolves. Freshness is
+  carried by the `ETag` instead, which is derived from the provider URL and therefore changes
+  exactly when the artwork does.
 
 ## FR-4xx — Browse, Search & Detail
 

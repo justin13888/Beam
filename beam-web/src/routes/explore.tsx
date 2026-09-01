@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import type { components } from "@/api.gen";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { apiClient } from "@/lib/apiClient";
+import { artworkSrc } from "@/lib/artwork";
 
 type MediaTypeFilter =
 	components["schemas"]["beam_server.services.metadata.MediaTypeFilter"];
@@ -452,10 +453,12 @@ export function ExplorePage({
 							// A show's first season can lack art (specials,
 							// season-less shows), so take the first season that
 							// actually has a poster.
-							const poster = isMovie
-								? node.Movie.poster_url
-								: (node.Show.seasons.find((s) => s.poster_url)?.poster_url ??
-									null);
+							const poster = artworkSrc(
+								isMovie
+									? node.Movie.poster_url
+									: (node.Show.seasons.find((s) => s.poster_url)?.poster_url ??
+											null),
+							);
 							const typeLabel = isMovie ? "Movie" : "Show";
 							return (
 								<li key={media.id}>

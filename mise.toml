@@ -448,8 +448,37 @@ set -eu
 # --no-metrics is passed to every invocation. The CLI reports command and flag
 # usage to Google by default, and that is a contributor's decision rather than
 # something a build task should make quietly on their behalf.
-cmdline_tools_zip="commandlinetools-linux-16111833_latest.zip"
-cmdline_tools_sha1="e025545c62a8e64c7559119566a569fb1dec5f60"
+# Google publishes the command-line tools per host and the emulator system
+# image per ABI, and both were pinned to the Linux x86_64 pair. CI is Linux, so
+# CI never noticed -- but on a Mac the unpacked `android` is a Linux ELF and the
+# task dies with "cannot execute binary file", and the system image would be an
+# architecture the host cannot boot.
+#
+# The checksums are Google's own, from the SDK repository manifest at
+# https://dl.google.com/android/repository/repository2-3.xml. Google ships no
+# Linux aarch64 archive, so that host gets a clear error rather than a 404.
+case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64)
+        cmdline_tools_zip="commandlinetools-linux-16111833_latest.zip"
+        cmdline_tools_sha1="e025545c62a8e64c7559119566a569fb1dec5f60"
+        system_image_abi="x86_64"
+        ;;
+    Darwin-arm64)
+        cmdline_tools_zip="commandlinetools-mac_arm64-16111833_latest.zip"
+        cmdline_tools_sha1="ad03dc49bfacfd52c110b14104ea548b8a07e830"
+        system_image_abi="arm64-v8a"
+        ;;
+    Darwin-x86_64)
+        cmdline_tools_zip="commandlinetools-mac_x86_64-16111833_latest.zip"
+        cmdline_tools_sha1="112cf9618794a997ff273537d55bee02c22abffe"
+        system_image_abi="x86_64"
+        ;;
+    *)
+        echo "android:sdk: no Android command-line tools for $(uname -s)-$(uname -m)." >&2
+        echo "  Google publishes linux-x86_64, mac_arm64 and mac_x86_64 only." >&2
+        exit 1
+        ;;
+esac
 android="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/android"
 
 if [ ! -x "$android" ]; then
@@ -458,7 +487,14 @@ if [ ! -x "$android" ]; then
     trap 'rm -rf "$tmp"' EXIT
     curl -fsSL -o "$tmp/tools.zip" \
         "https://dl.google.com/android/repository/$cmdline_tools_zip"
-    got=$(sha1sum "$tmp/tools.zip" | cut -d" " -f1)
+    # sha1sum is GNU coreutils and is absent on macOS; shasum is perl-core and
+    # is absent from some minimal Linux images. Take whichever the host has,
+    # preferring sha1sum so CI's existing path is byte-for-byte unchanged.
+    if command -v sha1sum > /dev/null 2>&1; then
+        got=$(sha1sum "$tmp/tools.zip" | cut -d" " -f1)
+    else
+        got=$(shasum -a 1 "$tmp/tools.zip" | cut -d" " -f1)
+    fi
     if [ "$got" != "$cmdline_tools_sha1" ]; then
         echo "checksum mismatch for $cmdline_tools_zip:" >&2
         echo "  expected $cmdline_tools_sha1" >&2
@@ -484,7 +520,7 @@ fi
 # difference between a job that installs 12 GB and one that installs 2.
 packages="platform-tools platforms/android-37.2 build-tools/37.0.0 ndk/29.0.14206865"
 if [ "${BEAM_ANDROID_SDK_MINIMAL:-0}" != "1" ]; then
-    packages="$packages emulator system-images/android-37.1/google_apis_ps16k/x86_64"
+    packages="$packages emulator system-images/android-37.1/google_apis_ps16k/$system_image_abi"
 fi
 
 # shellcheck disable=SC2086
@@ -507,7 +543,14 @@ profile="${BEAM_CARGO_PROFILE:-debug}"
 if [ "${BEAM_ANDROID_ALL_ABIS:-0}" = "1" ] || [ "$profile" != "debug" ]; then
     targets="-t arm64-v8a -t armeabi-v7a -t x86_64"
 else
-    targets="-t x86_64"
+    # The emulator runs the host's own architecture, so this has to track the
+    # ABI `android:sdk` installs a system image for. Hardcoding x86_64 left an
+    # Apple silicon contributor with a library for the one ABI their emulator
+    # cannot run -- the app installs and then finds no native code.
+    case "$(uname -m)" in
+        arm64|aarch64) targets="-t arm64-v8a" ;;
+        *) targets="-t x86_64" ;;
+    esac
 fi
 
 release_flag=""
@@ -872,12 +915,17 @@ cd beam-android && ./gradlew lintDebug
 description = "Rewrite the Kotlin sources to satisfy ktlint"
 run = "ktlint --format --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'"
 
+# The three Gradle tasks are ordered against each other for the same reason the
+# pre-push hook chains them: they drive ./gradlew against one project, which
+# serialises on its own lock anyway, so running them at once only contends.
 [tasks."android:test"]
 description = "Run the Android unit tests (JVM and Robolectric)"
+wait_for = ["android:lint"]
 run = "cd beam-android && ./gradlew testDebugUnitTest"
 
 [tasks."android:screenshot"]
 description = "Check the rendered screens against the recorded references"
+wait_for = ["android:lint", "android:test"]
 run = "cd beam-android && ./gradlew verifyRoborazziDebug"
 
 [tasks."android:screenshot:record"]
@@ -1027,6 +1075,12 @@ xcrun xcodebuild test \
 [tasks."apple:snapshot"]
 description = "Check the rendered screens against the recorded references"
 depends = ["core:apple"]
+# Every xcodebuild here shares one DerivedData, and two at once fail with
+# "unable to attach DB ... database is locked". `mise run ci` schedules
+# apple:test, apple:snapshot and apple:build together, so they are ordered
+# against each other. wait_for rather than depends: it orders these only when
+# they are already scheduled, so running one alone still runs only that one.
+wait_for = ["apple:test"]
 dir = "beam-apple/Packages/BeamKit"
 run = '''
 set -eu
@@ -1082,6 +1136,8 @@ echo "References rewritten. Review \`git diff\` before committing them."
 [tasks."apple:build"]
 description = "Build the iOS and macOS apps"
 depends = ["apple:project", "core:apple"]
+# Last of the xcodebuild tier -- see apple:snapshot for why these are ordered.
+wait_for = ["apple:test", "apple:snapshot"]
 run = '''
 set -eu
 

@@ -139,6 +139,29 @@ pub struct ServerConfig {
     #[config(env = "BEAM_METADATA_LANGUAGE")]
     pub metadata_language: Option<String>,
 
+    /// Ceiling for the on-disk artwork cache, in bytes. Beam serves poster
+    /// and backdrop art itself (ADR-0015), caching it under
+    /// `BEAM_DATA_DIR/artwork`; once the total exceeds this, the least
+    /// recently served entries are deleted. Sizing it below a library's
+    /// artwork costs re-fetches, never correctness.
+    #[config(env = "BEAM_ARTWORK_CACHE_MAX_BYTES", default = 1_073_741_824)]
+    pub artwork_cache_max_bytes: u64,
+
+    /// How long Beam waits on a provider CDN for one image, in seconds.
+    #[config(env = "BEAM_ARTWORK_FETCH_TIMEOUT_SECS", default = 10)]
+    pub artwork_fetch_timeout_secs: u64,
+
+    /// Largest single image Beam will accept from a provider, in bytes. A
+    /// response over this is refused rather than buffered.
+    #[config(env = "BEAM_ARTWORK_MAX_IMAGE_BYTES", default = 16_777_216)]
+    pub artwork_max_image_bytes: u64,
+
+    /// How long a failed artwork fetch is remembered, in seconds, so a
+    /// provider that is down (or art that has been deleted upstream) is not
+    /// re-requested once per client per grid render.
+    #[config(env = "BEAM_ARTWORK_NEGATIVE_TTL_SECS", default = 300)]
+    pub artwork_negative_ttl_secs: u64,
+
     /// OIDC issuer URL (e.g. the opt-in dev Dex: `http://dex.beam.localhost:5556/dex`). OIDC
     /// login is disabled -- returning a clear error rather than panicking --
     /// unless this, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are all set
@@ -254,6 +277,10 @@ impl fmt::Debug for ServerConfig {
             tmdb_api_token,
             anilist_enabled,
             metadata_language,
+            artwork_cache_max_bytes,
+            artwork_fetch_timeout_secs,
+            artwork_max_image_bytes,
+            artwork_negative_ttl_secs,
             oidc_issuer,
             oidc_client_id,
             oidc_client_secret,
@@ -291,6 +318,10 @@ impl fmt::Debug for ServerConfig {
             .field("tmdb_api_token", &redact_option(tmdb_api_token))
             .field("anilist_enabled", anilist_enabled)
             .field("metadata_language", metadata_language)
+            .field("artwork_cache_max_bytes", artwork_cache_max_bytes)
+            .field("artwork_fetch_timeout_secs", artwork_fetch_timeout_secs)
+            .field("artwork_max_image_bytes", artwork_max_image_bytes)
+            .field("artwork_negative_ttl_secs", artwork_negative_ttl_secs)
             .field("oidc_issuer", oidc_issuer)
             .field("oidc_client_id", oidc_client_id)
             .field("oidc_client_secret", &redact_option(oidc_client_secret))
