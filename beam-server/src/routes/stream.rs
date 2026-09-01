@@ -209,7 +209,7 @@ impl Responses for MediaDelivery {
         responses = responses.with(
             416,
             kynos::openapi::Response::with_content(
-                "the requested range cannot be satisfied",
+                "Range not satisfiable",
                 kynos::openapi::model::body::mime_names::APPLICATION_PROBLEM_JSON,
                 OpenApiMediaType::new(registry.resolve::<kynos::Problem>()),
             ),

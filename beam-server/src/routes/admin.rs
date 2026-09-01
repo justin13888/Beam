@@ -151,11 +151,14 @@ pub struct UsersQuery {
 // ── Library reads (any authenticated user) ─────────────────────────────────
 
 /// Every library the caller can see.
-///
-/// `InternalError` rather than one of the library error types: this reads a collection and
-/// parses no identifier, so `get_libraries` can only fail on the database.
-/// Returning the wider type made the operation advertise a 400 and a 404 it
-/// has no way to produce, which a generated client turns into dead branches.
+// `InternalError` rather than one of the library error types: this reads a
+// collection and parses no identifier, so `get_libraries` can only fail on the
+// database. The wider type made the operation advertise a 400 and a 404 it has
+// no way to produce, which a generated client turns into dead branches.
+//
+// Deliberately not a doc comment: Kynos publishes those as the operation's
+// `description`, and why a Rust return type was narrowed is not something an
+// API consumer has any use for.
 #[kynos::get("/libraries", tag = Admin, operation_id = "listLibraries")]
 pub async fn list_libraries(
     auth: SessionAuth,

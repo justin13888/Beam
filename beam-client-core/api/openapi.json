@@ -59,7 +59,7 @@
             }
           },
           "403": {
-            "description": "Malformed Origin/Referer header",
+            "description": "Cross-origin request rejected",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1251,7 +1251,7 @@
             }
           },
           "416": {
-            "description": "the requested range cannot be satisfied",
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1481,7 +1481,7 @@
             }
           },
           "416": {
-            "description": "the requested range cannot be satisfied",
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1713,7 +1713,7 @@
             }
           },
           "416": {
-            "description": "the requested range cannot be satisfied",
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1943,7 +1943,7 @@
             }
           },
           "416": {
-            "description": "the requested range cannot be satisfied",
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1986,7 +1986,6 @@
           "admin"
         ],
         "summary": "Every library the caller can see.",
-        "description": "`InternalError` rather than one of the library error types: this reads a collection and\nparses no identifier, so `get_libraries` can only fail on the database.\nReturning the wider type made the operation advertise a 400 and a 404 it\nhas no way to produce, which a generated client turns into dead branches.",
         "operationId": "listLibraries",
         "parameters": [
           {
@@ -3649,7 +3648,7 @@
             }
           },
           "403": {
-            "description": "Malformed Origin/Referer header",
+            "description": "Cross-origin request rejected",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4042,7 +4041,7 @@
             }
           },
           "403": {
-            "description": "Malformed Origin/Referer header",
+            "description": "Cross-origin request rejected",
             "content": {
               "application/problem+json": {
                 "schema": {

@@ -65,16 +65,18 @@ pub struct OriginHeaders {
 /// A named type because `Short` is the only way an interceptor can answer
 /// without reaching the handler, and its `Responses` is what the document
 /// prints.
+///
+/// `NotAllowed` is written first deliberately. Kynos carries one response per
+/// status and titles it from the first variant declaring that status, so the
+/// leading variant's title becomes the published description of *every* 403 on
+/// every operation this interceptor covers -- including the admin refusal,
+/// which comes from `AuthRejection` and has no title of its own
+/// (getkono/kynos#103, #105). "Cross-origin request rejected" is the broader
+/// of the two and the one that reads sensibly in that position; with
+/// `Malformed` first, three operations documented their 403 as "Malformed
+/// Origin/Referer header", which is a narrower thing than they answer with.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
 pub enum CrossOriginRejected {
-    #[error("Malformed Origin/Referer header")]
-    #[problem(
-        status = 403,
-        type = "https://beam.justinchung.net/reference/errors/#malformed-origin",
-        title = "Malformed Origin/Referer header"
-    )]
-    Malformed,
-
     #[error("Cross-origin request rejected")]
     #[problem(
         status = 403,
@@ -82,6 +84,14 @@ pub enum CrossOriginRejected {
         title = "Cross-origin request rejected"
     )]
     NotAllowed,
+
+    #[error("Malformed Origin/Referer header")]
+    #[problem(
+        status = 403,
+        type = "https://beam.justinchung.net/reference/errors/#malformed-origin",
+        title = "Malformed Origin/Referer header"
+    )]
+    Malformed,
 }
 
 /// CSRF defense-in-depth for cookie-authenticated state-changing requests.
