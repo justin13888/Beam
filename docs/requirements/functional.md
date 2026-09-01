@@ -112,17 +112,23 @@ strength. Each requirement is independently testable. See `product.md` for narra
   ([ADR-0004](../architecture/decisions/ADR-0004-never-transcode.md)).
 - **FR-502**: The server MUST serve file bytes for full download as an attachment response, and MUST
   support Range requests to allow download resumption.
-- **FR-503**: The server MUST NOT generate or serve HLS/DASH manifests or segments. Adaptive
-  streaming exploration is deferred — tracked in
-  [#75](https://github.com/justin13888/beam/issues/75).
+- **FR-503**: The server MUST NOT generate or serve HLS/DASH manifests or segments. This is
+  settled, not deferred: both formats are defined over segments, so producing them for a library's
+  existing containers means repackaging bytes — request-time remuxing or an index-time derived
+  artifact, each of which FR-501 and
+  [ADR-0004](../architecture/decisions/ADR-0004-never-transcode.md) exclude. Adaptive bitrate over
+  independently indexed encodes is separately unachievable, since their keyframes do not align. See
+  [ADR-0014](../architecture/decisions/ADR-0014-adaptive-streaming-rejected.md) for the full
+  argument and for the client-side work that answers the compatibility and bandwidth problems
+  instead.
 - **FR-504**: Streaming and download endpoints MUST authenticate the request using the session
   cookie established per FR-103. The server MUST NOT accept a bearer or stream token supplied via URL
   query string.
 - **FR-505**: For a title with multiple indexed file versions, the server MUST expose an endpoint
   (`/media/{id}/sources`) enumerating the available versions — including real probed per-stream
   codec information, resolution, container, and size — so the client can present a source-quality
-  picker. Per-episode/show source enumeration is deferred — tracked in
-  [#68](https://github.com/justin13888/beam/issues/68).
+  picker. The endpoint accepts a movie id or an episode id; a show id is rejected, since shows have
+  no files of their own.
 - **FR-506**: Switching between file versions during the source-selection scenario MUST result in
   direct-play of the newly selected file; the server MUST NOT perform any transcoding or format
   conversion to service the switch.

@@ -164,5 +164,5 @@ without a rewrite — see [ADR-0001](decisions/ADR-0001-modular-monolith.md) for
   lift a session cookie from (NFR-605). Android mobile
   [#67](https://github.com/justin13888/beam/issues/67) and Apple iOS/macOS
   [#66](https://github.com/justin13888/beam/issues/66) have shipped.
-- Adaptive-bitrate streaming (HLS/DASH): deferred — tracked in
-  [#75](https://github.com/justin13888/beam/issues/75); see `streaming.md`.
+- Adaptive-bitrate streaming (HLS/DASH): rejected, not deferred — see
+  [ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md) and `streaming.md`.

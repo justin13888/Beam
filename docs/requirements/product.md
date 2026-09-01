@@ -52,7 +52,10 @@ first-class domain concepts — the domain model, API surface, and client UI are
 
 Scenario (c) depends on the library already containing multiple indexed file versions of the same
 logical title. Beam does not create those versions; it only lets the client choose among whatever
-the operator has indexed. This is how Beam supports low-bandwidth delivery without a transcoder.
+the operator has indexed. This is how Beam supports low-bandwidth delivery without a transcoder —
+for movies. An episode cannot yet carry a second file
+([#142](https://github.com/justin13888/beam/issues/142)), so scenario (c) is unavailable for
+television until that is fixed.
 
 ## What Beam delivers
 
@@ -91,7 +94,6 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
   [#67](https://github.com/justin13888/beam/issues/67) and Apple iOS/macOS
   [#66](https://github.com/justin13888/beam/issues/66) have shipped; both remaining clients inherit
   `beam-client-core`, and both need a native token mint before they can sign in at all.
-- HLS/DASH exploration — [#75](https://github.com/justin13888/beam/issues/75).
 - Server-side image proxy for poster/backdrop art (currently direct CDN links, see NFR-501 and
   [ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md)) —
   [#70](https://github.com/justin13888/beam/issues/70).
@@ -102,6 +104,9 @@ the operator has indexed. This is how Beam supports low-bandwidth delivery witho
 
 - Live transcoding or remuxing of any kind — a rejected philosophy, not a deferred feature
   ([ADR-0004](../architecture/decisions/ADR-0004-never-transcode.md)).
+- Adaptive-bitrate streaming (HLS/DASH) — rejected on the same terms, since packaging Beam's
+  containers into segments is remuxing and independently indexed encodes cannot switch seamlessly
+  ([ADR-0014](../architecture/decisions/ADR-0014-adaptive-streaming-rejected.md)).
 - Non-Postgres storage backends.
 - Full-text or fuzzy search beyond `pg_trgm` similarity matching.
 - Watch-history analytics or recommendations.
