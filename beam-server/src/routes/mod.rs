@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod api_error;
+pub mod artwork;
 pub mod auth;
 pub mod delivery;
 pub mod genres;
@@ -66,6 +67,7 @@ pub fn rest_routes() -> Router<AppState> {
             Group::new("/")
                 .tag::<tags::Media>()
                 .mount(kynos::routes![genres::list_genres])
+                .mount(kynos::routes![artwork::get_artwork, artwork::head_artwork,])
                 .mount(kynos::routes![
                     media::get_media_detail,
                     media::get_media_sources,

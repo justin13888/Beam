@@ -166,26 +166,48 @@ pub struct ArtworkCache {
 }
 
 impl ArtworkCache {
-    /// Opens the cache directory and rebuilds the index from what is in it.
+    /// An empty cache over `config.root`, touching no disk.
+    ///
+    /// Separate from [`Self::restore`] because it is infallible and
+    /// synchronous, which is what lets a caller that has no runtime yet --
+    /// a test fixture, notably -- have one at all. A cache built this way is
+    /// correct but cold: it serves nothing until it has fetched it.
+    pub fn new(
+        config: ArtworkCacheConfig,
+        fetcher: Arc<dyn ArtworkFetcher>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            config,
+            fetcher,
+            clock,
+            index: Mutex::new(Index::default()),
+            negative: Mutex::new(HashMap::new()),
+            lanes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Rebuilds the index from the files already in the cache directory.
     ///
     /// A cache that survives a restart is most of the point: a cold start
     /// after a deploy should not re-fetch a whole library's art from TMDB.
+    pub async fn restore(&self) -> std::io::Result<()> {
+        tokio::fs::create_dir_all(&self.config.root).await?;
+        let restored = Self::scan(&self.config.root).await?;
+        *self.index.lock().expect("artwork index poisoned") = restored;
+        Ok(())
+    }
+
+    /// [`Self::new`] followed by [`Self::restore`] -- what the process does at
+    /// startup.
     pub async fn open(
         config: ArtworkCacheConfig,
         fetcher: Arc<dyn ArtworkFetcher>,
         clock: Arc<dyn Clock>,
     ) -> std::io::Result<Self> {
-        tokio::fs::create_dir_all(&config.root).await?;
-        let index = Self::scan(&config.root).await?;
-
-        Ok(Self {
-            config,
-            fetcher,
-            clock,
-            index: Mutex::new(index),
-            negative: Mutex::new(HashMap::new()),
-            lanes: Mutex::new(HashMap::new()),
-        })
+        let cache = Self::new(config, fetcher, clock);
+        cache.restore().await?;
+        Ok(cache)
     }
 
     /// Rebuilds the index by walking the shard directories.
