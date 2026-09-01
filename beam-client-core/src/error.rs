@@ -90,6 +90,19 @@ pub enum BeamError {
     Server {
         /// The HTTP status code.
         status: u16,
+        /// Whether the same request could plausibly succeed later.
+        ///
+        /// Carried rather than re-derived, the same way [`BeamError::Network`]
+        /// carries its own. A status is not something a client can reason
+        /// about on its own here: 5xx means the server failed to handle a
+        /// request it accepted, while a 4xx that reaches this variant -- a 415
+        /// or a 422, which three operations declare -- is the request itself
+        /// being refused, and resending it unchanged fails identically.
+        /// Kotlin and Swift each used to decide that for themselves and both
+        /// answered "retryable" unconditionally, so a schema-rejected body got
+        /// a retry button forever. Deciding it once, here, is what makes that
+        /// unrepresentable rather than merely fixed.
+        retryable: bool,
         /// The server's explanation, where it sent one.
         detail: String,
         /// The problem document's `type`. See [`BeamError::NotFound`].
@@ -131,24 +144,6 @@ pub enum BeamError {
     },
 }
 
-/// Whether retrying the identical request could plausibly succeed.
-///
-/// A free function because the platforms cannot reach the inherent method:
-/// `BeamError` is a `uniffi::Error`, and an `impl` block on one is not
-/// exported -- `#[uniffi::export]` wants an object receiver. So Kotlin and
-/// Swift each hand-wrote their own table, and all three disagreed. Rust said a
-/// `Server` below 500 was not retryable while both clients said it was, which
-/// put a retry button on a 415 that will be rejected identically forever; and
-/// Rust said `Storage` was not retryable while Kotlin said it was, each with a
-/// stated rationale, in tests that could not see each other.
-///
-/// One answer, computed here.
-#[uniffi::export]
-#[must_use]
-pub fn is_retryable(error: BeamError) -> bool {
-    error.is_retryable()
-}
-
 impl BeamError {
     /// Whether retrying the identical request could plausibly succeed.
     ///
@@ -167,7 +162,7 @@ impl BeamError {
             // here -- a 415 or a 422 on the three operations that declare
             // them -- is the request itself being refused, and resending it
             // unchanged fails identically.
-            Self::Server { status, .. } => *status >= 500,
+            Self::Server { retryable, .. } => *retryable,
             // The device could not write, not the server could not be asked.
             // A full disk or a locked keystore clears, and the viewer who
             // frees space has a real path to success -- so this is stated
@@ -301,30 +296,6 @@ mod tests {
             !BeamError::Network {
                 detail: "invalid URL".to_owned(),
                 retryable: false,
-            }
-            .is_retryable()
-        );
-    }
-
-    #[test]
-    fn server_errors_are_retryable_only_from_500_up() {
-        for status in [500_u16, 502, 503] {
-            assert!(
-                BeamError::Server {
-                    status,
-                    detail: String::new(),
-                    code: String::new(),
-                }
-                .is_retryable(),
-                "{status} should be retryable"
-            );
-        }
-        // A 4xx that reached the Server variant is still the caller's fault.
-        assert!(
-            !BeamError::Server {
-                status: 418,
-                detail: String::new(),
-                code: String::new(),
             }
             .is_retryable()
         );

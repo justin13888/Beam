@@ -289,8 +289,14 @@ pub fn classify(
             // beam-server sends Retry-After, but a proxy in between may not.
             retry_after_secs: retry_after_secs.unwrap_or(60),
         },
+        // 5xx is the server failing to handle a request it accepted, so the
+        // same request may well succeed later. Anything else reaching here is
+        // the request being refused -- 415 and 422 are declared on three
+        // in-client operations -- and resending it unchanged fails the same
+        // way. Decided once, here, so no client has to guess.
         other => BeamError::Server {
             status: other,
+            retryable: other >= 500,
             detail,
             code,
         },
@@ -755,18 +761,60 @@ mod tests {
         assert_eq!(classify(401, None, None), BeamError::Unauthenticated);
     }
 
+    /// Where the retryability of a `Server` status is actually decided.
+    ///
+    /// It used to be derived three times -- once in Rust, once in Kotlin, once
+    /// in Swift -- and the two clients answered "retryable" for every status,
+    /// so a 415 or a 422 (declared on three in-client operations) offered a
+    /// retry for a body the server refuses identically every time. The verdict
+    /// is now set here and carried on the error, so no client derives it.
+    #[test]
+    fn a_server_status_carries_its_own_retryability() {
+        for status in [500_u16, 502, 503] {
+            let error = classify(status, None, None);
+            assert!(
+                matches!(
+                    error,
+                    BeamError::Server {
+                        retryable: true,
+                        ..
+                    }
+                ),
+                "{status} should arrive retryable, got {error:?}"
+            );
+        }
+        for status in [415_u16, 418, 422] {
+            let error = classify(status, None, None);
+            assert!(
+                matches!(
+                    error,
+                    BeamError::Server {
+                        retryable: false,
+                        ..
+                    }
+                ),
+                "{status} should arrive non-retryable, got {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_unmapped_status_is_preserved_rather_than_flattened() {
         let document = problem("about:blank", Some("teapot"));
         match classify(418, Some(&document), None) {
             BeamError::Server {
                 status,
+                retryable,
                 detail,
                 code,
             } => {
                 assert_eq!(status, 418);
                 assert_eq!(detail, "teapot");
                 assert_eq!(code, ABOUT_BLANK);
+                assert!(
+                    !retryable,
+                    "a 4xx reaching the Server variant is the request being refused"
+                );
             }
             other => panic!("expected a server error, got {other:?}"),
         }

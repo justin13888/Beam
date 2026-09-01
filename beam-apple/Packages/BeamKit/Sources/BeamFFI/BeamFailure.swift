@@ -65,26 +65,13 @@ public struct BeamFailure: Error, Equatable, Sendable {
 
     /// Flatten a core failure.
     ///
-    /// The message and the sign-in and certificate affordances are decided
-    /// here, because they are UI copy. Whether a retry is honest is decided by
-    /// the core and read back through `isRetryable(_:)`. This file used to
-    /// answer that itself and disagreed with the core on every `Server` status
-    /// below 500 -- so a 415 or a 422, which three operations declare, got a
-    /// retry button for a body the server will refuse identically forever.
+    /// The message is decided here, because it is UI copy. Whether a retry is
+    /// honest is decided by the core: `Network` and `Server` both carry the
+    /// verdict on the error itself, so this reads it rather than deriving it.
+    /// It used to derive it, and answered "retryable" for every `Server`
+    /// status -- so a 415 or a 422, which three operations declare, offered a
+    /// retry for a body the server refuses identically every time.
     public static func from(_ error: BeamError) -> BeamFailure {
-        let presented = presentation(error)
-        return BeamFailure(
-            message: presented.message,
-            isRetryable: BeamCoreBindings.isRetryable(error),
-            requiresSignIn: presented.requiresSignIn,
-            isForbidden: presented.isForbidden,
-            untrustedCertificate: presented.untrustedCertificate,
-            untrustedHost: presented.untrustedHost
-        )
-    }
-
-    /// Everything about a failure except whether it is worth retrying.
-    private static func presentation(_ error: BeamError) -> BeamFailure {
         switch error {
         case .NoActiveServer:
             return BeamFailure(
@@ -128,15 +115,18 @@ public struct BeamFailure: Error, Equatable, Sendable {
             return BeamFailure(message: detail)
         case .RateLimited(let retryAfterSecs):
             return BeamFailure(
-                message: "Too many requests. Try again in \(retryAfterSecs)s."
+                message: "Too many requests. Try again in \(retryAfterSecs)s.",
+                isRetryable: true
             )
-        case .Server(let status, _, _):
+        case .Server(let status, let retryable, _, _):
             return BeamFailure(
-                message: "The server had a problem (\(status)). Try again shortly."
+                message: "The server had a problem (\(status)). Try again shortly.",
+                isRetryable: retryable
             )
-        case .Network(let detail, _):
+        case .Network(let detail, let retryable):
             return BeamFailure(
-                message: "Could not reach the server: \(detail)"
+                message: "Could not reach the server: \(detail)",
+                isRetryable: retryable
             )
         case .UntrustedCertificate(let host, let details):
             return BeamFailure(
@@ -146,8 +136,14 @@ public struct BeamFailure: Error, Equatable, Sendable {
             )
         case .Protocol(let detail):
             return BeamFailure(message: "Unexpected response from the server: \(detail)")
+        // Retryable, matching `error.rs`: a full disk is emptied and a locked
+        // keystore unlocks, so the viewer who frees space has a real path to
+        // success. Android said so first; the core now states it too.
         case .Storage(let detail):
-            return BeamFailure(message: "This device could not save that: \(detail)")
+            return BeamFailure(
+                message: "This device could not save that: \(detail)",
+                isRetryable: true
+            )
         }
     }
 }
