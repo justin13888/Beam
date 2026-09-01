@@ -1096,11 +1096,11 @@ mod tests {
         "description":"Undercover.",
         "year":2015,
         "seasons":[
-            {"season_number":1,"dates":{},"genres":[],"episodes":[
+            {"id":"s1","season_number":1,"dates":{},"genres":[],"episodes":[
                 {"id":"e1","episode_number":1,"title":"Pilot","streams":[],"file_id":"f1"},
                 {"id":"e2","episode_number":2,"title":"Second","streams":[]}
             ]},
-            {"season_number":2,"dates":{},"genres":["Thriller"],"episode_runtime":52,
+            {"id":"s2","season_number":2,"dates":{},"genres":["Thriller"],"episode_runtime":52,
              "poster_url":"/artwork/s1/2.jpg","ratings":{"tmdb":88},"episodes":[
                 {"id":"e3","episode_number":1,"title":"Return","streams":[],"file_id":"f3",
                  "thumbnail_url":"/artwork/e3.jpg","duration":3120.0,"air_date":"2016-01-01"}

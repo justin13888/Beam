@@ -23,6 +23,8 @@ pub struct ShowMetadata {
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct SeasonMetadata {
+    /// Season ID
+    pub id: String,
     /// Season number
     pub season_number: u32,
     /// Show dates

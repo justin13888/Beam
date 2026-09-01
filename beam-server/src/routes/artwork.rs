@@ -22,101 +22,14 @@ use kynos::http::etag::ETag;
 use kynos::prelude::*;
 use kynos::response::range::served::{Conditions, Served};
 use kynos::response::range::source::InMemory;
-use serde::{Deserialize, Serialize};
 use tracing::error;
 use uuid::Uuid;
 
+use crate::models::media::{ArtworkKind, ArtworkVariant};
 use crate::routes::api_error::{DeliveryError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::tags::Media;
 use crate::state::AppState;
-
-/// Which kind of title the artwork belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtworkKind {
-    /// A movie.
-    Movie,
-    /// A show.
-    Show,
-    /// One season of a show.
-    Season,
-    /// One episode of a season.
-    Episode,
-}
-
-/// Which image of that title.
-///
-/// Not every pairing exists -- an episode has a thumbnail and no poster, a
-/// season has a poster and no backdrop -- and the ones that do not are a 404,
-/// the same answer as a title that simply has no art yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtworkVariant {
-    /// Portrait cover art.
-    Poster,
-    /// Landscape background art.
-    Backdrop,
-    /// An episode still.
-    Thumbnail,
-}
-
-/// A path segment that names no artwork Beam serves.
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-#[error("unrecognised artwork path segment")]
-pub struct UnknownArtworkSegment;
-
-// `Display` and `FromStr` rather than the serde pair: Kynos parses and renders
-// a path parameter through those, and having one spelling of these variants
-// rather than two is what keeps the route, the description and the generated
-// clients agreeing on what `/artwork/movie/{id}/poster` means.
-impl std::fmt::Display for ArtworkKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Movie => "movie",
-            Self::Show => "show",
-            Self::Season => "season",
-            Self::Episode => "episode",
-        })
-    }
-}
-
-impl std::str::FromStr for ArtworkKind {
-    type Err = UnknownArtworkSegment;
-
-    fn from_str(segment: &str) -> Result<Self, Self::Err> {
-        match segment {
-            "movie" => Ok(Self::Movie),
-            "show" => Ok(Self::Show),
-            "season" => Ok(Self::Season),
-            "episode" => Ok(Self::Episode),
-            _ => Err(UnknownArtworkSegment),
-        }
-    }
-}
-
-impl std::fmt::Display for ArtworkVariant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Poster => "poster",
-            Self::Backdrop => "backdrop",
-            Self::Thumbnail => "thumbnail",
-        })
-    }
-}
-
-impl std::str::FromStr for ArtworkVariant {
-    type Err = UnknownArtworkSegment;
-
-    fn from_str(segment: &str) -> Result<Self, Self::Err> {
-        match segment {
-            "poster" => Ok(Self::Poster),
-            "backdrop" => Ok(Self::Backdrop),
-            "thumbnail" => Ok(Self::Thumbnail),
-            _ => Err(UnknownArtworkSegment),
-        }
-    }
-}
 
 /// What the artwork endpoint captures.
 #[derive(Debug, Schema, PathParams)]

@@ -5381,6 +5381,10 @@
       },
       "SeasonMetadata": {
         "properties": {
+          "id": {
+            "type": "string",
+            "description": "Season ID"
+          },
           "season_number": {
             "type": "integer",
             "maximum": 4294967295.0,
@@ -5448,6 +5452,7 @@
         },
         "type": "object",
         "required": [
+          "id",
           "season_number",
           "dates",
           "episodes",
