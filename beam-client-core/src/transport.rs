@@ -13,6 +13,7 @@
 
 use crate::api::{ExecuteFuture, Middleware, Next};
 use crate::error::BeamError;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// The cookie `beam-server` issues and reads. Defined in
@@ -60,13 +61,38 @@ impl SessionCookieHolder {
     }
 }
 
+/// How many task slots the problem map holds before it starts evicting.
+///
+/// A task that fails and never reads its document -- `hydrate` drops the
+/// failures of titles it could not fetch -- would otherwise leave an entry
+/// behind for the life of the client. Eviction under pressure costs the
+/// fallback message rather than the wrong one, which is the right way round.
+const MAX_PENDING_PROBLEMS: usize = 64;
+
 /// Attaches the session cookie, notices when the server rejects it, and keeps
 /// the problem document from whatever failed.
 #[derive(Debug)]
 pub struct SessionMiddleware {
     cookie: Arc<SessionCookieHolder>,
     unauthorized: Arc<std::sync::atomic::AtomicBool>,
-    problem: Arc<RwLock<Option<ProblemDetail>>>,
+    /// Keyed by the task that made the request.
+    ///
+    /// One shared slot was a race, not a store: the write happens after
+    /// `response.bytes()` is awaited, so with two requests in flight on one
+    /// client the second overwrites the first before the first reads it -- and
+    /// the reader has no way to notice. `hydrate` puts concurrent
+    /// `get_media_detail` calls on one backend through a `JoinSet`, and both
+    /// mobile clients fan out on their home and detail screens, so this was
+    /// reachable without any unusual caller. What a viewer saw was a title
+    /// reporting another title's failure: `BeamErrors.kt` branches on
+    /// `#source-file-missing`, so a plain 404 could be shown as "ask an
+    /// administrator to rescan the library".
+    ///
+    /// Keying by task is what makes the association real. Every concurrent
+    /// request is a separate tokio task -- spawned by `JoinSet`, or by uniffi
+    /// for each foreign async call -- and `map_error` runs in the same task
+    /// that made the request, so it reads its own document or none.
+    problems: Arc<RwLock<HashMap<Option<tokio::task::Id>, ProblemDetail>>>,
 }
 
 impl SessionMiddleware {
@@ -76,7 +102,7 @@ impl SessionMiddleware {
         Self {
             cookie,
             unauthorized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            problem: Arc::new(RwLock::new(None)),
+            problems: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -91,18 +117,25 @@ impl SessionMiddleware {
             .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The problem document from the last failed response, if it carried one.
+    /// The problem document from *this task's* last failed response.
     ///
     /// Read here rather than out of the generated error because spargen gives
     /// each operation its own error enum -- `GetMediaDetailError`,
-    /// `DeleteLibraryError`, thirty-odd of them -- and `ResponseValue` drops
-    /// the raw body once it has decoded one. Reaching the `type` through those
-    /// would mean a hand-written table over generated names, which drifts the
-    /// moment an operation is added. The middleware sees every response
-    /// through one function instead, so this needs nothing per operation.
+    /// `DeleteLibraryError`, thirty-odd of them -- each holding
+    /// `Box<types::Problem>` behind a `StatusNNN` variant, and none of them
+    /// deriving `Serialize` or exposing an accessor. There is no generic way
+    /// to reach the body from `Error::Api`, so the middleware -- which sees
+    /// every response through one function -- reads it instead.
+    ///
+    /// That gap belongs upstream in spargen rather than here: a generated
+    /// error that carries a problem document should be able to hand it back.
+    /// Until a release does, this is where the document comes from.
     #[must_use]
     pub fn take_problem(&self) -> Option<ProblemDetail> {
-        self.problem.write().expect("problem lock").take()
+        self.problems
+            .write()
+            .expect("problem lock")
+            .remove(&tokio::task::try_id())
     }
 }
 
@@ -124,7 +157,7 @@ impl Middleware for SessionMiddleware {
         // (curl, mobile apps)". Sending an Origin would put us in the
         // *checked* path with a value that cannot match.
         let unauthorized = Arc::clone(&self.unauthorized);
-        let problem = Arc::clone(&self.problem);
+        let problems = Arc::clone(&self.problems);
         Box::pin(async move {
             let response = next.run(request).await?;
             let status = response.status();
@@ -146,7 +179,31 @@ impl Middleware for SessionMiddleware {
                 .bytes()
                 .await
                 .map_err(crate::api::TransportError::new)?;
-            *problem.write().expect("problem lock") = ProblemDetail::parse(&body);
+            {
+                // `None` outside a task -- a bare `block_on`, which the tests
+                // use. Those cannot interleave two requests the way spawned
+                // tasks can, so they share one slot and lose nothing by it.
+                let id = tokio::task::try_id();
+                let mut problems = problems.write().expect("problem lock");
+                match ProblemDetail::parse(&body) {
+                    Some(parsed) => {
+                        // Bounded: a task that never reads its document would
+                        // otherwise hold a slot forever.
+                        if problems.len() >= MAX_PENDING_PROBLEMS
+                            && !problems.contains_key(&id)
+                            && let Some(&victim) = problems.keys().next()
+                        {
+                            problems.remove(&victim);
+                        }
+                        problems.insert(id, parsed);
+                    }
+                    // A response with no document clears this task's slot, so a
+                    // later failure cannot claim an earlier one's.
+                    None => {
+                        problems.remove(&id);
+                    }
+                }
+            }
 
             let mut rebuilt = ::http::Response::new(body);
             *rebuilt.status_mut() = status;
@@ -459,6 +516,66 @@ mod tests {
     }
 
     /// A success is passed through untouched: no buffering, nothing captured.
+    /// Two requests in flight on one client each read their own document.
+    ///
+    /// This is the shape `hydrate` produces: a `JoinSet` of `get_media_detail`
+    /// calls sharing one `MiddlewareBackend`. With a single shared slot the
+    /// second write lands before the first reader gets there, so one caller
+    /// took the other's `type` and the other took none -- and because
+    /// `BeamErrors.kt` branches on `#source-file-missing`, a plain 404 could be
+    /// shown as "ask an administrator to rescan the library".
+    ///
+    /// The barrier is what makes the failure deterministic rather than a race
+    /// the test might win: both responses are captured before either is read,
+    /// which is exactly the interleaving that loses a document.
+    #[tokio::test]
+    async fn concurrent_requests_each_read_their_own_problem_document() {
+        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let one = tokio::spawn({
+            let middleware = Arc::clone(&middleware);
+            let barrier = Arc::clone(&barrier);
+            async move {
+                drive(&middleware, CannedBackend {
+                    status: 404,
+                    content_type: "application/problem+json",
+                    body: r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
+                })
+                .await;
+                barrier.wait().await;
+                middleware.take_problem()
+            }
+        });
+
+        let two = tokio::spawn({
+            let middleware = Arc::clone(&middleware);
+            let barrier = Arc::clone(&barrier);
+            async move {
+                drive(&middleware, CannedBackend {
+                    status: 404,
+                    content_type: "application/problem+json",
+                    body: r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404}"#,
+                })
+                .await;
+                barrier.wait().await;
+                middleware.take_problem()
+            }
+        });
+
+        let first = one.await.expect("the task completes");
+        let second = two.await.expect("the task completes");
+
+        assert_eq!(
+            first.expect("the first caller has a document").type_uri,
+            "https://beam.justinchung.net/reference/errors/#media-not-found"
+        );
+        assert_eq!(
+            second.expect("the second caller has a document").type_uri,
+            "https://beam.justinchung.net/reference/errors/#source-file-missing"
+        );
+    }
+
     #[tokio::test]
     async fn a_successful_response_is_not_buffered() {
         let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
