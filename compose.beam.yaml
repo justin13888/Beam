@@ -102,7 +102,14 @@ services:
       # Disable response buffering for low-latency media streaming
       traefik.http.services.server.loadbalancer.responseForwarding.flushInterval: "-1"
 
+  # TODO(#146): remove the profile and restore web to the default `up`. The
+  # image build runs `bun run codegen:openapi`, which cannot read the OpenAPI
+  # 3.2 document the server now emits, and `beam-web/src/api.gen.ts` is
+  # gitignored -- so the build must regenerate it and fails. Until then the web
+  # UI is opt-in (`--profile web`) and a default `compose up` brings up the
+  # server, which is what the native clients talk to.
   web:
+    profiles: [web]
     build:
       context: .
       dockerfile: beam-web/Containerfile

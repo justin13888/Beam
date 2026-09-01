@@ -7,16 +7,21 @@ Kubernetes-native topologies are out of scope — tracked in
 possible without a rewrite.
 
 **No release has been cut yet** — the repository has no tags and no published releases, so no
-images exist to pull today and `compose.beam.yaml` builds both from the in-repo Containerfiles.
+images exist to pull today and `compose.beam.yaml` builds the server from the in-repo Containerfile.
 `beam-server/Containerfile` compiles FFmpeg from source, so expect the first `compose build` to be
 slow. Once a release is published, it publishes multi-arch (`linux/amd64`, `linux/arm64`) images to
-`ghcr.io/justin13888/beam-server` and `ghcr.io/justin13888/beam-web`, tagged `vX.Y.Z`, `X.Y`, and
-`latest`, which should be preferred over building locally. See
+`ghcr.io/justin13888/beam-server`, tagged `vX.Y.Z`, `X.Y`, and `latest`, which should be preferred
+over building locally. See
 [ADR-0009](../architecture/decisions/ADR-0009-release-engineering.md) for how a release is cut.
 
-Building the `web` image locally requires `mise run codegen:openapi` first: it takes
-`beam-web/openapi.json` from the build context rather than compiling the Rust workspace to generate
-it. The build fails with an explicit message if the spec is absent.
+**The web UI is currently opt-in and does not build.** `beam-web` is stood down until it is
+regenerated against the OpenAPI 3.2 contract
+([#146](https://github.com/justin13888/beam/issues/146)): its Containerfile runs
+`bun run codegen:openapi`, which `openapi-typescript` cannot execute against a 3.2 document, and
+`beam-web/src/api.gen.ts` is gitignored — so the image build has no way to produce a client and
+fails. The `web` service therefore sits behind a compose profile, is excluded from the release
+images, and `podman compose up -d` brings up the server without it. A deployment driven by the
+native Android and Apple clients is unaffected; they consume the same `/v1` API directly.
 
 ## Compose topology
 
@@ -43,7 +48,7 @@ include:
 | Service | Role |
 |---|---|
 | `server` | The `beam-server` binary (built from `beam-server/Containerfile`): HTTP API, OIDC auth, in-process indexing/enrichment, direct-play streaming. Mounts the media library read-only at `BEAM_VIDEO_DIR` and server-writable state at `BEAM_DATA_DIR` (host paths via `HOST_VIDEO_DIR`/`HOST_DATA_DIR`, or the `server_videos`/`server_data` named volumes by default). Healthchecked via `GET /v1/health`. Depends only on `postgres`. |
-| `web` | The `beam-web` SPA (built from `beam-web/Containerfile`, which generates the typed client from the `beam-web/openapi.json` supplied in the build context), served as static files by Caddy. Depends on a healthy `server`. |
+| `web` | The `beam-web` SPA, served as static files by Caddy. **Behind the `web` compose profile and currently unbuildable** — see #146 above. `podman compose --profile web up -d` is what would start it; a default `up` omits it. Depends on a healthy `server`. |
 
 ## Database migrations
 
@@ -69,7 +74,11 @@ about. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam
      [`configuration.md`](configuration.md)).
    - Configure `BEAM_OIDC_ISSUER`/`BEAM_OIDC_CLIENT_ID`/`BEAM_OIDC_CLIENT_SECRET` against a real
      OIDC provider; register `<BEAM_SERVER_URL>/v1/auth/callback` as the redirect URI. Dex's
-     static users are for local development only.
+     static users are for local development only. **This is not optional**: OIDC is the only
+     authentication mechanism Beam has (FR-101, [ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)),
+     there is no local account fallback, and the bundled Dex is unreachable from the server
+     container ([#73](https://github.com/justin13888/beam/issues/73)) — so a deployment without a
+     reachable external IdP cannot sign anyone in at all.
    - Grant admin via your IdP, not the server: configure the IdP to release a claim (e.g. a Dex/
      Keycloak group) and set `BEAM_OIDC_ADMIN_CLAIM` (e.g. `groups`) and, for a value/array match,
      `BEAM_OIDC_ADMIN_VALUE` (e.g. `beam-admin`). Admin is recomputed on every login — granting
