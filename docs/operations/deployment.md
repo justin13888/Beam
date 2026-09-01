@@ -75,10 +75,9 @@ about. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam
    - Configure `BEAM_OIDC_ISSUER`/`BEAM_OIDC_CLIENT_ID`/`BEAM_OIDC_CLIENT_SECRET` against a real
      OIDC provider; register `<BEAM_SERVER_URL>/v1/auth/callback` as the redirect URI. Dex's
      static users are for local development only. **This is not optional**: OIDC is the only
-     authentication mechanism Beam has (FR-101, [ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)),
-     there is no local account fallback, and the bundled Dex is unreachable from the server
-     container ([#73](https://github.com/justin13888/beam/issues/73)) — so a deployment without a
-     reachable external IdP cannot sign anyone in at all.
+     authentication mechanism Beam has (FR-101, [ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md))
+     and there is no local account fallback, so a deployment without a reachable IdP cannot sign
+     anyone in at all.
    - Grant admin via your IdP, not the server: configure the IdP to release a claim (e.g. a Dex/
      Keycloak group) and set `BEAM_OIDC_ADMIN_CLAIM` (e.g. `groups`) and, for a value/array match,
      `BEAM_OIDC_ADMIN_VALUE` (e.g. `beam-admin`). Admin is recomputed on every login — granting
