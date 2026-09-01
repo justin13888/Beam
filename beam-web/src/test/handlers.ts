@@ -93,7 +93,7 @@ export const handlers = [
 		HttpResponse.json<Schemas["beam_server.models.library.Library"][]>([]),
 	),
 	http.get(`${BASE_URL}/v1/libraries/:id`, () =>
-		problem(404, "Not found", "#media-not-found"),
+		problem(404, "No library has that id", "#library-not-found"),
 	),
 	http.get(`${BASE_URL}/v1/libraries/:id/files`, () =>
 		HttpResponse.json<Schemas["beam_server.models.library.file.LibraryFile"][]>(

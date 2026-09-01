@@ -130,19 +130,35 @@ describe("/libraries", () => {
 	// hardcoded string and discarded the body, so a viewer saw the same seven
 	// words whichever of these came back.
 	it("shows the server's own explanation for a client error", async () => {
-		server.use(
-			http.get(`${BASE_URL}/v1/libraries`, () =>
+		// Asserted on the create mutation, not on the list. `GET /v1/libraries`
+		// reads a collection and parses no id, so this branch removed its 400
+		// and 404 -- it declares 200/401/403/500 and has no coded client error
+		// at all. The fixture this replaces served it a 400 `#invalid-library-id`,
+		// a response that operation cannot produce, so it proved nothing about
+		// what a viewer would ever see. `POST /v1/admin/libraries` does declare
+		// a 400, and it is the one a person actually hits: a root path that is
+		// not there.
+		serveLibraries(
+			http.post(`${BASE_URL}/v1/admin/libraries`, () =>
 				problem(
 					400,
-					"library id 7 is not a valid identifier",
-					"#invalid-library-id",
+					"/media/nope does not exist on the server",
+					"#library-path-not-found",
 				),
 			),
 		);
+		const user = userEvent.setup();
 		renderRoute("/libraries");
 
+		await user.click(
+			await screen.findByRole("button", { name: /Add Library/ }),
+		);
+		await user.type(screen.getByLabelText("Name"), "Shows");
+		await user.type(screen.getByLabelText("Root Path"), "/media/nope");
+		await user.click(screen.getByRole("button", { name: "Create" }));
+
 		expect(
-			await screen.findByText(/not a valid identifier/),
+			await screen.findByText(/does not exist on the server/),
 		).toBeInTheDocument();
 	});
 
