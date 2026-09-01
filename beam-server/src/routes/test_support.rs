@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use beam_auth::server::OidcRuntimeConfig;
+use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::{
     oidc::NotConfiguredOidcClient, pending_auth_store::in_memory::InMemoryPendingAuthStore,
     repository::in_memory::InMemoryUserRepository, session_store::in_memory::InMemorySessionStore,
@@ -128,17 +128,57 @@ impl MetadataService for StubMetadataService {
 /// dependency probe, for tests that exercise router wiring rather than any
 /// individual service.
 pub(crate) fn make_app_state() -> AppState {
-    make_app_state_with(|config| config, Arc::new(beam_domain::services::RealClock))
+    make_app_state_with(|_| {})
 }
 
-/// [`make_app_state`] with the configuration adjusted and the clock chosen.
+/// [`make_app_state`] with the configuration adjusted, on the real clock.
 ///
-/// `adjust` receives the defaults-shaped config so a test can change only the
-/// fields it cares about, and `clock` lets a test move time -- `uptime_secs`
-/// is otherwise always zero and unassertable.
+/// `adjust` mutates the defaults-shaped config in place so a test names only
+/// the fields it cares about.
 pub(crate) fn make_app_state_with(
-    adjust: impl FnOnce(crate::config::ServerConfig) -> crate::config::ServerConfig,
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
+) -> AppState {
+    make_app_state_with_clock(adjust, Arc::new(beam_domain::services::RealClock))
+}
+
+/// [`make_app_state_with`] with the clock chosen too.
+///
+/// `clock` lets a test move time -- `uptime_secs` is otherwise always zero and
+/// unassertable.
+pub(crate) fn make_app_state_with_clock(
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
     clock: Arc<dyn beam_domain::services::Clock>,
+) -> AppState {
+    make_app_state_full(
+        adjust,
+        clock,
+        Arc::new(InMemoryDependencyProbe::healthy()),
+        None,
+    )
+}
+
+/// [`make_app_state_with`] with the dependency probe chosen too.
+///
+/// `/v1/health` reports what the probe says, so a test that wants a degraded
+/// answer configures the probe to fail rather than breaking a real dependency
+/// (NFR-205).
+pub(crate) fn make_app_state_with_probe(
+    probe: Arc<dyn crate::services::health::DependencyProbe>,
+) -> AppState {
+    make_app_state_full(
+        |_| {},
+        Arc::new(beam_domain::services::RealClock),
+        probe,
+        None,
+    )
+}
+
+/// Every seam at once. The three wrappers above name the one they vary.
+pub(crate) fn make_app_state_full(
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
+    clock: Arc<dyn beam_domain::services::Clock>,
+    probe: Arc<dyn crate::services::health::DependencyProbe>,
+    metrics: Option<metrics_exporter_prometheus::PrometheusHandle>,
 ) -> AppState {
     let notification = Arc::new(InMemoryNotificationService::new());
     let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
@@ -197,10 +237,8 @@ pub(crate) fn make_app_state_with(
         ..Default::default()
     };
 
-    AppState::with_clock(
-        adjust(config),
-        services,
-        Arc::new(InMemoryDependencyProbe::healthy()),
-        clock,
-    )
+    let mut config = config;
+    adjust(&mut config);
+
+    AppState::with_clock(config, services, probe, clock, metrics)
 }

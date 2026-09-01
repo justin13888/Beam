@@ -4,9 +4,10 @@ pub mod admin_claim;
 // `#[macro_export]` inside a `cfg`-gated module cannot be referred to by an
 // absolute path from within this crate.
 pub mod contract;
-pub(crate) mod hex;
+pub mod hex;
 pub mod models;
 pub mod oidc;
+pub mod oidc_config;
 pub mod pending_auth_store;
 pub mod repository;
 pub mod session_store;

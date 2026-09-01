@@ -1,10 +1,10 @@
+use kynos::Schema;
 use rust_decimal::Decimal;
-use salvo::oapi::ToSchema;
 use serde::Serialize;
 
 use super::{OutputAudioCodec, OutputSubtitleCodec, OutputVideoCodec, Resolution};
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct MediaStreamMetadata {
     /// Video tracks
     pub video_tracks: Vec<VideoTrack>,
@@ -14,7 +14,7 @@ pub struct MediaStreamMetadata {
     pub subtitle_tracks: Vec<SubtitleTrack>,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct VideoTrack {
     /// The target video codec
     pub codec: OutputVideoCodec,
@@ -32,7 +32,7 @@ pub struct VideoTrack {
     pub frame_rate: Decimal,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct AudioTrack {
     /// The target audio codec (e.g., "aac", "opus", "ac3").
     pub codec: OutputAudioCodec,
@@ -55,7 +55,7 @@ pub struct AudioTrack {
     pub is_autoselect: bool,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct SubtitleTrack {
     /// The target subtitle format.
     pub codec: OutputSubtitleCodec,

@@ -156,7 +156,7 @@ mod uptime {
 
     use beam_domain::services::TestClock;
 
-    use crate::routes::test_support::make_app_state_with;
+    use crate::routes::test_support::make_app_state_with_clock;
 
     #[test]
     fn uptime_is_measured_from_when_the_state_was_built() {
@@ -164,7 +164,7 @@ mod uptime {
         // `Instant::now()` directly it is always ~0 in a test, so no assertion
         // about it could fail -- which is why the clock is injected.
         let clock = Arc::new(TestClock::new());
-        let state = make_app_state_with(|config| config, clock.clone());
+        let state = make_app_state_with_clock(|_| {}, clock.clone());
 
         assert_eq!(
             state.uptime_secs(),
@@ -182,7 +182,7 @@ mod uptime {
     #[test]
     fn uptime_reports_whole_seconds_and_never_rounds_up() {
         let clock = Arc::new(TestClock::new());
-        let state = make_app_state_with(|config| config, clock.clone());
+        let state = make_app_state_with_clock(|_| {}, clock.clone());
 
         clock.advance(Duration::from_millis(1_999));
         assert_eq!(state.uptime_secs(), 1);

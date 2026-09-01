@@ -7,10 +7,11 @@
 use beam_domain::models::admin_log::{AdminLog, AdminLogCategory, AdminLogLevel};
 use beam_index::services::notification::{AdminEvent, EventCategory, EventLevel};
 use chrono::{DateTime, Utc};
-use salvo::oapi::ToSchema;
+use kynos::Schema;
+use kynos::schema::unchecked::Unchecked;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Serialize, Schema)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminEventLevelDto {
     Info,
@@ -28,7 +29,7 @@ impl From<EventLevel> for AdminEventLevelDto {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Serialize, Schema)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminEventCategoryDto {
     LibraryScan,
@@ -44,7 +45,7 @@ impl From<EventCategory> for AdminEventCategoryDto {
     }
 }
 
-#[derive(Clone, Debug, Serialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Schema)]
 pub struct AdminEventDto {
     pub id: String,
     pub timestamp: DateTime<Utc>,
@@ -69,7 +70,7 @@ impl From<AdminEvent> for AdminEventDto {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Schema)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminLogLevelDto {
     Info,
@@ -96,13 +97,22 @@ fn category_to_str(category: &AdminLogCategory) -> &'static str {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct AdminLogEntryDto {
     pub id: String,
     pub level: AdminLogLevelDto,
     pub category: String,
     pub message: String,
-    pub details: Option<serde_json::Value>,
+    /// Structured context an operator can read, whose shape depends on the
+    /// event that produced it.
+    ///
+    /// `Unchecked` because it genuinely is unconstrained: a scan failure and an
+    /// enrichment failure put different keys here. Kynos refuses a bare
+    /// `serde_json::Value` in a described type -- the schema would be `true`,
+    /// which is a claim the document cannot check -- and this wrapper says so
+    /// out loud instead, annotating the property `x-kynos-unchecked`. It is
+    /// `#[serde(transparent)]`, so the bytes on the wire are unchanged.
+    pub details: Option<Unchecked<serde_json::Value>>,
     pub created_at: String,
 }
 
@@ -113,24 +123,24 @@ impl From<AdminLog> for AdminLogEntryDto {
             level: log.level.into(),
             category: category_to_str(&log.category).to_string(),
             message: log.message,
-            details: log.details,
+            details: log.details.map(Unchecked),
             created_at: log.created_at.to_rfc3339(),
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct CreateLibraryRequest {
     pub name: String,
     pub root_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct ScanLibraryResponse {
     pub added: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct AdminLogCountResponse {
     pub count: u64,
 }
@@ -140,7 +150,7 @@ pub struct AdminLogCountResponse {
 /// One user row in the admin users tab. `is_admin` is informational and
 /// read-only here: admin is derived from the IdP-asserted claim on every
 /// login, so there is deliberately no endpoint to change it.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct AdminUserDto {
     pub id: String,
     pub display_name: String,
@@ -179,7 +189,7 @@ impl From<beam_auth::utils::models::User> for AdminUserDto {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct AdminUserListResponse {
     pub items: Vec<AdminUserDto>,
     /// Total number of users across all pages.
@@ -189,14 +199,14 @@ pub struct AdminUserListResponse {
 /// Body of `PATCH /v1/admin/users/{id}`. `disabled` is the only mutable
 /// field: `is_admin` is IdP-claim-driven (recomputed at every login), so a
 /// local toggle would be silently overwritten and is deliberately absent.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct UpdateAdminUserRequest {
     pub disabled: bool,
 }
 
 // ── Admin system status (issue #85) ──────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct AdminStatusCounts {
     pub users: u64,
     pub libraries: u64,
@@ -204,7 +214,7 @@ pub struct AdminStatusCounts {
 }
 
 /// Metadata-enrichment queue overview: row counts per state.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct EnrichmentQueueCounts {
     pub pending: u64,
     pub enriched: u64,
@@ -231,7 +241,7 @@ impl From<beam_domain::models::enrichment::EnrichmentStatusCounts> for Enrichmen
 
 /// One recent library-scan admin log entry, slimmed to what the system
 /// status tab renders.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct RecentScanDto {
     pub level: AdminLogLevelDto,
     pub message: String,
@@ -256,7 +266,7 @@ impl From<AdminLog> for RecentScanDto {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct AdminStatusResponse {
     /// Whole seconds since the server process built its state.
     pub uptime_secs: u64,

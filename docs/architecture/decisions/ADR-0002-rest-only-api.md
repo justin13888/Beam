@@ -3,7 +3,8 @@
 ## Status
 
 Superseded by [ADR-0010](ADR-0010-openapi-3-2-kynos.md), which retains the REST-only decision while
-ratifying OpenAPI 3.2, typed SSE, and Kynos as the migration target.
+moving the API to OpenAPI 3.2, typed SSE, and Kynos. Everything below describes the stack as it was
+when this decision was taken; Salvo is no longer in the workspace.
 
 ## Context
 

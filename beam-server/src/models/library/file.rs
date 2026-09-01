@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
-use salvo::oapi::ToSchema;
+use kynos::Schema;
 use serde::Serialize;
 
 /// File indexing status
-#[derive(Clone, Copy, Debug, Serialize, ToSchema, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Schema, Eq, PartialEq)]
 pub enum FileIndexStatus {
     /// File is indexed and metadata matches
     Known,
@@ -24,7 +24,7 @@ impl From<beam_domain::models::file::FileStatus> for FileIndexStatus {
 }
 
 /// The kind of content a media file represents
-#[derive(Clone, Copy, Debug, Serialize, ToSchema, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Schema, Eq, PartialEq)]
 pub enum FileContentType {
     /// File is associated with a movie
     Movie,
@@ -35,7 +35,7 @@ pub enum FileContentType {
 }
 
 /// A media file within a library
-#[derive(Clone, Debug, Serialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Schema)]
 pub struct LibraryFile {
     pub id: String,
     pub library_id: String,

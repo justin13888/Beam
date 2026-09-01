@@ -5,20 +5,24 @@ boundaries it must respect, and how it is tested. System-level context lives in
 [overview.md](overview.md); schema detail in [data-model.md](data-model.md); decision rationale in
 the [ADRs](decisions/).
 
-This page describes deployed components. Kynos is a ratified future replacement for Salvo, subject
-to the [migration readiness contract](kynos-migration-readiness.md); it is not yet a workspace
-dependency.
+This page describes deployed components. The HTTP edge is Kynos, which replaced Salvo under
+[ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md); the gate-by-gate record is in
+[kynos-migration-readiness.md](kynos-migration-readiness.md). It is a `beam-server` dependency and
+no other crate's.
 
 ## Server (`beam-server`)
 
 The single deployable backend binary
 ([ADR-0001](decisions/ADR-0001-modular-monolith.md)). It owns:
 
-- The HTTP API (Salvo) under `/v1`, REST/OpenAPI-only
+- The HTTP API (Kynos) under `/v1`, REST/OpenAPI-only
   ([ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md)): media browse/search/detail,
   playback-progress/continue-watching, admin-gated library CRUD, operational logs, and an SSE
-  endpoint for scan/enrichment progress.
-- Auth wiring: mounts `beam-auth`'s OIDC BFF routes; sessions are Postgres-backed via `beam-auth`
+  endpoint for scan/enrichment progress. `create_router` is walked once to dispatch and once to emit
+  the OpenAPI 3.2 document, so the served surface and its description cannot disagree; a router that
+  cannot describe itself fails at startup rather than at a listener.
+- Auth wiring: owns the OIDC BFF endpoints (`routes/auth.rs`) over `beam-auth`'s
+  transport-independent client, stores and claim logic; sessions are Postgres-backed via `beam-auth`
   ([ADR-0005](decisions/ADR-0005-sessions-in-postgres.md)).
 - Streaming: direct-play byte-serving over HTTP Range requests with ETag support; no transcoding
   ([ADR-0004](decisions/ADR-0004-never-transcode.md)). `/media/{id}/sources` reports the real
@@ -34,9 +38,12 @@ hard (e.g. a cookie-Secure misconfiguration is a startup error) and logs redact 
 ### Module layout
 
 - `routes/` — the HTTP layer (`health.rs`, `media.rs`, `stream.rs`, `playback.rs`, `admin.rs`,
-  `middleware.rs`, `api_error.rs`). Thin: parse the request, call a service trait, render the
-  response. Salvo `Request`/`Response`/extractor types never leak past this layer; a handler that
-  finds injected state missing returns a 500, never panics.
+  `auth.rs`, `genres.rs`, `middleware.rs`, `metrics_mw.rs`, `rate_limit.rs`, `api_error.rs`,
+  `tags.rs`, and `mod.rs`, which is the whole route table as one value). Thin: parse the request,
+  call a service trait, render the response. Kynos `Request`/`Response`/extractor types never leak
+  past this layer. State arrives through `Inject<T>` rather than a run-time lookup, so a missing
+  dependency is a compile error and the "handler returns 500 on missing state" arm no longer exists.
+  `api_error.rs` holds the one RFC 9457 error family every operation renders through.
 - `services/` — business logic behind traits (`library.rs`, `metadata.rs`, `playback.rs`,
   `admin_log.rs`, `notification.rs`, `hash.rs`, `media_info.rs`), each with a production
   implementation and an in-memory fake for tests.
@@ -46,10 +53,11 @@ hard (e.g. a cookie-Secure misconfiguration is a startup error) and logs redact 
 - `models/` — REST-facing DTOs, mapped from `beam-domain` types; API-shape-focused, no FFmpeg
   types.
 
-**Testing:** subcutaneous end-to-end slices — build the real Salvo router with `AppServices` wired
-to in-memory fakes and drive it with `salvo::test::TestClient` (`*_tests.rs` beside each route);
-error paths (missing files, malformed Range headers, non-admin sessions) are codified by
-configuring fakes to fail. Zero external infrastructure.
+**Testing:** subcutaneous end-to-end slices — build the real Kynos router with `AppServices` wired
+to in-memory fakes and drive it with `kynos::test::TestClient` (`*_tests.rs` beside each route),
+which dispatches in process without binding a port; error paths (missing files, malformed Range
+headers, non-admin sessions) are codified by configuring fakes to fail. Zero external
+infrastructure.
 
 ## Indexer (`beam-index`)
 
@@ -92,20 +100,24 @@ admin allowlist. Users are provisioned JIT from the IdP on first login; there is
 registration.
 
 Feature-gated so consumers pull only what they need: `utils` (stores, models, repository traits),
-`oidc` (real discovery/token exchange via `openidconnect` + `reqwest`), `server` (Salvo routes and
-session middleware, mounted by `beam-server`), `test-utils` (`FakeOidcClient` and fakes, no HTTP
-client). Layout mirrors the features: `src/utils/` (`oidc.rs`, `session_store.rs`,
-`pending_auth_store.rs`, `admin_claim.rs`, `models.rs`, `repository.rs`) and `src/server/`
-(`oidc_routes.rs`).
+`oidc` (real discovery/token exchange via `openidconnect` + `reqwest`, and the default), and
+`test-utils` (`FakeOidcClient` and fakes, no HTTP client). There is no `server` feature: the HTTP
+adapter for the flow moved to `beam-server/src/routes/auth.rs` with the Kynos migration, because
+ADR-0010 requires the framework to stay in `beam-server`. What is left here is
+transport-independent by construction — the crate has no web-framework dependency to gate. Layout
+is `src/utils/` (`oidc.rs`, `oidc_config.rs`, `session_store.rs`, `pending_auth_store.rs`,
+`admin_claim.rs`, `models.rs`, `repository.rs`).
 
-**Testing:** route-level tests drive the full login/callback/logout flow against `FakeOidcClient`
-and in-memory stores — no real IdP, network, or database.
+**Testing:** the flow's own logic is tested here against `FakeOidcClient` and in-memory stores; the
+full login/callback/logout round-trip is driven through the HTTP adapter in `beam-server` — no real
+IdP, network, or database either way.
 
 ## Domain (`beam-domain`)
 
 The framework-agnostic core: domain models, repository and provider traits, and pure utility
-helpers. It never depends on a web framework, never builds SeaORM queries (trait signatures only —
-query-building lives in `beam-index`/`beam-auth`), and never links FFmpeg or leaks FFI types.
+helpers. It never depends on a web framework (Kynos included), never builds SeaORM queries (trait
+signatures only — query-building lives in `beam-index`/`beam-auth`), and never links FFmpeg or leaks
+FFI types.
 This crate is what lets services be tested purely against in-memory fakes.
 
 ### Module layout
@@ -157,10 +169,17 @@ repository implementations and the in-memory fakes that stand in for them.
 
 The reference client: a Vite + React 19 + TanStack Router single-page app styled with Tailwind 4
 and shadcn/ui, talking exclusively to `beam-server`'s REST API. The typed client is generated from
-the server's OpenAPI spec via `openapi-typescript` into `src/api.gen.ts` and wrapped by
-`openapi-fetch` in `src/lib/apiClient.ts`; TanStack Query handles caching/loading state. Both CI and
-the Containerfile regenerate the typed client from `beam-web/openapi.json`, which `mise run
-codegen:openapi` exports from the Rust types.
+the server's OpenAPI document via `openapi-typescript` into `src/api.gen.ts` and wrapped by
+`openapi-fetch` in `src/lib/apiClient.ts`; TanStack Query handles caching/loading state. `mise run
+codegen:openapi` exports `beam-web/openapi.json` from the Rust types, and CI and the Containerfile
+regenerate the typed client from it.
+
+**That regeneration is currently switched off and `api.gen.ts` is stale.** `openapi-typescript`
+7.13.0 cannot read the OpenAPI 3.2 document the Kynos migration produces (see
+[api.md](api.md#openapi-docs-and-codegen)), and `beam-web` is being rewritten shortly, so it is
+stood down rather than mechanically renamed: the codegen step and the `ts:typecheck`/`ts:test` gates
+carry a [#146](https://github.com/justin13888/beam/issues/146) TODO. Everything below describes the
+app as it stands, not a client regenerated against the current contract.
 
 - **Routes** (`src/routes/`, file-based via `createFileRoute`): `index.tsx` (home /
   continue-watching), `libraries.tsx` / `libraries.$id.tsx`, `media.$id.tsx` (detail + player),
@@ -190,9 +209,12 @@ Kotlin and Swift over UniFFI 0.32 —
 dependency and would drag a Postgres driver into an Android `.so`, and `beam-index` links FFmpeg,
 which does not cross-compile to Android.
 
-- **Generated REST client** (`api/openapi.json` → `$OUT_DIR` via spargen in `build.rs`): all 31
-  operations, never hand-written. The spec is exported from `beam-server`'s own handler
-  annotations by `mise run codegen:openapi:core`.
+- **Generated REST client** (`api/openapi.json` → `$OUT_DIR` via spargen 0.4.0 in `build.rs`):
+  every operation in the document, never hand-written. spargen reads OpenAPI 3.2 natively, so this
+  side of the contract needed no work when the server moved to Kynos. The document is exported from
+  `beam-server`'s own declarations by `mise run codegen:openapi` (which writes both copies) or
+  `codegen:openapi:core` (which writes this one); `codegen:openapi:check` diffs both, so the native
+  client's contract cannot drift from the server's.
 - **`capability.rs`** — the reason a native client exists. Matches each source against a
   `DeviceProfile` built from `MediaCodecList`, and returns a per-source verdict (hardware,
   software, or unplayable with a reason) plus a ranking. Unplayable sources are returned with

@@ -55,6 +55,15 @@ tokio = { version = "1.53.1", default-features = false, features = ["rt"] }
 uniffi = { version = "0.32", features = ["tokio"] }
 url = "2.5.8"
 
+# Named by the generated client rather than by this crate directly: spargen
+# emits an `EventStream<T>` over `futures_core::Stream` for the admin event
+# stream, and decodes `format: uuid` into `Uuid`. Its E023 runtime-dependency
+# check fails the build when either is missing -- which is why they are declared
+# here even though nothing in this crate's own source names them. The version
+# floors E023 enforces are explained in `[workspace.dependencies]`.
+futures-core = { workspace = true }
+uuid = { workspace = true }
+
 # rustls with `ring`, deliberately not `aws-lc-rs`: aws-lc-rs needs cmake and a
 # per-ABI C toolchain, which does not cross-compile cleanly to Android.
 #
@@ -66,7 +75,16 @@ url = "2.5.8"
 [dependencies.reqwest]
 version = "0.12.28"
 default-features = false
-features = ["charset", "http2", "json", "rustls-tls-manual-roots-no-provider"]
+# `stream` is required by the generated client: the admin event stream is a
+# `text/event-stream` operation, and spargen lowers it to an `EventStream<T>`
+# over reqwest's byte stream.
+features = [
+    "charset",
+    "http2",
+    "json",
+    "rustls-tls-manual-roots-no-provider",
+    "stream",
+]
 
 [build-dependencies]
 spargen = "0.4.0"

@@ -2,9 +2,9 @@
 //!
 //! The generated types are faithful to the OpenAPI document, which makes them
 //! correct but awkward to render: every scalar field carries its own alias
-//! (`BeamServerModelsMediaTitleoriginal` rather than `String`), optional
-//! numbers arrive as `i64` because JSON Schema has no unsigned type, and image
-//! URLs are server-relative. Translating once here means no screen has to know
+//! (`Titleoriginal` rather than `String`), optional numbers arrive as `i64`
+//! because JSON Schema has no unsigned type, and image URLs are
+//! server-relative. Translating once here means no screen has to know
 //! any of that, and it means the same normalisation is shared by every native
 //! client rather than reimplemented per platform.
 //!
@@ -507,7 +507,7 @@ pub struct ServerHealth {
 // -- conversions ----------------------------------------------------------
 //
 // Every numeric narrowing below is deliberate. The server's own types are
-// unsigned, but JSON Schema has no unsigned integer, so salvo's `uint32` and
+// unsigned, but JSON Schema has no unsigned integer, so kynos's `uint32` and
 // `uint64` formats reach the generated client as `i64`. A negative value is
 // therefore impossible in practice and meaningless if it occurred; each
 // conversion treats one as absent rather than wrapping it into an enormous
@@ -542,24 +542,18 @@ pub fn progress_fraction(position_secs: f64, duration_secs: Option<f64>) -> Opti
 
 impl MediaSummary {
     /// Normalise a generated catalog entry.
-    fn from_generated(
-        node: wire::BeamServerModelsMediaMediaMetadata,
-        record: &ServerRecord,
-    ) -> Self {
+    fn from_generated(node: wire::MediaMetadata, record: &ServerRecord) -> Self {
         match node {
-            wire::BeamServerModelsMediaMediaMetadata::BeamServerModelsMediaMediaMetadataVariant1(
-                boxed,
-            ) => Self::from_movie(&boxed.movie, record),
-            wire::BeamServerModelsMediaMediaMetadata::BeamServerModelsMediaMediaMetadataVariant0(
-                boxed,
-            ) => Self::from_show(&boxed.show, record),
+            wire::MediaMetadata::MediaMetadataVariant1(boxed) => {
+                Self::from_movie(&boxed.movie, record)
+            }
+            wire::MediaMetadata::MediaMetadataVariant0(boxed) => {
+                Self::from_show(&boxed.show, record)
+            }
         }
     }
 
-    fn from_movie(
-        movie: &wire::BeamServerModelsMediaMovieMovieMetadata,
-        record: &ServerRecord,
-    ) -> Self {
+    fn from_movie(movie: &wire::MovieMetadata, record: &ServerRecord) -> Self {
         let title = &movie.title;
         Self {
             id: movie.id.clone(),
@@ -582,10 +576,7 @@ impl MediaSummary {
         }
     }
 
-    fn from_show(
-        show: &wire::BeamServerModelsMediaShowShowMetadata,
-        record: &ServerRecord,
-    ) -> Self {
+    fn from_show(show: &wire::ShowMetadata, record: &ServerRecord) -> Self {
         let title = &show.title;
         // A series carries its artwork and genres on its seasons rather than
         // on itself, so a tile takes the first season that has any. Without
@@ -636,10 +627,7 @@ impl MediaSummary {
 }
 
 impl EpisodeSummary {
-    fn from_generated(
-        episode: &wire::BeamServerModelsMediaShowEpisodeMetadata,
-        record: &ServerRecord,
-    ) -> Self {
+    fn from_generated(episode: &wire::EpisodeMetadata, record: &ServerRecord) -> Self {
         Self {
             id: episode.id.clone(),
             episode_number: narrow_u32(Some(episode.episode_number)).unwrap_or(0),
@@ -654,10 +642,7 @@ impl EpisodeSummary {
 }
 
 impl SeasonSummary {
-    fn from_generated(
-        season: &wire::BeamServerModelsMediaShowSeasonMetadata,
-        record: &ServerRecord,
-    ) -> Self {
+    fn from_generated(season: &wire::SeasonMetadata, record: &ServerRecord) -> Self {
         Self {
             season_number: narrow_u32(Some(season.season_number)).unwrap_or(0),
             poster_url: absolute(record, season.poster_url.clone()),
@@ -675,19 +660,12 @@ impl SeasonSummary {
 impl MediaDetail {
     /// Normalise a generated detail response.
     #[must_use]
-    pub fn from_generated(
-        node: wire::BeamServerModelsMediaMediaMetadata,
-        record: &ServerRecord,
-    ) -> Self {
+    pub fn from_generated(node: wire::MediaMetadata, record: &ServerRecord) -> Self {
         match node {
-            wire::BeamServerModelsMediaMediaMetadata::BeamServerModelsMediaMediaMetadataVariant1(
-                boxed,
-            ) => Self::Movie {
+            wire::MediaMetadata::MediaMetadataVariant1(boxed) => Self::Movie {
                 summary: MediaSummary::from_movie(&boxed.movie, record),
             },
-            wire::BeamServerModelsMediaMediaMetadata::BeamServerModelsMediaMediaMetadataVariant0(
-                boxed,
-            ) => Self::Show {
+            wire::MediaMetadata::MediaMetadataVariant0(boxed) => Self::Show {
                 summary: MediaSummary::from_show(&boxed.show, record),
                 seasons: boxed
                     .show
@@ -703,11 +681,8 @@ impl MediaDetail {
 impl MediaPage {
     /// Normalise a generated connection.
     #[must_use]
-    pub fn from_generated(
-        connection: wire::BeamServerServicesMetadataMediaConnection,
-        record: &ServerRecord,
-    ) -> Self {
-        let wire::BeamServerServicesMetadataMediaConnection { edges, page_info } = connection;
+    pub fn from_generated(connection: wire::MediaConnection, record: &ServerRecord) -> Self {
+        let wire::MediaConnection { edges, page_info } = connection;
         Self {
             items: edges
                 .into_iter()
@@ -722,8 +697,8 @@ impl MediaPage {
 impl LibrarySummary {
     /// Normalise a generated library.
     #[must_use]
-    pub fn from_generated(library: wire::BeamServerModelsLibraryLibrary) -> Self {
-        let wire::BeamServerModelsLibraryLibrary {
+    pub fn from_generated(library: wire::Library) -> Self {
+        let wire::Library {
             description,
             id,
             last_scan_file_count,
@@ -747,8 +722,8 @@ impl LibrarySummary {
 impl LibraryFileSummary {
     /// Normalise a generated library file.
     #[must_use]
-    pub fn from_generated(file: wire::BeamServerModelsLibraryFileLibraryFile) -> Self {
-        let wire::BeamServerModelsLibraryFileLibraryFile {
+    pub fn from_generated(file: wire::LibraryFile) -> Self {
+        let wire::LibraryFile {
             container_format,
             content_type,
             duration_secs,
@@ -771,22 +746,14 @@ impl LibraryFileSummary {
             mime_type,
             duration_secs,
             content_type: match content_type {
-                wire::BeamServerModelsLibraryFileFileContentType::Movie => FileContentType::Movie,
-                wire::BeamServerModelsLibraryFileFileContentType::Episode => {
-                    FileContentType::Episode
-                }
-                wire::BeamServerModelsLibraryFileFileContentType::Unclassified => {
-                    FileContentType::Unclassified
-                }
+                wire::FileContentType::Movie => FileContentType::Movie,
+                wire::FileContentType::Episode => FileContentType::Episode,
+                wire::FileContentType::Unclassified => FileContentType::Unclassified,
             },
             status: match status {
-                wire::BeamServerModelsLibraryFileFileIndexStatus::Known => FileIndexStatus::Known,
-                wire::BeamServerModelsLibraryFileFileIndexStatus::Changed => {
-                    FileIndexStatus::Changed
-                }
-                wire::BeamServerModelsLibraryFileFileIndexStatus::Unknown => {
-                    FileIndexStatus::Unknown
-                }
+                wire::FileIndexStatus::Known => FileIndexStatus::Known,
+                wire::FileIndexStatus::Changed => FileIndexStatus::Changed,
+                wire::FileIndexStatus::Unknown => FileIndexStatus::Unknown,
             },
             scanned_at_unix: scanned_at.0.unix_timestamp(),
         }
@@ -796,8 +763,8 @@ impl LibraryFileSummary {
 impl DeviceSession {
     /// Normalise a generated session summary.
     #[must_use]
-    pub fn from_generated(session: wire::BeamAuthServerOidcRoutesSessionSummary) -> Self {
-        let wire::BeamAuthServerOidcRoutesSessionSummary {
+    pub fn from_generated(session: wire::SessionSummary) -> Self {
+        let wire::SessionSummary {
             created_at,
             device_hash,
             id,
@@ -830,8 +797,8 @@ fn kind_from_str(raw: &str) -> MediaKind {
 impl ContinueWatchingEntry {
     /// Normalise a generated continue-watching row, before hydration.
     #[must_use]
-    pub fn from_generated(item: wire::BeamServerServicesPlaybackContinueWatchingItem) -> Self {
-        let wire::BeamServerServicesPlaybackContinueWatchingItem {
+    pub fn from_generated(item: wire::ContinueWatchingItem) -> Self {
+        let wire::ContinueWatchingItem {
             duration_secs,
             episode_id,
             file_id,
@@ -858,8 +825,8 @@ impl ContinueWatchingEntry {
 impl HistoryEntry {
     /// Normalise a generated history row, before hydration.
     #[must_use]
-    pub fn from_generated(item: wire::BeamServerServicesPlaybackHistoryItem) -> Self {
-        let wire::BeamServerServicesPlaybackHistoryItem {
+    pub fn from_generated(item: wire::HistoryItem) -> Self {
+        let wire::HistoryItem {
             completed,
             duration_secs,
             episode_id,
@@ -886,19 +853,19 @@ impl HistoryEntry {
 }
 
 impl LogLevel {
-    fn from_log(level: wire::BeamServerModelsAdminAdminLogLevelDto) -> Self {
+    fn from_log(level: wire::AdminLogLevelDto) -> Self {
         match level {
-            wire::BeamServerModelsAdminAdminLogLevelDto::Info => Self::Info,
-            wire::BeamServerModelsAdminAdminLogLevelDto::Warning => Self::Warning,
-            wire::BeamServerModelsAdminAdminLogLevelDto::Error => Self::Error,
+            wire::AdminLogLevelDto::Info => Self::Info,
+            wire::AdminLogLevelDto::Warning => Self::Warning,
+            wire::AdminLogLevelDto::Error => Self::Error,
         }
     }
 
-    fn from_event(level: wire::BeamServerModelsAdminAdminEventLevelDto) -> Self {
+    fn from_event(level: wire::AdminEventLevelDto) -> Self {
         match level {
-            wire::BeamServerModelsAdminAdminEventLevelDto::Info => Self::Info,
-            wire::BeamServerModelsAdminAdminEventLevelDto::Warning => Self::Warning,
-            wire::BeamServerModelsAdminAdminEventLevelDto::Error => Self::Error,
+            wire::AdminEventLevelDto::Info => Self::Info,
+            wire::AdminEventLevelDto::Warning => Self::Warning,
+            wire::AdminEventLevelDto::Error => Self::Error,
         }
     }
 }
@@ -906,8 +873,8 @@ impl LogLevel {
 impl AdminStatus {
     /// Normalise a generated status response.
     #[must_use]
-    pub fn from_generated(status: wire::BeamServerModelsAdminAdminStatusResponse) -> Self {
-        let wire::BeamServerModelsAdminAdminStatusResponse {
+    pub fn from_generated(status: wire::AdminStatusResponse) -> Self {
+        let wire::AdminStatusResponse {
             counts,
             enrichment,
             recent_scans,
@@ -943,11 +910,8 @@ impl AdminStatus {
 impl AdminUser {
     /// Normalise a generated admin user row.
     #[must_use]
-    pub fn from_generated(
-        user: wire::BeamServerModelsAdminAdminUserDto,
-        record: &ServerRecord,
-    ) -> Self {
-        let wire::BeamServerModelsAdminAdminUserDto {
+    pub fn from_generated(user: wire::AdminUserDto, record: &ServerRecord) -> Self {
+        let wire::AdminUserDto {
             avatar_url,
             created_at,
             disabled,
@@ -971,8 +935,8 @@ impl AdminUser {
 impl AdminLogEntry {
     /// Normalise a generated log line.
     #[must_use]
-    pub fn from_generated(entry: wire::BeamServerModelsAdminAdminLogEntryDto) -> Self {
-        let wire::BeamServerModelsAdminAdminLogEntryDto {
+    pub fn from_generated(entry: wire::AdminLogEntryDto) -> Self {
+        let wire::AdminLogEntryDto {
             category,
             created_at,
             details,
@@ -997,8 +961,8 @@ impl AdminLogEntry {
 impl AdminEvent {
     /// Normalise a generated server event.
     #[must_use]
-    pub fn from_generated(event: wire::BeamServerModelsAdminAdminEventDto) -> Self {
-        let wire::BeamServerModelsAdminAdminEventDto {
+    pub fn from_generated(event: wire::AdminEventDto) -> Self {
+        let wire::AdminEventDto {
             category,
             id,
             level,
@@ -1011,10 +975,8 @@ impl AdminEvent {
             id,
             level: LogLevel::from_event(level),
             category: match category {
-                wire::BeamServerModelsAdminAdminEventCategoryDto::LibraryScan => {
-                    EventCategory::LibraryScan
-                }
-                wire::BeamServerModelsAdminAdminEventCategoryDto::System => EventCategory::System,
+                wire::AdminEventCategoryDto::LibraryScan => EventCategory::LibraryScan,
+                wire::AdminEventCategoryDto::System => EventCategory::System,
             },
             message,
             library_id,
@@ -1027,8 +989,8 @@ impl AdminEvent {
 impl ServerHealth {
     /// Normalise a generated health report.
     #[must_use]
-    pub fn from_generated(health: wire::BeamServerRoutesHealthHealthStatus) -> Self {
-        let wire::BeamServerRoutesHealthHealthStatus {
+    pub fn from_generated(health: wire::HealthStatus) -> Self {
+        let wire::HealthStatus {
             checks,
             status,
             timestamp: _,
@@ -1050,9 +1012,7 @@ impl ServerHealth {
 ///
 /// Returns [`BeamError::BadRequest`] when the query cannot be expressed, which
 /// today means only a page size the server would reject.
-pub fn browse_params(
-    query: &BrowseQuery,
-) -> Result<crate::api::BeamServerRoutesMediaBrowseMediaParams, BeamError> {
+pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParams, BeamError> {
     let first = match query.first {
         Some(0) => {
             return Err(BeamError::BadRequest {
@@ -1063,7 +1023,7 @@ pub fn browse_params(
         None => None,
     };
 
-    Ok(crate::api::BeamServerRoutesMediaBrowseMediaParams {
+    Ok(crate::api::BrowseMediaParams {
         first,
         after: query.after.clone(),
         last: None,
@@ -1079,8 +1039,8 @@ pub fn browse_params(
             MediaSortField::Runtime => wire::SortBy::Runtime,
         }),
         sort_order: query.sort_order.map(|order| match order {
-            SortOrder::Ascending => wire::SortOrder::Asc,
-            SortOrder::Descending => wire::SortOrder::Desc,
+            SortOrder::Ascending => wire::SortOrderFe86ad6c::Asc,
+            SortOrder::Descending => wire::SortOrderFe86ad6c::Desc,
         }),
         media_type: query.media_type.map(|kind| match kind {
             MediaTypeFilter::Movie => wire::MediaType::Movie,
@@ -1092,6 +1052,8 @@ pub fn browse_params(
         year_to: query.year_to.map(i64::from),
         query: query.query.clone(),
         min_rating: query.min_rating.map(i64::from),
+        origin: None,
+        referer: None,
     })
 }
 
@@ -1109,7 +1071,7 @@ mod tests {
     /// Parsing the wire shape rather than hand-building the generated structs
     /// means these tests also assert the contract the server actually
     /// publishes, not just this module's arithmetic.
-    fn node(json: &str) -> wire::BeamServerModelsMediaMediaMetadata {
+    fn node(json: &str) -> wire::MediaMetadata {
         serde_json::from_str(json).expect("the fixture should match the generated type")
     }
 
@@ -1247,7 +1209,7 @@ mod tests {
             r#"{{"edges":[{{"cursor":"c1","node":{MOVIE}}}],
                  "page_info":{{"has_next_page":true,"has_previous_page":false,"end_cursor":"c1"}}}}"#
         );
-        let connection: wire::BeamServerServicesMetadataMediaConnection =
+        let connection: wire::MediaConnection =
             serde_json::from_str(&json).expect("a valid connection");
         let page = MediaPage::from_generated(connection, &record());
         assert_eq!(page.items.len(), 1);
@@ -1282,7 +1244,7 @@ mod tests {
                      "position_secs":30.0,"duration_secs":120.0,
                      "updated_at":"2026-01-01T00:00:00Z"}}"#
             );
-            let item: wire::BeamServerServicesPlaybackContinueWatchingItem =
+            let item: wire::ContinueWatchingItem =
                 serde_json::from_str(&json).expect("a valid item");
             ContinueWatchingEntry::from_generated(item)
         };
@@ -1299,8 +1261,7 @@ mod tests {
         let json = r#"{"file_id":"f1","media_id":"m1","media_type":"movie",
                        "position_secs":30.0,"duration_secs":120.0,
                        "updated_at":"2026-01-01T00:00:00Z"}"#;
-        let item: wire::BeamServerServicesPlaybackContinueWatchingItem =
-            serde_json::from_str(json).expect("a valid item");
+        let item: wire::ContinueWatchingItem = serde_json::from_str(json).expect("a valid item");
         let entry = ContinueWatchingEntry::from_generated(item);
         assert_eq!(entry.progress_fraction, Some(0.25));
         assert_eq!(entry.updated_at_unix, 1_767_225_600);
@@ -1314,8 +1275,7 @@ mod tests {
                        "episode_id":"e1","completed":true,
                        "position_secs":120.0,"duration_secs":120.0,
                        "updated_at":"2026-01-01T00:00:00Z"}"#;
-        let item: wire::BeamServerServicesPlaybackHistoryItem =
-            serde_json::from_str(json).expect("a valid item");
+        let item: wire::HistoryItem = serde_json::from_str(json).expect("a valid item");
         let entry = HistoryEntry::from_generated(item);
         assert!(entry.completed);
         assert_eq!(entry.episode_id.as_deref(), Some("e1"));
@@ -1326,8 +1286,7 @@ mod tests {
     fn a_library_reports_a_running_scan_as_started_but_unfinished() {
         let json = r#"{"id":"l1","name":"Films","size":42,
                        "last_scan_started_at":"2026-01-01T00:00:00Z"}"#;
-        let library: wire::BeamServerModelsLibraryLibrary =
-            serde_json::from_str(json).expect("a valid library");
+        let library: wire::Library = serde_json::from_str(json).expect("a valid library");
         let summary = LibrarySummary::from_generated(library);
         assert_eq!(summary.size, 42);
         assert_eq!(summary.last_scan_started_at_unix, Some(1_767_225_600));
@@ -1341,8 +1300,7 @@ mod tests {
         let json = r#"{"id":"1","level":"warning","category":"scan",
                        "message":"skipped","created_at":"2026-01-01",
                        "details":{"path":"/media/x.mkv"}}"#;
-        let entry: wire::BeamServerModelsAdminAdminLogEntryDto =
-            serde_json::from_str(json).expect("a valid log entry");
+        let entry: wire::AdminLogEntryDto = serde_json::from_str(json).expect("a valid log entry");
         let mapped = AdminLogEntry::from_generated(entry);
         assert_eq!(mapped.level, LogLevel::Warning);
         assert_eq!(
@@ -1382,7 +1340,10 @@ mod tests {
         assert_eq!(params.first, Some(24));
         assert_eq!(params.after.as_deref(), Some("cursor"));
         assert!(matches!(params.sort_by, Some(wire::SortBy::DateAdded)));
-        assert!(matches!(params.sort_order, Some(wire::SortOrder::Desc)));
+        assert!(matches!(
+            params.sort_order,
+            Some(wire::SortOrderFe86ad6c::Desc)
+        ));
         assert!(matches!(params.media_type, Some(wire::MediaType::Show)));
         assert_eq!(params.genre.as_deref(), Some("Drama"));
         assert_eq!(params.year, Some(1999));
@@ -1425,8 +1386,7 @@ mod tests {
     fn a_health_report_narrows_its_uptime() {
         let json = r#"{"status":"ok","version":"0.1.0","uptime_secs":1234,
                        "timestamp":"2026-01-01","checks":{"database":"ok"}}"#;
-        let health: wire::BeamServerRoutesHealthHealthStatus =
-            serde_json::from_str(json).expect("a valid health report");
+        let health: wire::HealthStatus = serde_json::from_str(json).expect("a valid health report");
         let mapped = ServerHealth::from_generated(health);
         assert_eq!(mapped.uptime_secs, 1234);
         assert_eq!(mapped.database, "ok");

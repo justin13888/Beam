@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 
 use beam_domain::services::{Clock, RealClock};
@@ -119,7 +118,9 @@ impl PendingAuthStore for SqlPendingAuthStore {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
-    use chrono::DateTime;
+    // `Utc` is only ever named in this module. At file scope it was an unused
+    // import in a default build, which `-D warnings` rejects.
+    use chrono::{DateTime, Utc};
     use std::collections::HashMap;
     use std::sync::Mutex;
 

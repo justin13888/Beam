@@ -1,4 +1,4 @@
-use salvo::oapi::ToSchema;
+use kynos::Schema;
 use serde::Serialize;
 
 mod codec;
@@ -16,7 +16,7 @@ pub use source::*;
 pub use stream::*;
 
 /// Media metadata
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub enum MediaMetadata {
     Show(ShowMetadata),
     Movie(MovieMetadata),
@@ -31,7 +31,7 @@ impl MediaMetadata {
     }
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct Title {
     /// Original title
     pub original: String,
@@ -41,7 +41,7 @@ pub struct Title {
     pub alternatives: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct ExternalIdentifiers {
     /// IMDb ID (e.g., tt1234567)
     pub imdb_id: Option<String>,
@@ -51,7 +51,7 @@ pub struct ExternalIdentifiers {
     pub tvdb_id: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct Ratings {
     /// TMDB rating as a percentage (0-100)
     pub tmdb: Option<u32>,

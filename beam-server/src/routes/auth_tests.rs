@@ -1,20 +1,46 @@
+//! Subcutaneous tests for the OIDC BFF endpoints (ADR-0003).
+//!
+//! These drive the seven real handlers in [`crate::routes::auth`] through
+//! Kynos's in-process `TestClient` over a real `AppState`, with a
+//! `FakeOidcClient` and the in-memory stores below the trait line -- no IdP,
+//! no Postgres, no listener (NFR-201).
+//!
+//! Two things moved with the framework and are worth knowing when reading
+//! these. The routes now carry their production paths (`/v1/auth/login`,
+//! `/v1/me`, ...) rather than the bare `/login`, `/me` the Salvo sub-router
+//! mounted, because a Kynos route declares its own path. And the injected
+//! dependencies arrive by *type* from the state, so the harness swaps them by
+//! building an `AppServices` rather than by stacking `affix_state` hoops.
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use salvo::prelude::*;
-    use salvo::test::{ResponseExt, TestClient};
+    use beam_auth::utils::models::User;
+    use beam_auth::utils::oidc::fake::FakeOidcClient;
+    use beam_auth::utils::oidc::{OidcClient, OidcIdentity};
+    use beam_auth::utils::oidc_config::OidcRuntimeConfig;
+    use beam_auth::utils::pending_auth_store::PendingAuthStore;
+    use beam_auth::utils::pending_auth_store::in_memory::InMemoryPendingAuthStore;
+    use beam_auth::utils::repository::UserRepository;
+    use beam_auth::utils::repository::in_memory::InMemoryUserRepository;
+    use beam_auth::utils::session_store::SessionStore;
+    use beam_auth::utils::session_store::in_memory::InMemorySessionStore;
+    use kynos::http::StatusCode;
+    use kynos::prelude::*;
+    use kynos::test::{TestClient, TestResponse};
     use serde_json::{Value, json};
 
-    use crate::server::oidc_routes::{OidcRuntimeConfig, oidc_routes};
-    use crate::utils::oidc::fake::FakeOidcClient;
-    use crate::utils::oidc::{OidcClient, OidcIdentity};
-    use crate::utils::pending_auth_store::PendingAuthStore;
-    use crate::utils::pending_auth_store::in_memory::InMemoryPendingAuthStore;
-    use crate::utils::repository::UserRepository;
-    use crate::utils::repository::in_memory::InMemoryUserRepository;
-    use crate::utils::session_store::SessionStore;
-    use crate::utils::session_store::in_memory::InMemorySessionStore;
+    use crate::routes::api_error::SESSION_COOKIE;
+    use crate::routes::auth::{
+        oidc_callback, oidc_delete_session, oidc_list_sessions, oidc_login, oidc_logout,
+        oidc_logout_all, oidc_me,
+    };
+    use crate::routes::test_support::make_app_state;
+    use crate::services::health::InMemoryDependencyProbe;
+    use crate::state::{AppServices, AppState};
+
+    const STATE_COOKIE: &str = "beam_oidc_state";
 
     /// Default runtime config for the harness: admin is bound to a `groups`
     /// claim containing `beam-admin`, mirroring a typical Dex/Keycloak setup.
@@ -72,7 +98,7 @@ mod tests {
     }
 
     struct Harness {
-        service: Service,
+        client: TestClient<AppState>,
         oidc_client: Arc<FakeOidcClient>,
         user_repo: Arc<InMemoryUserRepository>,
         session_store: Arc<InMemorySessionStore>,
@@ -113,6 +139,12 @@ mod tests {
     /// means two routers with two clients -- which by default would also mean
     /// two isolated session stores, and then a cross-account revocation test
     /// would pass for the wrong reason.
+    ///
+    /// The auth dependencies are swapped by rebuilding [`AppServices`] on top
+    /// of the shared stub state rather than by injecting them per route:
+    /// `Inject<T>` resolves against the router's context, so the state *is* the
+    /// injection point now. Every service this suite never touches is carried
+    /// over from `test_support`'s stubs unchanged.
     fn make_harness_sharing_store(
         oidc_client: FakeOidcClient,
         user_repo: Arc<InMemoryUserRepository>,
@@ -126,60 +158,118 @@ mod tests {
         let session_dyn: Arc<dyn SessionStore> = session_store.clone();
         let user_repo_dyn: Arc<dyn UserRepository> = user_repo.clone();
 
-        let router = Router::new()
-            .hoop(affix_state::inject(oidc_dyn))
-            .hoop(affix_state::inject(pending_auth_store))
-            .hoop(affix_state::inject(session_dyn))
-            .hoop(affix_state::inject(user_repo_dyn))
-            .hoop(affix_state::inject(config))
-            .push(oidc_routes());
+        let base = make_app_state();
+
+        // The session TTLs live in two places: the handlers mint from
+        // `OidcRuntimeConfig`, and `SessionAuthenticator` slides the idle
+        // expiry from `ServerConfig`. A harness that let them disagree would
+        // mint a session the very next request could not authenticate.
+        let mut server_config = base.config.clone();
+        server_config.web_url = config.web_url.clone();
+        server_config.cookie_secure = Some(config.cookie_secure);
+        server_config.session_idle_days = config.session_idle_days;
+        server_config.session_max_days = config.session_max_days;
+
+        let services = AppServices {
+            hash: base.services.hash.clone(),
+            library: base.services.library.clone(),
+            metadata: base.services.metadata.clone(),
+            notification: base.services.notification.clone(),
+            admin_log: base.services.admin_log.clone(),
+            user_repo: user_repo_dyn,
+            playback: base.services.playback.clone(),
+            genre_repo: base.services.genre_repo.clone(),
+            library_repo: base.services.library_repo.clone(),
+            file_repo: base.services.file_repo.clone(),
+            enrichment_repo: base.services.enrichment_repo.clone(),
+            session_store: session_dyn,
+            oidc_client: oidc_dyn,
+            pending_auth_store,
+            oidc_config: config,
+        };
+
+        let state = AppState::new(
+            server_config,
+            services,
+            Arc::new(InMemoryDependencyProbe::healthy()),
+            None,
+        );
+
+        let service = Router::new()
+            .nest(
+                "/v1",
+                Router::new().mount(kynos::routes![
+                    oidc_login,
+                    oidc_callback,
+                    oidc_me,
+                    oidc_logout,
+                    oidc_logout_all,
+                    oidc_list_sessions,
+                    oidc_delete_session,
+                ]),
+            )
+            .build(state)
+            .expect("the auth router describes itself");
 
         Harness {
-            service: Service::new(router),
+            client: TestClient::new(service),
             oidc_client,
             user_repo,
             session_store,
         }
     }
 
-    /// Drives `GET /login` and returns the `beam_oidc_state` cookie value and
-    /// the redirect `Location` header.
-    async fn do_login(harness: &Harness, redirect: Option<&str>) -> (String, String) {
-        let url = match redirect {
-            Some(r) => format!("http://0.0.0.0/login?redirect={r}"),
-            None => "http://0.0.0.0/login".to_string(),
-        };
-        let res = TestClient::get(url).send(&harness.service).await;
-        assert_eq!(res.status_code, Some(StatusCode::FOUND));
-
-        let state_cookie = res
+    /// The value of a live (non-clearing) cookie the response set, if any.
+    ///
+    /// A removal is emitted as `name=; ...; Max-Age=0`, which `cookies()`
+    /// reports alongside a real one -- so "was a session issued?" is "is there
+    /// a `beam_session` with a value?", not merely "is the name present?".
+    fn live_cookie<'a>(response: &'a TestResponse, name: &str) -> Option<&'a str> {
+        response
             .cookies()
-            .get("beam_oidc_state")
+            .into_iter()
+            .find(|(set, value)| *set == name && !value.is_empty())
+            .map(|(_, value)| value)
+    }
+
+    /// Drives `GET /v1/auth/login` and returns the `beam_oidc_state` cookie
+    /// value and the redirect `Location` header.
+    async fn do_login(harness: &Harness, redirect: Option<&str>) -> (String, String) {
+        let path = match redirect {
+            Some(r) => format!("/v1/auth/login?redirect={r}"),
+            None => "/v1/auth/login".to_string(),
+        };
+        let response = harness.client.get(&path).send().await;
+        assert_eq!(response.status(), StatusCode::FOUND);
+
+        let state_cookie = live_cookie(&response, STATE_COOKIE)
             .expect("state cookie should be set")
-            .value()
             .to_string();
-        let location = res
-            .headers()
-            .get("Location")
+        let location = response
+            .header("location")
             .expect("Location header should be set")
-            .to_str()
-            .unwrap()
             .to_string();
         (state_cookie, location)
     }
 
-    /// Drives `GET /callback` presenting the given state cookie, and the
-    /// mock IdP's freshly-minted state/code as query params.
-    async fn do_callback(harness: &Harness, state_cookie: &str, callback_state: &str) -> Response {
-        TestClient::get(format!(
-            "http://0.0.0.0/callback?state={callback_state}&code=fake-code"
-        ))
-        .add_header("Cookie", format!("beam_oidc_state={state_cookie}"), true)
-        .send(&harness.service)
-        .await
+    /// Drives `GET /v1/auth/callback` presenting the given state cookie, and
+    /// the mock IdP's freshly-minted state/code as query params.
+    async fn do_callback(
+        harness: &Harness,
+        state_cookie: &str,
+        callback_state: &str,
+    ) -> TestResponse {
+        harness
+            .client
+            .get(&format!(
+                "/v1/auth/callback?state={callback_state}&code=fake-code"
+            ))
+            .cookie(STATE_COOKIE, state_cookie)
+            .send()
+            .await
     }
 
-    // ─── GET /login ────────────────────────────────────────────────────────
+    // ─── GET /v1/auth/login ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn login_redirects_to_idp_and_sets_state_cookie() {
@@ -193,7 +283,7 @@ mod tests {
         assert!(location.starts_with("https://fake-idp.test/"));
     }
 
-    // ─── GET /callback ─────────────────────────────────────────────────────
+    // ─── GET /v1/auth/callback ─────────────────────────────────────────────
 
     #[tokio::test]
     async fn callback_happy_path_provisions_user_and_sets_session_cookie() {
@@ -205,14 +295,15 @@ mod tests {
         let (state_cookie, _) = do_login(&harness, Some("/library")).await;
         let begin = harness.oidc_client.last_begin().unwrap();
 
-        let mut res = do_callback(&harness, &state_cookie, &begin.state).await;
-        assert_eq!(res.status_code, Some(StatusCode::FOUND));
+        let response = do_callback(&harness, &state_cookie, &begin.state).await;
+        response
+            .assert_status(StatusCode::FOUND)
+            .assert_redirect("http://localhost:5173/library");
 
-        let location = res.headers().get("Location").unwrap().to_str().unwrap();
-        assert_eq!(location, "http://localhost:5173/library");
-
-        let session_cookie = res.cookies().get("beam_session");
-        assert!(session_cookie.is_some(), "session cookie should be set");
+        assert!(
+            live_cookie(&response, SESSION_COOKIE).is_some(),
+            "session cookie should be set"
+        );
 
         let user = harness
             .user_repo
@@ -226,8 +317,6 @@ mod tests {
             !user.is_admin,
             "newuser@example.com released no admin-granting claim"
         );
-
-        let _ = res.take_string().await;
     }
 
     #[tokio::test]
@@ -277,12 +366,12 @@ mod tests {
 
         let (state_cookie, _) = do_login(&harness, None).await;
         let begin = harness.oidc_client.last_begin().unwrap();
-        let res = do_callback(&harness, &state_cookie, &begin.state).await;
+        let response = do_callback(&harness, &state_cookie, &begin.state).await;
 
         // Login still succeeds and mints a session.
-        assert_eq!(res.status_code, Some(StatusCode::FOUND));
+        assert_eq!(response.status(), StatusCode::FOUND);
         assert!(
-            res.cookies().get("beam_session").is_some(),
+            live_cookie(&response, SESSION_COOKIE).is_some(),
             "session cookie should be set even with no email claim"
         );
 
@@ -323,7 +412,7 @@ mod tests {
         let (state_a, _) = do_login(&harness_a, None).await;
         let begin_a = harness_a.oidc_client.last_begin().unwrap();
         let res_a = do_callback(&harness_a, &state_a, &begin_a.state).await;
-        assert_eq!(res_a.status_code, Some(StatusCode::FOUND));
+        assert_eq!(res_a.status(), StatusCode::FOUND);
 
         let harness_b = make_harness_with_repo(
             FakeOidcClient::with_identity(identity_with(
@@ -337,7 +426,7 @@ mod tests {
         let (state_b, _) = do_login(&harness_b, None).await;
         let begin_b = harness_b.oidc_client.last_begin().unwrap();
         let res_b = do_callback(&harness_b, &state_b, &begin_b.state).await;
-        assert_eq!(res_b.status_code, Some(StatusCode::FOUND));
+        assert_eq!(res_b.status(), StatusCode::FOUND);
 
         let user_a = shared_repo
             .find_by_oidc_identity("https://issuer-a.test", "subj-a")
@@ -496,8 +585,12 @@ mod tests {
 
         let (state_cookie, _) = do_login(&harness, None).await;
         // Present a state that doesn't match the cookie.
-        let res = do_callback(&harness, &state_cookie, "wrong-state").await;
-        assert_eq!(res.status_code, Some(StatusCode::BAD_REQUEST));
+        let response = do_callback(&harness, &state_cookie, "wrong-state").await;
+        // The failure is an RFC 9457 problem document now, and the `type` is
+        // the stable half of it -- the message never was contractual.
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/bad-request");
     }
 
     #[tokio::test]
@@ -511,11 +604,11 @@ mod tests {
         let begin = harness.oidc_client.last_begin().unwrap();
 
         let first = do_callback(&harness, &state_cookie, &begin.state).await;
-        assert_eq!(first.status_code, Some(StatusCode::FOUND));
+        assert_eq!(first.status(), StatusCode::FOUND);
 
         // Same state/cookie presented again -- already consumed.
         let second = do_callback(&harness, &state_cookie, &begin.state).await;
-        assert_eq!(second.status_code, Some(StatusCode::BAD_REQUEST));
+        assert_eq!(second.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -525,10 +618,12 @@ mod tests {
             true,
         )));
 
-        let res = TestClient::get("http://0.0.0.0/callback?state=whatever&code=fake-code")
-            .send(&harness.service)
+        let response = harness
+            .client
+            .get("/v1/auth/callback?state=whatever&code=fake-code")
+            .send()
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::BAD_REQUEST));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -539,13 +634,15 @@ mod tests {
         )));
 
         let (state_cookie, _) = do_login(&harness, None).await;
-        let res = TestClient::get(format!(
-            "http://0.0.0.0/callback?state={state_cookie}&error=access_denied"
-        ))
-        .add_header("Cookie", format!("beam_oidc_state={state_cookie}"), true)
-        .send(&harness.service)
-        .await;
-        assert_eq!(res.status_code, Some(StatusCode::BAD_REQUEST));
+        let response = harness
+            .client
+            .get(&format!(
+                "/v1/auth/callback?state={state_cookie}&error=access_denied"
+            ))
+            .cookie(STATE_COOKIE, &state_cookie)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -554,8 +651,8 @@ mod tests {
 
         let (state_cookie, _) = do_login(&harness, None).await;
         let begin = harness.oidc_client.last_begin().unwrap();
-        let res = do_callback(&harness, &state_cookie, &begin.state).await;
-        assert_eq!(res.status_code, Some(StatusCode::BAD_REQUEST));
+        let response = do_callback(&harness, &state_cookie, &begin.state).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -573,7 +670,7 @@ mod tests {
         let (state_cookie, _) = do_login(&harness, None).await;
         let begin = harness.oidc_client.last_begin().unwrap();
         let ok = do_callback(&harness, &state_cookie, &begin.state).await;
-        assert_eq!(ok.status_code, Some(StatusCode::FOUND));
+        assert_eq!(ok.status(), StatusCode::FOUND);
 
         let user = repo
             .find_by_oidc_identity("https://dex.test", "subj-1")
@@ -592,10 +689,12 @@ mod tests {
         // A fresh login attempt is refused with 403 and no new session.
         let (state_cookie2, _) = do_login(&harness, None).await;
         let begin2 = harness.oidc_client.last_begin().unwrap();
-        let res = do_callback(&harness, &state_cookie2, &begin2.state).await;
-        assert_eq!(res.status_code, Some(StatusCode::FORBIDDEN));
+        let response = do_callback(&harness, &state_cookie2, &begin2.state).await;
+        response
+            .assert_status(StatusCode::FORBIDDEN)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/forbidden");
         assert!(
-            res.cookies().get("beam_session").is_none(),
+            live_cookie(&response, SESSION_COOKIE).is_none(),
             "a disabled account must not receive a session cookie"
         );
         assert_eq!(
@@ -633,43 +732,50 @@ mod tests {
         let (sc2, _) = do_login(&harness, None).await;
         let b2 = harness.oidc_client.last_begin().unwrap();
         let blocked = do_callback(&harness, &sc2, &b2.state).await;
-        assert_eq!(blocked.status_code, Some(StatusCode::FORBIDDEN));
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
 
         repo.set_disabled(user.id, false).await.unwrap();
         let (sc3, _) = do_login(&harness, None).await;
         let b3 = harness.oidc_client.last_begin().unwrap();
         let allowed = do_callback(&harness, &sc3, &b3.state).await;
-        assert_eq!(allowed.status_code, Some(StatusCode::FOUND));
+        assert_eq!(allowed.status(), StatusCode::FOUND);
         assert!(
-            allowed.cookies().get("beam_session").is_some(),
+            live_cookie(&allowed, SESSION_COOKIE).is_some(),
             "a re-enabled account should receive a session cookie again"
         );
     }
 
-    // ─── GET /me, POST /logout, GET /sessions, DELETE /sessions/:id ──────────
+    // ─── GET /v1/me, POST /v1/logout, /v1/sessions, /v1/sessions/{id} ───────
 
     /// Whether the response tells the browser to drop the session cookie.
     ///
-    /// `remove_cookie` emits an expiring `Set-Cookie` rather than a live one,
-    /// so `res.cookies()` never shows it -- the header is what a browser acts
-    /// on and therefore what this asserts.
-    fn clears_session_cookie(res: &Response) -> bool {
-        res.headers()
-            .get_all("set-cookie")
+    /// A clearing cookie is emitted as `beam_session=; ...; Max-Age=0` rather
+    /// than a live one, so this reads the raw field -- which is what a browser
+    /// acts on and therefore what this asserts.
+    fn clears_session_cookie(response: &TestResponse) -> bool {
+        response
+            .headers("set-cookie")
             .iter()
-            .filter_map(|v| v.to_str().ok())
             .any(|c| c.starts_with("beam_session=;"))
     }
 
     async fn login_and_get_session_cookie(harness: &Harness, email: &str) -> String {
         let (state_cookie, _) = do_login(harness, None).await;
         let begin = harness.oidc_client.last_begin().unwrap();
-        let res = do_callback(harness, &state_cookie, &begin.state).await;
-        res.cookies()
-            .get("beam_session")
+        let response = do_callback(harness, &state_cookie, &begin.state).await;
+        live_cookie(&response, SESSION_COOKIE)
             .unwrap_or_else(|| panic!("expected a session cookie after login as {email}"))
-            .value()
             .to_string()
+    }
+
+    /// `GET /v1/me` as the holder of `session_cookie`.
+    async fn get_me(harness: &Harness, session_cookie: &str) -> TestResponse {
+        harness
+            .client
+            .get("/v1/me")
+            .cookie(SESSION_COOKIE, session_cookie)
+            .send()
+            .await
     }
 
     #[tokio::test]
@@ -680,13 +786,10 @@ mod tests {
         )));
         let session_cookie = login_and_get_session_cookie(&harness, "me@example.com").await;
 
-        let mut res = TestClient::get("http://0.0.0.0/me")
-            .add_header("Cookie", format!("beam_session={session_cookie}"), true)
-            .send(&harness.service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::OK));
+        let response = get_me(&harness, &session_cookie).await;
+        assert_eq!(response.status(), StatusCode::OK);
 
-        let body: Value = res.take_json().await.unwrap();
+        let body: Value = response.json();
         assert_eq!(body["email"], "me@example.com");
     }
 
@@ -697,10 +800,8 @@ mod tests {
             true,
         )));
 
-        let res = TestClient::get("http://0.0.0.0/me")
-            .send(&harness.service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+        let response = harness.client.get("/v1/me").send().await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -711,17 +812,38 @@ mod tests {
         )));
         let session_cookie = login_and_get_session_cookie(&harness, "logout@example.com").await;
 
-        let res = TestClient::post("http://0.0.0.0/logout")
-            .add_header("Cookie", format!("beam_session={session_cookie}"), true)
-            .send(&harness.service)
+        let response = harness
+            .client
+            .post("/v1/logout")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            clears_session_cookie(&response),
+            "logging out must also clear the cookie"
+        );
 
-        let res = TestClient::get("http://0.0.0.0/me")
-            .add_header("Cookie", format!("beam_session={session_cookie}"), true)
-            .send(&harness.service)
+        assert_eq!(
+            get_me(&harness, &session_cookie).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// The session ids `GET /v1/sessions` reports for the holder of `cookie`.
+    async fn list_session_ids(harness: &Harness, cookie: &str) -> Vec<String> {
+        let response = harness
+            .client
+            .get("/v1/sessions")
+            .cookie(SESSION_COOKIE, cookie)
+            .send()
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(response.status(), StatusCode::OK);
+        response
+            .json::<Vec<Value>>()
+            .into_iter()
+            .map(|session| session["id"].as_str().expect("a session id").to_string())
+            .collect()
     }
 
     #[tokio::test]
@@ -732,27 +854,22 @@ mod tests {
         )));
         let session_cookie = login_and_get_session_cookie(&harness, "sessions@example.com").await;
 
-        let mut res = TestClient::get("http://0.0.0.0/sessions")
-            .add_header("Cookie", format!("beam_session={session_cookie}"), true)
-            .send(&harness.service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::OK));
-        let sessions: Vec<Value> = res.take_json().await.unwrap();
-        assert_eq!(sessions.len(), 1);
-        let session_id = sessions[0]["id"].as_str().unwrap().to_string();
+        let ids = list_session_ids(&harness, &session_cookie).await;
+        assert_eq!(ids.len(), 1);
 
-        let res = TestClient::delete(format!("http://0.0.0.0/sessions/{session_id}"))
-            .add_header("Cookie", format!("beam_session={session_cookie}"), true)
-            .send(&harness.service)
+        let response = harness
+            .client
+            .delete(&format!("/v1/sessions/{}", ids[0]))
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         // The session used to make this very request was just revoked.
-        let res = TestClient::get("http://0.0.0.0/me")
-            .add_header("Cookie", format!("beam_session={session_cookie}"), true)
-            .send(&harness.service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(
+            get_me(&harness, &session_cookie).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
@@ -763,12 +880,13 @@ mod tests {
         )));
         let session_cookie = login_and_get_session_cookie(&harness, "sessions2@example.com").await;
 
-        let res =
-            TestClient::delete("http://0.0.0.0/sessions/00000000-0000-0000-0000-000000000000")
-                .add_header("Cookie", format!("beam_session={session_cookie}"), true)
-                .send(&harness.service)
-                .await;
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
+        let response = harness
+            .client
+            .delete("/v1/sessions/00000000-0000-0000-0000-000000000000")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -801,30 +919,24 @@ mod tests {
         let bystander_cookie =
             login_and_get_session_cookie(&bystander_harness, "bystander@example.com").await;
 
-        let res = TestClient::post("http://0.0.0.0/logout-all")
-            .add_header("Cookie", format!("beam_session={first}"), true)
-            .send(&harness.service)
+        let response = harness
+            .client
+            .post("/v1/logout-all")
+            .cookie(SESSION_COOKIE, &first)
+            .send()
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         for cookie in [&first, &second] {
-            let res = TestClient::get("http://0.0.0.0/me")
-                .add_header("Cookie", format!("beam_session={cookie}"), true)
-                .send(&harness.service)
-                .await;
             assert_eq!(
-                res.status_code,
-                Some(StatusCode::UNAUTHORIZED),
+                get_me(&harness, cookie).await.status(),
+                StatusCode::UNAUTHORIZED,
                 "every session of the caller must be gone"
             );
         }
-        let res = TestClient::get("http://0.0.0.0/me")
-            .add_header("Cookie", format!("beam_session={bystander_cookie}"), true)
-            .send(&bystander_harness.service)
-            .await;
         assert_eq!(
-            res.status_code,
-            Some(StatusCode::OK),
+            get_me(&bystander_harness, &bystander_cookie).await.status(),
+            StatusCode::OK,
             "logging one user out everywhere must not touch anyone else"
         );
     }
@@ -865,41 +977,38 @@ mod tests {
         let attacker_cookie = login_and_get_session_cookie(&attacker, "attacker@example.com").await;
         assert_ne!(victim_cookie, attacker_cookie);
 
-        let mut res = TestClient::get("http://0.0.0.0/sessions")
-            .add_header("Cookie", format!("beam_session={victim_cookie}"), true)
-            .send(&victim.service)
-            .await;
-        let sessions: Vec<Value> = res.take_json().await.unwrap();
-        assert_eq!(sessions.len(), 1, "the victim sees only their own session");
-        let victim_session_id = sessions[0]["id"].as_str().unwrap().to_string();
+        let victim_sessions = list_session_ids(&victim, &victim_cookie).await;
+        assert_eq!(
+            victim_sessions.len(),
+            1,
+            "the victim sees only their own session"
+        );
 
-        let res = TestClient::delete(format!("http://0.0.0.0/sessions/{victim_session_id}"))
-            .add_header("Cookie", format!("beam_session={attacker_cookie}"), true)
-            .send(&attacker.service)
+        let response = attacker
+            .client
+            .delete(&format!("/v1/sessions/{}", victim_sessions[0]))
+            .cookie(SESSION_COOKIE, &attacker_cookie)
+            .send()
             .await;
         assert_eq!(
-            res.status_code,
-            Some(StatusCode::UNAUTHORIZED),
+            response.status(),
+            StatusCode::UNAUTHORIZED,
             "another user's session id must not be revocable, and must not be \
              distinguishable from one that does not exist"
         );
 
-        let res = TestClient::get("http://0.0.0.0/me")
-            .add_header("Cookie", format!("beam_session={victim_cookie}"), true)
-            .send(&victim.service)
-            .await;
         assert_eq!(
-            res.status_code,
-            Some(StatusCode::OK),
+            get_me(&victim, &victim_cookie).await.status(),
+            StatusCode::OK,
             "the victim is still signed in"
         );
     }
 
     #[tokio::test]
     async fn revoking_a_session_other_than_the_current_one_leaves_the_cookie_alone() {
-        // `current.value() == current_token` decides whether to clear the
-        // caller's own cookie. Inverting it would sign the caller out every
-        // time they revoked one of their *other* devices.
+        // Whether the caller's own cookie is cleared is decided by re-reading
+        // their token after the revocation. Inverting that would sign the
+        // caller out every time they revoked one of their *other* devices.
         let harness = make_harness(FakeOidcClient::with_identity(identity(
             "twodevices@example.com",
             true,
@@ -908,43 +1017,35 @@ mod tests {
         // Log in the old device first and read its id while it is the only
         // session, so the id is known rather than guessed at.
         let old_device = login_and_get_session_cookie(&harness, "twodevices@example.com").await;
-        let mut res = TestClient::get("http://0.0.0.0/sessions")
-            .add_header("Cookie", format!("beam_session={old_device}"), true)
-            .send(&harness.service)
-            .await;
-        let sessions: Vec<Value> = res.take_json().await.unwrap();
-        assert_eq!(sessions.len(), 1);
-        let old_device_id = sessions[0]["id"].as_str().unwrap().to_string();
+        let ids = list_session_ids(&harness, &old_device).await;
+        assert_eq!(ids.len(), 1);
+        let old_device_id = ids[0].clone();
 
         let current = login_and_get_session_cookie(&harness, "twodevices@example.com").await;
         assert_ne!(old_device, current);
 
-        let res = TestClient::delete(format!("http://0.0.0.0/sessions/{old_device_id}"))
-            .add_header("Cookie", format!("beam_session={current}"), true)
-            .send(&harness.service)
+        let response = harness
+            .client
+            .delete(&format!("/v1/sessions/{old_device_id}"))
+            .cookie(SESSION_COOKIE, &current)
+            .send()
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(
-            !clears_session_cookie(&res),
+            !clears_session_cookie(&response),
             "revoking another device must not clear the caller's own cookie"
         );
 
         // The caller is still signed in; the other device is not.
         assert_eq!(
-            TestClient::get("http://0.0.0.0/me")
-                .add_header("Cookie", format!("beam_session={current}"), true)
-                .send(&harness.service)
-                .await
-                .status_code,
-            Some(StatusCode::OK)
+            get_me(&harness, &current).await.status(),
+            StatusCode::OK,
+            "the caller keeps the session they were holding"
         );
         assert_eq!(
-            TestClient::get("http://0.0.0.0/me")
-                .add_header("Cookie", format!("beam_session={old_device}"), true)
-                .send(&harness.service)
-                .await
-                .status_code,
-            Some(StatusCode::UNAUTHORIZED)
+            get_me(&harness, &old_device).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "the revoked device is signed out"
         );
     }
 
@@ -959,20 +1060,18 @@ mod tests {
         )));
         let cookie = login_and_get_session_cookie(&harness, "selfrevoke@example.com").await;
 
-        let mut res = TestClient::get("http://0.0.0.0/sessions")
-            .add_header("Cookie", format!("beam_session={cookie}"), true)
-            .send(&harness.service)
-            .await;
-        let sessions: Vec<Value> = res.take_json().await.unwrap();
-        let own_id = sessions[0]["id"].as_str().unwrap().to_string();
+        let ids = list_session_ids(&harness, &cookie).await;
+        let own_id = ids[0].clone();
 
-        let res = TestClient::delete(format!("http://0.0.0.0/sessions/{own_id}"))
-            .add_header("Cookie", format!("beam_session={cookie}"), true)
-            .send(&harness.service)
+        let response = harness
+            .client
+            .delete(&format!("/v1/sessions/{own_id}"))
+            .cookie(SESSION_COOKIE, &cookie)
+            .send()
             .await;
-        assert_eq!(res.status_code, Some(StatusCode::NO_CONTENT));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(
-            clears_session_cookie(&res),
+            clears_session_cookie(&response),
             "revoking the session in use must clear its cookie"
         );
     }
@@ -1043,11 +1142,7 @@ mod tests {
 
     /// Log in once with `before`, then again with `after`, over one user
     /// repository, and return the stored row afterwards.
-    async fn relogin_with(
-        subject: &str,
-        before: OidcIdentity,
-        after: OidcIdentity,
-    ) -> crate::utils::models::User {
+    async fn relogin_with(subject: &str, before: OidcIdentity, after: OidcIdentity) -> User {
         let user_repo = Arc::new(InMemoryUserRepository::default());
         let first = make_harness_full(
             FakeOidcClient::with_identity(before),
@@ -1123,38 +1218,24 @@ mod tests {
 
     #[tokio::test]
     async fn a_changed_name_or_picture_at_the_idp_is_written_through_on_the_next_login() {
-        let user_repo = Arc::new(InMemoryUserRepository::default());
-
-        let before = make_harness_full(
-            FakeOidcClient::with_identity(identity_with_profile(
+        let stored = relogin_with(
+            "sub-changing@example.com",
+            identity_with_profile(
                 "changing@example.com",
                 "Old Name",
                 "https://idp.test/old.png",
-            )),
-            user_repo.clone(),
-            test_config(),
-        );
-        let _ = login_and_get_session_cookie(&before, "changing@example.com").await;
-
-        let after_change = make_harness_full(
-            FakeOidcClient::with_identity(identity_with_profile(
+            ),
+            identity_with_profile(
                 "changing@example.com",
                 "New Name",
                 "https://idp.test/new.png",
-            )),
-            user_repo.clone(),
-            test_config(),
-        );
-        let _ = login_and_get_session_cookie(&after_change, "changing@example.com").await;
+            ),
+        )
+        .await;
 
-        let after = user_repo
-            .find_by_oidc_identity("https://idp.test", "sub-changing@example.com")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(after.display_name, "New Name");
+        assert_eq!(stored.display_name, "New Name");
         assert_eq!(
-            after.avatar_url.as_deref(),
+            stored.avatar_url.as_deref(),
             Some("https://idp.test/new.png")
         );
     }

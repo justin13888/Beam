@@ -7,9 +7,9 @@ a REST API and direct media byte streams. It persists all of its own state — c
 enrichment queue — in a single Postgres database. See `docs/requirements/product.md` for the
 product-level framing this architecture serves.
 
-The diagrams below describe the deployed Salvo implementation. Kynos is the ratified replacement,
-but is not adopted until the [migration readiness gates](kynos-migration-readiness.md) from
-[ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md) pass.
+The HTTP edge is Kynos, which replaced Salvo under
+[ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md); the gate-by-gate record of that migration is in
+[kynos-migration-readiness.md](kynos-migration-readiness.md). It is confined to `beam-server`.
 
 ## System context
 
@@ -49,8 +49,8 @@ process, a deliberate scale-appropriate choice
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ beam-server (binary crate)                                                │
 │                                                                           │
-│  HTTP layer (Salvo): REST handlers, OpenAPI spec generation, SSE          │
-│  routes, session middleware, static OpenAPI docs UI (Scalar)              │
+│  HTTP layer (Kynos): REST handlers, OpenAPI 3.2 derivation, SSE           │
+│  routes, session/CSRF interceptors, OpenAPI docs UI (Scalar)              │
 │                                                                           │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌─────────────────┐    │
 │  │ beam-auth  │  │ beam-index │  │ beam-domain│  │ beam-entity /    │    │
@@ -79,17 +79,18 @@ run the `beam-migration` CLI instead.
 Per-crate detail lives in [components.md](components.md); the one-paragraph map:
 
 **beam-server** (binary crate)
-The single deployable process. Owns the HTTP server (Salvo) and wires together the OpenAPI REST API,
-session/auth middleware, the admin SSE event stream, the byte-range streaming handlers, and the
-in-process indexing and enrichment background workers. Holds the top-level dependency-injection
-wiring: it constructs concrete Postgres-backed repositories and hands them to services as
-`Arc<dyn Trait>`, and is the only crate allowed to know about HTTP request/response types. Does
+The single deployable process. Owns the HTTP server (Kynos) and wires together the OpenAPI REST API,
+session/auth interceptors, the admin SSE event stream, the byte-range streaming handlers, the OIDC
+BFF endpoints, and the in-process indexing and enrichment background workers. Holds the top-level
+dependency-injection wiring: it constructs concrete Postgres-backed repositories and hands them to
+services as `Arc<dyn Trait>`, and is the only crate allowed to know about HTTP request/response
+types — Kynos is a `beam-server` dependency and nothing else's. Does
 **not** link `ffmpeg-next` — see [ADR-0004](decisions/ADR-0004-never-transcode.md).
 
 **beam-domain**
 Framework-agnostic core: domain types (movie, show, episode, file, media stream, user, session),
 repository and provider traits (`EnrichmentProvider`), and pure domain logic. Zero dependency on
-Salvo, sea-orm, or `ffmpeg-next` — that isolation is what makes the service layer testable without
+Kynos, sea-orm, or `ffmpeg-next` — that isolation is what makes the service layer testable without
 infrastructure. Codecs are plain strings/enums, never FFI types.
 
 **beam-entity**
@@ -104,7 +105,8 @@ or manually via its CLI. See `data-model.md`.
 Implements the OIDC Authorization Code + PKCE flow (via the `openidconnect` crate), JIT user
 provisioning keyed by `(issuer, subject)`, admin-role resolution from a configured ID-token claim
 (`BEAM_OIDC_ADMIN_CLAIM`, issue #85), and the `SessionStore` trait with its Postgres-backed
-implementation. See
+implementation. Transport-independent: the HTTP adapter for the flow lives in `beam-server`
+(`routes/auth.rs`), which is what let this crate drop its framework dependency entirely. See
 [ADR-0003](decisions/ADR-0003-oidc-bff-auth.md) and
 [ADR-0005](decisions/ADR-0005-sessions-in-postgres.md).
 

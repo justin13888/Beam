@@ -1,559 +1,363 @@
-/// Subcutaneous HTTP tests for `/v1/files/{file_id}/progress` and
-/// `/v1/continue-watching`.
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
+//! Subcutaneous tests for `/v1/files/{file_id}/progress`,
+//! `/v1/continue-watching` and `/v1/history`.
+//!
+//! The playback service here is the real `DbPlaybackService` over in-memory
+//! repositories, because what these tests assert is how a reported position
+//! comes back out of the other two endpoints -- a multi-step state change no
+//! stub could stand in for. The repositories are kept beside the state so a
+//! test can seed the file a report is about; everything the playback routes
+//! never touch comes from `test_support`.
 
-    use beam_auth::server::OidcRuntimeConfig;
-    use beam_auth::utils::{
-        models::CreateUser,
-        oidc::NotConfiguredOidcClient,
-        pending_auth_store::in_memory::InMemoryPendingAuthStore,
-        repository::{UserRepository, in_memory::InMemoryUserRepository},
-        session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use beam_auth::utils::session_store::SessionData;
+use beam_domain::models::movie::Movie;
+use beam_domain::models::{MediaFile, MediaFileContent, MovieEntry};
+use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
+use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+use kynos::http::StatusCode;
+use kynos::prelude::*;
+use kynos::test::TestClient;
+
+use crate::routes::playback::{
+    HistoryResponse, ReportProgressRequest, get_continue_watching, get_history,
+    report_playback_progress,
+};
+use crate::routes::test_support::make_app_state;
+use crate::services::playback::{ContinueWatchingItem, DbPlaybackService, PlaybackProgressDto};
+use crate::state::{AppServices, AppState};
+
+/// A state whose playback service is real, plus the repositories behind it.
+struct Fixture {
+    state: AppState,
+    file_repo: Arc<InMemoryFileRepository>,
+    movie_repo: Arc<InMemoryMovieRepository>,
+}
+
+fn fixture() -> Fixture {
+    let base = make_app_state();
+
+    let file_repo = Arc::new(InMemoryFileRepository::default());
+    let movie_repo = Arc::new(InMemoryMovieRepository::default());
+    let playback: Arc<dyn crate::services::playback::PlaybackService> =
+        Arc::new(DbPlaybackService::new(
+            Arc::new(InMemoryPlaybackProgressRepository::default()),
+            file_repo.clone(),
+            movie_repo.clone(),
+            Arc::new(InMemoryShowRepository::default()),
+        ));
+
+    let services = AppServices {
+        hash: base.services.hash.clone(),
+        library: base.services.library.clone(),
+        metadata: base.services.metadata.clone(),
+        notification: base.services.notification.clone(),
+        admin_log: base.services.admin_log.clone(),
+        user_repo: base.services.user_repo.clone(),
+        playback,
+        genre_repo: base.services.genre_repo.clone(),
+        library_repo: base.services.library_repo.clone(),
+        file_repo: file_repo.clone(),
+        enrichment_repo: base.services.enrichment_repo.clone(),
+        session_store: base.services.session_store.clone(),
+        oidc_client: base.services.oidc_client.clone(),
+        pending_auth_store: base.services.pending_auth_store.clone(),
+        oidc_config: base.services.oidc_config.clone(),
     };
-    use beam_domain::models::movie::Movie;
-    use beam_domain::models::{MediaFile, MediaFileContent, MovieEntry};
-    use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
-    use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
-    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-    use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
-    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-    use salvo::prelude::*;
-    use salvo::test::{ResponseExt, TestClient};
 
-    use crate::routes::{
-        HistoryResponse, ReportProgressRequest, get_continue_watching, get_history,
-        report_playback_progress,
-    };
-    use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
-    use crate::services::hash::HashService;
-    use crate::services::library::LibraryError;
-    use crate::services::metadata::{
-        MediaConnection, MediaFilter, MediaSearchFilters, MediaSortField, MetadataError,
-        MetadataService, PageInfo, SortOrder,
-    };
-    use crate::services::notification::InMemoryNotificationService;
-    use crate::services::playback::{ContinueWatchingItem, DbPlaybackService, PlaybackProgressDto};
-    use crate::state::{AppServices, AppState};
-
-    #[derive(Debug)]
-    struct StubHashService;
-
-    #[async_trait::async_trait]
-    impl HashService for StubHashService {
-        fn hash_sync(&self, _path: &std::path::Path) -> std::io::Result<u64> {
-            unimplemented!("not called in playback route tests")
-        }
-        async fn hash_async(&self, _path: PathBuf) -> std::io::Result<u64> {
-            unimplemented!("not called in playback route tests")
-        }
+    Fixture {
+        state: AppState::new(base.config.clone(), services, base.probe.clone(), None),
+        file_repo,
+        movie_repo,
     }
+}
 
-    #[derive(Debug)]
-    struct StubLibraryService;
+fn client(fixture: &Fixture) -> TestClient<AppState> {
+    let service = Router::new()
+        .nest(
+            "/v1",
+            Router::new().mount(kynos::routes![
+                report_playback_progress,
+                get_continue_watching,
+                get_history
+            ]),
+        )
+        .build(fixture.state.clone())
+        .expect("the playback router describes itself");
 
-    #[async_trait::async_trait]
-    impl crate::services::library::LibraryService for StubLibraryService {
-        async fn get_libraries(
-            &self,
-            _user_id: String,
-        ) -> Result<Vec<crate::models::Library>, LibraryError> {
-            unimplemented!("not called in playback route tests")
-        }
-        async fn get_library_by_id(
-            &self,
-            _library_id: String,
-        ) -> Result<Option<crate::models::Library>, LibraryError> {
-            unimplemented!("not called in playback route tests")
-        }
-        async fn get_library_files(
-            &self,
-            _library_id: String,
-        ) -> Result<Vec<crate::models::LibraryFile>, LibraryError> {
-            unimplemented!("not called in playback route tests")
-        }
-        async fn get_file_by_id(
-            &self,
-            _file_id: String,
-        ) -> Result<Option<crate::models::LibraryFile>, LibraryError> {
-            unimplemented!("not called in playback route tests")
-        }
-        async fn create_library(
-            &self,
-            _name: String,
-            _path: String,
-        ) -> Result<crate::models::Library, LibraryError> {
-            unimplemented!("not called in playback route tests")
-        }
-        async fn scan_library(&self, _library_id: String) -> Result<u32, LibraryError> {
-            unimplemented!("not called in playback route tests")
-        }
-        async fn delete_library(&self, _library_id: String) -> Result<bool, LibraryError> {
-            unimplemented!("not called in playback route tests")
-        }
-    }
+    TestClient::new(service)
+}
 
-    #[derive(Debug, Default)]
-    struct StubMetadataService;
-
-    #[async_trait::async_trait]
-    impl MetadataService for StubMetadataService {
-        async fn get_media_metadata(
-            &self,
-            _media_id: &str,
-        ) -> Option<crate::models::MediaMetadata> {
-            None
-        }
-        async fn search_media(
-            &self,
-            _first: Option<u32>,
-            _after: Option<String>,
-            _last: Option<u32>,
-            _before: Option<String>,
-            _sort_by: MediaSortField,
-            _sort_order: SortOrder,
-            _filters: MediaSearchFilters,
-        ) -> MediaConnection {
-            MediaConnection {
-                edges: vec![],
-                page_info: PageInfo {
-                    has_next_page: false,
-                    has_previous_page: false,
-                    start_cursor: None,
-                    end_cursor: None,
-                },
-            }
-        }
-        async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
-            Ok(())
-        }
-        async fn get_media_sources(
-            &self,
-            _media_id: &str,
-        ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
-            unimplemented!("not called in playback route tests")
-        }
-    }
-
-    struct TestFixture {
-        state: AppState,
-        session_store: Arc<InMemorySessionStore>,
-        user_repo: Arc<InMemoryUserRepository>,
-        file_repo: Arc<InMemoryFileRepository>,
-        movie_repo: Arc<InMemoryMovieRepository>,
-    }
-
-    fn make_test_state() -> TestFixture {
-        let session_store = Arc::new(InMemorySessionStore::default());
-        let user_repo = Arc::new(InMemoryUserRepository::default());
-
-        let notification = Arc::new(InMemoryNotificationService::new());
-        let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
-            InMemoryAdminLogRepository::default(),
-        )));
-
-        let file_repo = Arc::new(InMemoryFileRepository::default());
-        let movie_repo = Arc::new(InMemoryMovieRepository::default());
-        let show_repo = Arc::new(InMemoryShowRepository::default());
-        let playback: Arc<dyn crate::services::playback::PlaybackService> =
-            Arc::new(DbPlaybackService::new(
-                Arc::new(InMemoryPlaybackProgressRepository::default()),
-                file_repo.clone(),
-                movie_repo.clone(),
-                show_repo.clone(),
-            ));
-
-        let services = AppServices {
-            hash: Arc::new(StubHashService),
-            library: Arc::new(StubLibraryService),
-            metadata: Arc::new(StubMetadataService),
-            notification,
-            admin_log,
-            user_repo: user_repo.clone(),
-            playback,
-            genre_repo: Arc::new(
-                beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
-            ),
-            library_repo: Arc::new(
-                beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
-            ),
-            file_repo: file_repo.clone(),
-            enrichment_repo: Arc::new(
-                beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
-            ),
-            session_store: session_store.clone(),
-            oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
-            pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
-            oidc_config: OidcRuntimeConfig {
-                web_url: "http://localhost:5173".to_string(),
-                cookie_secure: false,
-                admin_claim: None,
-                admin_value: None,
-                session_idle_days: 14,
-                session_max_days: 60,
+/// Issues a session directly, bypassing the OIDC login flow.
+///
+/// The user id is what every playback row is keyed by, so one token is used
+/// for a whole test: a second session would be a second user with an empty
+/// history.
+async fn seed_session(fixture: &Fixture) -> String {
+    fixture
+        .state
+        .services
+        .session_store
+        .create(
+            &SessionData {
+                user_id: uuid::Uuid::new_v4().to_string(),
+                device_hash: "test-device".to_owned(),
+                ip: "127.0.0.1".to_owned(),
+                created_at: chrono::Utc::now().timestamp(),
+                last_active: chrono::Utc::now().timestamp(),
             },
-        };
+            86_400,
+            86_400,
+        )
+        .await
+        .expect("the in-memory session store issues a session")
+}
 
-        let config = crate::config::ServerConfig {
-            video_dir: PathBuf::from("/tmp"),
-            data_dir: PathBuf::from("/tmp"),
-            database_url: "postgres://unused:unused@localhost/unused".to_string(),
-            watch_enabled: false,
-            anilist_enabled: false,
-            cookie_secure: Some(false),
-            ..Default::default()
-        };
-
-        let state = AppState::new(
-            config,
-            services,
-            Arc::new(crate::services::health::InMemoryDependencyProbe::healthy()),
-        );
-        TestFixture {
-            state,
-            session_store,
-            user_repo,
-            file_repo,
-            movie_repo,
-        }
+fn make_media_file(content: MediaFileContent) -> MediaFile {
+    MediaFile {
+        id: uuid::Uuid::new_v4(),
+        library_id: uuid::Uuid::new_v4(),
+        path: PathBuf::from("/media/test.mp4"),
+        hash: 0,
+        size_bytes: 1024,
+        mtime: None,
+        mime_type: Some("video/mp4".to_owned()),
+        duration: Some(std::time::Duration::from_secs(7200)),
+        container_format: Some("mp4".to_owned()),
+        content: Some(content),
+        status: beam_domain::models::FileStatus::Known,
+        scanned_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
+}
 
-    /// Seeds a user + session directly (bypassing the OIDC login flow, which
-    /// isn't under test here) and returns a `Cookie` header value.
-    async fn seed_session_cookie(fixture: &TestFixture) -> String {
-        let user = fixture
-            .user_repo
-            .create(CreateUser {
-                oidc_issuer: "https://test.example".to_string(),
-                oidc_subject: "subj-1".to_string(),
-                email: Some("test@example.com".to_string()),
-                display_name: "Test User".to_string(),
-                avatar_url: None,
-                is_admin: false,
-            })
-            .await
-            .expect("seed user should succeed");
-
-        let token = fixture
-            .session_store
-            .create(
-                &SessionData {
-                    user_id: user.id.to_string(),
-                    device_hash: "test-device".to_string(),
-                    ip: "127.0.0.1".to_string(),
-                    created_at: chrono::Utc::now().timestamp(),
-                    last_active: chrono::Utc::now().timestamp(),
-                },
-                86400,
-                86400,
-            )
-            .await
-            .expect("seed session should succeed");
-
-        format!("beam_session={token}")
+fn make_movie() -> Movie {
+    Movie {
+        id: uuid::Uuid::new_v4(),
+        title: "Test Movie".to_owned(),
+        title_localized: None,
+        description: None,
+        year: None,
+        release_date: None,
+        runtime: None,
+        poster_url: None,
+        backdrop_url: None,
+        tmdb_id: None,
+        imdb_id: None,
+        tvdb_id: None,
+        anilist_id: None,
+        rating_tmdb: None,
+        rating_imdb: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
+}
 
-    fn build_service(fixture: &TestFixture) -> Service {
-        let router = Router::new()
-            .hoop(affix_state::inject(fixture.state.clone()))
-            .push(
-                Router::with_path("v1")
-                    .push(
-                        Router::with_path("files/{file_id}/progress").put(report_playback_progress),
-                    )
-                    .push(Router::with_path("continue-watching").get(get_continue_watching))
-                    .push(Router::with_path("history").get(get_history)),
-            );
-        Service::new(router)
-    }
+/// Seeds a file whose content resolves to nothing, which is all a progress
+/// report itself needs.
+fn seed_bare_file(fixture: &Fixture) -> uuid::Uuid {
+    let file = make_media_file(MediaFileContent::Movie {
+        movie_entry_id: uuid::Uuid::new_v4(),
+    });
+    let file_id = file.id;
+    fixture
+        .file_repo
+        .files
+        .lock()
+        .unwrap()
+        .insert(file_id, file);
+    file_id
+}
 
-    fn make_media_file(content: MediaFileContent) -> MediaFile {
-        MediaFile {
-            id: uuid::Uuid::new_v4(),
-            library_id: uuid::Uuid::new_v4(),
-            path: PathBuf::from("/media/test.mp4"),
-            hash: 0,
-            size_bytes: 1024,
-            mtime: None,
-            mime_type: Some("video/mp4".to_string()),
-            duration: Some(std::time::Duration::from_secs(7200)),
-            container_format: Some("mp4".to_string()),
-            content: Some(content),
-            status: beam_domain::models::FileStatus::Known,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        }
-    }
+/// Seeds a resolvable movie + entry + file, and returns both ids.
+fn seed_movie_file(fixture: &Fixture) -> (uuid::Uuid, uuid::Uuid) {
+    let movie = make_movie();
+    let movie_id = movie.id;
+    fixture
+        .movie_repo
+        .movies
+        .lock()
+        .unwrap()
+        .insert(movie_id, movie);
 
-    #[tokio::test]
-    async fn test_report_progress_requires_auth() {
-        let fixture = make_test_state();
-        let service = build_service(&fixture);
-        let res = TestClient::put(format!(
-            "http://localhost/v1/files/{}/progress",
-            uuid::Uuid::new_v4()
-        ))
+    let entry = MovieEntry {
+        id: uuid::Uuid::new_v4(),
+        library_id: uuid::Uuid::new_v4(),
+        movie_id,
+        edition: None,
+        is_primary: true,
+        created_at: chrono::Utc::now(),
+    };
+    let entry_id = entry.id;
+    fixture
+        .movie_repo
+        .entries
+        .lock()
+        .unwrap()
+        .insert(entry_id, entry);
+
+    let file = make_media_file(MediaFileContent::Movie {
+        movie_entry_id: entry_id,
+    });
+    let file_id = file.id;
+    fixture
+        .file_repo
+        .files
+        .lock()
+        .unwrap()
+        .insert(file_id, file);
+
+    (movie_id, file_id)
+}
+
+/// Reports a position for `file_id` as the holder of `token`.
+async fn report(
+    client: &TestClient<AppState>,
+    token: &str,
+    file_id: uuid::Uuid,
+    position_secs: f64,
+) -> StatusCode {
+    client
+        .put(&format!("/v1/files/{file_id}/progress"))
+        .cookie("beam_session", token)
+        .json(&ReportProgressRequest {
+            position_secs,
+            duration_secs: Some(100.0),
+        })
+        .send()
+        .await
+        .status()
+}
+
+// ── PUT /v1/files/{file_id}/progress ─────────────────────────────────────────
+
+#[tokio::test]
+async fn reporting_progress_requires_a_session() {
+    let fixture = fixture();
+    let response = client(&fixture)
+        .put(&format!("/v1/files/{}/progress", uuid::Uuid::new_v4()))
         .json(&ReportProgressRequest {
             position_secs: 10.0,
             duration_secs: Some(100.0),
         })
-        .send(&service)
+        .send()
         .await;
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
 
-    #[tokio::test]
-    async fn test_report_progress_unknown_file_returns_404() {
-        let fixture = make_test_state();
-        let service = build_service(&fixture);
-        let cookie = seed_session_cookie(&fixture).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
 
-        let res = TestClient::put(format!(
-            "http://localhost/v1/files/{}/progress",
-            uuid::Uuid::new_v4()
-        ))
-        .add_header("Cookie", cookie, true)
+#[tokio::test]
+async fn reporting_progress_for_an_unknown_file_is_a_404() {
+    let fixture = fixture();
+    let client = client(&fixture);
+    let token = seed_session(&fixture).await;
+
+    let status = report(&client, &token, uuid::Uuid::new_v4(), 10.0).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_reported_position_comes_back_as_an_incomplete_progress_row() {
+    let fixture = fixture();
+    let file_id = seed_bare_file(&fixture);
+    let client = client(&fixture);
+    let token = seed_session(&fixture).await;
+
+    let response = client
+        .put(&format!("/v1/files/{file_id}/progress"))
+        .cookie("beam_session", &token)
         .json(&ReportProgressRequest {
-            position_secs: 10.0,
+            position_secs: 42.0,
             duration_secs: Some(100.0),
         })
-        .send(&service)
-        .await;
-        assert_eq!(res.status_code, Some(StatusCode::NOT_FOUND));
-    }
-
-    #[tokio::test]
-    async fn test_report_progress_known_file_returns_200_with_dto() {
-        let fixture = make_test_state();
-        let file = make_media_file(MediaFileContent::Movie {
-            movie_entry_id: uuid::Uuid::new_v4(),
-        });
-        let file_id = file.id;
-        fixture
-            .file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(file.id, file);
-
-        let service = build_service(&fixture);
-        let cookie = seed_session_cookie(&fixture).await;
-
-        let mut res = TestClient::put(format!("http://localhost/v1/files/{file_id}/progress"))
-            .add_header("Cookie", cookie, true)
-            .json(&ReportProgressRequest {
-                position_secs: 42.0,
-                duration_secs: Some(100.0),
-            })
-            .send(&service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::OK));
-        let body: PlaybackProgressDto = res.take_json().await.unwrap();
-        assert_eq!(body.position_secs, 42.0);
-        assert!(!body.completed);
-    }
-
-    #[tokio::test]
-    async fn test_continue_watching_requires_auth() {
-        let fixture = make_test_state();
-        let service = build_service(&fixture);
-        let res = TestClient::get("http://localhost/v1/continue-watching")
-            .send(&service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    #[tokio::test]
-    async fn test_continue_watching_returns_reported_movie() {
-        let fixture = make_test_state();
-
-        let movie = Movie {
-            id: uuid::Uuid::new_v4(),
-            title: "Test Movie".to_string(),
-            title_localized: None,
-            description: None,
-            year: None,
-            release_date: None,
-            runtime: None,
-            poster_url: None,
-            backdrop_url: None,
-            tmdb_id: None,
-            imdb_id: None,
-            tvdb_id: None,
-            anilist_id: None,
-            rating_tmdb: None,
-            rating_imdb: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        let movie_id = movie.id;
-        fixture
-            .movie_repo
-            .movies
-            .lock()
-            .unwrap()
-            .insert(movie.id, movie);
-
-        let entry = MovieEntry {
-            id: uuid::Uuid::new_v4(),
-            library_id: uuid::Uuid::new_v4(),
-            movie_id,
-            edition: None,
-            is_primary: true,
-            created_at: chrono::Utc::now(),
-        };
-        let entry_id = entry.id;
-        fixture
-            .movie_repo
-            .entries
-            .lock()
-            .unwrap()
-            .insert(entry.id, entry);
-
-        let file = make_media_file(MediaFileContent::Movie {
-            movie_entry_id: entry_id,
-        });
-        let file_id = file.id;
-        fixture
-            .file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(file.id, file);
-
-        let service = build_service(&fixture);
-        let cookie = seed_session_cookie(&fixture).await;
-
-        TestClient::put(format!("http://localhost/v1/files/{file_id}/progress"))
-            .add_header("Cookie", cookie.clone(), true)
-            .json(&ReportProgressRequest {
-                position_secs: 10.0,
-                duration_secs: Some(100.0),
-            })
-            .send(&service)
-            .await;
-
-        let mut res = TestClient::get("http://localhost/v1/continue-watching")
-            .add_header("Cookie", cookie, true)
-            .send(&service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::OK));
-        let items: Vec<ContinueWatchingItem> = res.take_json().await.unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].media_id, movie_id.to_string());
-        assert_eq!(items[0].media_type, "movie");
-    }
-
-    /// Seeds a resolvable movie + entry + file and returns the file id.
-    fn seed_movie_file(fixture: &TestFixture) -> uuid::Uuid {
-        let movie = Movie {
-            id: uuid::Uuid::new_v4(),
-            title: "Test Movie".to_string(),
-            title_localized: None,
-            description: None,
-            year: None,
-            release_date: None,
-            runtime: None,
-            poster_url: None,
-            backdrop_url: None,
-            tmdb_id: None,
-            imdb_id: None,
-            tvdb_id: None,
-            anilist_id: None,
-            rating_tmdb: None,
-            rating_imdb: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        let movie_id = movie.id;
-        fixture
-            .movie_repo
-            .movies
-            .lock()
-            .unwrap()
-            .insert(movie.id, movie);
-
-        let entry = MovieEntry {
-            id: uuid::Uuid::new_v4(),
-            library_id: uuid::Uuid::new_v4(),
-            movie_id,
-            edition: None,
-            is_primary: true,
-            created_at: chrono::Utc::now(),
-        };
-        let entry_id = entry.id;
-        fixture
-            .movie_repo
-            .entries
-            .lock()
-            .unwrap()
-            .insert(entry.id, entry);
-
-        let file = make_media_file(MediaFileContent::Movie {
-            movie_entry_id: entry_id,
-        });
-        let file_id = file.id;
-        fixture
-            .file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(file.id, file);
-        file_id
-    }
-
-    #[tokio::test]
-    async fn test_history_requires_auth() {
-        let fixture = make_test_state();
-        let service = build_service(&fixture);
-        let res = TestClient::get("http://localhost/v1/history")
-            .send(&service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::UNAUTHORIZED));
-    }
-
-    #[tokio::test]
-    async fn test_history_returns_items_and_total_including_completed() {
-        let fixture = make_test_state();
-        let in_progress_file = seed_movie_file(&fixture);
-        let completed_file = seed_movie_file(&fixture);
-
-        let service = build_service(&fixture);
-        let cookie = seed_session_cookie(&fixture).await;
-
-        // One in-progress and one completed report.
-        TestClient::put(format!(
-            "http://localhost/v1/files/{in_progress_file}/progress"
-        ))
-        .add_header("Cookie", cookie.clone(), true)
-        .json(&ReportProgressRequest {
-            position_secs: 10.0,
-            duration_secs: Some(100.0),
-        })
-        .send(&service)
-        .await;
-        TestClient::put(format!(
-            "http://localhost/v1/files/{completed_file}/progress"
-        ))
-        .add_header("Cookie", cookie.clone(), true)
-        .json(&ReportProgressRequest {
-            position_secs: 99.0,
-            duration_secs: Some(100.0),
-        })
-        .send(&service)
+        .send()
         .await;
 
-        let mut res = TestClient::get("http://localhost/v1/history")
-            .add_header("Cookie", cookie, true)
-            .send(&service)
-            .await;
-        assert_eq!(res.status_code, Some(StatusCode::OK));
-        let body: HistoryResponse = res.take_json().await.unwrap();
-        assert_eq!(body.total, 2);
-        assert_eq!(body.items.len(), 2);
-        // The completed row is included in history (continue-watching hides it).
-        assert!(body.items.iter().any(|i| i.completed));
-    }
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: PlaybackProgressDto = response.json();
+    assert_eq!(body.position_secs, 42.0);
+    assert!(!body.completed);
+}
+
+// ── GET /v1/continue-watching ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn continue_watching_requires_a_session() {
+    let fixture = fixture();
+    let response = client(&fixture).get("/v1/continue-watching").send().await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_partially_watched_file_resolves_back_to_its_movie() {
+    let fixture = fixture();
+    let (movie_id, file_id) = seed_movie_file(&fixture);
+    let client = client(&fixture);
+    let token = seed_session(&fixture).await;
+
+    assert_eq!(
+        report(&client, &token, file_id, 10.0).await,
+        StatusCode::OK,
+        "the report the rest of this test reads back must have landed"
+    );
+
+    let response = client
+        .get("/v1/continue-watching")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let items: Vec<ContinueWatchingItem> = response.json();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].media_id, movie_id.to_string());
+    assert_eq!(items[0].media_type, "movie");
+}
+
+// ── GET /v1/history ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn history_requires_a_session() {
+    let fixture = fixture();
+    let response = client(&fixture).get("/v1/history").send().await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn history_counts_and_returns_the_completed_row_continue_watching_hides() {
+    let fixture = fixture();
+    let (_, in_progress_file) = seed_movie_file(&fixture);
+    let (_, completed_file) = seed_movie_file(&fixture);
+    let client = client(&fixture);
+    let token = seed_session(&fixture).await;
+
+    assert_eq!(
+        report(&client, &token, in_progress_file, 10.0).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        report(&client, &token, completed_file, 99.0).await,
+        StatusCode::OK
+    );
+
+    let response = client
+        .get("/v1/history")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: HistoryResponse = response.json();
+    assert_eq!(body.total, 2);
+    assert_eq!(body.items.len(), 2);
+    assert!(
+        body.items.iter().any(|item| item.completed),
+        "a completed row belongs in history even though continue-watching drops it"
+    );
 }

@@ -31,10 +31,16 @@
 
 /// The REST client, generated from `api/openapi.json` by spargen at build time.
 ///
-/// Names here are derived from the spec's `operationId`s, which salvo emits as
-/// fully-qualified Rust paths -- hence `beam_server_routes_media_browse_media`
-/// rather than `browse_media`. Callers outside this crate should use the
-/// hand-written wrappers rather than these names directly.
+/// Names here are derived from the spec's `operationId`s and schema names,
+/// which kynos emits as bare names rather than as fully-qualified Rust paths --
+/// hence `browse_media` and `MediaMetadata` rather than
+/// `beam_server_routes_media_browse_media` and
+/// `BeamServerModelsMediaMediaMetadata`. Stripping the module path can make two
+/// formerly distinct names collide, and spargen disambiguates those with a hash
+/// suffix: the `sort_order` *query parameter* is `types::SortOrderFe86ad6c`,
+/// because `types::SortOrder` is already the schema enum of the same shape.
+/// Callers outside this crate should use the hand-written wrappers rather than
+/// these names directly.
 pub mod api {
     #![allow(clippy::all, missing_docs, unused)]
     include!(concat!(env!("OUT_DIR"), "/beam_api.rs"));
@@ -110,18 +116,16 @@ mod tests {
             }
         });
 
-        let decoded_movie: BeamServerModelsMediaMediaMetadata =
-            serde_json::from_value(movie).expect("movie decodes");
+        let decoded_movie: MediaMetadata = serde_json::from_value(movie).expect("movie decodes");
         assert!(matches!(
             decoded_movie,
-            BeamServerModelsMediaMediaMetadata::BeamServerModelsMediaMediaMetadataVariant1(_)
+            MediaMetadata::MediaMetadataVariant1(_)
         ));
 
-        let decoded_show: BeamServerModelsMediaMediaMetadata =
-            serde_json::from_value(show).expect("show decodes");
+        let decoded_show: MediaMetadata = serde_json::from_value(show).expect("show decodes");
         assert!(matches!(
             decoded_show,
-            BeamServerModelsMediaMediaMetadata::BeamServerModelsMediaMediaMetadataVariant0(_)
+            MediaMetadata::MediaMetadataVariant0(_)
         ));
     }
 
@@ -130,7 +134,7 @@ mod tests {
     #[test]
     fn media_metadata_rejects_an_unknown_shape() {
         let neither = serde_json::json!({ "Episode": { "id": "x" } });
-        let result: Result<BeamServerModelsMediaMediaMetadata, _> = serde_json::from_value(neither);
+        let result: Result<MediaMetadata, _> = serde_json::from_value(neither);
         assert!(result.is_err(), "an unknown variant must not decode");
     }
 }

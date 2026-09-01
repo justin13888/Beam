@@ -77,7 +77,7 @@ own bespoke tests.
 
 | Use | When |
 |---|---|
-| Subcutaneous `salvo::test::TestClient` | Default for any request-handling flow. Real router, real handlers, real services, fakes below the trait line. Assert the response **and** the state mutation. |
+| Subcutaneous `kynos::test::TestClient` | Default for any request-handling flow. Real router, real handlers, real services, fakes below the trait line. Assert the response **and** the state mutation. |
 | Table-driven unit test | A pure function whose interesting cases are enumerable. |
 | `proptest` | A pure function with an algebraic invariant (parsing never panics, a slice never exceeds its source, an operation is idempotent). |
 | `sea_orm::MockDatabase` | A repository's generated SQL -- which column a filter binds and to what, sort direction, pagination, `ON CONFLICT` target. Assert *properties*, never a whole statement string. Hermetic. |
@@ -132,6 +132,18 @@ mise run rust:coverage:report           # the between-runs proxy
 ## Workflow Rules
 1. Before modifying database schema, check `beam-migration` and `beam-entity`.
 2. Do not add new external service dependencies to `compose.dependencies.yaml` without explicitly providing an in-memory trait implementation for the test suite first.
+3. **A gap in `kynos` or `spargen` blocks and is fixed upstream, never worked around locally.** Both are first-party
+   ([getkono/kynos](https://github.com/getkono/kynos), [getkono/spargen](https://github.com/getkono/spargen)) and both
+   sit on the same seam: they derive the served routes, the OpenAPI document, and every generated client from one
+   declaration. A local exception -- a hand-written response, a second router, a patched schema, an `unchecked` waiver --
+   is exactly how the document stops describing the server, which is the failure [ADR-0010](docs/architecture/decisions/ADR-0010-openapi-3-2-kynos.md)
+   and [ADR-0012](docs/architecture/decisions/ADR-0012-native-client-rust-core.md) exist to prevent. File the issue
+   upstream, then take the fix from a published release: Beam tracks both as crates.io version requirements, never
+   git revisions. Until a release carries it, record the gap in a comment naming the issue.
+
+   Using a different *supported* API is not a workaround. When `kynos` accepted a route-level `tag = ...` and silently
+   dropped it, the fix was to declare the tags on group scopes -- where Kynos does read them -- and file the bug, not to
+   post-process the emitted document.
 
 ## Where to look first
 

@@ -1,12 +1,12 @@
 mod file;
 
 use chrono::{DateTime, Utc};
-use salvo::oapi::ToSchema;
+use kynos::Schema;
 use serde::Serialize;
 
 pub use file::*;
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct Library {
     pub id: String,
     pub name: String,
