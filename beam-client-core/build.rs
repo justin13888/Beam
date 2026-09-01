@@ -25,8 +25,10 @@ use spargen::{OmitMethod, OmitRule};
 /// binary` is deprecated in favour of `contentMediaType`, and spargen's E009
 /// rejects it for wanting a string-like or binary schema. Two first-party tools
 /// disagreeing about one media type is exactly the case AGENTS.md says to fix
-/// upstream, and is filed as getkono/spargen#72; when it is fixed, removing
-/// these rules should be a no-op here.
+/// upstream, and is filed as getkono/spargen#72. When it lands, these rules
+/// stay: the paragraph above is reason enough on its own, and dropping them
+/// would generate the four methods this client is deliberately without. What
+/// the fix retires is the second half of this rationale, not the omission.
 const MEDIA_DELIVERY: [(OmitMethod, &str); 4] = [
     (OmitMethod::Get, "/v1/files/{file_id}/stream"),
     (OmitMethod::Head, "/v1/files/{file_id}/stream"),
