@@ -656,6 +656,30 @@ macro_rules! session_store_contract {
             assert!(fixture.store().get(&token).await.unwrap().is_none());
         }
 
+        /// A malformed id is a different answer from a session that is not
+        /// there, and both implementations have to give it.
+        ///
+        /// The SQL store parses the caller-supplied id before it queries, so it
+        /// errors. The double string-compared and answered `Ok(false)`. The
+        /// handler maps the first to 400 and the second to 401, so the same
+        /// request produced two different statuses depending on which store was
+        /// underneath -- and every default-tier test ran against the one that
+        /// hid it.
+        #[tokio::test]
+        async fn a_malformed_session_id_is_an_error_not_a_miss() {
+            let fixture = $setup().await;
+            let user = fixture.new_user().await;
+
+            assert!(
+                fixture
+                    .store()
+                    .delete_by_id("not-a-uuid", &user.to_string())
+                    .await
+                    .is_err(),
+                "a malformed session id must be distinguishable from one that does not exist"
+            );
+        }
+
         #[tokio::test]
         async fn get_and_touch_slides_the_window_only_past_the_throttle() {
             use $crate::utils::session_store::get_and_touch;

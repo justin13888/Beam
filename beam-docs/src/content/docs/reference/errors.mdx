@@ -190,6 +190,18 @@ is a 503 rather than a 500 because the server is working and the identity provid
 **What to do.** Sign in again. This is distinct from an ordinary 401 because the session was not the
 problem.
 
+### invalid-session-id
+
+**400.** The session id in the path is not a UUID.
+
+Only `DELETE /v1/sessions/{id}` can produce it. Until the taxonomy landed this condition was a
+**500**: the handler flattened every store error into `internal`, so a client's own typo came back
+as "Beam broke" and the 400 the operation advertised had nothing that could reach it.
+
+**What to do.** Send an id from `GET /v1/sessions`. Distinct from
+[`session-not-found`](#session-not-found), which means the id was well-formed and named no session
+of yours -- retrying that one with the same id will never work either, but for a different reason.
+
 ### session-not-found
 
 **401.** From `DELETE /v1/sessions/{id}`. No such session.

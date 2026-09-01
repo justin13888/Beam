@@ -894,6 +894,35 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// A well-formed id nobody owns is a 401; a malformed one is a 400.
+    ///
+    /// It used to be a 500 for both a malformed id and a genuine store fault,
+    /// because the handler flattened every `SessionError` into `Internal` --
+    /// so the 400 the operation declared had nothing that could produce it.
+    /// Only the SQL store could reveal that: the in-memory double answered
+    /// `Ok(false)` here, which the handler reads as 401, so the two stores gave
+    /// different statuses for the same request. The shared `SessionStore`
+    /// contract now pins the store half; this pins the route half.
+    #[tokio::test]
+    async fn delete_malformed_session_id_returns_400() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "sessions3@example.com",
+            true,
+        )));
+        let session_cookie = login_and_get_session_cookie(&harness, "sessions3@example.com").await;
+
+        harness
+            .client
+            .delete("/v1/sessions/not-a-uuid")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#invalid-session-id",
+            );
+    }
+
     #[tokio::test]
     async fn logging_out_everywhere_revokes_every_session_of_that_user_only() {
         // The mutant this pins: replacing the handler body with `Ok(())`

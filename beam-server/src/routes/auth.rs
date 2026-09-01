@@ -29,7 +29,7 @@ use beam_auth::utils::oidc::{OidcClient, OidcError};
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
-use beam_auth::utils::session_store::{SessionData, SessionStore};
+use beam_auth::utils::session_store::{SessionData, SessionError, SessionStore};
 use chrono::Utc;
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
@@ -255,6 +255,22 @@ pub enum CurrentUserError {
 /// cannot enumerate other people's sessions.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
 pub enum SessionRevokeError {
+    /// The `{id}` in the path is not a UUID.
+    ///
+    /// Declared before the 401 so kynos titles the 400 from here. The
+    /// operation already advertised a 400 it had no way to reach: every store
+    /// error, the id parse included, was flattened into `Internal`, so a
+    /// client's typo came back as "Beam broke" (issue #123). Its own code
+    /// rather than the 401, because a malformed id and a session that is not
+    /// there are different things for a caller to do something about.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-session-id",
+        title = "Invalid session id"
+    )]
+    InvalidSessionId(String),
+
     #[error("{0}")]
     #[problem(
         status = 401,
@@ -686,7 +702,16 @@ pub async fn oidc_delete_session(
     let deleted = session_store
         .delete_by_id(&path.id, &auth.0.user_id)
         .await
-        .map_err(|e| SessionRevokeError::Internal(e.to_string()))?;
+        .map_err(|e| match e {
+            // The store parses the path id before it queries, so this is the
+            // caller's typo rather than a fault. The user id cannot reach here
+            // malformed -- it comes from an authenticated session.
+            SessionError::InvalidId(_) => SessionRevokeError::InvalidSessionId(format!(
+                "{} is not a valid session id",
+                path.id
+            )),
+            other => SessionRevokeError::Internal(other.to_string()),
+        })?;
 
     if !deleted {
         return Err(SessionRevokeError::SessionNotFound(
