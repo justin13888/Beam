@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { configure } from "@testing-library/react";
-import { afterAll, afterEach, beforeAll, vi } from "vitest";
+import { afterAll, afterEach, beforeAll } from "vitest";
 import { server } from "./server";
 
 // `renderRoute` mounts a real router: a page is not on screen until the auth
@@ -44,7 +44,14 @@ if (!("IntersectionObserver" in globalThis)) {
 			return [];
 		}
 	}
-	vi.stubGlobal("IntersectionObserver", NoopIntersectionObserver);
+	// Assigned rather than `vi.stubGlobal`: four suites call
+	// `vi.unstubAllGlobals()` in `afterEach`, which clears that registry
+	// and would take this with it after their first test.
+	Object.defineProperty(globalThis, "IntersectionObserver", {
+		value: NoopIntersectionObserver,
+		configurable: true,
+		writable: true,
+	});
 }
 
 if (!("ResizeObserver" in globalThis)) {
@@ -53,7 +60,14 @@ if (!("ResizeObserver" in globalThis)) {
 		observe() {}
 		unobserve() {}
 	}
-	vi.stubGlobal("ResizeObserver", NoopResizeObserver);
+	// Assigned rather than `vi.stubGlobal`: four suites call
+	// `vi.unstubAllGlobals()` in `afterEach`, which clears that registry
+	// and would take this with it after their first test.
+	Object.defineProperty(globalThis, "ResizeObserver", {
+		value: NoopResizeObserver,
+		configurable: true,
+		writable: true,
+	});
 }
 
 // The same kind of gap, for web storage, and the one that actually bit.
@@ -75,32 +89,49 @@ if (!("ResizeObserver" in globalThis)) {
 // This is the environment, not a double for anything beam-web owns: auth is
 // cookie-only and nothing here writes web storage. A per-test reset is still
 // unnecessary for that reason.
-if (globalThis.localStorage === undefined) {
-	class MemoryStorage implements Storage {
-		#entries = new Map<string, string>();
+//
+// Installed per storage rather than behind one condition, and by assignment
+// rather than `vi.stubGlobal`. The single `localStorage === undefined` guard
+// it replaces could not tell the Node >= 26 shadowing it targets from jsdom
+// failing to install storage at all, and it stubbed `sessionStorage` inside a
+// branch keyed on *`localStorage`*'s absence -- so an environment where only
+// the second was missing kept the hole. `vi.stubGlobal` registers in the same
+// per-file registry that `vi.unstubAllGlobals()` clears, and four suites call
+// that in `afterEach`, which unwound the shim after their first test. It is
+// latent only because `@vidstack/react` reads at module scope, before any
+// test runs; a plain assignment survives, as `window.matchMedia` above
+// already does.
+class MemoryStorage implements Storage {
+	#entries = new Map<string, string>();
 
-		get length() {
-			return this.#entries.size;
-		}
-		key(index: number) {
-			return [...this.#entries.keys()][index] ?? null;
-		}
-		getItem(key: string) {
-			return this.#entries.get(key) ?? null;
-		}
-		setItem(key: string, value: string) {
-			this.#entries.set(key, String(value));
-		}
-		removeItem(key: string) {
-			this.#entries.delete(key);
-		}
-		clear() {
-			this.#entries.clear();
-		}
+	get length() {
+		return this.#entries.size;
 	}
+	key(index: number) {
+		return [...this.#entries.keys()][index] ?? null;
+	}
+	getItem(key: string) {
+		return this.#entries.get(key) ?? null;
+	}
+	setItem(key: string, value: string) {
+		this.#entries.set(key, String(value));
+	}
+	removeItem(key: string) {
+		this.#entries.delete(key);
+	}
+	clear() {
+		this.#entries.clear();
+	}
+}
 
-	vi.stubGlobal("localStorage", new MemoryStorage());
-	vi.stubGlobal("sessionStorage", new MemoryStorage());
+for (const name of ["localStorage", "sessionStorage"] as const) {
+	if (globalThis[name] === undefined) {
+		Object.defineProperty(globalThis, name, {
+			value: new MemoryStorage(),
+			configurable: true,
+			writable: true,
+		});
+	}
 }
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
