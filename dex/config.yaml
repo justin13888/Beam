@@ -1,7 +1,19 @@
 # Dev-only Dex config (see ADR-0003 and docs/operations/deployment.md).
 # Static users + a single static client -- no real user data, safe to commit.
+#
+# Enabled only by the `dev-idp` compose profile; `mise run dev:up` is the
+# supported entry point. Beam itself is bring-your-own-IdP (FR-101).
 
-issuer: http://localhost:5556/dex
+# `dex.beam.localhost` rather than `localhost` so that one issuer string works
+# from the browser, from inside the beam-server container, and from a host-run
+# `cargo run -p beam-server` (#73). openidconnect requires the discovery
+# document's `issuer` to equal the configured BEAM_OIDC_ISSUER exactly, so the
+# browser-visible and server-visible URLs cannot differ. The name resolves to
+# loopback on the host per RFC 6761 and to the dex container through compose
+# DNS via the network alias in compose.dependencies.yaml. On a host whose
+# resolver does not special-case *.localhost (glibc without systemd-resolved),
+# add `127.0.0.1 dex.beam.localhost` to /etc/hosts.
+issuer: http://dex.beam.localhost:5556/dex
 
 storage:
   type: sqlite3

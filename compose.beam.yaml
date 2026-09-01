@@ -51,18 +51,30 @@ services:
 
       # OIDC auth (see ADR-0003 / docs/architecture/security.md). Login is
       # disabled with a clear error -- not a crash -- until issuer,
-      # client_id, and client_secret are all set. The bundled `dex` dev IdP
-      # (compose.dependencies.yaml) is reachable from a browser at
-      # http://localhost:5556/dex, but reaching it from *inside* this
-      # container needs host networking or an equivalent DNS alias -- the
-      # fully-containerized OIDC topology is a tracked follow-up, not
-      # solved by this compose file; run beam-server on the host to exercise
-      # the OIDC flow in dev (see docs/operations/deployment.md).
+      # client_id, and client_secret are all set. Beam is bring-your-own-IdP
+      # (FR-101): point these at Keycloak/Authentik/Authelia/a hosted IdP.
+      #
+      # These three deliberately have no default, and must not acquire one.
+      # The bundled dev Dex is opt-in behind the `dev-idp` compose profile, so
+      # a default pointing at it would aim a profile-less stack at an IdP that
+      # is not running -- turning a clear "OIDC not configured" into a
+      # confusing discovery failure. `mise run dev:up` supplies them instead,
+      # alongside the profile (see mise.toml and docs/operations/deployment.md).
       - BEAM_OIDC_ISSUER
       - BEAM_OIDC_CLIENT_ID
       - BEAM_OIDC_CLIENT_SECRET
       - BEAM_OIDC_SCOPES=${BEAM_OIDC_SCOPES:-openid profile email}
-      - BEAM_WEB_URL=${BEAM_WEB_URL:-http://localhost:5173}
+      # The containerized web client is served on :8080 (see the `web` service
+      # below); beam-server's own default is Vite's :5173, which is right for a
+      # host-run server but would send the post-login redirect to a dead port
+      # here.
+      #
+      # This is also the CSRF allowed-origin set, not just the redirect target
+      # (routes/middleware.rs). So if you run the Vite dev server on :5173
+      # against *this* containerized server, reads succeed but every write gets
+      # a 403 -- set BEAM_EXTRA_ALLOWED_ORIGINS=http://localhost:5173, or
+      # override BEAM_WEB_URL, for that combination.
+      - BEAM_WEB_URL=${BEAM_WEB_URL:-http://localhost:8080}
       - BEAM_EXTRA_ALLOWED_ORIGINS
       # Admin is granted by an IdP-asserted ID-token claim, not the server.
       # e.g. BEAM_OIDC_ADMIN_CLAIM=groups BEAM_OIDC_ADMIN_VALUE=beam-admin
