@@ -37,14 +37,11 @@ bandwidth. It has no adaptive streaming and will never switch for you, because t
 transcoder generating alternatives on the fly. Every option in that list is a file that already
 exists on the server.
 
-<Aside type="caution" title="Movies only">
-Multiple sources work for movies. **TV episodes cannot have more than one file**: an episode is
-unique per season and episode number, so a second file for the same episode is rejected during the
-scan rather than offered as an alternative. See
+Multiple sources work for movies and for TV episodes alike: a second file indexed against the same
+episode is offered as another source of it, exactly as it is for a movie. See
 [Managing libraries](/operate/libraries/#multiple-versions).
-</Aside>
 
-If a movie shows no picker, only one file is indexed for it. Adding another version is something
+If a title shows no picker, only one file is indexed for it. Adding another version is something
 an administrator does.
 
 ## Subtitles

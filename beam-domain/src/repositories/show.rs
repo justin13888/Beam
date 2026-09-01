@@ -28,6 +28,19 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr>;
     async fn find_episodes_by_season_id(&self, season_id: Uuid) -> Result<Vec<Episode>, DbErr>;
     async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
+    /// Resolve `(season_id, episode_number)` to its episode, creating the row
+    /// only if no episode holds that number in that season.
+    ///
+    /// This is what lets one episode carry more than one file -- a second rip
+    /// at a different quality, or a more compatible container. `create_episode`
+    /// inserts unconditionally, which collides with `idx_episodes_unique` and
+    /// fails the whole scan, so scanning must go through this instead (#142).
+    ///
+    /// On a hit the stored row is returned **unchanged**: `create.title` and
+    /// `create.runtime` are parsed from a filename, while the existing row may
+    /// carry a canonical title that enrichment has since written. The weaker
+    /// source must not overwrite the stronger one.
+    async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
     /// Reverse lookup from a `MediaFileContent::Episode { episode_id }` back
     /// to the episode -- used together with `find_season_by_id` to resolve a
     /// file id to its show for continue-watching.
@@ -227,6 +240,18 @@ pub mod in_memory {
             Ok(ep)
         }
 
+        async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
+            {
+                let guard = self.episodes.lock().unwrap();
+                if let Some(e) = guard.values().find(|e| {
+                    e.season_id == create.season_id && e.episode_number == create.episode_number
+                }) {
+                    return Ok(e.clone());
+                }
+            }
+            self.create_episode(create).await
+        }
+
         async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr> {
             Ok(self.episodes.lock().unwrap().get(&episode_id).cloned())
         }
@@ -302,4 +327,47 @@ pub mod in_memory {
             Ok(updated)
         }
     }
+}
+
+/// The fixture the shared `ShowRepository` contract runs against in-process.
+/// Kept in its own module so the contract module below contains nothing but
+/// the setup function and the macro invocation -- the macro brings its own
+/// imports, and duplicating them here would trip `-D unused-imports`.
+#[mutants::skip]
+#[cfg(test)]
+mod in_memory_fixture {
+    use super::in_memory::InMemoryShowRepository;
+    use crate::repositories::ShowRepository;
+    use crate::repositories::contract::fixture::ShowFixture;
+
+    pub struct InMemoryFixture {
+        repo: InMemoryShowRepository,
+    }
+
+    impl InMemoryFixture {
+        pub fn new() -> Self {
+            Self {
+                repo: InMemoryShowRepository::default(),
+            }
+        }
+    }
+
+    impl ShowFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn ShowRepository {
+            &self.repo
+        }
+    }
+}
+
+/// The shared `ShowRepository` contract over the in-memory double. The same
+/// suite runs against the SeaORM implementation in
+/// `beam-index/tests/pg_integration/show_repository.rs`, which is where the
+/// `idx_episodes_unique` constraint the contract exists for actually lives.
+#[cfg(test)]
+mod contract_over_in_memory {
+    async fn setup() -> super::in_memory_fixture::InMemoryFixture {
+        super::in_memory_fixture::InMemoryFixture::new()
+    }
+
+    crate::show_repository_contract!(setup);
 }

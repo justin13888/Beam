@@ -23,7 +23,7 @@
 pub mod fixture {
     use uuid::Uuid;
 
-    use crate::repositories::PlaybackProgressRepository;
+    use crate::repositories::{PlaybackProgressRepository, ShowRepository};
     use crate::services::TestClock;
 
     /// Everything the [`crate::playback_progress_repository_contract`] suite
@@ -48,6 +48,17 @@ pub mod fixture {
 
         /// A media file that exists as far as the backing store is concerned.
         async fn new_file(&self) -> Uuid;
+    }
+
+    /// Everything the [`crate::show_repository_contract`] suite needs.
+    ///
+    /// Narrower than [`PlaybackProgressFixture`]: the suite builds its own
+    /// shows, seasons and episodes through the trait under test, so a backing
+    /// store has no rows to seed first.
+    pub trait ShowFixture: Send + Sync {
+        /// The repository under contract, holding no shows the suite did not
+        /// create itself.
+        fn repo(&self) -> &dyn ShowRepository;
     }
 }
 
@@ -368,6 +379,194 @@ macro_rules! playback_progress_repository_contract {
 
             assert_eq!(repo.count_by_user(user).await.unwrap(), 2);
             assert_eq!(repo.count_by_user(other).await.unwrap(), 1);
+        }
+    };
+}
+
+/// Behavioural contract for the find-or-create half of
+/// [`crate::repositories::ShowRepository`].
+///
+/// `$setup` names an `async fn() -> impl ShowFixture`.
+///
+/// The subject is [`ShowRepository::find_or_create_episode`], and the reason
+/// this is a *shared* contract rather than a unit test is that the behaviour it
+/// pins is a database constraint. `episodes` carries `idx_episodes_unique` over
+/// `(season_id, episode_number)`, so an unconditional insert raises a
+/// uniqueness violation and aborts the scan (#142). An in-memory double has no
+/// such index and cannot fail that way, so a test that ran only against the
+/// fake would pass while production stayed broken.
+#[macro_export]
+macro_rules! show_repository_contract {
+    ($setup:path) => {
+        use ::std::time::Duration;
+        use $crate::models::show::{CreateEpisode, CreateShow};
+        use $crate::repositories::contract::fixture::ShowFixture as _;
+
+        /// A season to hang episodes off, created through the trait so every
+        /// implementation builds it the same way.
+        async fn season_of(
+            repo: &dyn $crate::repositories::ShowRepository,
+            show_title: &str,
+        ) -> ::uuid::Uuid {
+            let show = repo
+                .create(CreateShow {
+                    title: show_title.to_string(),
+                    year: Some(2026),
+                })
+                .await
+                .expect("create a show");
+            repo.find_or_create_season(show.id, 1)
+                .await
+                .expect("create season 1")
+                .id
+        }
+
+        fn episode(season_id: ::uuid::Uuid, number: u32, title: &str) -> CreateEpisode {
+            CreateEpisode {
+                season_id,
+                episode_number: number,
+                title: title.to_string(),
+                runtime: Some(Duration::from_secs(1_200)),
+            }
+        }
+
+        /// The #142 regression. A second file for one episode must resolve to
+        /// the row the first file created, not raise a uniqueness violation.
+        #[tokio::test]
+        async fn find_or_create_episode_reuses_the_row_for_a_second_file() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let season = season_of(repo, "Reused Row").await;
+
+            let first = repo
+                .find_or_create_episode(episode(season, 3, "Pilot"))
+                .await
+                .expect("first file creates the episode");
+            let second = repo
+                .find_or_create_episode(episode(season, 3, "Pilot"))
+                .await
+                .expect("a second file for the same episode must not fail the scan");
+
+            assert_eq!(first.id, second.id, "both files resolve to one episode");
+            assert_eq!(
+                repo.find_episodes_by_season_id(season).await.unwrap().len(),
+                1,
+                "no duplicate episode row was inserted"
+            );
+        }
+
+        /// `create` carries only what a filename parse produced, while the
+        /// stored row may already hold what enrichment wrote. The weaker source
+        /// must not overwrite the stronger one.
+        #[tokio::test]
+        async fn find_or_create_episode_preserves_the_established_title_and_runtime() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let season = season_of(repo, "Preserved Metadata").await;
+
+            repo.find_or_create_episode(episode(season, 1, "The Canonical Title"))
+                .await
+                .unwrap();
+
+            let second = repo
+                .find_or_create_episode(CreateEpisode {
+                    season_id: season,
+                    episode_number: 1,
+                    title: "Show.S01E01.1080p.WEB-DL".to_string(),
+                    runtime: Some(Duration::from_secs(9_999)),
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                second.title, "The Canonical Title",
+                "a second file's parsed title must not overwrite the stored one"
+            );
+            assert_eq!(
+                second.runtime,
+                Some(Duration::from_secs(1_200)),
+                "nor its runtime"
+            );
+        }
+
+        /// Find-or-create must key on the episode number, not merely on the
+        /// season -- otherwise every episode after the first would collapse
+        /// into one row.
+        #[tokio::test]
+        async fn find_or_create_episode_keeps_distinct_numbers_apart() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let season = season_of(repo, "Distinct Numbers").await;
+
+            let one = repo
+                .find_or_create_episode(episode(season, 1, "One"))
+                .await
+                .unwrap();
+            let two = repo
+                .find_or_create_episode(episode(season, 2, "Two"))
+                .await
+                .unwrap();
+
+            assert_ne!(one.id, two.id);
+            assert_eq!(
+                repo.find_episodes_by_season_id(season).await.unwrap().len(),
+                2
+            );
+        }
+
+        /// ...and on the season, not merely on the number: episode 1 exists in
+        /// every season of every show.
+        #[tokio::test]
+        async fn find_or_create_episode_scopes_the_number_to_its_season() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let first_season = season_of(repo, "Scoped A").await;
+            let second_season = season_of(repo, "Scoped B").await;
+
+            let a = repo
+                .find_or_create_episode(episode(first_season, 1, "A1"))
+                .await
+                .unwrap();
+            let b = repo
+                .find_or_create_episode(episode(second_season, 1, "B1"))
+                .await
+                .unwrap();
+
+            assert_ne!(
+                a.id, b.id,
+                "the same episode number in another season is another episode"
+            );
+            assert_eq!(
+                repo.find_episodes_by_season_id(first_season)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        /// The season half of the same behaviour, previously unconstrained by
+        /// any shared contract.
+        #[tokio::test]
+        async fn find_or_create_season_reuses_the_row_for_a_second_file() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let show = repo
+                .create(CreateShow {
+                    title: "Reused Season".to_string(),
+                    year: None,
+                })
+                .await
+                .unwrap();
+
+            let first = repo.find_or_create_season(show.id, 2).await.unwrap();
+            let second = repo.find_or_create_season(show.id, 2).await.unwrap();
+
+            assert_eq!(first.id, second.id);
+            assert_eq!(
+                repo.find_seasons_by_show_id(show.id).await.unwrap().len(),
+                1
+            );
         }
     };
 }

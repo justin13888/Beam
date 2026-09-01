@@ -199,6 +199,26 @@ impl ShowRepository for SqlShowRepository {
         Ok(models.into_iter().map(Episode::from).collect())
     }
 
+    async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
+        use beam_entity::episode;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let existing = episode::Entity::find()
+            .filter(episode::Column::SeasonId.eq(create.season_id))
+            .filter(episode::Column::EpisodeNumber.eq(create.episode_number as i32))
+            .one(self.db.as_ref())
+            .await?;
+
+        // The stored row wins: see the trait's documentation. Its title may
+        // have been replaced by enrichment, and `create` only ever carries what
+        // a filename parse produced.
+        if let Some(model) = existing {
+            return Ok(Episode::from(model));
+        }
+
+        self.create_episode(create).await
+    }
+
     async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
         use beam_entity::episode;
         use chrono::Utc;

@@ -326,7 +326,10 @@ impl LocalIndexService {
                 .find_or_create_season(show.id, season_num)
                 .await?;
 
-            // Create episode
+            // Find or create the episode. Creating it unconditionally collided
+            // with `idx_episodes_unique` and failed the entire scan as soon as
+            // a season held a second file for one episode -- which is exactly
+            // the alternate source ADR-0014 tells operators to provide (#142).
             let episode_title = if parsed.title.is_empty() {
                 file_stem.to_string()
             } else {
@@ -338,7 +341,10 @@ impl LocalIndexService {
                 title: episode_title,
                 runtime: Some(duration),
             };
-            let episode = self.show_repo.create_episode(create_episode).await?;
+            let episode = self
+                .show_repo
+                .find_or_create_episode(create_episode)
+                .await?;
 
             Ok(MediaFileContent::Episode {
                 episode_id: episode.id,
@@ -2315,7 +2321,7 @@ mod tests {
 
         let episode_id = Uuid::new_v4();
         mock_show_repo
-            .expect_create_episode()
+            .expect_find_or_create_episode()
             .times(1)
             .returning(move |_| {
                 Ok(beam_domain::models::Episode {
