@@ -1106,6 +1106,136 @@ xcrun xcodebuild build \
     CODE_SIGNING_ALLOWED=NO
 '''
 
+# ---------------------------------------------------------------------------
+# Dev stack
+#
+# A bare `podman compose up -d` is the bring-your-own-IdP topology -- Postgres,
+# Traefik, server, web, and no identity provider -- so login is disabled with a
+# clear error. That is the supported production shape (FR-101, ADR-0003), and
+# the default deliberately does not ship a test IdP.
+#
+# The tasks below add the bundled dev Dex, which sits behind the `dev-idp`
+# compose profile. The BEAM_OIDC_* values live here rather than as compose
+# defaults on purpose: a profile can gate the `dex` *service*, but it cannot
+# conditionally set environment on `server`, so a default would aim a
+# profile-less stack at an IdP that is not running -- turning a clear "OIDC not
+# configured" into a confusing discovery failure. Keeping them here also
+# preserves compose.beam.yaml's list-form "unset stays unset" invariant.
+#
+# Ordering is sequenced in dev:up rather than with `depends_on: dex`, because a
+# depends_on pointing at a profile-gated service makes the profile-less project
+# invalid outright: `service "server" depends on undefined service "dex"`.
+# ---------------------------------------------------------------------------
+
+[tasks."dev:up"]
+description = "Bring up the dev stack, including the bundled Dex IdP"
+# BEAM_OIDC_ADMIN_CLAIM here is load-bearing, not a placeholder. Admin is
+# derived solely from an IdP-asserted claim (FR-106), but Dex's builtin
+# connector cannot emit `groups` for staticPasswords (dexidp/dex#1080, #3958),
+# so there is no per-user claim to point at. `email_verified` is boolean true
+# for both static users, which makes *every* dev user an admin. Acceptable for
+# a dev fixture -- without it nobody can reach the admin surface at all -- and
+# precisely why the bundled Dex is not a production IdP.
+env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_WEB_URL = "{{ env.BEAM_WEB_URL | default(value='http://localhost:8080') }}", BEAM_OIDC_ADMIN_CLAIM = "email_verified" }
+run = '''
+set -eu
+compose_cmd=${BEAM_COMPOSE:-}
+[ -n "$compose_cmd" ] || compose_cmd=$(command -v podman >/dev/null 2>&1 && echo "podman compose" || echo "docker compose")
+compose() { $compose_cmd "$@"; }
+# Dex first, and healthy, before the server: beam-server resolves OIDC
+# discovery once at startup and installs a login-disabled client if the issuer
+# is unreachable, so losing this race costs a restart rather than a retry.
+compose --profile dev-idp up -d --wait postgres dex
+compose --profile dev-idp up -d --wait
+echo
+echo "Web      http://localhost:8080"
+echo "API      http://localhost:8000"
+echo "Sign in  admin@beam.localhost / password   (also user@beam.localhost)"
+'''
+
+[tasks."dev:down"]
+description = "Tear down the dev stack, including the bundled Dex IdP"
+run = '''
+set -eu
+compose_cmd=${BEAM_COMPOSE:-}
+[ -n "$compose_cmd" ] || compose_cmd=$(command -v podman >/dev/null 2>&1 && echo "podman compose" || echo "docker compose")
+compose() { $compose_cmd "$@"; }
+compose --profile dev-idp down
+'''
+
+[tasks."dev:verify-oidc"]
+description = "Smoke-test the containerized dev OIDC topology (needs compose)"
+# Deliberately outside `ci`: it needs a container runtime, and NFR-201 says the
+# default run must not. It asserts what #73 actually broke -- that one issuer
+# string resolves identically from inside the server container and from the
+# host -- which no workspace test can cover, because there is nothing here to
+# fake. The issuer is read back out of the running container rather than
+# restated, so this cannot drift from dev:up.
+depends = ["dev:up"]
+run = '''
+set -eu
+compose_cmd=${BEAM_COMPOSE:-}
+[ -n "$compose_cmd" ] || compose_cmd=$(command -v podman >/dev/null 2>&1 && echo "podman compose" || echo "docker compose")
+compose() { $compose_cmd "$@"; }
+
+status=0
+check() {
+    if [ "$1" -eq 0 ]; then
+        echo "ok    $2"
+    else
+        echo "FAIL  $2" >&2
+        status=1
+    fi
+}
+
+issuer=$(compose exec -T server printenv BEAM_OIDC_ISSUER | tr -d '\r')
+if [ -z "$issuer" ]; then
+    echo "FAIL  the server container has no BEAM_OIDC_ISSUER -- start it with 'mise run dev:up'" >&2
+    exit 1
+fi
+echo "issuer: $issuer"
+
+# The container leg: discovery must resolve *and* self-report the same issuer.
+# openidconnect compares those byte-for-byte, which is exactly the mismatch
+# that made the containerized flow unusable.
+# Every check below records its own failure rather than letting `set -e` abort
+# the run: a smoke test that stops at the first failure hides the rest, and
+# which leg broke is the whole diagnostic value here.
+# stderr is deliberately not silenced: without it a DNS failure, a refused
+# connection and a genuine issuer mismatch all render as the same one-line FAIL.
+doc=$(compose exec -T server curl -fsS "$issuer/.well-known/openid-configuration" || true)
+rc=0; printf '%s' "$doc" | grep -Eq "\"issuer\"[[:space:]]*:[[:space:]]*\"$issuer\"" || rc=$?
+check "$rc" "discovery from inside the server container reports the configured issuer"
+
+# The browser leg: the very same URL has to resolve from the host.
+rc=0; curl -fsS -o /dev/null "$issuer/.well-known/openid-configuration" || rc=$?
+check "$rc" "discovery reachable from the host at the same URL"
+
+# The flow: /v1/auth/login must hand the browser an authorize URL on that host.
+# A real GET, not `curl -I`: the route is declared GET-only and kynos dispatches
+# on exact method equality, so a HEAD would take the 405 branch every time and
+# this check would be red against a perfectly healthy stack. `-o /dev/null -D -`
+# keeps the headers and discards the body; curl does not follow the redirect
+# without -L. The GET costs one pending_auths row and a state cookie.
+authority=$(printf '%s' "$issuer" | sed 's|^[a-z][a-z0-9+.-]*://||; s|/.*||')
+rc=0; curl -sS -o /dev/null -D - http://localhost:8000/v1/auth/login \
+    | grep -iqF "location: $issuer" || rc=$?
+check "$rc" "GET /v1/auth/login redirects to the IdP at $authority"
+
+# The negative: the default topology stays valid and IdP-free. A `depends_on`
+# naming the profile-gated dex service would break the first of these outright.
+rc=0; compose config -q || rc=$?
+check "$rc" "profile-less compose project is valid"
+# Captured rather than piped: with no `pipefail`, a failing `compose config`
+# would hand grep empty input, grep would report "no dex", and the check would
+# print ok -- a false pass exactly where a regression would show up.
+rc=0; services=$(compose config --services) || rc=$?
+printf '%s\n' "$services" | grep -qx dex && rc=1
+check "$rc" "profile-less compose project starts no IdP"
+
+exit "$status"
+'''
+
 [tasks.ci]
 description = "Run every check that CI enforces, except coverage and image builds"
 depends = [
