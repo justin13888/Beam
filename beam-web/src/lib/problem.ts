@@ -43,10 +43,15 @@ const ABOUT_BLANK = "about:blank";
 const SOURCE_FILE_MISSING = "#source-file-missing";
 
 /**
- * The path every Beam problem type hangs under, whatever origin serves it.
+ * The path every Beam problem type hangs under.
  *
- * Matched rather than a whole origin for the same reason `SOURCE_FILE_MISSING`
- * is a suffix: the deployment moves the origin, the path is the stable half.
+ * beam-server builds each `type` from one compile-time constant, `ERROR_BASE`
+ * in `routes/api_error.rs` (`https://beam.justinchung.net/reference/errors/#`),
+ * and its taxonomy test pins every code to that prefix. The origin is fixed,
+ * not something a deployment moves. This matches the path rather than the
+ * whole URL so the web client does not hand-copy a server constant the
+ * server's own test already guards: if that origin ever changes, the change
+ * lands once, on the server.
  */
 const BEAM_CODE_PATH = "/reference/errors/#";
 
