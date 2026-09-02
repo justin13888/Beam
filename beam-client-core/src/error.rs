@@ -145,13 +145,14 @@ pub enum BeamError {
 }
 
 impl BeamError {
-    /// Whether retrying the identical request could plausibly succeed.
+    /// Whether retrying the identical request *now* could plausibly succeed.
     ///
-    /// Consulted by the playback-progress queue, which drops rather than
-    /// enqueues a failure this reports false for, and exported to the
-    /// platforms as [`is_retryable`]. Deliberately conservative: an error
-    /// whose retryability is unclear is treated as *not* retryable, so a
-    /// permanently-failing sample cannot occupy the queue forever.
+    /// Not exported across the FFI: Kotlin and Swift read the `retryable`
+    /// field that [`BeamError::Server`] and [`BeamError::Network`] carry, which
+    /// is where the verdict for a status is decided once. Deliberately
+    /// conservative: an error whose retryability is unclear is treated as *not*
+    /// retryable. Whether a failed progress sample is kept is a different
+    /// question -- see [`BeamError::is_permanent`].
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -171,6 +172,45 @@ impl BeamError {
             // and gave none, because `Storage` simply fell through `_`.
             Self::Storage { .. } => true,
             _ => false,
+        }
+    }
+
+    /// Whether the identical request will fail identically until the request
+    /// itself changes -- so retrying it later, after anything at all has
+    /// happened, is pointless.
+    ///
+    /// This is the question the playback-progress queue asks, and it is not
+    /// the complement of [`is_retryable`](Self::is_retryable). Three failures
+    /// are not retryable *now* and yet are the whole reason the queue exists:
+    /// an expired session, a missing one, and a certificate the user has not
+    /// yet trusted. Each clears the moment the user acts, and the sample is
+    /// then accepted unchanged -- dropping it would lose exactly the resume
+    /// point that an interrupted session is supposed to preserve. Every
+    /// variant is named so a new one has to say which side it is on.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            // The request itself is refused: a body the schema rejects, a
+            // file the user may not touch, a title that no longer exists, a
+            // response that does not match the contract. Resending it changes
+            // nothing.
+            Self::BadRequest { .. }
+            | Self::Forbidden { .. }
+            | Self::NotFound { .. }
+            | Self::Protocol { .. }
+            | Self::InvalidServerUrl { .. } => true,
+            // Carried on the error, decided once at the transport.
+            Self::Server { retryable, .. } | Self::Network { retryable, .. } => !*retryable,
+            // Cured by the user acting: signing in, or trusting the
+            // certificate. The sample waits for them.
+            Self::SessionExpired | Self::Unauthenticated | Self::UntrustedCertificate { .. } => {
+                false
+            }
+            // Cured by time or by the device: the limiter's window passes, the
+            // disk is emptied, the keystore unlocks.
+            Self::RateLimited { .. } | Self::Storage { .. } => false,
+            // Cured by selecting or adding a server.
+            Self::NoActiveServer | Self::UnknownServer { .. } => false,
         }
     }
 }
@@ -318,6 +358,89 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    /// The distinction the progress queue lives on: not retryable now is not
+    /// the same as never worth retrying.
+    #[test]
+    fn a_credential_or_trust_failure_is_not_permanent_while_a_refusal_is() {
+        for kept in [
+            BeamError::SessionExpired,
+            BeamError::Unauthenticated,
+            BeamError::UntrustedCertificate {
+                host: "beam.test".to_owned(),
+                details: CertificateDetails {
+                    sha256_fingerprint: "AA:BB".to_owned(),
+                    spki_sha256_base64: "c3BraQ==".to_owned(),
+                    subject: "CN=beam.local".to_owned(),
+                    issuer: "CN=beam.local".to_owned(),
+                    not_before_unix: 0,
+                    not_after_unix: i64::MAX,
+                    subject_alt_names: vec!["beam.local".to_owned()],
+                    serial_hex: "01".to_owned(),
+                    is_self_signed: true,
+                    is_expired: false,
+                },
+            },
+        ] {
+            assert!(
+                !kept.is_retryable() && !kept.is_permanent(),
+                "{kept:?} waits for the user, so it is neither retryable now nor dropped"
+            );
+        }
+
+        for refused in [
+            BeamError::BadRequest {
+                detail: String::new(),
+                code: String::new(),
+            },
+            BeamError::Forbidden {
+                detail: String::new(),
+                code: String::new(),
+            },
+            BeamError::NotFound {
+                detail: String::new(),
+                code: String::new(),
+            },
+            BeamError::Protocol {
+                detail: String::new(),
+            },
+            BeamError::Server {
+                status: 422,
+                retryable: false,
+                detail: String::new(),
+                code: String::new(),
+            },
+        ] {
+            assert!(
+                refused.is_permanent() && !refused.is_retryable(),
+                "{refused:?} fails identically forever"
+            );
+        }
+
+        for transient in [
+            BeamError::RateLimited {
+                retry_after_secs: 1,
+            },
+            BeamError::Server {
+                status: 503,
+                retryable: true,
+                detail: String::new(),
+                code: String::new(),
+            },
+            BeamError::Network {
+                detail: String::new(),
+                retryable: true,
+            },
+            BeamError::Storage {
+                detail: String::new(),
+            },
+        ] {
+            assert!(
+                transient.is_retryable() && !transient.is_permanent(),
+                "{transient:?} is worth retrying, so it cannot also be permanent"
+            );
+        }
     }
 
     #[test]

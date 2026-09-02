@@ -894,7 +894,15 @@ impl BeamClient {
                 // fifteen seconds, MAX_ATTEMPTS was reset before it could
                 // count. `Dropped` existed for exactly this and had no
                 // producer.
-                if !mapped.is_retryable() {
+                //
+                // Only a *permanent* refusal is dropped. An expired session,
+                // a missing one, or a certificate the user has not yet trusted
+                // is not retryable *now*, but the same sample is accepted the
+                // moment the user signs in or trusts the certificate -- and
+                // the whole point of the queue is that a resume point survives
+                // exactly that kind of interruption. Those are queued, and
+                // `flush_progress` sends them once the user has acted.
+                if mapped.is_permanent() {
                     return Ok(ProgressOutcome::Dropped {
                         reason: mapped.to_string(),
                     });
@@ -1985,6 +1993,62 @@ mod tests {
             )
             .expect("the server is registered");
         (client, id)
+    }
+
+    /// The reason the queue exists: an interrupted session must not lose the
+    /// resume point. A 401 is not retryable *now*, and used to be dropped for
+    /// it -- contradicting `SessionExpired`'s own doc comment and both
+    /// platform reporters, which tell the viewer their place is safe.
+    #[tokio::test]
+    async fn a_progress_sample_refused_for_credentials_is_queued_not_dropped() {
+        let (client, id) = client_answering(
+            401,
+            r#"{"type":"about:blank","status":401,"detail":"no session"}"#,
+        )
+        .await;
+
+        let outcome = client
+            .report_progress(uuid::Uuid::nil().to_string(), 120.0, Some(7200.0), true)
+            .await
+            .expect("a failed send is an outcome, not an error");
+
+        assert_eq!(outcome, ProgressOutcome::Queued { pending: 1 });
+        assert_eq!(
+            client.pending_progress_count().await.expect("countable"),
+            1,
+            "the sample is on disk, waiting for the sign-in"
+        );
+        assert!(
+            matches!(
+                client.session_state(id).expect("known"),
+                SessionState::LoggedOut
+            ),
+            "a 401 with no session in place is not an expiry"
+        );
+    }
+
+    /// The other half: a request the server refuses on its shape fails
+    /// identically forever, and a queue slot spent on it never retires --
+    /// `enqueue` replaces the entry and resets `attempts` every fifteen
+    /// seconds while the title plays.
+    #[tokio::test]
+    async fn a_progress_sample_the_server_refuses_is_dropped() {
+        let (client, _) = client_answering(
+            400,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#validation","status":400,"detail":"position_secs must be finite"}"#,
+        )
+        .await;
+
+        let outcome = client
+            .report_progress(uuid::Uuid::nil().to_string(), 120.0, Some(7200.0), true)
+            .await
+            .expect("a refused send is an outcome, not an error");
+
+        let ProgressOutcome::Dropped { reason } = outcome else {
+            panic!("expected the sample to be dropped, got {outcome:?}");
+        };
+        assert!(reason.contains("position_secs must be finite"), "{reason}");
+        assert_eq!(client.pending_progress_count().await.expect("countable"), 0);
     }
 
     /// The document the middleware captured is the one the error carries.
