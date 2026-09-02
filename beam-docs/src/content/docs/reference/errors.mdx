@@ -53,10 +53,11 @@ rescan removed it, in which case reloading the list is the right response.
 
 **400.** The media id in the path is not a UUID.
 
-**What to do.** Fix the caller. Every route taking a media id — the detail route, `/sources`, and
-the admin refresh — answers this, so the three now agree. `GET /v1/media/{id}` used to answer
-[`media-not-found`](#media-not-found) here instead, because it resolved the id through a lookup that
-could not tell "malformed" from "absent".
+**What to do.** Fix the caller. Every route taking a media id — the detail route, `/sources`, the
+admin refresh, and `/v1/artwork/{kind}/{id}/{variant}` — answers this, so they all agree. `GET
+/v1/media/{id}` and the artwork route used to answer [`media-not-found`](#media-not-found) and
+[`artwork-not-found`](#artwork-not-found) here instead, because each resolved the id through a lookup
+that could not tell "malformed" from "absent".
 
 ### sources-not-available-for-show
 

@@ -421,6 +421,21 @@ pub enum DeliveryError {
 /// show has no backdrop.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum ArtworkError {
+    /// The `{id}` in the path is not a UUID.
+    ///
+    /// The same code the detail route, `/sources` and the admin refresh answer
+    /// with, because it is the same condition on the same identifier. This
+    /// route used to fold the failed parse into the 404 -- a malformed id and
+    /// an unknown one are different things for a caller to fix, and the other
+    /// three routes over the same id already told them apart.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-media-id",
+        title = "Invalid media id"
+    )]
+    InvalidId(String),
+
     /// No image for this title: the row carries no stored URL, the variant does
     /// not apply to that kind, or the provider no longer serves it.
     ///

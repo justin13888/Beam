@@ -367,10 +367,6 @@ mod tests {
                 format!("/v1/artwork/movie/{}/poster", Uuid::new_v4()),
             ),
             (
-                "an id that is not an id at all",
-                "/v1/artwork/movie/not-a-uuid/poster".to_string(),
-            ),
-            (
                 "a variant this kind does not have",
                 format!("/v1/artwork/movie/{with_art}/thumbnail"),
             ),
@@ -386,6 +382,30 @@ mod tests {
                 .await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{case}");
         }
+    }
+
+    /// An id that is not a UUID is the caller's mistake, and it gets the same
+    /// answer here as from the detail route, `/sources` and the admin refresh.
+    /// This route used to fold it into the 404 above, so four routes over one
+    /// identifier gave two answers to one condition.
+    #[tokio::test]
+    async fn a_malformed_id_is_a_400_like_every_other_media_id_route() {
+        let fixture = fixture(InMemoryArtworkFetcher::new());
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        client
+            .get("/v1/artwork/movie/not-a-uuid/poster")
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
+        assert_eq!(
+            fixture.fetcher.call_count(),
+            0,
+            "a request that names nothing must not reach the provider",
+        );
     }
 
     /// A provider that has dropped the image degrades to the same placeholder

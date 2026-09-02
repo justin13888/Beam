@@ -62,14 +62,15 @@ pub type ArtworkDelivery = RuntimeDelivery<ArtworkRanges>;
 ///
 /// `None` covers three cases that are one answer to a client: the title does
 /// not exist, it exists but has no art yet, and the variant does not apply to
-/// this kind of title.
+/// this kind of title. An id that is not an id at all is not among them: that
+/// is the caller's mistake, and it gets the same 400 every other media-id
+/// route gives it rather than being folded into the miss.
 async fn upstream_url(
     state: &AppState,
     path: &ArtworkPath,
 ) -> Result<Option<String>, ArtworkError> {
-    let Ok(id) = Uuid::parse_str(&path.id) else {
-        return Ok(None);
-    };
+    let id = Uuid::parse_str(&path.id)
+        .map_err(|_| ArtworkError::InvalidId(format!("Invalid media id: {}", path.id)))?;
     let services = &state.services;
 
     let url = match (path.kind, path.variant) {
@@ -176,7 +177,8 @@ async fn deliver(
 /// when a title's artwork does, so clients revalidate rather than re-download.
 /// A title with no art, an id that does not exist, and a variant that does not
 /// apply to this kind of title are all `404` -- every client already renders a
-/// placeholder for that.
+/// placeholder for that. An id that is not a UUID is a `400`, as on every
+/// other route that takes a media id.
 #[kynos::get("/artwork/{kind}/{id}/{variant}", tag = Media, operation_id = "getArtwork")]
 #[tracing::instrument(skip_all)]
 pub async fn get_artwork(
