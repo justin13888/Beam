@@ -108,6 +108,13 @@ hooks {
                 glob = List("Cargo.toml", "beam-server/Containerfile", ".github/actions/setup-ffmpeg/action.yml")
                 check = "mise run check:ffmpeg-version"
             }
+            // Pure YAML parsing -- milliseconds. Narrower than ci.yml's `compose`
+            // filter, which also watches mise.toml and dex/, for the reason the
+            // docs-build step gives: the gate reads only the compose files.
+            ["compose-invariants"] {
+                glob = List("compose*.yaml")
+                check = "mise run check:compose-invariants"
+            }
             // A pure grep over the tracked .rs files -- milliseconds, and it catches
             // the one mistake that would silently corrupt every mutation-testing
             // result: a test double that cargo-mutants will mutate as if it were

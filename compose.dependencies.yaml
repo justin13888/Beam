@@ -16,18 +16,56 @@ services:
       retries: 5
       start_period: 10s
 
-  # Lightweight dev OIDC IdP (see ADR-0003). Ships static test users so local
-  # dev/evaluation doesn't require standing up a real identity provider;
-  # production deployments point BEAM_OIDC_ISSUER at Keycloak/Authentik/
-  # Authelia/a hosted IdP instead.
+  # Lightweight dev OIDC IdP (see ADR-0003), behind the `dev-idp` profile so it
+  # is opt-in rather than part of the default stack: beam is bring-your-own-IdP
+  # (FR-101), and production deployments point BEAM_OIDC_ISSUER at Keycloak/
+  # Authentik/Authelia/a hosted IdP. `mise run dev:up` enables the profile and
+  # supplies the matching BEAM_OIDC_* wiring; a bare `podman compose up` starts
+  # no IdP and leaves login disabled with a clear error.
+  #
+  # The `dex.beam.localhost` alias is what makes the containerized flow work at
+  # all (#73). The issuer string has to be byte-identical for the browser and
+  # for beam-server, because openidconnect validates the discovery document's
+  # `issuer` against the configured one and re-checks it on the ID token's
+  # `iss`. `*.localhost` resolves to loopback on the host (RFC 6761) and to this
+  # container through compose DNS, so one string satisfies both -- and the
+  # host-run `cargo run -p beam-server` flow as well.
+  #
+  # This leans on one property of the *server* image, so do not treat it as
+  # free: it works only because that image's resolver does *not* special-case
+  # subdomains of `.localhost`, letting the compose DNS alias win. musl does
+  # special-case them -- resolving to the container's own loopback, never
+  # reaching this service -- and glibc has been moving the same way. The
+  # runtime stage is debian:trixie-slim today, which is why this works.
+  # Rebasing it on Alpine, or onto a base with a newer resolver, breaks dev
+  # login; `mise run dev:verify-oidc` is what catches it.
   dex:
     image: ghcr.io/dexidp/dex:v2.45.1
     command: ["dex", "serve", "/etc/dex/config.yaml"]
+    profiles: [dev-idp]
     volumes:
       - ./dex/config.yaml:/etc/dex/config.yaml:ro
       - dex:/var/dex
+    # Fixed on both sides, unlike the `${*_HOST_PORT}` knobs on the other
+    # services: 5556 is part of the issuer string (dex/config.yaml, dev:up), and
+    # the browser reaches it through this host mapping while beam-server reaches
+    # it through the `dex.beam.localhost` alias on the container side. Host port,
+    # container port and the issuer's port therefore have to be one number, so
+    # a variable here could only ever break login.
     ports:
-      - "${DEX_HOST_PORT:-5556}:5556"
+      - "5556:5556"
+    networks:
+      default:
+        aliases:
+          - dex.beam.localhost
+    healthcheck:
+      # Dex serves /healthz under the issuer's path prefix, so /dex/healthz --
+      # a bare /healthz is a 404. The image ships busybox wget, not curl.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5556/dex/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   traefik:
     image: docker.io/traefik:v3.7.12
@@ -63,5 +101,13 @@ volumes:
   dex:
 
 networks:
+  # Declared explicitly even though Compose would create `default` implicitly:
+  # `dex` attaches to it by name to carry the `dex.beam.localhost` alias, and
+  # podman-compose refuses a file whose services reference a network that file
+  # does not declare (`RuntimeError: missing networks: default`). Docker Compose
+  # accepts the implicit form, so this is the one line that keeps `podman
+  # compose` -- which mise.toml prefers and the README documents first -- a
+  # working runtime. `check:compose-invariants` asserts it for every file.
+  default:
   beam_proxy:
     name: beam_proxy

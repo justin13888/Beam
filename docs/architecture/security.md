@@ -12,9 +12,10 @@ never sees an ID, access, or refresh token. The browser holds exactly one creden
 1. **Login.** `GET /v1/auth/login` generates a PKCE verifier/challenge, `state`, and nonce, stores
    them in the single-use `pending_auths` table (see `data-model.md`), and redirects the browser to
    the configured issuer's authorization endpoint.
-2. **IdP authentication.** The user authenticates at the IdP (dev: Dex via
-   `compose.dependencies.yaml`; prod: any OIDC-compliant IdP — Keycloak, Authentik, Authelia, a
-   hosted provider). The IdP redirects back with an authorization code.
+2. **IdP authentication.** The user authenticates at the IdP (dev: the opt-in Dex behind the
+   `dev-idp` compose profile, started by `mise run dev:up`; prod: any OIDC-compliant IdP —
+   Keycloak, Authentik, Authelia, a hosted provider). The IdP redirects back with an authorization
+   code.
 3. **Callback.** `GET /v1/auth/callback` consumes the `pending_auths` row atomically (a `state`
    value is exchangeable at most once), exchanges code + PKCE verifier for tokens server-to-server
    (via the `openidconnect` crate), and validates the ID token's issuer, audience, signature, nonce,

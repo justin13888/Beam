@@ -319,8 +319,12 @@ everything up to the trait boundary hermetically, and validate the real round-tr
 - **OIDC ↔ IdP round-trip.** The `beam-auth` client logic is unit-tested exhaustively against a
   `FakeOidcClient` — authorization URL construction, PKCE handling, callback/token exchange, JIT
   user provisioning, admin-claim evaluation. The real browser-driven Authorization Code + PKCE
-  flow is exercised manually against the bundled Dex today; an automated Playwright suite is
-  tracked in [#74](https://github.com/justin13888/beam/issues/74).
+  flow is exercised against the opt-in Dex (`mise run dev:up`). `mise run dev:verify-oidc`
+  smoke-tests the wiring that flow depends on — that one issuer string resolves identically from
+  inside the server container and from the host, and that the profile-less stack starts no IdP.
+  It needs a container runtime, so like `rust:test:pg` it sits outside `ci` (NFR-201). A
+  browser-driven Playwright suite is tracked in
+  [#74](https://github.com/justin13888/beam/issues/74).
 - **Real `cameo` → TMDB/AniList network calls.** The enrichment pipeline is unit-tested against its
   provider trait with a programmable fake, covering success, partial failure, retry/backoff, and
   missing-API-key behavior. Real network calls are only exercised by running the server against

@@ -131,16 +131,26 @@ instead.
 
 See individual README files for each component.
 
-To spin up the dependency stack (Postgres + the bundled [Dex](https://dexidp.io/) dev OIDC
-provider, fronted by Traefik) with Docker/Podman Compose for local development or testing, run:
+For a full local stack with a working login, run:
 
 ```bash
-podman compose -f compose.dependencies.yaml up
+mise run dev:up
 ```
 
-The bundled Dex ships static test users for local development (see `dex/config.yaml`); run
-`beam-server` on the host to exercise the OIDC login flow against it (the fully containerized
-Dex topology is tracked in [#73](https://github.com/justin13888/beam/issues/73)).
+That brings up Postgres, Traefik, the server, the web client, and the bundled
+[Dex](https://dexidp.io/) dev OIDC provider, then prints where to reach them. Sign in as
+`admin@beam.localhost` / `password` (or `user@beam.localhost`). `mise run dev:down` tears it back
+down, and `mise run dev:verify-oidc` smoke-tests the OIDC wiring.
+
+Beam is bring-your-own-IdP, so the bundled Dex is **opt-in**: it sits behind the `dev-idp` compose
+profile and `mise run dev:up` is what enables it. A plain `podman compose up -d` brings up
+everything *except* an identity provider, which is the shape a real deployment has — login stays
+disabled with a clear error until you point `BEAM_OIDC_*` at your own provider. See
+[`docs/operations/deployment.md`](docs/operations/deployment.md).
+
+Its static test users live in `dex/config.yaml` and are for local development only. If
+`curl http://dex.beam.localhost:5556/dex/.well-known/openid-configuration` fails to resolve on your
+host, add `127.0.0.1 dex.beam.localhost` to `/etc/hosts`.
 
 ## License
 

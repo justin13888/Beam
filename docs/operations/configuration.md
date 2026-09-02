@@ -44,7 +44,7 @@ optional variables unset/commented rather than blank.
 | `BEAM_OIDC_CLIENT_ID` | unset | OIDC client id registered with the IdP. |
 | `BEAM_OIDC_CLIENT_SECRET` | unset | OIDC client secret. Secret — never logged (startup config logging redacts it). |
 | `BEAM_OIDC_SCOPES` | `openid profile email` | Space-separated scopes requested at login. |
-| `BEAM_WEB_URL` | `http://localhost:5173` | Web client origin: OIDC success redirect target and an implicitly allowed CSRF Origin. |
+| `BEAM_WEB_URL` | `http://localhost:5173` | Web client origin: OIDC success redirect target and an implicitly allowed CSRF Origin. The default suits a host-run server against the Vite dev server; the compose stack overrides it to `http://localhost:8080`, where the containerized web client is served. Running Vite on `:5173` against a containerized server therefore needs `BEAM_EXTRA_ALLOWED_ORIGINS=http://localhost:5173`, or writes are rejected with 403 while reads still succeed. |
 | `BEAM_EXTRA_ALLOWED_ORIGINS` | unset | Comma-separated extra Origins accepted on state-changing requests. |
 | `BEAM_OIDC_ADMIN_CLAIM` | unset | Name of an ID-token claim the IdP asserts to grant admin (e.g. `groups`). Admin is derived **solely** from this claim, recomputed on every login. **Unset → nobody is admin, and any existing admin is demoted at their next login.** An empty value is treated as unset. |
 | `BEAM_OIDC_ADMIN_VALUE` | unset | Expected value for `BEAM_OIDC_ADMIN_CLAIM`. Unset → the claim must assert boolean `true` (a stringified `"true"` is also accepted). Set → admin is granted when the claim is a string equal to this value **or** an array containing it (case-sensitive; covers a `groups` claim). Setting this while `BEAM_OIDC_ADMIN_CLAIM` is unset **fails startup**. |
@@ -82,10 +82,17 @@ Read by the compose files, not by application code:
 | `POSTGRES_HOST_PORT` | `5432` | Host port for Postgres. |
 | `BEAM_SERVER_HOST_PORT` | `8000` | Host port for the API server. |
 | `WEB_HOST_PORT` | `8080` | Host port for the web app. |
-| `DEX_HOST_PORT` | `5556` | Host port for the dev-only Dex IdP. |
 | `TRAEFIK_HTTP_PORT` / `TRAEFIK_HTTPS_PORT` / `TRAEFIK_DASHBOARD_PORT` | `80` / `443` / `8888` | Traefik entrypoints (dashboard is loopback-only). |
 | `HOST_VIDEO_DIR` | `server_videos` named volume | Host path mounted read-only at `BEAM_VIDEO_DIR`. |
 | `HOST_DATA_DIR` | `server_data` named volume | Host path mounted at `BEAM_DATA_DIR`. |
+
+## Task-only variables
+
+Read by the `mise` tasks, not by the compose files or by application code:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BEAM_COMPOSE` | `podman compose` if `podman` is on `PATH`, else `docker compose` | Container runtime the `dev:*` mise tasks drive. Set it (e.g. `docker compose`) when both are installed but only one is usable. |
 
 ## Validation
 

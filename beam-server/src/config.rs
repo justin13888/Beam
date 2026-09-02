@@ -162,7 +162,7 @@ pub struct ServerConfig {
     #[config(env = "BEAM_ARTWORK_NEGATIVE_TTL_SECS", default = 300)]
     pub artwork_negative_ttl_secs: u64,
 
-    /// OIDC issuer URL (e.g. Dex in dev: `http://localhost:5556/dex`). OIDC
+    /// OIDC issuer URL (e.g. the opt-in dev Dex: `http://dex.beam.localhost:5556/dex`). OIDC
     /// login is disabled -- returning a clear error rather than panicking --
     /// unless this, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` are all set
     /// (see ADR-0003).

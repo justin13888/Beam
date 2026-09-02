@@ -28,21 +28,28 @@ include:
   - compose.beam.yaml
 ```
 
-`podman compose up -d` (or `docker compose up -d`) brings up everything.
+`podman compose up -d` (or `docker compose up -d`) brings up Postgres, Traefik, the server, and
+the web client — but deliberately **no identity provider**. Beam is bring-your-own-IdP (FR-101),
+so that is the production shape: login stays disabled with a clear error until `BEAM_OIDC_*` point
+at your own provider.
+
+The bundled dev Dex sits behind the `dev-idp` compose profile and is opt-in. `mise run dev:up`
+enables the profile and supplies the matching `BEAM_OIDC_*` wiring in one step; it is the
+supported way to get a working login locally, and is for development only.
 
 ### Dependency services (`compose.dependencies.yaml`)
 
 | Service | Role |
 |---|---|
 | `postgres` | Postgres 18, the sole datastore: catalog, sessions, enrichment state, admin logs. Healthchecked via `pg_isready`; data in the `postgres` named volume. |
-| `dex` | Dev-only OIDC IdP with static test users (`admin@beam.localhost` / `user@beam.localhost`, password `password`; see `dex/config.yaml`). Production deployments point `BEAM_OIDC_ISSUER` at a real IdP (Keycloak, Authentik, Authelia, or a hosted provider) instead. Note: the server *container* cannot currently reach the bundled Dex — exercising the OIDC flow in dev means running `beam-server` on the host; the fully containerized topology is tracked in [#73](https://github.com/justin13888/beam/issues/73). |
+| `dex` | Dev-only OIDC IdP with static test users (`admin@beam.localhost` / `user@beam.localhost`, password `password`; see `dex/config.yaml`). **Opt-in**: it is gated behind the `dev-idp` compose profile and does not start with a bare `compose up`. Use `mise run dev:up`, which enables the profile and sets the matching `BEAM_OIDC_*`. Production deployments point `BEAM_OIDC_ISSUER` at a real IdP (Keycloak, Authentik, Authelia, or a hosted provider) instead. Listens on `5556` on both the host and the container; that port is part of the issuer string, which the browser reaches via the host mapping and the server via the compose alias, so it has no `*_HOST_PORT` override. |
 | `traefik` | TLS termination and `Host()`-rule routing (`server.beam.localhost` → server, `beam.localhost` → web), HTTP→HTTPS redirect, HTTP/3, dashboard bound to loopback. The server router disables response buffering (`flushInterval: "-1"`) for low-latency media delivery. The bundled setup uses self-signed certs for `*.beam.localhost`; bring your own domain/certificate configuration for production. |
 
 ### Application services (`compose.beam.yaml`)
 
 | Service | Role |
 |---|---|
-| `server` | The `beam-server` binary (built from `beam-server/Containerfile`): HTTP API, OIDC auth, in-process indexing/enrichment, direct-play streaming. Mounts the media library read-only at `BEAM_VIDEO_DIR` and server-writable state at `BEAM_DATA_DIR` (host paths via `HOST_VIDEO_DIR`/`HOST_DATA_DIR`, or the `server_videos`/`server_data` named volumes by default). Healthchecked via `GET /v1/health`. Depends only on `postgres`. |
+| `server` | The `beam-server` binary (built from `beam-server/Containerfile`): HTTP API, OIDC auth, in-process indexing/enrichment, direct-play streaming. Mounts the media library read-only at `BEAM_VIDEO_DIR` and server-writable state at `BEAM_DATA_DIR` (host paths via `HOST_VIDEO_DIR`/`HOST_DATA_DIR`, or the `server_videos`/`server_data` named volumes by default). Healthchecked via `GET /v1/health`. Depends only on `postgres` — deliberately not on `dex`, because a `depends_on` naming a profile-gated service makes the profile-less project invalid outright; `mise run dev:up` sequences Dex first instead. |
 | `web` | The `beam-web` SPA (built from `beam-web/Containerfile`, which generates the typed client from the `beam-web/openapi.json` supplied in the build context), served as static files by Caddy. Depends on a healthy `server`. |
 
 ## Database migrations
@@ -69,8 +76,9 @@ about. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam
      [`configuration.md`](configuration.md)).
    - Configure `BEAM_OIDC_ISSUER`/`BEAM_OIDC_CLIENT_ID`/`BEAM_OIDC_CLIENT_SECRET` against a real
      OIDC provider; register `<BEAM_SERVER_URL>/v1/auth/callback` as the redirect URI. Dex's
-     static users are for local development only.
-   - Grant admin via your IdP, not the server: configure the IdP to release a claim (e.g. a Dex/
+     static users are for local development only — never enable the `dev-idp` profile in
+     production.
+   - Grant admin via your IdP, not the server: configure the IdP to release a claim (e.g. a
      Keycloak group) and set `BEAM_OIDC_ADMIN_CLAIM` (e.g. `groups`) and, for a value/array match,
      `BEAM_OIDC_ADMIN_VALUE` (e.g. `beam-admin`). Admin is recomputed on every login — granting
      **and** revoking. Leaving `BEAM_OIDC_ADMIN_CLAIM` unset means nobody is admin.

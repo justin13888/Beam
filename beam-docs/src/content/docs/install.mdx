@@ -10,10 +10,13 @@ brings both up, along with the web app.
 
 <Aside type="note" title="The default stack starts more than Beam">
 The root `compose.yaml` also pulls in the development dependencies, which include **Traefik** —
-binding host ports **80 and 443** and mounting the Docker socket read-only — and **Dex**, a test
-identity provider. If you already run something on 80 or 443, or you do not want a container with
-access to the Docker socket, bring up `compose.beam.yaml` and your own Postgres instead of the
-default `compose.yaml`.
+binding host ports **80 and 443** and mounting the Docker socket read-only. If you already run
+something on 80 or 443, or you do not want a container with access to the Docker socket, bring up
+`compose.beam.yaml` and your own Postgres instead of the default `compose.yaml`.
+
+The default stack starts **no identity provider**, so nobody can sign in until you configure one.
+That is deliberate — Beam is bring-your-own-IdP. The bundled Dex test provider is opt-in behind
+the `dev-idp` Compose profile and is for local development only.
 </Aside>
 
 <Aside type="caution" title="No release has been published yet">
