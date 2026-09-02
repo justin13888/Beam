@@ -227,6 +227,24 @@ async fn an_unknown_id_is_a_404_problem_document() {
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#media-not-found");
 }
 
+/// The detail route used to answer this 404: `get_media_metadata` returns an
+/// `Option`, and the failed parse was folded into the miss while `/sources`
+/// answered the same typo with 400. The parse now happens in the handler, and
+/// this is the test that reaches it -- every other detail test uses a
+/// well-formed id.
+#[tokio::test]
+async fn a_malformed_id_on_the_detail_route_is_a_400_not_a_404() {
+    let (client, token) = signed_in(StubMetadataService::default()).await;
+
+    client
+        .get("/v1/media/not-a-uuid")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
+}
+
 #[tokio::test]
 async fn the_detail_route_requires_a_session() {
     let client = client(state_with(StubMetadataService::default()));

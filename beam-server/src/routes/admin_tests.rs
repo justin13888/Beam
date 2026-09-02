@@ -394,6 +394,31 @@ async fn an_authenticated_caller_sees_an_empty_library_list() {
     assert!(response.json::<Vec<Library>>().is_empty());
 }
 
+/// Three operations resolve a library by id and share `LibraryRefError`, so a
+/// malformed id has to be the same 400 on each. Table-driven because the
+/// interesting thing is that the answers agree, not any one of them.
+#[tokio::test]
+async fn a_malformed_library_id_is_a_400_on_every_route_that_takes_one() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    for (case, request) in [
+        ("get one library", client.get("/v1/libraries/not-a-uuid")),
+        (
+            "list its files",
+            client.get("/v1/libraries/not-a-uuid/files"),
+        ),
+        ("delete it", client.delete("/v1/admin/libraries/not-a-uuid")),
+    ] {
+        let response = request.cookie("beam_session", &token).send().await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+        response.assert_problem_type(
+            "https://beam.justinchung.net/reference/errors/#invalid-library-id",
+        );
+    }
+}
+
 // ─── Library mutations: admin-gated ─────────────────────────────────────────
 
 #[tokio::test]
