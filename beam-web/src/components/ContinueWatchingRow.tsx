@@ -5,6 +5,7 @@ import type { components } from "@/api.gen";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
 import { artworkSrc } from "@/lib/artwork";
+import { apiError } from "@/lib/problem";
 import { formatDuration } from "@/lib/utils";
 
 type ContinueWatchingItem =
@@ -20,7 +21,7 @@ async function fetchMediaMetadata(
 		credentials: "include",
 	});
 	if (response.status === 404) return null;
-	if (error) throw new Error("Failed to load media metadata");
+	if (error) throw apiError(error, "Failed to load media metadata");
 	return data ?? null;
 }
 
@@ -36,7 +37,7 @@ export function ContinueWatchingRow() {
 				params: { query: { limit: 20 } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load continue watching");
+			if (error) throw apiError(error, "Failed to load continue watching");
 			return data ?? [];
 		},
 		enabled: isAuthenticated,

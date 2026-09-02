@@ -13,6 +13,7 @@ import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
+import { apiError } from "@/lib/problem";
 
 type Session =
 	components["schemas"]["beam_auth.server.oidc_routes.SessionSummary"];
@@ -116,7 +117,7 @@ export function ProfilePage() {
 			const { data, error } = await apiClient.GET("/v1/sessions", {
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load active sessions");
+			if (error) throw apiError(error, "Failed to load active sessions");
 			return data;
 		},
 		enabled: isAuthenticated,
@@ -133,7 +134,8 @@ export function ProfilePage() {
 				params: { path: { id } },
 				credentials: "include",
 			});
-			if (error || !response.ok) throw new Error("Failed to revoke session");
+			if (error || !response.ok)
+				throw apiError(error, "Failed to revoke session");
 			toast.success("Session revoked");
 			await queryClient.invalidateQueries({ queryKey: ["sessions"] });
 			// The current session is not identifiable from the client (the list
@@ -160,7 +162,7 @@ export function ProfilePage() {
 			const { error, response } = await apiClient.POST("/v1/logout-all", {
 				credentials: "include",
 			});
-			if (error || !response.ok) throw new Error("Failed to sign out");
+			if (error || !response.ok) throw apiError(error, "Failed to sign out");
 			toast.success("Signed out of all sessions");
 			// logout-all revokes *all* sessions including the current one and
 			// clears the cookie, so route through the local logout flow to clear

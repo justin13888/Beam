@@ -90,7 +90,7 @@ async fn metrics_endpoint_reports_503_when_no_recorder_is_installed() {
         .send()
         .await
         .assert_status(StatusCode::SERVICE_UNAVAILABLE)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/metrics-unavailable");
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#metrics-unavailable");
 }
 
 /// The inverse of what Salvo's implementation asserted. `/metrics` used to be

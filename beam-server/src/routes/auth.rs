@@ -29,7 +29,7 @@ use beam_auth::utils::oidc::{OidcClient, OidcError};
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
-use beam_auth::utils::session_store::{SessionData, SessionStore};
+use beam_auth::utils::session_store::{SessionData, SessionError, SessionStore};
 use chrono::Utc;
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::routes::api_error::{SESSION_COOKIE, SessionAuth};
+use crate::routes::api_error::{InternalError, SESSION_COOKIE, SessionAuth};
 use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
@@ -119,87 +119,206 @@ pub struct SetCookie {
     set_cookie: String,
 }
 
+/// A `Set-Cookie` value that could not be rendered as header text.
+///
+/// Its own type rather than a variant of any handler's error, because every
+/// handler that writes a cookie needs it and none of them should widen to the
+/// rest of another's statuses to get it. `oidc_logout` returned the login
+/// solely to carry this, and so advertised a 400, a 403 and a 503 it could not
+/// produce.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct CookieEncodingError(String);
+
 impl SetCookie {
-    fn new(cookie: &Cookie) -> Result<Self, AuthError> {
+    fn new(cookie: &Cookie) -> Result<Self, CookieEncodingError> {
         let encoded = cookie
             .encode()
-            .ok_or_else(|| AuthError::Internal("could not encode session cookie".into()))?;
+            .ok_or_else(|| CookieEncodingError("could not encode session cookie".into()))?;
         let set_cookie = encoded
             .to_str()
-            .map_err(|_| AuthError::Internal("session cookie is not valid header text".into()))?
+            .map_err(|_| CookieEncodingError("session cookie is not valid header text".into()))?
             .to_owned();
         Ok(Self { set_cookie })
     }
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
+//
+// One type per operation shape, for the reason `api_error` sets out: Kynos
+// derives an operation's responses from its return type, and carries one
+// response per status titled from the first variant declaring it.
 
-/// What the login round-trip can answer with.
+/// `GET /v1/auth/login`.
 ///
-/// 401 is absent: the operations that need a session take `SessionAuth`, which
-/// contributes it. `SessionNotFound` is the one exception and lives in
-/// [`SessionActionError`] -- see the note there.
+/// No 400 and no 403: the only input is a redirect path, which is sanitised
+/// rather than rejected, and nothing here is authorised.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
-pub enum AuthError {
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/bad-request",
-        title = "Bad request"
-    )]
-    BadRequest(String),
-
-    /// The identity is valid but the local account is disabled (issue #85).
-    #[error("{0}")]
-    #[problem(
-        status = 403,
-        type = "https://beam.justinchung.net/reference/errors/forbidden",
-        title = "Forbidden"
-    )]
-    Forbidden(String),
-
+pub enum LoginStartError {
     /// OIDC is not configured, or discovery failed. Distinct from a 500: the
     /// server is working, the identity provider is not reachable.
     #[error("{0}")]
     #[problem(
         status = 503,
-        type = "https://beam.justinchung.net/reference/errors/oidc-unavailable",
+        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
         title = "Login unavailable"
     )]
-    Unavailable(String),
+    OidcUnavailable(String),
 
     #[error("{0}")]
     #[problem(
         status = 500,
-        type = "https://beam.justinchung.net/reference/errors/internal",
+        type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
     Internal(String),
 }
 
-/// Revoking a session by id.
+/// `GET /v1/auth/callback`.
+///
+/// The two 400s share one declared response and `AttemptInvalid` is written
+/// first, because it is the one a caller hits by reloading the callback URL --
+/// which is the single most common way to reach this endpoint in error.
+#[derive(Debug, thiserror::Error, kynos::ApiError)]
+pub enum LoginCallbackError {
+    /// The round-trip cannot be matched to one this server started: the state
+    /// cookie or parameter is missing, the two disagree, the pending record
+    /// was already consumed or has expired, or the code is absent.
+    ///
+    /// One code rather than five, because a client acts on all of them
+    /// identically -- start again from the app -- and enumerating exactly which
+    /// half of a CSRF check failed tells an attacker more than it tells a user.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#login-attempt-invalid",
+        title = "Login attempt is not valid"
+    )]
+    AttemptInvalid(String),
+
+    /// The identity provider refused, or the token exchange did not verify.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#login-failed",
+        title = "Login failed"
+    )]
+    LoginFailed(String),
+
+    /// The identity verified; the local account is disabled (issue #85).
+    #[error("{0}")]
+    #[problem(
+        status = 403,
+        type = "https://beam.justinchung.net/reference/errors/#account-disabled",
+        title = "Account is disabled"
+    )]
+    AccountDisabled(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/me`.
+///
+/// Keeps a 401 of its own rather than leaving it to `SessionAuth`, because it
+/// means something the extractor's does not: the session verified, and the
+/// account behind it has since been deleted.
+#[derive(Debug, thiserror::Error, kynos::ApiError)]
+pub enum CurrentUserError {
+    #[error("{0}")]
+    #[problem(
+        status = 401,
+        type = "https://beam.justinchung.net/reference/errors/#account-removed",
+        title = "Account no longer exists"
+    )]
+    AccountRemoved(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `DELETE /v1/sessions/{id}`.
 ///
 /// Keeps its own 401 because the status carries meaning here that
 /// `SessionAuth`'s does not: a session id that does not exist and one that
 /// belongs to somebody else answer identically and deliberately, so a caller
 /// cannot enumerate other people's sessions.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
-pub enum SessionActionError {
+pub enum SessionRevokeError {
+    /// The `{id}` in the path is not a UUID.
+    ///
+    /// Its position titles nothing. Kynos titles a status from the first
+    /// declaration it meets, and the `Path` extractor's 400 and `SessionAuth`'s
+    /// 401 are both met before this enum, so the document reads "Bad Request"
+    /// and "Unauthorized" for those statuses whatever order the variants take;
+    /// order decides a title only for a status no extractor or authenticator
+    /// declares.
+    ///
+    /// The operation already advertised a 400 it had no way to reach: every
+    /// store error, the id parse included, was flattened into `Internal`, so a
+    /// client's typo came back as "Beam broke" (issue #123). Its own code
+    /// rather than the 401, because a malformed id and a session that is not
+    /// there are different things for a caller to do something about.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-session-id",
+        title = "Invalid session id"
+    )]
+    InvalidSessionId(String),
+
     #[error("{0}")]
     #[problem(
         status = 401,
-        type = "https://beam.justinchung.net/reference/errors/unauthorized",
-        title = "Unauthorized"
+        type = "https://beam.justinchung.net/reference/errors/#session-not-found",
+        title = "Session not found"
     )]
-    Unauthorized(String),
+    SessionNotFound(String),
 
     #[error("{0}")]
     #[problem(
         status = 500,
-        type = "https://beam.justinchung.net/reference/errors/internal",
+        type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
     Internal(String),
+}
+
+// A cookie that cannot be rendered is a server fault wherever it happens, so
+// each of these is the same 500 reached through a different handler's type.
+
+impl From<CookieEncodingError> for LoginStartError {
+    fn from(e: CookieEncodingError) -> Self {
+        Self::Internal(e.to_string())
+    }
+}
+
+impl From<CookieEncodingError> for LoginCallbackError {
+    fn from(e: CookieEncodingError) -> Self {
+        Self::Internal(e.to_string())
+    }
+}
+
+impl From<CookieEncodingError> for SessionRevokeError {
+    fn from(e: CookieEncodingError) -> Self {
+        Self::Internal(e.to_string())
+    }
+}
+
+impl From<CookieEncodingError> for InternalError {
+    fn from(e: CookieEncodingError) -> Self {
+        Self::Internal(e.to_string())
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -294,12 +413,12 @@ pub async fn oidc_login(
     Inject(oidc_client): Inject<Arc<dyn OidcClient>>,
     Inject(pending_auth_store): Inject<Arc<dyn PendingAuthStore>>,
     Inject(config): Inject<OidcRuntimeConfig>,
-) -> Result<WithHeaders<Redirect<302>, SetCookie>, AuthError> {
+) -> Result<WithHeaders<Redirect<302>, SetCookie>, LoginStartError> {
     let redirect_path = sanitize_redirect_path(query.redirect.as_deref());
 
     let begin = oidc_client
         .begin_auth()
-        .map_err(|e| AuthError::Unavailable(format!("OIDC login unavailable: {e}")))?;
+        .map_err(|e| LoginStartError::OidcUnavailable(format!("OIDC login unavailable: {e}")))?;
 
     pending_auth_store
         .create(
@@ -312,7 +431,7 @@ pub async fn oidc_login(
             STATE_TTL_SECS,
         )
         .await
-        .map_err(|e| AuthError::Internal(format!("Failed to start OIDC login: {e}")))?;
+        .map_err(|e| LoginStartError::Internal(format!("Failed to start OIDC login: {e}")))?;
 
     let cookie = build_cookie(
         STATE_COOKIE,
@@ -351,24 +470,24 @@ pub async fn oidc_callback(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
     Inject(config): Inject<OidcRuntimeConfig>,
-) -> Result<WithHeaders<Redirect<302>, SetCookie>, AuthError> {
+) -> Result<WithHeaders<Redirect<302>, SetCookie>, LoginCallbackError> {
     if let Some(error) = query.error {
         let description = query.error_description.unwrap_or_default();
-        return Err(AuthError::BadRequest(format!(
+        return Err(LoginCallbackError::LoginFailed(format!(
             "IdP returned error: {error} {description}"
         )));
     }
 
     let state_cookie = cookies
         .beam_oidc_state
-        .ok_or_else(|| AuthError::BadRequest("Missing state cookie".into()))?;
+        .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing state cookie".into()))?;
 
     let query_state = query
         .state
-        .ok_or_else(|| AuthError::BadRequest("Missing state parameter".into()))?;
+        .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing state parameter".into()))?;
 
     if state_cookie != query_state {
-        return Err(AuthError::BadRequest(
+        return Err(LoginCallbackError::AttemptInvalid(
             "State mismatch between cookie and callback".into(),
         ));
     }
@@ -376,21 +495,25 @@ pub async fn oidc_callback(
     let pending = pending_auth_store
         .consume(&query_state)
         .await
-        .map_err(|e| AuthError::Internal(e.to_string()))?
+        .map_err(|e| LoginCallbackError::Internal(e.to_string()))?
         .ok_or_else(|| {
-            AuthError::BadRequest("Unknown, already-used, or expired login attempt".into())
+            LoginCallbackError::AttemptInvalid(
+                "Unknown, already-used, or expired login attempt".into(),
+            )
         })?;
 
     let code = query
         .code
-        .ok_or_else(|| AuthError::BadRequest("Missing code parameter".into()))?;
+        .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing code parameter".into()))?;
 
     let identity = oidc_client
         .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
         .await
         .map_err(|e| match e {
-            OidcError::NonceMismatch => AuthError::BadRequest("Nonce mismatch".to_owned()),
-            other => AuthError::BadRequest(format!("Login failed: {other}")),
+            OidcError::NonceMismatch => {
+                LoginCallbackError::LoginFailed("Nonce mismatch".to_owned())
+            }
+            other => LoginCallbackError::LoginFailed(format!("Login failed: {other}")),
         })?;
 
     // Admin is derived solely from a configured ID-token claim asserted by the
@@ -412,7 +535,7 @@ pub async fn oidc_callback(
     let user = match user_repo
         .find_by_oidc_identity(&identity.issuer, &identity.subject)
         .await
-        .map_err(|e| AuthError::Internal(e.to_string()))?
+        .map_err(|e| LoginCallbackError::Internal(e.to_string()))?
     {
         Some(existing) => {
             // A disabled account is blocked at the door: no session is minted
@@ -420,7 +543,7 @@ pub async fn oidc_callback(
             // already-provisioned account can be disabled -- JIT-provisioned
             // new users below are always created enabled.
             if existing.disabled {
-                return Err(AuthError::Forbidden(
+                return Err(LoginCallbackError::AccountDisabled(
                     "This account has been disabled. Contact an administrator.".to_owned(),
                 ));
             }
@@ -428,13 +551,13 @@ pub async fn oidc_callback(
                 user_repo
                     .set_admin(existing.id, is_admin)
                     .await
-                    .map_err(|e| AuthError::Internal(e.to_string()))?;
+                    .map_err(|e| LoginCallbackError::Internal(e.to_string()))?;
             }
             if existing.display_name != display_name || existing.avatar_url != identity.picture {
                 user_repo
                     .update_oidc_profile(existing.id, display_name, identity.picture.clone())
                     .await
-                    .map_err(|e| AuthError::Internal(e.to_string()))?;
+                    .map_err(|e| LoginCallbackError::Internal(e.to_string()))?;
             }
             existing
         }
@@ -448,7 +571,7 @@ pub async fn oidc_callback(
                 is_admin,
             })
             .await
-            .map_err(|e| AuthError::Internal(format!("Failed to provision user: {e}")))?,
+            .map_err(|e| LoginCallbackError::Internal(format!("Failed to provision user: {e}")))?,
     };
 
     let idle_ttl_secs = config.idle_ttl_secs();
@@ -468,7 +591,7 @@ pub async fn oidc_callback(
     let token = session_store
         .create(&session_data, idle_ttl_secs, absolute_ttl_secs)
         .await
-        .map_err(|e| AuthError::Internal(e.to_string()))?;
+        .map_err(|e| LoginCallbackError::Internal(e.to_string()))?;
 
     let cookie = build_cookie(
         SESSION_COOKIE,
@@ -491,15 +614,15 @@ pub async fn oidc_callback(
 pub async fn oidc_me(
     auth: SessionAuth,
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
-) -> Result<Json<MeResponse>, SessionActionError> {
-    let user_uuid = Uuid::parse_str(&auth.0.user_id)
-        .map_err(|e| SessionActionError::Internal(e.to_string()))?;
+) -> Result<Json<MeResponse>, CurrentUserError> {
+    let user_uuid =
+        Uuid::parse_str(&auth.0.user_id).map_err(|e| CurrentUserError::Internal(e.to_string()))?;
 
     let user = user_repo
         .find_by_id(user_uuid)
         .await
-        .map_err(|e| SessionActionError::Internal(e.to_string()))?
-        .ok_or_else(|| SessionActionError::Unauthorized("User no longer exists".into()))?;
+        .map_err(|e| CurrentUserError::Internal(e.to_string()))?
+        .ok_or_else(|| CurrentUserError::AccountRemoved("User no longer exists".into()))?;
 
     Ok(Json(MeResponse {
         id: user.id.to_string(),
@@ -519,7 +642,7 @@ pub async fn oidc_me(
 pub async fn oidc_logout(
     Cookies(cookies): Cookies<AuthCookies>,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<WithHeaders<NoContent, SetCookie>, AuthError> {
+) -> Result<WithHeaders<NoContent, SetCookie>, InternalError> {
     if let Some(token) = cookies.beam_session {
         let _ = session_store.delete(&token).await;
     }
@@ -535,11 +658,11 @@ pub async fn oidc_logout(
 pub async fn oidc_logout_all(
     auth: SessionAuth,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<WithHeaders<NoContent, SetCookie>, AuthError> {
+) -> Result<WithHeaders<NoContent, SetCookie>, InternalError> {
     session_store
         .delete_all_for_user(&auth.0.user_id)
         .await
-        .map_err(|e| AuthError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
 
     Ok(WithHeaders::new(
         NoContent,
@@ -552,11 +675,11 @@ pub async fn oidc_logout_all(
 pub async fn oidc_list_sessions(
     auth: SessionAuth,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<Json<Vec<SessionSummary>>, SessionActionError> {
+) -> Result<Json<Vec<SessionSummary>>, InternalError> {
     let sessions = session_store
         .list_for_user(&auth.0.user_id)
         .await
-        .map_err(|e| SessionActionError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
 
     Ok(Json(
         sessions
@@ -581,14 +704,23 @@ pub async fn oidc_delete_session(
     Path(path): Path<SessionPath>,
     Cookies(cookies): Cookies<AuthCookies>,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<SessionRevoked, SessionActionError> {
+) -> Result<SessionRevoked, SessionRevokeError> {
     let deleted = session_store
         .delete_by_id(&path.id, &auth.0.user_id)
         .await
-        .map_err(|e| SessionActionError::Internal(e.to_string()))?;
+        .map_err(|e| match e {
+            // The store parses the path id before it queries, so this is the
+            // caller's typo rather than a fault. The user id cannot reach here
+            // malformed -- it comes from an authenticated session.
+            SessionError::InvalidId(_) => SessionRevokeError::InvalidSessionId(format!(
+                "{} is not a valid session id",
+                path.id
+            )),
+            other => SessionRevokeError::Internal(other.to_string()),
+        })?;
 
     if !deleted {
-        return Err(SessionActionError::Unauthorized(
+        return Err(SessionRevokeError::SessionNotFound(
             "Session not found".to_owned(),
         ));
     }
@@ -604,7 +736,7 @@ pub async fn oidc_delete_session(
         Some(token) => session_store
             .get(&token)
             .await
-            .map_err(|e| SessionActionError::Internal(e.to_string()))?
+            .map_err(|e| SessionRevokeError::Internal(e.to_string()))?
             .is_some(),
         None => false,
     };
@@ -612,8 +744,7 @@ pub async fn oidc_delete_session(
     if still_valid {
         Ok(SessionRevoked::Kept(NoContent))
     } else {
-        let cleared = SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))
-            .map_err(|_| SessionActionError::Internal("could not clear session cookie".into()))?;
+        let cleared = SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))?;
         Ok(SessionRevoked::SignedOut(WithHeaders::new(
             NoContent, cleared,
         )))

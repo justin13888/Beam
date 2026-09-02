@@ -38,6 +38,10 @@ pub(crate) mod test_support;
 #[path = "contract_tests.rs"]
 mod contract_tests;
 
+#[cfg(test)]
+#[path = "taxonomy_tests.rs"]
+mod taxonomy_tests;
+
 /// Every `/v1` operation, as one table.
 ///
 /// Grouped by tag rather than mounted flat. Every route here also carries a

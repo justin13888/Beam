@@ -107,14 +107,26 @@ impl<R: MediaRanges> IntoResponse for RuntimeDelivery<R> {
 
 impl<R: MediaRanges> Responses for RuntimeDelivery<R> {
     /// The same 200/206/304 shape `Delivery` describes, widened to every range
-    /// in `R`.
+    /// in `R`, plus the 416 the range engine answers with directly.
     ///
     /// OpenAPI permits a media-type range (`video/*`, `image/*`) as a `content`
     /// key, which is the honest description of "whatever was detected".
+    ///
+    /// The 416 belongs here rather than on [`DeliveryError`] because this is
+    /// where it is produced: `Served::deliver` resolves an unsatisfiable range
+    /// into a problem document and returns it as an `Ok` delivery, so the
+    /// handler never sees an error to convert. It was previously declared by a
+    /// `DeliveryError` variant that nothing constructed -- the document was
+    /// right by accident, and deleting the dead variant would have silently
+    /// dropped a status the server still returns.
+    ///
+    /// Declaring it on the generic rather than on one alias is what keeps it
+    /// true: every `RuntimeDelivery` goes through the same range engine, so
+    /// artwork answers 416 on an unsatisfiable range exactly as file delivery
+    /// does.
     fn responses(registry: &mut kynos::schema::registry::Registry) -> kynos::openapi::Responses {
         use kynos::openapi::{MediaType as OpenApiMediaType, RefOr, Schema, StatusPattern};
 
-        let _ = registry;
         let (primary, rest) = R::RANGES
             .split_first()
             .expect("a delivery answers with at least one media type");
@@ -133,6 +145,15 @@ impl<R: MediaRanges> Responses for RuntimeDelivery<R> {
                 }
             }
         }
+
+        responses = responses.with(
+            416,
+            kynos::openapi::Response::with_content(
+                "Range not satisfiable",
+                kynos::openapi::model::body::mime_names::APPLICATION_PROBLEM_JSON,
+                OpenApiMediaType::new(registry.resolve::<kynos::Problem>()),
+            ),
+        );
 
         responses
     }

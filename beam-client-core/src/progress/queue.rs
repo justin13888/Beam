@@ -165,7 +165,9 @@ impl ProgressQueue {
                     || 2_i64.saturating_pow(entry.attempts.min(6)),
                     |seconds| i64::try_from(seconds).unwrap_or(i64::MAX),
                 );
-                entry.not_before_unix = now + backoff;
+                // Saturating: the transport clamps `Retry-After`, but this
+                // layer must not be the one that panics if a caller does not.
+                entry.not_before_unix = now.saturating_add(backoff);
             }
         }
         // An entry that just exhausted its attempts is dropped by `load`, so
@@ -371,6 +373,37 @@ mod tests {
         assert!(queue.ready().await.expect("ready").is_empty());
         clock.advance_secs(2);
         assert_eq!(queue.ready().await.expect("ready").len(), 1);
+    }
+
+    /// A `Retry-After` at the edge of the integer range neither panics nor
+    /// wraps into the past, which would make the entry ready immediately.
+    #[tokio::test]
+    async fn an_absurd_retry_after_saturates_rather_than_overflowing() {
+        let clock = Arc::new(TestClock::new(1_000));
+        let (queue, _storage) = queue(clock.clone());
+        queue
+            .enqueue(sample("f1", 120.0, 1_000))
+            .await
+            .expect("enqueue");
+
+        queue
+            .record_failure("f1", Some(9_223_372_036_854_775_807))
+            .await
+            .expect("record_failure");
+
+        let entry = queue
+            .load()
+            .await
+            .expect("load")
+            .pop()
+            .expect("the entry is still held");
+        assert!(
+            entry.not_before_unix >= clock.now_unix(),
+            "next attempt {} is before now {}",
+            entry.not_before_unix,
+            clock.now_unix()
+        );
+        assert!(queue.ready().await.expect("ready").is_empty());
     }
 
     #[tokio::test]

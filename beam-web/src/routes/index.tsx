@@ -12,6 +12,7 @@ import { ContinueWatchingRow } from "@/components/ContinueWatchingRow";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
+import { apiError } from "@/lib/problem";
 
 export const Route = createFileRoute("/")({
 	component: DashboardPage,
@@ -25,7 +26,7 @@ function DashboardPage() {
 			const { data, error } = await apiClient.GET("/v1/libraries", {
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load libraries");
+			if (error) throw apiError(error, "Failed to load libraries");
 			return data;
 		},
 		enabled: isAuthenticated,

@@ -18,6 +18,7 @@ import { toast } from "sonner";
 import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/apiClient";
+import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 import { useAuth } from "../hooks/auth";
 import { useAdminEventStream } from "../hooks/useAdminEventStream";
@@ -210,7 +211,7 @@ function UsersTab() {
 				params: { query: { limit: PAGE_SIZE, offset } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load users");
+			if (error) throw apiError(error, "Failed to load users");
 			return data;
 		},
 	});
@@ -225,7 +226,7 @@ function UsersTab() {
 					credentials: "include",
 				},
 			);
-			if (error || !response.ok) throw new Error("Failed to update user");
+			if (error || !response.ok) throw apiError(error, "Failed to update user");
 		},
 	});
 
@@ -459,7 +460,7 @@ function StatusTab() {
 			const { data, error } = await apiClient.GET("/v1/admin/status", {
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load system status");
+			if (error) throw apiError(error, "Failed to load system status");
 			return data as AdminStatus;
 		},
 		refetchInterval: 30_000,
@@ -583,7 +584,7 @@ function LogsTab() {
 				params: { query: { limit: PAGE_SIZE, offset } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load admin logs");
+			if (error) throw apiError(error, "Failed to load admin logs");
 			return data;
 		},
 		enabled: isAuthenticated,
@@ -595,7 +596,7 @@ function LogsTab() {
 			const { data, error } = await apiClient.GET("/v1/admin/logs/count", {
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load admin log count");
+			if (error) throw apiError(error, "Failed to load admin log count");
 			return data;
 		},
 		enabled: isAuthenticated,

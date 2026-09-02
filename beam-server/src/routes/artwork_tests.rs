@@ -367,10 +367,6 @@ mod tests {
                 format!("/v1/artwork/movie/{}/poster", Uuid::new_v4()),
             ),
             (
-                "an id that is not an id at all",
-                "/v1/artwork/movie/not-a-uuid/poster".to_string(),
-            ),
-            (
                 "a variant this kind does not have",
                 format!("/v1/artwork/movie/{with_art}/thumbnail"),
             ),
@@ -386,6 +382,30 @@ mod tests {
                 .await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{case}");
         }
+    }
+
+    /// An id that is not a UUID is the caller's mistake, and it gets the same
+    /// answer here as from the detail route, `/sources` and the admin refresh.
+    /// This route used to fold it into the 404 above, so four routes over one
+    /// identifier gave two answers to one condition.
+    #[tokio::test]
+    async fn a_malformed_id_is_a_400_like_every_other_media_id_route() {
+        let fixture = fixture(InMemoryArtworkFetcher::new());
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        client
+            .get("/v1/artwork/movie/not-a-uuid/poster")
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
+        assert_eq!(
+            fixture.fetcher.call_count(),
+            0,
+            "a request that names nothing must not reach the provider",
+        );
     }
 
     /// A provider that has dropped the image degrades to the same placeholder
@@ -406,6 +426,57 @@ mod tests {
             .await;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The provider answered and Beam could not use the answer. That is the
+    /// provider's fault, and it is reported as one: a 502, not the `internal`
+    /// that would send an operator looking for a bug in Beam.
+    #[tokio::test]
+    async fn a_provider_that_answers_unusably_is_a_502() {
+        let fixture = fixture(
+            InMemoryArtworkFetcher::new()
+                .with_error(POSTER_URL, ArtworkFetchError::Upstream { status: 503 }),
+        );
+        let id = movie_with_poster(&fixture, Some(POSTER_URL)).await;
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        client
+            .get(&format!("/v1/artwork/movie/{id}/poster"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_GATEWAY)
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#artwork-upstream-failed",
+            );
+    }
+
+    /// A stored URL the fetcher refuses never produced a request, so nothing
+    /// upstream can have failed: enrichment wrote bad data onto a row, and
+    /// that is Beam's fault. Reporting it as a provider failure would tell an
+    /// operator to wait for a CDN that was never asked anything.
+    #[tokio::test]
+    async fn a_stored_url_beam_refuses_to_fetch_is_beams_own_fault() {
+        const PLAIN_HTTP: &str = "http://image.tmdb.org/t/p/w500/poster.jpg";
+        let fixture = fixture(InMemoryArtworkFetcher::new().with_error(
+            PLAIN_HTTP,
+            ArtworkFetchError::Refused {
+                url: PLAIN_HTTP.to_string(),
+                reason: "not https".to_string(),
+            },
+        ));
+        let id = movie_with_poster(&fixture, Some(PLAIN_HTTP)).await;
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        client
+            .get(&format!("/v1/artwork/movie/{id}/poster"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
     }
 
     #[tokio::test]

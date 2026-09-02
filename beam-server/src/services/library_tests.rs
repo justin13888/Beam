@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_library_propagates_validator_validation_error() {
+    async fn test_create_library_propagates_a_path_outside_the_root() {
         let video_dir = PathBuf::from("/media/videos");
         let service = LocalLibraryService::new(
             Arc::new(InMemoryLibraryRepository::default()),
@@ -238,14 +238,16 @@ mod tests {
             video_dir.clone(),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::validation_error("path escapes root")),
+            Arc::new(InMemoryPathValidator::path_outside_root(
+                "path escapes root",
+            )),
         );
 
         let result = service
             .create_library("Outside".to_string(), "/etc/secret".to_string())
             .await;
 
-        assert!(matches!(result, Err(LibraryError::Validation(_))));
+        assert!(matches!(result, Err(LibraryError::PathOutsideRoot(_))));
     }
 
     #[tokio::test]
@@ -705,6 +707,22 @@ mod os_path_validator {
         OsPathValidator.validate_library_path(requested, root)
     }
 
+    /// The rejection's message reaches an administrator's browser as the
+    /// `detail` of a 400, so it must not name either the path that was asked
+    /// for or the root it was checked against (NFR-108). The paths go to the
+    /// log instead.
+    fn assert_names_no_path(err: &LibraryError, paths: &[&Path]) {
+        let message = err.to_string();
+        for path in paths {
+            let path = path.to_string_lossy();
+            assert!(
+                !message.contains(path.as_ref()),
+                "a client-facing rejection must not carry a filesystem path; \
+                 {message:?} names {path:?}"
+            );
+        }
+    }
+
     #[test]
     fn absolute_path_inside_root_is_accepted_and_canonicalized() {
         let (_tmp, root) = root_with_children();
@@ -733,7 +751,7 @@ mod os_path_validator {
         // canonicalize step and must be caught by the containment check itself.
         let err = validate(Path::new("movies/../.."), &root).expect_err("escapes root");
         assert!(
-            matches!(err, LibraryError::Validation(_)),
+            matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
     }
@@ -751,9 +769,10 @@ mod os_path_validator {
         let outside = TempDir::new().expect("other temp dir");
         let err = validate(outside.path(), &root).expect_err("outside root");
         assert!(
-            matches!(err, LibraryError::Validation(_)),
+            matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
+        assert_names_no_path(&err, &[&root, outside.path()]);
     }
 
     #[cfg(unix)]
@@ -768,9 +787,12 @@ mod os_path_validator {
         // This is the case a naive starts_with on the *requested* path would miss.
         let err = validate(Path::new("escape"), &root).expect_err("symlink escapes root");
         assert!(
-            matches!(err, LibraryError::Validation(_)),
+            matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
+        // The resolved target is the one a naive message would print, and it
+        // is exactly the location an administrator would rather not disclose.
+        assert_names_no_path(&err, &[&root, &outside_real]);
     }
 
     #[cfg(unix)]
@@ -796,7 +818,7 @@ mod os_path_validator {
 
         let err = validate(&evil, &root).expect_err("sibling is not inside root");
         assert!(
-            matches!(err, LibraryError::Validation(_)),
+            matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
     }
@@ -820,6 +842,8 @@ mod os_path_validator {
             matches!(err, LibraryError::PathNotFound(_)),
             "expected PathNotFound, got {err:?}"
         );
+        // This one used to be the root path verbatim, as the whole message.
+        assert_names_no_path(&err, &[&missing_root]);
     }
 
     #[test]

@@ -313,10 +313,13 @@ The site serves a custom Astro landing page at `/` (`src/pages/index.astro`, out
 collection) and Starlight docs for every other route, grouped as Start here / Using Beam / Running
 Beam / Reference / Help — the middle two map to the two personas in
 [`../requirements/product.md`](../requirements/product.md). The error reference
-(`reference/errors`) is the only page coupled to server behavior: it catalogues the statuses and
-response bodies produced by `ApiError`, `FileDeliveryError`, `OidcCallbackError`, `OidcAuthError`,
-the rate limiter, the same-origin hoop, and the health endpoint. **A change to any of those is not
-complete until both [`api.md`](api.md)'s error bullet and that page are updated.**
+(`reference/errors`) is the only page coupled to server behavior: it carries one section per
+problem `type` the server can emit, and each `type` URI is a fragment addressing that section.
+**A change to any error enum is not complete until both [`api.md`](api.md)'s error bullet and that
+page are updated** — and `routes/taxonomy_tests.rs` now fails the build when the page and the
+`#[problem(type = ...)]` attributes describe different sets, so this is a check rather than a
+convention. The four enums this paragraph used to name were replaced by a per-operation family in
+the Kynos migration; the test is what stops that list going stale again.
 
 Content lives under `src/content/docs/` (Starlight collection schema in `src/content.config.ts`,
 stock `docsSchema()` with no extension); the sidebar is declared explicitly in `astro.config.mjs`

@@ -121,7 +121,7 @@ hooks {
                 glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json")
                 check = "mise run ts:check"
             }
-            // TODO(#146): restore `ts-typecheck` and `ts-test`.
+            // TODO(#146): restore `ts-typecheck`.
             //
             // Disabled in step with the `ci` task in mise.toml, which is the point of
             // routing both through `mise run`: the hook and CI must not disagree about
@@ -134,10 +134,12 @@ hooks {
             //     glob = List("*.ts", "*.tsx", "*.json")
             //     check = "mise run ts:typecheck"
             // }
-            // ["ts-test"] {
-            //     glob = List("*.ts", "*.tsx")
-            //     check = "mise run ts:test"
-            // }
+            // Not gated on #146: vitest resolves through Vite and never needs the
+            // generated types to exist, so the suite runs on a fresh checkout.
+            ["ts-test"] {
+                glob = List("*.ts", "*.tsx")
+                check = "mise run ts:test"
+            }
             // Without this a docs-only change is pushed unverified, because none of the ts-*
             // steps above build beam-docs. Narrower than ci.yml's `docs` filter, which also
             // watches mise.toml and the workflows; hk globs file paths, and firing a docs

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as factory from "@/test/factories";
 import { BASE_URL } from "@/test/handlers";
 import { renderRoute } from "@/test/harness";
+import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
@@ -52,10 +53,7 @@ describe("/libraries", () => {
 	it("surfaces a failed delete as an error toast rather than silently", async () => {
 		serveLibraries(
 			http.delete(`${BASE_URL}/v1/admin/libraries/:id`, () =>
-				HttpResponse.json(
-					{ message: "boom", code: "internal" },
-					{ status: 500 },
-				),
+				problem(500, "boom", "#internal"),
 			),
 		);
 		vi.stubGlobal(
@@ -102,16 +100,65 @@ describe("/libraries", () => {
 	it("surfaces a failed list as an error state with a retry", async () => {
 		server.use(
 			http.get(`${BASE_URL}/v1/libraries`, () =>
-				HttpResponse.json(
-					{ message: "boom", code: "internal" },
-					{ status: 500 },
-				),
+				problem(500, "boom", "#internal"),
 			),
 		);
 		renderRoute("/libraries");
 
 		expect(
 			await screen.findByText(/Failed to load libraries/),
+		).toBeInTheDocument();
+	});
+
+	// A 500's `detail` is diagnostic text that frequently interpolates an
+	// internal error, so it is the one case where the server's own words are
+	// deliberately not shown (NFR-108). The test above asserts the fallback;
+	// this asserts that the internal message did not come with it.
+	it("does not put a 500's internal message in front of a viewer", async () => {
+		server.use(
+			http.get(`${BASE_URL}/v1/libraries`, () =>
+				problem(500, "Database error: connection refused", "#internal"),
+			),
+		);
+		renderRoute("/libraries");
+
+		await screen.findByText(/Failed to load libraries/);
+		expect(screen.queryByText(/connection refused/)).not.toBeInTheDocument();
+	});
+
+	// The bug this whole path existed to hide: every call site threw a
+	// hardcoded string and discarded the body, so a viewer saw the same seven
+	// words whichever of these came back.
+	it("shows the server's own explanation for a client error", async () => {
+		// Asserted on the create mutation, not on the list. `GET /v1/libraries`
+		// reads a collection and parses no id, so this branch removed its 400
+		// and 404 -- it declares 200/401/403/500 and has no coded client error
+		// at all. The fixture this replaces served it a 400 `#invalid-library-id`,
+		// a response that operation cannot produce, so it proved nothing about
+		// what a viewer would ever see. `POST /v1/admin/libraries` does declare
+		// a 400, and it is the one a person actually hits: a root path that is
+		// not there.
+		serveLibraries(
+			http.post(`${BASE_URL}/v1/admin/libraries`, () =>
+				problem(
+					400,
+					"/media/nope does not exist on the server",
+					"#library-path-not-found",
+				),
+			),
+		);
+		const user = userEvent.setup();
+		renderRoute("/libraries");
+
+		await user.click(
+			await screen.findByRole("button", { name: /Add Library/ }),
+		);
+		await user.type(screen.getByLabelText("Name"), "Shows");
+		await user.type(screen.getByLabelText("Root Path"), "/media/nope");
+		await user.click(screen.getByRole("button", { name: "Create" }));
+
+		expect(
+			await screen.findByText(/does not exist on the server/),
 		).toBeInTheDocument();
 	});
 
@@ -147,10 +194,7 @@ describe("/libraries", () => {
 	it("surfaces a failed create as an error toast and keeps the form open", async () => {
 		serveLibraries(
 			http.post(`${BASE_URL}/v1/admin/libraries`, () =>
-				HttpResponse.json(
-					{ message: "boom", code: "internal" },
-					{ status: 500 },
-				),
+				problem(500, "boom", "#internal"),
 			),
 		);
 		const user = userEvent.setup();

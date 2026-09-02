@@ -22,6 +22,17 @@ public data class BeamFailure(
  * Deliberately exhaustive over [BeamException] rather than falling back to
  * `toString()`: an error surfaced to a user should read as a sentence about
  * their situation, not as a debug representation of ours.
+ *
+ * The *message* is decided here, because it is UI copy. Whether a retry is
+ * honest is decided by the core: `Network` and `Server` both carry the verdict
+ * on the error itself, so this file reads it rather than deriving it. It used
+ * to derive it, and offered a retry for every `Server` status -- including a
+ * 415 or a 422, which three operations declare, where resending the same
+ * refused body fails identically forever.
+ *
+ * Read as a field rather than through an exported function on purpose: this
+ * mapping is exercised by hermetic JVM unit tests with no native library
+ * loaded, and a call into the core would make every one of them need one.
  */
 public fun BeamException.toFailure(): BeamFailure =
     when (this) {
@@ -89,7 +100,7 @@ public fun BeamException.toFailure(): BeamFailure =
         is BeamException.Server -> {
             BeamFailure(
                 message = "The server had a problem handling that.",
-                retryable = true,
+                retryable = retryable,
             )
         }
 

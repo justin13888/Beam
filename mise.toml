@@ -1174,15 +1174,24 @@ depends = [
     "check:mutants-skip-fakes",
     "codegen:openapi:check",
     "ts:check",
-    # TODO(#146): restore "ts:typecheck" and "ts:test".
+    "ts:test",
+    # TODO(#146): restore "ts:typecheck".
     #
     # beam-web is generated from `api.gen.ts`, which cannot be regenerated
     # until the TypeScript toolchain reads OpenAPI 3.2 (see codegen:openapi).
-    # Every schema key it names was renamed by the Kynos port, so both gates
-    # fail on ~55 references across 20 files. beam-web is being rewritten
-    # shortly, so they are off rather than mechanically renamed twice.
+    # Every schema key it names was renamed by the Kynos port, so the gate
+    # fails on ~55 references across 20 files -- all of them
+    # `Cannot find module '@/api.gen'` in a fresh checkout. beam-web is being
+    # rewritten shortly, so it is off rather than mechanically renamed twice.
     #
     # `ts:check` stays: biome excludes api.gen.ts and does not type-check.
+    # `ts:test` is back: it was switched off alongside `ts:typecheck` rather
+    # than for a reason of its own. vitest resolves through Vite, which does
+    # not need the generated types to exist, so the suite runs on a fresh
+    # checkout. It was off while over half of its suites were silently not
+    # running at all (the Node >= 26 `localStorage` shadowing fixed in
+    # `src/test/setup.ts`), which is exactly the state a gate exists to catch.
+    # ci.yml's ts-test job and the pre-push hook in hk.pkl enforce the same.
     "docs:build",
     "android:lint",
     "android:test",

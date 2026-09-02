@@ -1,5 +1,6 @@
 import { HttpResponse, http } from "msw";
 import type { components } from "@/api.gen";
+import { problem } from "@/test/problem";
 import * as factory from "./factories";
 
 /**
@@ -74,10 +75,7 @@ export const handlers = [
 		HttpResponse.json(emptyMediaConnection),
 	),
 	http.get(`${BASE_URL}/v1/media/:id`, () =>
-		HttpResponse.json(
-			{ message: "Not found", code: "not_found" },
-			{ status: 404 },
-		),
+		problem(404, "Not found", "#media-not-found"),
 	),
 	http.get(`${BASE_URL}/v1/media/:id/sources`, () =>
 		HttpResponse.json<Schemas["beam_server.models.media.source.MediaSource"][]>(
@@ -95,10 +93,7 @@ export const handlers = [
 		HttpResponse.json<Schemas["beam_server.models.library.Library"][]>([]),
 	),
 	http.get(`${BASE_URL}/v1/libraries/:id`, () =>
-		HttpResponse.json(
-			{ message: "Not found", code: "not_found" },
-			{ status: 404 },
-		),
+		problem(404, "No library has that id", "#library-not-found"),
 	),
 	http.get(`${BASE_URL}/v1/libraries/:id/files`, () =>
 		HttpResponse.json<Schemas["beam_server.models.library.file.LibraryFile"][]>(
@@ -159,10 +154,7 @@ export const handlers = [
 
 /** Reusable override for an unauthenticated / expired session. */
 export const meUnauthenticatedHandler = http.get(`${BASE_URL}/v1/me`, () =>
-	HttpResponse.json(
-		{ message: "Missing session cookie", code: "unauthorized" },
-		{ status: 401 },
-	),
+	problem(401, "Missing session cookie"),
 );
 
 /** Reusable override for an authenticated admin. */

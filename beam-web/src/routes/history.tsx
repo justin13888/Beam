@@ -19,6 +19,7 @@ import type { components } from "@/api.gen";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
 import { artworkSrc } from "@/lib/artwork";
+import { apiError } from "@/lib/problem";
 
 type HistoryItem =
 	components["schemas"]["beam_server.services.playback.HistoryItem"];
@@ -50,7 +51,7 @@ async function fetchMediaMetadata(
 		credentials: "include",
 	});
 	if (response.status === 404) return null;
-	if (error) throw new Error("Failed to load media metadata");
+	if (error) throw apiError(error, "Failed to load media metadata");
 	return data ?? null;
 }
 
@@ -96,7 +97,7 @@ export function HistoryPage() {
 				credentials: "include",
 			});
 			if (error || data === undefined) {
-				throw new Error("Failed to load watch history");
+				throw apiError(error, "Failed to load watch history");
 			}
 			return data;
 		},
@@ -129,7 +130,7 @@ export function HistoryPage() {
 			},
 		);
 		if (error || !response.ok) {
-			toast.error("Failed to reset progress");
+			toast.error(apiError(error, "Failed to reset progress").message);
 			return;
 		}
 		navigate({

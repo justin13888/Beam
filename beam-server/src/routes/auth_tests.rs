@@ -593,7 +593,9 @@ mod tests {
         // the stable half of it -- the message never was contractual.
         response
             .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type("https://beam.justinchung.net/reference/errors/bad-request");
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#login-attempt-invalid",
+            );
     }
 
     #[tokio::test]
@@ -695,7 +697,7 @@ mod tests {
         let response = do_callback(&harness, &state_cookie2, &begin2.state).await;
         response
             .assert_status(StatusCode::FORBIDDEN)
-            .assert_problem_type("https://beam.justinchung.net/reference/errors/forbidden");
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#account-disabled");
         assert!(
             live_cookie(&response, SESSION_COOKIE).is_none(),
             "a disabled account must not receive a session cookie"
@@ -890,6 +892,35 @@ mod tests {
             .send()
             .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A well-formed id nobody owns is a 401; a malformed one is a 400.
+    ///
+    /// It used to be a 500 for both a malformed id and a genuine store fault,
+    /// because the handler flattened every `SessionError` into `Internal` --
+    /// so the 400 the operation declared had nothing that could produce it.
+    /// Only the SQL store could reveal that: the in-memory double answered
+    /// `Ok(false)` here, which the handler reads as 401, so the two stores gave
+    /// different statuses for the same request. The shared `SessionStore`
+    /// contract now pins the store half; this pins the route half.
+    #[tokio::test]
+    async fn delete_malformed_session_id_returns_400() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "sessions3@example.com",
+            true,
+        )));
+        let session_cookie = login_and_get_session_cookie(&harness, "sessions3@example.com").await;
+
+        harness
+            .client
+            .delete("/v1/sessions/not-a-uuid")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#invalid-session-id",
+            );
     }
 
     #[tokio::test]

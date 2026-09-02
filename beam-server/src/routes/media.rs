@@ -5,10 +5,11 @@
 
 use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::models::search::{MediaConnection, MediaSortField, MediaTypeFilter, SortOrder};
 use crate::models::{MediaMetadata, MediaSource};
-use crate::routes::api_error::{LookupError, MutationError, SessionAuth};
+use crate::routes::api_error::{MediaLookupError, MediaSourcesError, SessionAuth};
 use crate::routes::tags::Media;
 use crate::services::metadata::{MediaSearchFilters, MetadataError};
 use crate::state::AppState;
@@ -114,10 +115,22 @@ pub async fn get_media_detail(
     _auth: SessionAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<MediaMetadata>, LookupError> {
+) -> Result<Json<MediaMetadata>, MediaLookupError> {
+    // Parsed here rather than inside the lookup: `get_media_metadata` returns
+    // `Option`, so a malformed id and a well-formed miss arrive
+    // indistinguishable and both used to answer 404 -- while `/sources` and the
+    // refresh route, sharing this same path parameter, answered 400. Doing it
+    // before the call is what lets the two be told apart at all.
+    if Uuid::parse_str(&path.id).is_err() {
+        return Err(MediaLookupError::InvalidMediaId(format!(
+            "{} is not a valid media id",
+            path.id
+        )));
+    }
+
     match state.services.metadata.get_media_metadata(&path.id).await {
         Some(metadata) => Ok(Json(metadata)),
-        None => Err(LookupError::NotFound(format!(
+        None => Err(MediaLookupError::MediaNotFound(format!(
             "media {} not found",
             path.id
         ))),
@@ -135,15 +148,21 @@ pub async fn get_media_sources(
     _auth: SessionAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<MediaSource>>, MutationError> {
+) -> Result<Json<Vec<MediaSource>>, MediaSourcesError> {
     match state.services.metadata.get_media_sources(&path.id).await {
         Ok(sources) => Ok(Json(sources)),
-        Err(MetadataError::MediaNotFound) => Err(MutationError::NotFound(format!(
+        Err(MetadataError::InvalidId) => Err(MediaSourcesError::InvalidMediaId(format!(
+            "media id {} is not a valid identifier",
+            path.id
+        ))),
+        Err(MetadataError::MediaNotFound) => Err(MediaSourcesError::MediaNotFound(format!(
             "media {} not found",
             path.id
         ))),
-        Err(MetadataError::Unsupported(msg)) => Err(MutationError::BadRequest(msg)),
-        Err(MetadataError::InternalError(msg)) => Err(MutationError::Internal(msg)),
+        Err(MetadataError::Unsupported(msg)) => {
+            Err(MediaSourcesError::SourcesNotAvailableForShow(msg))
+        }
+        Err(MetadataError::InternalError(msg)) => Err(MediaSourcesError::Internal(msg)),
     }
 }
 

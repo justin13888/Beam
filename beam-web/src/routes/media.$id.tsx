@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/auth";
 import { usePlaybackBeacon } from "@/hooks/usePlaybackBeacon";
 import { apiClient } from "@/lib/apiClient";
 import { artworkSrc } from "@/lib/artwork";
+import { apiError } from "@/lib/problem";
 import { nextPlayableEpisode } from "@/lib/upNext";
 import { formatDuration } from "@/lib/utils";
 
@@ -32,7 +33,7 @@ const mediaQueryOptions = (mediaId: string) =>
 				credentials: "include",
 			});
 			if (response.status === 404) return null;
-			if (error) throw new Error("Failed to load media metadata");
+			if (error) throw apiError(error, "Failed to load media metadata");
 			return data ?? null;
 		},
 	});
@@ -97,7 +98,7 @@ export function MediaDetailPage({
 				},
 			);
 			if (error || !response.ok) {
-				throw new Error("Failed to request a metadata refresh");
+				throw apiError(error, "Failed to request a metadata refresh");
 			}
 		},
 		onSuccess: () => {
@@ -105,8 +106,10 @@ export function MediaDetailPage({
 				"Metadata refresh queued -- it will be re-fetched on the next enrichment sweep",
 			);
 		},
-		onError: () => {
-			toast.error("Failed to request a metadata refresh");
+		onError: (error) => {
+			// The thrown ApiError already carries the server's explanation and
+			// its fallback; re-stating a fixed string here discarded it.
+			toast.error(error.message);
 		},
 	});
 
@@ -142,7 +145,7 @@ export function MediaDetailPage({
 				},
 			);
 			if (response.status === 404 || response.status === 400) return [];
-			if (error) throw new Error("Failed to load media sources");
+			if (error) throw apiError(error, "Failed to load media sources");
 			return data ?? [];
 		},
 		enabled: !!playableId,
@@ -166,7 +169,7 @@ export function MediaDetailPage({
 				params: { query: { limit: 100 } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load playback progress");
+			if (error) throw apiError(error, "Failed to load playback progress");
 			return data ?? [];
 		},
 	});

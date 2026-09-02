@@ -6,6 +6,7 @@ import type { components } from "@/api.gen";
 import * as factory from "@/test/factories";
 import { BASE_URL, meUnauthenticatedHandler } from "@/test/handlers";
 import { renderRoute, waitForRouter } from "@/test/harness";
+import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
@@ -41,7 +42,7 @@ function serveSessions(status = 200) {
 		http.get(`${BASE_URL}/v1/sessions`, () =>
 			status === 200
 				? HttpResponse.json([sessionA, sessionB])
-				: HttpResponse.json({ message: "boom", code: "internal" }, { status }),
+				: problem(status, "boom", "#internal"),
 		),
 	);
 }
@@ -145,5 +146,28 @@ describe("/profile", () => {
 		expect(
 			await screen.findByText(/Failed to load active sessions/),
 		).toBeInTheDocument();
+	});
+
+	// The sessions list renders its query error inline rather than through the
+	// route error boundary, so the taxonomy has to reach the screen by a
+	// different path than the one RouteError.test.tsx covers. A 4xx problem
+	// document's own sentence is shown; the fallback is not.
+	it("shows the server's explanation when the sessions request is refused", async () => {
+		server.use(
+			http.get(`${BASE_URL}/v1/me`, () =>
+				HttpResponse.json(factory.user({ display_name: "Ada Lovelace" })),
+			),
+			http.get(`${BASE_URL}/v1/sessions`, () =>
+				problem(403, "This account has been removed", "#account-removed"),
+			),
+		);
+		renderRoute("/profile");
+
+		expect(
+			await screen.findByText(/This account has been removed/),
+		).toBeInTheDocument();
+		expect(
+			screen.queryByText(/Failed to load active sessions/),
+		).not.toBeInTheDocument();
 	});
 });

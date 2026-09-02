@@ -47,6 +47,8 @@ pub enum BeamError {
     Forbidden {
         /// The server's explanation.
         detail: String,
+        /// The problem document's `type`. See [`BeamError::NotFound`].
+        code: String,
     },
 
     /// The resource does not exist, or was removed by a rescan.
@@ -54,6 +56,16 @@ pub enum BeamError {
     NotFound {
         /// The server's explanation.
         detail: String,
+        /// The problem document's `type`: the stable identifier for *which*
+        /// failure this is, where the status alone cannot say.
+        ///
+        /// `media-not-found` and `source-file-missing` are both 404s and want
+        /// different words in front of a viewer -- the second means the
+        /// library and the disk have diverged, which is an operator's problem
+        /// rather than the viewer's. `about:blank` when the framework answered
+        /// rather than the application, which RFC 9457 defines as "the status
+        /// code is the whole story".
+        code: String,
     },
 
     /// The server rejected the request as malformed.
@@ -61,6 +73,8 @@ pub enum BeamError {
     BadRequest {
         /// The server's explanation.
         detail: String,
+        /// The problem document's `type`. See [`BeamError::NotFound`].
+        code: String,
     },
 
     /// Rate limited. `beam-server` applies this to the browse/search class and
@@ -76,8 +90,23 @@ pub enum BeamError {
     Server {
         /// The HTTP status code.
         status: u16,
+        /// Whether the same request could plausibly succeed later.
+        ///
+        /// Carried rather than re-derived, the same way [`BeamError::Network`]
+        /// carries its own. A status is not something a client can reason
+        /// about on its own here: 5xx means the server failed to handle a
+        /// request it accepted, while a 4xx that reaches this variant -- a 415
+        /// or a 422, which three operations declare -- is the request itself
+        /// being refused, and resending it unchanged fails identically.
+        /// Kotlin and Swift each used to decide that for themselves and both
+        /// answered "retryable" unconditionally, so a schema-rejected body got
+        /// a retry button forever. Deciding it once, here, is what makes that
+        /// unrepresentable rather than merely fixed.
+        retryable: bool,
         /// The server's explanation, where it sent one.
         detail: String,
+        /// The problem document's `type`. See [`BeamError::NotFound`].
+        code: String,
     },
 
     /// The request never produced a response.
@@ -116,21 +145,72 @@ pub enum BeamError {
 }
 
 impl BeamError {
-    /// Whether retrying the identical request could plausibly succeed.
+    /// Whether retrying the identical request *now* could plausibly succeed.
     ///
-    /// Used by the playback-progress queue to decide between enqueueing and
-    /// dropping. Deliberately conservative: an error whose retryability is
-    /// unclear is treated as *not* retryable, so a permanently-failing sample
-    /// cannot occupy the queue forever.
+    /// Not exported across the FFI: Kotlin and Swift read the `retryable`
+    /// field that [`BeamError::Server`] and [`BeamError::Network`] carry, which
+    /// is where the verdict for a status is decided once. Deliberately
+    /// conservative: an error whose retryability is unclear is treated as *not*
+    /// retryable. Whether a failed progress sample is kept is a different
+    /// question -- see [`BeamError::is_permanent`].
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Network { retryable, .. } => *retryable,
             Self::RateLimited { .. } => true,
             // 5xx is the server failing to handle a request it accepted;
-            // the same request may well succeed later.
-            Self::Server { status, .. } => *status >= 500,
+            // the same request may well succeed later. A 4xx that reached
+            // here -- a 415 or a 422 on the three operations that declare
+            // them -- is the request itself being refused, and resending it
+            // unchanged fails identically.
+            Self::Server { retryable, .. } => *retryable,
+            // The device could not write, not the server could not be asked.
+            // A full disk or a locked keystore clears, and the viewer who
+            // frees space has a real path to success -- so this is stated
+            // rather than left to the catch-all below, which had it backwards.
+            // Android said retryable here and gave that reason; Rust said not
+            // and gave none, because `Storage` simply fell through `_`.
+            Self::Storage { .. } => true,
             _ => false,
+        }
+    }
+
+    /// Whether the identical request will fail identically until the request
+    /// itself changes -- so retrying it later, after anything at all has
+    /// happened, is pointless.
+    ///
+    /// This is the question the playback-progress queue asks, and it is not
+    /// the complement of [`is_retryable`](Self::is_retryable). Three failures
+    /// are not retryable *now* and yet are the whole reason the queue exists:
+    /// an expired session, a missing one, and a certificate the user has not
+    /// yet trusted. Each clears the moment the user acts, and the sample is
+    /// then accepted unchanged -- dropping it would lose exactly the resume
+    /// point that an interrupted session is supposed to preserve. Every
+    /// variant is named so a new one has to say which side it is on.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            // The request itself is refused: a body the schema rejects, a
+            // file the user may not touch, a title that no longer exists, a
+            // response that does not match the contract. Resending it changes
+            // nothing.
+            Self::BadRequest { .. }
+            | Self::Forbidden { .. }
+            | Self::NotFound { .. }
+            | Self::Protocol { .. }
+            | Self::InvalidServerUrl { .. } => true,
+            // Carried on the error, decided once at the transport.
+            Self::Server { retryable, .. } | Self::Network { retryable, .. } => !*retryable,
+            // Cured by the user acting: signing in, or trusting the
+            // certificate. The sample waits for them.
+            Self::SessionExpired | Self::Unauthenticated | Self::UntrustedCertificate { .. } => {
+                false
+            }
+            // Cured by time or by the device: the limiter's window passes, the
+            // disk is emptied, the keystore unlocks.
+            Self::RateLimited { .. } | Self::Storage { .. } => false,
+            // Cured by selecting or adding a server.
+            Self::NoActiveServer | Self::UnknownServer { .. } => false,
         }
     }
 }
@@ -262,28 +342,6 @@ mod tests {
     }
 
     #[test]
-    fn server_errors_are_retryable_only_from_500_up() {
-        for status in [500_u16, 502, 503] {
-            assert!(
-                BeamError::Server {
-                    status,
-                    detail: String::new(),
-                }
-                .is_retryable(),
-                "{status} should be retryable"
-            );
-        }
-        // A 4xx that reached the Server variant is still the caller's fault.
-        assert!(
-            !BeamError::Server {
-                status: 418,
-                detail: String::new(),
-            }
-            .is_retryable()
-        );
-    }
-
-    #[test]
     fn rate_limiting_is_retryable_but_authentication_is_not() {
         assert!(
             BeamError::RateLimited {
@@ -295,10 +353,94 @@ mod tests {
         assert!(!BeamError::Unauthenticated.is_retryable());
         assert!(
             !BeamError::NotFound {
-                detail: String::new()
+                detail: String::new(),
+                code: String::new(),
             }
             .is_retryable()
         );
+    }
+
+    /// The distinction the progress queue lives on: not retryable now is not
+    /// the same as never worth retrying.
+    #[test]
+    fn a_credential_or_trust_failure_is_not_permanent_while_a_refusal_is() {
+        for kept in [
+            BeamError::SessionExpired,
+            BeamError::Unauthenticated,
+            BeamError::UntrustedCertificate {
+                host: "beam.test".to_owned(),
+                details: CertificateDetails {
+                    sha256_fingerprint: "AA:BB".to_owned(),
+                    spki_sha256_base64: "c3BraQ==".to_owned(),
+                    subject: "CN=beam.local".to_owned(),
+                    issuer: "CN=beam.local".to_owned(),
+                    not_before_unix: 0,
+                    not_after_unix: i64::MAX,
+                    subject_alt_names: vec!["beam.local".to_owned()],
+                    serial_hex: "01".to_owned(),
+                    is_self_signed: true,
+                    is_expired: false,
+                },
+            },
+        ] {
+            assert!(
+                !kept.is_retryable() && !kept.is_permanent(),
+                "{kept:?} waits for the user, so it is neither retryable now nor dropped"
+            );
+        }
+
+        for refused in [
+            BeamError::BadRequest {
+                detail: String::new(),
+                code: String::new(),
+            },
+            BeamError::Forbidden {
+                detail: String::new(),
+                code: String::new(),
+            },
+            BeamError::NotFound {
+                detail: String::new(),
+                code: String::new(),
+            },
+            BeamError::Protocol {
+                detail: String::new(),
+            },
+            BeamError::Server {
+                status: 422,
+                retryable: false,
+                detail: String::new(),
+                code: String::new(),
+            },
+        ] {
+            assert!(
+                refused.is_permanent() && !refused.is_retryable(),
+                "{refused:?} fails identically forever"
+            );
+        }
+
+        for transient in [
+            BeamError::RateLimited {
+                retry_after_secs: 1,
+            },
+            BeamError::Server {
+                status: 503,
+                retryable: true,
+                detail: String::new(),
+                code: String::new(),
+            },
+            BeamError::Network {
+                detail: String::new(),
+                retryable: true,
+            },
+            BeamError::Storage {
+                detail: String::new(),
+            },
+        ] {
+            assert!(
+                transient.is_retryable() && !transient.is_permanent(),
+                "{transient:?} is worth retrying, so it cannot also be permanent"
+            );
+        }
     }
 
     #[test]
@@ -308,6 +450,10 @@ mod tests {
         }
         .into();
         assert!(matches!(widened, BeamError::Storage { .. }));
-        assert!(!widened.is_retryable());
+        // Retryable: the keystore unlocks, the disk is emptied. This used to
+        // assert the opposite while `BeamErrorsTest.kt` asserted this, in the
+        // same change -- neither could see the other, because the core's
+        // verdict never crossed the FFI.
+        assert!(widened.is_retryable());
     }
 }

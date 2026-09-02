@@ -6,6 +6,7 @@ import type { components } from "@/api.gen";
 import * as factory from "@/test/factories";
 import { BASE_URL } from "@/test/handlers";
 import { renderRoute, waitForRouter } from "@/test/harness";
+import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
@@ -97,10 +98,7 @@ function serveMedia(
 		http.get(`${BASE_URL}/v1/media/:id`, () =>
 			metadata
 				? HttpResponse.json(metadata)
-				: HttpResponse.json(
-						{ message: "Not found", code: "not_found" },
-						{ status: 404 },
-					),
+				: problem(404, "Not found", "#media-not-found"),
 		),
 		http.get(`${BASE_URL}/v1/media/:id/sources`, () =>
 			HttpResponse.json(sources),
@@ -303,10 +301,7 @@ describe("/media/$id (show)", () => {
 	it("renders the route's error component when the media document fails to load", async () => {
 		server.use(
 			http.get(`${BASE_URL}/v1/media/:id`, () =>
-				HttpResponse.json(
-					{ message: "boom", code: "internal" },
-					{ status: 500 },
-				),
+				problem(500, "boom", "#internal"),
 			),
 		);
 		renderRoute("/media/movie-1");

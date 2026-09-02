@@ -28,8 +28,15 @@ pub struct SessionData {
 pub enum SessionError {
     #[error("Database error: {0}")]
     Db(#[from] sea_orm::DbErr),
-    #[error("Invalid user ID: {0}")]
-    InvalidUserId(#[from] uuid::Error),
+    /// A caller-supplied identifier is not a UUID.
+    ///
+    /// Named for the shape rather than the field: `delete_by_id` parses the
+    /// session id through it as well as the user id, and only the session id
+    /// can actually be malformed -- the user id comes from an authenticated
+    /// session. A handler that cannot tell this from a database failure
+    /// reports a client's typo as a 500.
+    #[error("Invalid id: {0}")]
+    InvalidId(#[from] uuid::Error),
 }
 
 type Result<T> = std::result::Result<T, SessionError>;
@@ -464,6 +471,13 @@ pub mod in_memory {
         }
 
         async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool> {
+            // Parsed, not string-compared. The SQL store parses before it
+            // queries, so a malformed id is an error there; answering
+            // `Ok(false)` here made the double say "no such session" for input
+            // production rejects outright, and the handler above cannot tell
+            // those two apart. The shared contract pins it for both.
+            let _: Uuid = id.parse()?;
+            let _: Uuid = user_id.parse()?;
             let mut sessions = self.lock_sessions();
             let key = sessions
                 .iter()

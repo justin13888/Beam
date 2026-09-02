@@ -29,7 +29,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::models::media::{ArtworkKind, ArtworkVariant};
-use crate::routes::api_error::{DeliveryError, SessionAuth};
+use crate::routes::api_error::{ArtworkError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::tags::Media;
 use crate::state::AppState;
@@ -62,14 +62,15 @@ pub type ArtworkDelivery = RuntimeDelivery<ArtworkRanges>;
 ///
 /// `None` covers three cases that are one answer to a client: the title does
 /// not exist, it exists but has no art yet, and the variant does not apply to
-/// this kind of title.
+/// this kind of title. An id that is not an id at all is not among them: that
+/// is the caller's mistake, and it gets the same 400 every other media-id
+/// route gives it rather than being folded into the miss.
 async fn upstream_url(
     state: &AppState,
     path: &ArtworkPath,
-) -> Result<Option<String>, DeliveryError> {
-    let Ok(id) = Uuid::parse_str(&path.id) else {
-        return Ok(None);
-    };
+) -> Result<Option<String>, ArtworkError> {
+    let id = Uuid::parse_str(&path.id)
+        .map_err(|_| ArtworkError::InvalidId(format!("Invalid media id: {}", path.id)))?;
     let services = &state.services;
 
     let url = match (path.kind, path.variant) {
@@ -112,9 +113,9 @@ async fn upstream_url(
     Ok(url)
 }
 
-fn lookup_failed(err: sea_orm::DbErr) -> DeliveryError {
+fn lookup_failed(err: sea_orm::DbErr) -> ArtworkError {
     error!(?err, "artwork title lookup failed");
-    DeliveryError::Internal("Failed to look up artwork".into())
+    ArtworkError::Internal("Failed to look up artwork".into())
 }
 
 /// Builds the delivery both methods share.
@@ -122,9 +123,9 @@ async fn deliver(
     state: &AppState,
     path: &ArtworkPath,
     conditions: &Conditions,
-) -> Result<ArtworkDelivery, DeliveryError> {
+) -> Result<ArtworkDelivery, ArtworkError> {
     let Some(url) = upstream_url(state, path).await? else {
-        return Err(DeliveryError::NotFound("No artwork for this title".into()));
+        return Err(ArtworkError::NotFound("No artwork for this title".into()));
     };
 
     let image = state.services.artwork.get(&url).await.map_err(|err| {
@@ -134,11 +135,37 @@ async fn deliver(
             // page. The cache remembers the failure so a whole grid of clients
             // does not re-ask a dead upstream.
             ArtworkFetchError::NotFound => {
-                DeliveryError::NotFound("No artwork for this title".into())
+                ArtworkError::NotFound("No artwork for this title".into())
             }
-            other => {
-                error!(%url, %other, "artwork could not be fetched");
-                DeliveryError::Internal("Failed to fetch artwork".into())
+            // The fetcher declined the URL before any request left: it is not
+            // `https`, or does not parse. Nothing upstream was asked anything,
+            // so this cannot be the provider's fault -- enrichment wrote a URL
+            // onto a row that Beam itself will not fetch. That is bad data Beam
+            // stored, which is what `internal` means.
+            ArtworkFetchError::Refused {
+                url: refused,
+                reason,
+            } => {
+                error!(%url, %refused, %reason, "stored artwork url refused by the fetcher");
+                ArtworkError::Internal("Failed to fetch artwork".into())
+            }
+            // The provider answered and Beam could not use the answer, or the
+            // provider did not answer at all.
+            ArtworkFetchError::Unsupported { content_type } => {
+                error!(%url, %content_type, "artwork provider returned a non-image");
+                ArtworkError::UpstreamFailed("Failed to fetch artwork".into())
+            }
+            ArtworkFetchError::TooLarge { limit } => {
+                error!(%url, limit, "artwork provider returned a body over the ceiling");
+                ArtworkError::UpstreamFailed("Failed to fetch artwork".into())
+            }
+            ArtworkFetchError::Upstream { status } => {
+                error!(%url, status, "artwork provider returned an error status");
+                ArtworkError::UpstreamFailed("Failed to fetch artwork".into())
+            }
+            ArtworkFetchError::Transport(reason) => {
+                error!(%url, %reason, "artwork provider could not be reached");
+                ArtworkError::UpstreamFailed("Failed to fetch artwork".into())
             }
         }
     })?;
@@ -154,7 +181,7 @@ async fn deliver(
 
     let delivery = served.deliver(conditions).await.map_err(|err| {
         error!(?err, "failed to read cached artwork");
-        DeliveryError::Internal("Failed to read artwork".into())
+        ArtworkError::Internal("Failed to read artwork".into())
     })?;
 
     Ok(ArtworkDelivery::new(
@@ -173,7 +200,8 @@ async fn deliver(
 /// when a title's artwork does, so clients revalidate rather than re-download.
 /// A title with no art, an id that does not exist, and a variant that does not
 /// apply to this kind of title are all `404` -- every client already renders a
-/// placeholder for that.
+/// placeholder for that. An id that is not a UUID is a `400`, as on every
+/// other route that takes a media id.
 #[kynos::get("/artwork/{kind}/{id}/{variant}", tag = Media, operation_id = "getArtwork")]
 #[tracing::instrument(skip_all)]
 pub async fn get_artwork(
@@ -181,7 +209,7 @@ pub async fn get_artwork(
     Path(path): Path<ArtworkPath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
-) -> Result<ArtworkDelivery, DeliveryError> {
+) -> Result<ArtworkDelivery, ArtworkError> {
     deliver(&state, &path, &conditions).await
 }
 
@@ -196,7 +224,7 @@ pub async fn head_artwork(
     Path(path): Path<ArtworkPath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
-) -> Result<ArtworkDelivery, DeliveryError> {
+) -> Result<ArtworkDelivery, ArtworkError> {
     deliver(&state, &path, &conditions).await
 }
 

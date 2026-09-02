@@ -16,10 +16,23 @@ use beam_domain::repositories::{
     FileRepository, MovieRepository, PlaybackProgressRepository, ShowRepository,
 };
 
+/// Recording progress against one file, which may not exist.
 #[derive(Debug, Error)]
 pub enum PlaybackError {
     #[error("file not found")]
     FileNotFound,
+    #[error("database error: {0}")]
+    Db(#[from] sea_orm::DbErr),
+}
+
+/// Reading a user's own progress rows.
+///
+/// Its own type because neither read names a file: `FileNotFound` is not
+/// merely unreachable for them, it is not expressible. Sharing `PlaybackError`
+/// forced a conversion that mapped a legitimate 404 onto a 500 for callers
+/// that could never see it, and the comment on that conversion said as much.
+#[derive(Debug, Error)]
+pub enum PlaybackReadError {
     #[error("database error: {0}")]
     Db(#[from] sea_orm::DbErr),
 }
@@ -40,7 +53,7 @@ pub trait PlaybackService: Send + Sync + std::fmt::Debug {
         &self,
         user_id: Uuid,
         limit: u32,
-    ) -> Result<Vec<ContinueWatchingItem>, PlaybackError>;
+    ) -> Result<Vec<ContinueWatchingItem>, PlaybackReadError>;
 
     /// One page of the user's watch history (completed and in-progress),
     /// most-recently-updated first, plus the total row count for pagination.
@@ -49,7 +62,7 @@ pub trait PlaybackService: Send + Sync + std::fmt::Debug {
         user_id: Uuid,
         limit: u64,
         offset: u64,
-    ) -> Result<(Vec<HistoryItem>, u64), PlaybackError>;
+    ) -> Result<(Vec<HistoryItem>, u64), PlaybackReadError>;
 }
 
 #[derive(Debug)]
@@ -147,7 +160,7 @@ impl PlaybackService for DbPlaybackService {
         &self,
         user_id: Uuid,
         limit: u32,
-    ) -> Result<Vec<ContinueWatchingItem>, PlaybackError> {
+    ) -> Result<Vec<ContinueWatchingItem>, PlaybackReadError> {
         let rows = self
             .playback_repo
             .find_in_progress_by_user(user_id, limit)
@@ -180,7 +193,7 @@ impl PlaybackService for DbPlaybackService {
         user_id: Uuid,
         limit: u64,
         offset: u64,
-    ) -> Result<(Vec<HistoryItem>, u64), PlaybackError> {
+    ) -> Result<(Vec<HistoryItem>, u64), PlaybackReadError> {
         // `total` is counted over all rows independently of the page slice, so
         // it stays stable across pages. Stale rows whose file was removed by a
         // rescan are skipped from `items` (like continue-watching) but remain

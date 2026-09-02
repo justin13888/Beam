@@ -150,5 +150,7 @@ async fn the_rejection_is_a_declared_problem_document() {
         .send()
         .await
         .assert_status(StatusCode::FORBIDDEN)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/cross-origin");
+        .assert_problem_type(
+            "https://beam.justinchung.net/reference/errors/#cross-origin-rejected",
+        );
 }

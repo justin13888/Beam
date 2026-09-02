@@ -133,7 +133,16 @@ but not that a downloaded title renders on a plane.
 - Beam is now on the path of every image render, so an artwork bug degrades a grid where previously
   only a provider outage could. The failure is bounded to a placeholder: a title with no art, an
   unknown id, an inapplicable variant and a provider that has dropped the image are all `404`, which
-  every client already renders as a placeholder.
+  every client already renders as a placeholder. (An id that is not a UUID is not "an unknown id":
+  it is the caller's mistake and answers `400` `invalid-media-id`, as every other route taking a
+  media id does -- the route originally folded it into the `404`, and was aligned with its siblings
+  under [#123](https://github.com/justin13888/beam/issues/123).) The bound was later drawn more
+  precisely under the same issue: a provider that has *dropped* the image is still a `404`, but a
+  provider that answers unusably or not at all -- a non-image body, one over the size ceiling, an
+  error status, a transport failure -- is a `502` `artwork-upstream-failed`. Clients still draw the
+  placeholder for it; the distinction exists for the operator, who can then tell a dead CDN from a
+  title with no art. A stored URL Beam itself refuses to fetch is a `500`, since no provider was
+  asked anything and the bad data is Beam's own.
 - The cache is state on disk that an operator must size. Sizing it below a library's artwork costs
   re-fetches, never correctness.
 - The generated Rust client cannot describe the endpoint, so it omits it. That is right on its own

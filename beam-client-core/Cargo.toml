@@ -28,6 +28,11 @@ time = { version = "0.3.55", features = ["formatting", "parsing", "serde"] }
 
 # Core-owned dependencies, beyond the generated client's contract above.
 async-trait = { workspace = true }
+# `SessionMiddleware` buffers a failed response so the problem document can be
+# read once and still reach the generated client. Rebuilding the response needs
+# `http::Response`, which reqwest converts from; the version requirement is the
+# workspace's so it stays the same `http` reqwest itself links.
+http = { workspace = true }
 base64 = "0.23.1"
 # The Matroska demuxer behind `crate::demux`. Pure Rust with no dependencies of
 # its own, which is what makes it viable in a static library that has to link

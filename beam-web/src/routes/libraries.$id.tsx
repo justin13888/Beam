@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
+import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 
 type LibraryFile =
@@ -180,7 +181,7 @@ export function LibraryDetailPage({ libraryId: id }: { libraryId: string }) {
 				params: { path: { id } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load library");
+			if (error) throw apiError(error, "Failed to load library");
 			return data;
 		},
 		enabled: isAuthenticated,
@@ -198,7 +199,7 @@ export function LibraryDetailPage({ libraryId: id }: { libraryId: string }) {
 				params: { path: { id } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to load library files");
+			if (error) throw apiError(error, "Failed to load library files");
 			return data;
 		},
 		enabled: isAuthenticated,
@@ -217,7 +218,7 @@ export function LibraryDetailPage({ libraryId: id }: { libraryId: string }) {
 				params: { path: { id } },
 				credentials: "include",
 			});
-			if (error) throw new Error("Failed to scan library");
+			if (error) throw apiError(error, "Failed to scan library");
 		},
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["library", id] });

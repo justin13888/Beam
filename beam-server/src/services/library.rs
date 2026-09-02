@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use sea_orm::DbErr;
 use thiserror::Error;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::models::{Library, LibraryFile};
@@ -14,7 +14,7 @@ use beam_index::services::index::{IndexError, IndexService};
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
     /// Validates that `requested` is within `root`, returning the canonical absolute path.
     /// Returns `LibraryError::PathNotFound` if the path does not exist.
-    /// Returns `LibraryError::Validation` if the path escapes root.
+    /// Returns `LibraryError::PathOutsideRoot` if the path escapes root.
     fn validate_library_path(&self, requested: &Path, root: &Path)
     -> Result<PathBuf, LibraryError>;
 }
@@ -28,9 +28,13 @@ impl PathValidator for OsPathValidator {
         requested: &Path,
         root: &Path,
     ) -> Result<PathBuf, LibraryError> {
+        // The messages below reach an administrator's browser as the `detail`
+        // of a 400, so none of them names a filesystem path (NFR-108). The
+        // paths go to the log, which is where the operator who can act on them
+        // is looking.
         let canonical_root = root.canonicalize().map_err(|e| {
-            error!("Failed to canonicalize video_dir: {}", e);
-            LibraryError::PathNotFound(root.to_string_lossy().to_string())
+            error!(root = %root.display(), error = %e, "failed to canonicalize video_dir");
+            LibraryError::PathNotFound("Video directory is not accessible".to_string())
         })?;
 
         let target_path = if requested.is_absolute() {
@@ -40,14 +44,19 @@ impl PathValidator for OsPathValidator {
         };
 
         let canonical_target = target_path.canonicalize().map_err(|e| {
-            LibraryError::PathNotFound(format!("Library path does not exist or invalid: {}", e))
+            warn!(requested = %target_path.display(), error = %e, "library path does not resolve");
+            LibraryError::PathNotFound("Library path does not exist".to_string())
         })?;
 
         if !canonical_target.starts_with(&canonical_root) {
-            return Err(LibraryError::Validation(format!(
-                "Library path must be within the video directory: {}",
-                root.display()
-            )));
+            warn!(
+                requested = %canonical_target.display(),
+                root = %canonical_root.display(),
+                "library path resolves outside the video directory"
+            );
+            return Err(LibraryError::PathOutsideRoot(
+                "Library path must be within the configured video directory".to_string(),
+            ));
         }
 
         Ok(canonical_target)
@@ -71,7 +80,7 @@ pub mod in_memory {
     pub enum InMemoryPathValidatorResult {
         Success(PathBuf),
         PathNotFound(String),
-        ValidationError(String),
+        PathOutsideRoot(String),
     }
 
     #[derive(Debug)]
@@ -92,9 +101,9 @@ pub mod in_memory {
             }
         }
 
-        pub fn validation_error(msg: impl Into<String>) -> Self {
+        pub fn path_outside_root(msg: impl Into<String>) -> Self {
             Self {
-                result: InMemoryPathValidatorResult::ValidationError(msg.into()),
+                result: InMemoryPathValidatorResult::PathOutsideRoot(msg.into()),
             }
         }
     }
@@ -110,8 +119,8 @@ pub mod in_memory {
                 InMemoryPathValidatorResult::PathNotFound(msg) => {
                     Err(LibraryError::PathNotFound(msg.clone()))
                 }
-                InMemoryPathValidatorResult::ValidationError(msg) => {
-                    Err(LibraryError::Validation(msg.clone()))
+                InMemoryPathValidatorResult::PathOutsideRoot(msg) => {
+                    Err(LibraryError::PathOutsideRoot(msg.clone()))
                 }
             }
         }
@@ -136,7 +145,12 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     async fn get_library_files(&self, library_id: String)
     -> Result<Vec<LibraryFile>, LibraryError>;
 
-    /// Get a single file by its ID
+    /// Get a single file by its ID.
+    ///
+    /// A `file_id` that is not a UUID is [`LibraryError::InvalidId`], not
+    /// `Ok(None)`: the caller sent something malformed rather than named a
+    /// file that does not exist, and the delivery routes answer the two
+    /// differently (400 against 404).
     async fn get_file_by_id(&self, file_id: String) -> Result<Option<LibraryFile>, LibraryError>;
 
     /// Create a new library
@@ -339,8 +353,6 @@ impl LibraryService for LocalLibraryService {
 
 #[derive(Debug, Error)]
 pub enum LibraryError {
-    #[error("User not found")]
-    UserNotFound,
     #[error("Database error: {0}")]
     Db(#[from] DbErr),
     #[error("Library not found")]
@@ -349,8 +361,8 @@ pub enum LibraryError {
     InvalidId,
     #[error("Path not found: {0}")]
     PathNotFound(String),
-    #[error("Validation error: {0}")]
-    Validation(String),
+    #[error("Library path is outside the permitted root: {0}")]
+    PathOutsideRoot(String),
 }
 
 impl From<IndexError> for LibraryError {

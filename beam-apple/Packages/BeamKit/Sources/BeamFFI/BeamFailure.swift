@@ -56,6 +56,13 @@ public struct BeamFailure: Error, Equatable, Sendable {
     }
 
     /// Flatten a core failure.
+    ///
+    /// The message is decided here, because it is UI copy. Whether a retry is
+    /// honest is decided by the core: `Network` and `Server` both carry the
+    /// verdict on the error itself, so this reads it rather than deriving it.
+    /// It used to derive it, and answered "retryable" for every `Server`
+    /// status -- so a 415 or a 422, which three operations declare, offered a
+    /// retry for a body the server refuses identically every time.
     public static func from(_ error: BeamError) -> BeamFailure {
         switch error {
         case .NoActiveServer:
@@ -80,23 +87,23 @@ public struct BeamFailure: Error, Equatable, Sendable {
                 message: "Your session has expired. Sign in again to continue.",
                 requiresSignIn: true
             )
-        case .Forbidden(let detail):
+        case .Forbidden(let detail, _):
             return BeamFailure(message: detail, isForbidden: true)
         case .NotFound:
             return BeamFailure(
                 message: "That is no longer in the library. It may have been removed by a scan."
             )
-        case .BadRequest(let detail):
+        case .BadRequest(let detail, _):
             return BeamFailure(message: detail)
         case .RateLimited(let retryAfterSecs):
             return BeamFailure(
                 message: "Too many requests. Try again in \(retryAfterSecs)s.",
                 isRetryable: true
             )
-        case .Server(let status, _):
+        case .Server(let status, let retryable, _, _):
             return BeamFailure(
                 message: "The server had a problem (\(status)). Try again shortly.",
-                isRetryable: true
+                isRetryable: retryable
             )
         case .Network(let detail, let retryable):
             return BeamFailure(
@@ -111,8 +118,14 @@ public struct BeamFailure: Error, Equatable, Sendable {
             )
         case .Protocol(let detail):
             return BeamFailure(message: "Unexpected response from the server: \(detail)")
+        // Retryable, matching `error.rs`: a full disk is emptied and a locked
+        // keystore unlocks, so the viewer who frees space has a real path to
+        // success. Android said so first; the core now states it too.
         case .Storage(let detail):
-            return BeamFailure(message: "This device could not save that: \(detail)")
+            return BeamFailure(
+                message: "This device could not save that: \(detail)",
+                isRetryable: true
+            )
         }
     }
 }

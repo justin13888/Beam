@@ -59,7 +59,7 @@
             }
           },
           "403": {
-            "description": "Malformed Origin/Referer header",
+            "description": "Cross-origin request rejected",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -158,7 +158,7 @@
           "media"
         ],
         "summary": "Poster, backdrop or thumbnail art for one title.",
-        "description": "Beam fetches the image from the metadata provider once and serves it from\nits own cache thereafter, so a viewer's browser never contacts TMDB or\nAniList and those CDNs never see who is looking at what (ADR-0015).\n\nThe URL is stable across re-enrichment; the strong `ETag` is what changes\nwhen a title's artwork does, so clients revalidate rather than re-download.\nA title with no art, an id that does not exist, and a variant that does not\napply to this kind of title are all `404` -- every client already renders a\nplaceholder for that.",
+        "description": "Beam fetches the image from the metadata provider once and serves it from\nits own cache thereafter, so a viewer's browser never contacts TMDB or\nAniList and those CDNs never see who is looking at what (ADR-0015).\n\nThe URL is stable across re-enrichment; the strong `ETag` is what changes\nwhen a title's artwork does, so clients revalidate rather than re-download.\nA title with no art, an id that does not exist, and a variant that does not\napply to this kind of title are all `404` -- every client already renders a\nplaceholder for that. An id that is not a UUID is a `400`, as on every\nother route that takes a media id.",
         "operationId": "getArtwork",
         "parameters": [
           {
@@ -353,8 +353,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -363,8 +363,18 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "Artwork not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Artwork provider failed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -590,8 +600,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -600,8 +610,18 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "Artwork not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Artwork provider failed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -710,7 +730,7 @@
             }
           },
           "404": {
-            "description": "Not found",
+            "description": "Media not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -823,7 +843,7 @@
             }
           },
           "404": {
-            "description": "Not found",
+            "description": "Media not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1278,7 +1298,7 @@
             }
           },
           "404": {
-            "description": "Not found",
+            "description": "File not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1726,8 +1746,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1736,8 +1756,8 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "File not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1956,8 +1976,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1966,8 +1986,8 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "File not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2188,8 +2208,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2198,8 +2218,8 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "File not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2418,8 +2438,8 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
+          "416": {
+            "description": "Range not satisfiable",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2428,8 +2448,8 @@
               }
             }
           },
-          "416": {
-            "description": "Range not satisfiable",
+          "404": {
+            "description": "File not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2517,26 +2537,6 @@
                     "$ref": "#/components/schemas/Library"
                   },
                   "type": "array"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -2641,7 +2641,7 @@
             }
           },
           "404": {
-            "description": "Not found",
+            "description": "Library not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2753,7 +2753,7 @@
             }
           },
           "404": {
-            "description": "Not found",
+            "description": "Library not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2882,16 +2882,6 @@
               }
             }
           },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -2994,7 +2984,7 @@
             }
           },
           "404": {
-            "description": "Not found",
+            "description": "Library not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3098,7 +3088,7 @@
             "description": "the request succeeded and there is no content to send"
           },
           "404": {
-            "description": "Not found",
+            "description": "Media not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3202,7 +3192,7 @@
             "description": "the request succeeded and there is no content to send"
           },
           "404": {
-            "description": "Not found",
+            "description": "Library not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3874,7 +3864,7 @@
             "description": "the request succeeded and there is no content to send"
           },
           "404": {
-            "description": "Not found",
+            "description": "User not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4143,28 +4133,18 @@
               }
             }
           },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Login unavailable",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
           "500": {
             "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Cross-origin request rejected",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4235,26 +4215,6 @@
                 "required": true,
                 "schema": {
                   "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Login unavailable",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -4556,16 +4516,6 @@
               }
             }
           },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
           "503": {
             "description": "Login unavailable",
             "content": {
@@ -4578,6 +4528,16 @@
           },
           "500": {
             "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Cross-origin request rejected",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4780,17 +4740,7 @@
             }
           },
           "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Login unavailable",
+            "description": "Account is disabled",
             "content": {
               "application/problem+json": {
                 "schema": {
