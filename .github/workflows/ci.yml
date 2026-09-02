@@ -30,6 +30,7 @@ jobs:
       ts: ${{ steps.filter.outputs.ts }}
       docs: ${{ steps.filter.outputs.docs }}
       ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
+      compose: ${{ steps.filter.outputs.compose }}
       android: ${{ steps.filter.outputs.android }}
       apple: ${{ steps.filter.outputs.apple }}
     steps:
@@ -110,6 +111,10 @@ jobs:
               - 'Cargo.toml'
               - 'beam-server/Containerfile'
               - '.github/actions/setup-ffmpeg/action.yml'
+            compose:
+              - *tooling
+              - 'compose*.yaml'
+              - 'dex/**'
 
   commits:
     name: Conventional commits
@@ -178,6 +183,16 @@ jobs:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - run: mise run check:ffmpeg-version
+
+  compose-invariants:
+    name: Compose invariants
+    needs: [changes]
+    if: needs.changes.outputs.compose == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - run: mise run check:compose-invariants
 
   rust-deny:
     name: Supply-chain audit
@@ -634,6 +649,7 @@ jobs:
       - rust-fmt
       - rust-lockfile
       - ffmpeg-version
+      - compose-invariants
       - rust-deny
       - rust-clippy
       - rust-test
