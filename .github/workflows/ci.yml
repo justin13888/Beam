@@ -347,22 +347,18 @@ jobs:
 
   ts-test:
     name: Web tests
-    needs: [changes, openapi]
-    # TODO(#146): re-enable once beam-web is regenerated against the
-    # Kynos contract. `api.gen.ts` cannot be regenerated until the TypeScript
-    # toolchain reads OpenAPI 3.2 (see the codegen:openapi task), and every
-    # schema key it names was renamed by the port. A skipped job still
-    # satisfies ci-ok, which passes on success-or-skipped.
-    if: false
+    needs: [changes]
+    # TODO(#146): only ts-typecheck and ts-build stay off. This job does not
+    # need `api.gen.ts` to exist -- vitest resolves through Vite, which never
+    # type-checks -- so it neither waits on the openapi job nor downloads its
+    # artifact. It runs the same set `ts:test` in the `ci` mise task and the
+    # pre-push hook enforce, plus the coverage thresholds in vitest.config.ts.
+    if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
-      - uses: actions/download-artifact@v8
-        with:
-          name: openapi-artifacts
-          path: beam-web
       - run: mise run ts:coverage
 
       - name: Upload coverage report

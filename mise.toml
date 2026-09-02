@@ -1187,10 +1187,11 @@ depends = [
     # `ts:check` stays: biome excludes api.gen.ts and does not type-check.
     # `ts:test` is back: it was switched off alongside `ts:typecheck` rather
     # than for a reason of its own. vitest resolves through Vite, which does
-    # not need the generated types to exist, and the suite passes -- 22 files
-    # and 144 tests. It was off while twelve of those suites were silently
-    # not running at all (the Node >= 26 `localStorage` shadowing fixed in
+    # not need the generated types to exist, so the suite runs on a fresh
+    # checkout. It was off while over half of its suites were silently not
+    # running at all (the Node >= 26 `localStorage` shadowing fixed in
     # `src/test/setup.ts`), which is exactly the state a gate exists to catch.
+    # ci.yml's ts-test job and the pre-push hook in hk.pkl enforce the same.
     "docs:build",
     "android:lint",
     "android:test",
