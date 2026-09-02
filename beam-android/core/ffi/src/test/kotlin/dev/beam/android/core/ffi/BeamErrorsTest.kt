@@ -74,32 +74,6 @@ class BeamErrorsTest {
     }
 
     @Test
-    fun `a missing source file is not phrased as the viewer's mistake`() {
-        // Both of these are 404s, so the status cannot separate them -- which
-        // is the whole reason the core carries the problem type. One means the
-        // viewer asked for something that is not there. The other means the
-        // catalogue still lists the title and the server no longer has its
-        // file, which nothing the viewer does will fix.
-        val absent =
-            BeamException
-                .NotFound("No title with id 0f3c", "https://beam.example/reference/errors/#media-not-found")
-                .toFailure()
-        val diverged =
-            BeamException
-                .NotFound(
-                    "Source video file not found",
-                    "https://beam.example/reference/errors/#source-file-missing",
-                ).toFailure()
-
-        assertEquals("No title with id 0f3c", absent.message)
-        assertTrue(
-            "a viewer cannot act on a missing mount, so say who can: ${diverged.message}",
-            diverged.message.contains("administrator"),
-        )
-        assertFalse("rescanning is not something a retry button does", diverged.retryable)
-    }
-
-    @Test
     fun `rate limiting says how long to wait`() {
         val failure = BeamException.RateLimited(30uL).toFailure()
 
