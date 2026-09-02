@@ -1248,6 +1248,10 @@ xcrun xcodebuild build \
 # Ordering is sequenced in dev:up rather than with `depends_on: dex`, because a
 # depends_on pointing at a profile-gated service makes the profile-less project
 # invalid outright: `service "server" depends on undefined service "dex"`.
+#
+# Each task sources scripts/compose.sh for the provider selection and for
+# `published_url`, which reads a host port back off the running stack. That is
+# the one place that knows the two providers print `compose port` differently.
 # ---------------------------------------------------------------------------
 
 [tasks."dev:up"]
@@ -1269,26 +1273,15 @@ description = "Bring up the dev stack, including the bundled Dex IdP"
 env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_OIDC_ADMIN_CLAIM = "email_verified" }
 run = '''
 set -eu
-compose_cmd=${BEAM_COMPOSE:-}
-[ -n "$compose_cmd" ] || compose_cmd=$(command -v podman >/dev/null 2>&1 && echo "podman compose" || echo "docker compose")
-compose() { $compose_cmd "$@"; }
+. scripts/compose.sh
 # Dex first, and healthy, before the server: beam-server resolves OIDC
 # discovery once at startup and installs a login-disabled client if the issuer
 # is unreachable, so losing this race costs a restart rather than a retry.
 compose --profile dev-idp up -d --wait postgres dex
 compose --profile dev-idp up -d --wait
-# Read the published ports back off the running containers rather than
-# restating the compose defaults: WEB_HOST_PORT and BEAM_SERVER_HOST_PORT are
-# documented overrides, and printing a URL the stack is not on is worse than
-# printing none.
-published() {
-    $compose_cmd --profile dev-idp port "$1" "$2" 2>/dev/null \
-        | tail -n1 \
-        | sed 's|^0\.0\.0\.0:|localhost:|; s|^\[::\]:|localhost:|; s|^|http://|'
-}
 echo
-echo "Web      $(published web 80)"
-echo "API      $(published server 8000)"
+echo "Web      $(published_url web 80)"
+echo "API      $(published_url server 8000)"
 echo "Sign in  admin@beam.localhost / password   (also user@beam.localhost)"
 '''
 
@@ -1296,9 +1289,7 @@ echo "Sign in  admin@beam.localhost / password   (also user@beam.localhost)"
 description = "Tear down the dev stack, including the bundled Dex IdP"
 run = '''
 set -eu
-compose_cmd=${BEAM_COMPOSE:-}
-[ -n "$compose_cmd" ] || compose_cmd=$(command -v podman >/dev/null 2>&1 && echo "podman compose" || echo "docker compose")
-compose() { $compose_cmd "$@"; }
+. scripts/compose.sh
 compose --profile dev-idp down
 '''
 
@@ -1313,9 +1304,7 @@ description = "Smoke-test the containerized dev OIDC topology (needs compose)"
 depends = ["dev:up"]
 run = '''
 set -eu
-compose_cmd=${BEAM_COMPOSE:-}
-[ -n "$compose_cmd" ] || compose_cmd=$(command -v podman >/dev/null 2>&1 && echo "podman compose" || echo "docker compose")
-compose() { $compose_cmd "$@"; }
+. scripts/compose.sh
 
 status=0
 check() {
@@ -1370,9 +1359,7 @@ authority=$(printf '%s' "$issuer" | sed 's|^[a-z][a-z0-9+.-]*://||; s|/.*||')
 # The API base is read off the running container, not hardcoded:
 # BEAM_SERVER_HOST_PORT is a documented override, and against a stack published
 # anywhere but :8000 a hardcoded URL reports FAIL for a healthy server.
-api_base=$(compose port server 8000 2>/dev/null \
-    | tail -n1 \
-    | sed 's|^0\.0\.0\.0:|localhost:|; s|^\[::\]:|localhost:|; s|^|http://|')
+api_base=$(published_url server 8000)
 [ -n "$api_base" ] || api_base="http://localhost:8000"
 rc=0; curl -sS -o /dev/null -D - "$api_base/v1/auth/login" \
     | grep -iqF "location: $issuer" || rc=$?
