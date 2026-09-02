@@ -137,11 +137,34 @@ async fn deliver(
             ArtworkFetchError::NotFound => {
                 ArtworkError::NotFound("No artwork for this title".into())
             }
-            // Every remaining variant is the provider failing, not Beam:
-            // an unusable content type, a body over the ceiling, a URL the
-            // fetcher refused, an upstream status, or no response at all.
-            other => {
-                error!(%url, %other, "artwork could not be fetched");
+            // The fetcher declined the URL before any request left: it is not
+            // `https`, or does not parse. Nothing upstream was asked anything,
+            // so this cannot be the provider's fault -- enrichment wrote a URL
+            // onto a row that Beam itself will not fetch. That is bad data Beam
+            // stored, which is what `internal` means.
+            ArtworkFetchError::Refused {
+                url: refused,
+                reason,
+            } => {
+                error!(%url, %refused, %reason, "stored artwork url refused by the fetcher");
+                ArtworkError::Internal("Failed to fetch artwork".into())
+            }
+            // The provider answered and Beam could not use the answer, or the
+            // provider did not answer at all.
+            ArtworkFetchError::Unsupported { content_type } => {
+                error!(%url, %content_type, "artwork provider returned a non-image");
+                ArtworkError::UpstreamFailed("Failed to fetch artwork".into())
+            }
+            ArtworkFetchError::TooLarge { limit } => {
+                error!(%url, limit, "artwork provider returned a body over the ceiling");
+                ArtworkError::UpstreamFailed("Failed to fetch artwork".into())
+            }
+            ArtworkFetchError::Upstream { status } => {
+                error!(%url, status, "artwork provider returned an error status");
+                ArtworkError::UpstreamFailed("Failed to fetch artwork".into())
+            }
+            ArtworkFetchError::Transport(reason) => {
+                error!(%url, %reason, "artwork provider could not be reached");
                 ArtworkError::UpstreamFailed("Failed to fetch artwork".into())
             }
         }

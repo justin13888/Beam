@@ -138,12 +138,14 @@ dead provider once per render.
 **502.** Beam asked the provider for the image and could not use what came back.
 
 The provider returned a non-image content type, a body over the configured ceiling
-(`BEAM_ARTWORK_MAX_IMAGE_BYTES`), an unhappy status, or nothing at all; or the stored URL was one
-Beam declined to fetch.
+(`BEAM_ARTWORK_MAX_IMAGE_BYTES`), an unhappy status, or nothing at all.
 
 **What to do.** Retry later, and draw the placeholder meanwhile. A 502 rather than
 [`internal`](#internal) because the fault is not Beam's -- `internal` means Beam broke, and
-reporting a provider CDN timeout that way tells an operator to go looking in the wrong place.
+reporting a provider CDN timeout that way tells an operator to go looking in the wrong place. The
+converse holds too: a stored artwork URL that Beam *itself* refuses to fetch (not `https`, or
+unparseable) is reported as [`internal`](#internal), because no request was ever made and the bad
+data is Beam's own.
 
 ### invalid-file-id
 
@@ -248,7 +250,10 @@ a scrape can tell "not enabled" from "wrong URL".
 
 **What to do.** Nothing client-side. Read the server log around the timestamp: a 500's `detail` is
 deliberately terse and the log line carries the real cause. The usual causes are PostgreSQL being
-unreachable and a schema/migration mismatch. Worth [reporting](/help/support/) if neither applies.
+unreachable and a schema/migration mismatch. On the artwork route it also covers a stored provider
+URL that Beam refuses to fetch -- enrichment wrote it, so it is Beam's data rather than a provider
+fault, and it is *not* [`artwork-upstream-failed`](#artwork-upstream-failed). Worth
+[reporting](/help/support/) if none of these applies.
 
 ## Responses with no code
 

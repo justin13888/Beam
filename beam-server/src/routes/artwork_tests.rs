@@ -428,6 +428,57 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// The provider answered and Beam could not use the answer. That is the
+    /// provider's fault, and it is reported as one: a 502, not the `internal`
+    /// that would send an operator looking for a bug in Beam.
+    #[tokio::test]
+    async fn a_provider_that_answers_unusably_is_a_502() {
+        let fixture = fixture(
+            InMemoryArtworkFetcher::new()
+                .with_error(POSTER_URL, ArtworkFetchError::Upstream { status: 503 }),
+        );
+        let id = movie_with_poster(&fixture, Some(POSTER_URL)).await;
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        client
+            .get(&format!("/v1/artwork/movie/{id}/poster"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_GATEWAY)
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#artwork-upstream-failed",
+            );
+    }
+
+    /// A stored URL the fetcher refuses never produced a request, so nothing
+    /// upstream can have failed: enrichment wrote bad data onto a row, and
+    /// that is Beam's fault. Reporting it as a provider failure would tell an
+    /// operator to wait for a CDN that was never asked anything.
+    #[tokio::test]
+    async fn a_stored_url_beam_refuses_to_fetch_is_beams_own_fault() {
+        const PLAIN_HTTP: &str = "http://image.tmdb.org/t/p/w500/poster.jpg";
+        let fixture = fixture(InMemoryArtworkFetcher::new().with_error(
+            PLAIN_HTTP,
+            ArtworkFetchError::Refused {
+                url: PLAIN_HTTP.to_string(),
+                reason: "not https".to_string(),
+            },
+        ));
+        let id = movie_with_poster(&fixture, Some(PLAIN_HTTP)).await;
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        client
+            .get(&format!("/v1/artwork/movie/{id}/poster"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+    }
+
     #[tokio::test]
     async fn artwork_requires_a_session() {
         let fixture = fixture(InMemoryArtworkFetcher::new().with_image(

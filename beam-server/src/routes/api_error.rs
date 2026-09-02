@@ -451,12 +451,13 @@ pub enum ArtworkError {
     NotFound(String),
 
     /// The provider answered unusably: a non-image content type, a body over
-    /// the ceiling, a refused URL, an unhappy upstream status, or nothing at
-    /// all.
+    /// the ceiling, an unhappy upstream status, or nothing at all.
     ///
     /// A 502 rather than a 500 because the fault is not Beam's, and `internal`
     /// is documented as meaning that it is. A provider CDN timing out reported
-    /// as a Beam 500 is the mislabelling issue #123 was opened on.
+    /// as a Beam 500 is the mislabelling issue #123 was opened on. A stored
+    /// URL the fetcher *refuses* is deliberately not here: no request was ever
+    /// made, so nothing upstream can have failed -- see [`Self::Internal`].
     #[error("{0}")]
     #[problem(
         status = 502,
@@ -465,8 +466,10 @@ pub enum ArtworkError {
     )]
     UpstreamFailed(String),
 
-    /// Beam's own fault: the title lookup failed, or the cached file could not
-    /// be read back.
+    /// Beam's own fault: the title lookup failed, the cached file could not be
+    /// read back, or enrichment stored a URL Beam itself will not fetch (not
+    /// `https`, or unparseable) -- bad data Beam wrote, not a provider that
+    /// misbehaved.
     #[error("{0}")]
     #[problem(
         status = 500,
