@@ -78,7 +78,7 @@ about. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam
      OIDC provider; register `<BEAM_SERVER_URL>/v1/auth/callback` as the redirect URI. Dex's
      static users are for local development only — never enable the `dev-idp` profile in
      production.
-   - Grant admin via your IdP, not the server: configure the IdP to release a claim (e.g. a Dex/
+   - Grant admin via your IdP, not the server: configure the IdP to release a claim (e.g. a
      Keycloak group) and set `BEAM_OIDC_ADMIN_CLAIM` (e.g. `groups`) and, for a value/array match,
      `BEAM_OIDC_ADMIN_VALUE` (e.g. `beam-admin`). Admin is recomputed on every login — granting
      **and** revoking. Leaving `BEAM_OIDC_ADMIN_CLAIM` unset means nobody is admin.
