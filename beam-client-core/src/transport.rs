@@ -386,7 +386,14 @@ impl TransportFailure {
     }
 }
 
-/// `Retry-After` as whole seconds.
+/// The longest `Retry-After` a response is believed about.
+///
+/// One hour: beam-server's rate limiter answers in seconds, a proxy's
+/// maintenance window in minutes, and anything beyond an hour is a misconfigured
+/// origin -- or an `i64::MAX` a caller would otherwise have to add to a clock.
+pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 60 * 60;
+
+/// `Retry-After` as whole seconds, clamped to [`MAX_RETRY_AFTER_SECS`].
 ///
 /// Only the delta-seconds form is read. RFC 9110 also permits an HTTP-date
 /// (`Retry-After: Fri, 31 Dec 1999 23:59:59 GMT`), and that form is not
@@ -394,13 +401,14 @@ impl TransportFailure {
 /// convert it would produce a worse answer than the caller's own default. It
 /// reads as `None`, exactly like a header that is missing or garbage.
 fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
+    let seconds: u64 = headers
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
         .ok()?
         .trim()
         .parse()
-        .ok()
+        .ok()?;
+    Some(seconds.min(MAX_RETRY_AFTER_SECS))
 }
 
 #[cfg(test)]
@@ -896,6 +904,29 @@ mod tests {
             retry_after_secs(&headers_with_retry_after("Fri, 31 Dec 1999 23:59:59 GMT")),
             None,
             "the HTTP-date form is deliberately unsupported"
+        );
+    }
+
+    /// An absurd `Retry-After` is believed only up to the ceiling.
+    ///
+    /// The queue adds this to a clock; a header of `i64::MAX` seconds would
+    /// otherwise overflow it, and a header of a year would park a resume
+    /// point past its own retention window.
+    #[test]
+    fn retry_after_is_clamped_to_the_ceiling() {
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after("9223372036854775807")),
+            Some(MAX_RETRY_AFTER_SECS)
+        );
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after("18446744073709551616")),
+            None,
+            "past u64 it is not a number at all"
+        );
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after(&MAX_RETRY_AFTER_SECS.to_string())),
+            Some(MAX_RETRY_AFTER_SECS),
+            "the ceiling itself is not clamped below itself"
         );
     }
 
