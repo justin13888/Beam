@@ -33,16 +33,6 @@ export interface Problem {
 const ABOUT_BLANK = "about:blank";
 
 /**
- * The code for a file the catalogue lists and the server no longer has.
- *
- * Matched as a suffix because the origin in front of it moves with the
- * deployment while the fragment is the stable half. Mirrors
- * `SOURCE_FILE_MISSING` in `BeamErrors.kt` and `sourceFileMissing` in
- * `BeamFailure.swift`.
- */
-const SOURCE_FILE_MISSING = "#source-file-missing";
-
-/**
  * The path every Beam problem type hangs under.
  *
  * beam-server builds each `type` from one compile-time constant, `ERROR_BASE`
@@ -104,10 +94,6 @@ export class ApiError extends Error {
  * - A **5xx** `detail` is diagnostic text and frequently interpolates an
  *   internal error. Putting it in front of a viewer leaks implementation
  *   detail (NFR-108) and tells them nothing they can act on.
- * - A **`source-file-missing`** 404 reads, in the server's words, as though the
- *   viewer asked for the wrong thing. It means the catalogue and the server's
- *   storage have diverged, which only an administrator can fix -- the same
- *   distinction the Android and Apple clients draw.
  * - A response with **no problem document** is a proxy or gateway page, not
  *   beam-server, so there is nothing to read.
  *
@@ -117,14 +103,6 @@ export class ApiError extends Error {
 export function apiError(error: unknown, fallback: string): ApiError {
 	const problem = problemFrom(error);
 	if (problem === null) return new ApiError(fallback, ABOUT_BLANK, null);
-
-	if (problem.type.endsWith(SOURCE_FILE_MISSING)) {
-		return new ApiError(
-			"This title is in the library but its file is missing from the server. Ask an administrator to rescan the library.",
-			problem.type,
-			problem.status,
-		);
-	}
 
 	// `problem.status` is a member of the very body being judged, so on its own
 	// it is not a safe input to a leak guard: a response whose transport status

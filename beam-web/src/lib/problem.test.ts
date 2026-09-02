@@ -65,33 +65,6 @@ describe("apiError", () => {
 		expect(error.code).toBe(`${BASE}#internal`);
 	});
 
-	// Both of these are 404s, so the status cannot separate them. One means the
-	// viewer asked for something that is not there; the other means the
-	// catalogue still lists the title and the server no longer has its file,
-	// which no amount of retrying fixes and which only an operator can.
-	it("tells a missing source file from a missing title", () => {
-		const absent = apiError(
-			{
-				type: `${BASE}#media-not-found`,
-				status: 404,
-				detail: "media 7 not found",
-			},
-			"Failed to load media",
-		);
-		const diverged = apiError(
-			{
-				type: `${BASE}#source-file-missing`,
-				status: 404,
-				detail: "Source video file not found",
-			},
-			"Failed to load media",
-		);
-
-		expect(absent.message).toBe("media 7 not found");
-		expect(diverged.message).toMatch(/administrator/);
-		expect(diverged.message).not.toBe("Source video file not found");
-	});
-
 	it("falls back when the response carried no problem document", () => {
 		const error = apiError(
 			"<html>502 Bad Gateway</html>",
