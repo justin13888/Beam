@@ -61,29 +61,29 @@ impl SessionCookieHolder {
     }
 }
 
-/// Where the middleware leaves the problem document for the call in progress.
-///
-/// Scoped to the future that made the request, rather than kept on the
-/// middleware. One shared slot was a race, not a store: the write happens after
-/// `response.bytes()` is awaited, so with two requests in flight on one client
-/// the second overwrote the first before the first read it -- and the reader
-/// had no way to notice. What a viewer saw was a title reporting another
-/// title's failure: `BeamErrors.kt` branches on `#source-file-missing`, so a
-/// plain 404 could be shown as "ask an administrator to rescan the library".
-///
-/// Keying the slot by `tokio::task::try_id()` looked like the fix and was not.
-/// uniffi 0.32 wraps each foreign async call in `async_compat::Compat` and
-/// polls it inline on the FFI caller's thread -- there is no `tokio::spawn` --
-/// so the id is `None` for every Kotlin and Swift call, and all concurrent
-/// foreign calls shared one slot: exactly the race the key was meant to close.
-///
-/// `LocalKey::scope` binds the value to the polls of one future, whatever
-/// drives it: a spawned task, a `JoinSet` entry, a bare `block_on`, or uniffi's
-/// inline poll. [`with_problem`] opens the scope and reads it back, and the
-/// middleware writes through [`tokio::task::LocalKey::try_with`], so a request
-/// made with no scope active -- `logout`'s best-effort revoke -- captures
-/// nothing rather than failing.
 tokio::task_local! {
+    /// Where the middleware leaves the problem document for the call in progress.
+    ///
+    /// Scoped to the future that made the request, rather than kept on the
+    /// middleware. One shared slot was a race, not a store: the write happens after
+    /// `response.bytes()` is awaited, so with two requests in flight on one client
+    /// the second overwrote the first before the first read it -- and the reader
+    /// had no way to notice. What a viewer saw was a title reporting another
+    /// title's failure: `BeamErrors.kt` branches on `#source-file-missing`, so a
+    /// plain 404 could be shown as "ask an administrator to rescan the library".
+    ///
+    /// Keying the slot by `tokio::task::try_id()` looked like the fix and was not.
+    /// uniffi 0.32 wraps each foreign async call in `async_compat::Compat` and
+    /// polls it inline on the FFI caller's thread -- there is no `tokio::spawn` --
+    /// so the id is `None` for every Kotlin and Swift call, and all concurrent
+    /// foreign calls shared one slot: exactly the race the key was meant to close.
+    ///
+    /// `LocalKey::scope` binds the value to the polls of one future, whatever
+    /// drives it: a spawned task, a `JoinSet` entry, a bare `block_on`, or uniffi's
+    /// inline poll. [`with_problem`] opens the scope and reads it back, and the
+    /// middleware writes through [`tokio::task::LocalKey::try_with`], so a request
+    /// made with no scope active -- `logout`'s best-effort revoke -- captures
+    /// nothing rather than failing.
     static PROBLEM_SLOT: ProblemSlot;
 }
 
