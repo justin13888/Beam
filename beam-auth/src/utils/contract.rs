@@ -670,13 +670,22 @@ macro_rules! session_store_contract {
             let fixture = $setup().await;
             let user = fixture.new_user().await;
 
+            let err = fixture
+                .store()
+                .delete_by_id("not-a-uuid", &user.to_string())
+                .await
+                .expect_err(
+                    "a malformed session id must be distinguishable from one that does not exist",
+                );
+            // `InvalidId` specifically, not any error: the handler maps it to
+            // the 400 and everything else to the 500, so a store answering
+            // `Db(..)` here would report a client's typo as Beam's fault.
             assert!(
-                fixture
-                    .store()
-                    .delete_by_id("not-a-uuid", &user.to_string())
-                    .await
-                    .is_err(),
-                "a malformed session id must be distinguishable from one that does not exist"
+                matches!(
+                    err,
+                    $crate::utils::session_store::SessionError::InvalidId(_)
+                ),
+                "a malformed session id must be reported as InvalidId, got {err:?}"
             );
         }
 
