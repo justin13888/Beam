@@ -1264,13 +1264,20 @@ description = "Bring up the dev stack, including the bundled Dex IdP"
 # a dev fixture -- without it nobody can reach the admin surface at all -- and
 # precisely why the bundled Dex is not a production IdP.
 #
+# BEAM_OIDC_ADMIN_VALUE is pinned *empty*, which the server normalises to unset
+# and so requires the claim to be boolean true. Left alone, a value from a root
+# `.env` would reach the container, and a set value is matched against a string
+# or an array -- a boolean claim can never satisfy it -- so no dev user would be
+# admin, with no warning. Empty rather than unset because shell env outranks
+# `.env` for compose, and an unset variable does not.
+#
 # BEAM_WEB_URL is deliberately *not* set here. compose.beam.yaml already
 # supplies `${BEAM_WEB_URL:-http://localhost:8080}`, and setting it from mise
 # would defeat that `:-` for anyone who configured the web port in `.env`:
 # shell env outranks `.env` for compose interpolation, so the redirect target
 # and the CSRF allowed-origin set would both point at :8080 while the app was
 # published somewhere else.
-env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_OIDC_ADMIN_CLAIM = "email_verified" }
+env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_OIDC_ADMIN_CLAIM = "email_verified", BEAM_OIDC_ADMIN_VALUE = "" }
 run = '''
 set -eu
 . scripts/compose.sh
