@@ -109,8 +109,8 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   The URI is written out per variant rather than derived from the variant name. Kynos can compose
   one from `#[problem(base = ...)]` plus the variant's name, but then a rename silently changes the
   published contract with no string to diff, and the same code is deliberately emitted from several
-  enums — `media-not-found` from three, `internal` from ten — which an implicit convention would
-  hide. `routes/taxonomy_tests.rs` asserts that every literal starts with `ERROR_BASE` and that the
+  enums — `internal` from nearly every one of them — which an implicit convention would hide.
+  `routes/taxonomy_tests.rs` asserts that every literal starts with `ERROR_BASE` and that the
   set of codes matches the set of sections on the published page, in both directions.
 
   **The codes do not reach the OpenAPI document yet**, and that is the one thing about this
@@ -133,22 +133,35 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   absent from almost all of them because they arrive from the `SessionAuth`/`AdminAuth` extractors,
   which is what makes taking the extractor and documenting the requirement one act.
 
-  **Framework-originated statuses carry `about:blank`, and that is correct rather than a gap.** For
-  the extractor `400`/`415`/`422`, `RangeRejection`'s `416`, the `404`/`405` fallback, the rate
-  limiter's `429` and `SessionAuth`'s `401`, the status genuinely is the whole story — RFC 9457's
-  own reading. The one real exception is the **admin `403`**: `SessionAuthenticator::authorize`
-  returns `AuthRejection::Forbidden`, and Kynos offers no way for an application to name it, so the
-  most actionable 403 on the surface is the one code Beam cannot publish. Filed as
-  [getkono/kynos#105](https://github.com/getkono/kynos/issues/105).
+  **Framework-originated statuses carry `about:blank`, and for most of them that is correct rather
+  than a gap.** For the extractor `400`/`415`/`422`, `RangeRejection`'s `416`, the `404`/`405`
+  fallback and `SessionAuth`'s `401`, the status genuinely is the whole story — RFC 9457's own
+  reading. Two are gaps, and both are filed upstream. The **admin `403`**:
+  `SessionAuthenticator::authorize` returns `AuthRejection::Forbidden`, and Kynos offers no way for
+  an application to name it, so the most actionable 403 on the surface is one Beam cannot publish
+  ([getkono/kynos#105](https://github.com/getkono/kynos/issues/105)). The rate limiter's **`429`**:
+  `RateLimitPolicy`'s `Decision` carries nowhere for a `type` either, and the response Kynos
+  *declares* for it has no content while the one it sends is a problem document
+  ([getkono/kynos#104](https://github.com/getkono/kynos/issues/104);
+  [`kynos-migration-readiness.md`](kynos-migration-readiness.md) has the detail). Neither is
+  "the one" — they are the two responses Beam answers with and cannot name.
+
+  Where several components declare the same status on one operation, Kynos titles the response
+  from the first declaration it meets. An extractor's `400` and an authenticator's `401` come before
+  the handler's return type, so a handler enum's variant order never titles those two; it decides
+  the title only for a status nothing before it declares — the `404`s, and the same-origin
+  interceptor's `403`.
 
   Statuses in use: `400`, `401`, `403`, `404`, `416` (stream/download range), `429` (rate limiter,
   with `Retry-After` and `X-RateLimit-Limit`/`-Remaining`/`-Reset`), `500`, `502` (artwork only:
   `artwork-upstream-failed`, when the metadata provider answered the image fetch unusably or not at
   all — the fault is the provider's, and `internal` is documented to mean it is Beam's), `503`
   (health, `/v1/auth/login` when OIDC is unconfigured, and `/metrics` when metrics are disabled). A wrong
-  method on a real path returns `405`. The `416` is declared on `MediaDelivery` rather than on
-  `DeliveryError`, because `Served::deliver` resolves an unsatisfiable range into a problem document
-  and returns it as an `Ok` delivery — the handler never sees an error to convert. `GET /v1/health`
+  method on a real path returns `405`. The `416` is declared on `RuntimeDelivery<R>`
+  (`routes/delivery.rs`) — the generic delivery type file delivery and artwork both return — rather
+  than on `DeliveryError` or `ArtworkError`, because `Served::deliver` resolves an unsatisfiable
+  range into a problem document and returns it as an `Ok` delivery — the handler never sees an error
+  to convert. `GET /v1/health`
   is the one endpoint that answers with a domain body rather than a problem document on failure: it
   renders the full `HealthStatus` JSON on both `200` and `503`, because a monitor needs the
   per-dependency `checks`. This bullet is the contract; `beam-docs`'

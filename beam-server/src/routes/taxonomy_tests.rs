@@ -12,7 +12,7 @@
 //! The second is the one that actually broke. `docs/architecture/api.md` and
 //! `beam-docs`' `reference/errors` are both prose, and the page spent the whole
 //! of the Kynos migration asserting that Beam had no error codes at all while
-//! the server emitted twenty-two of them (issue #123).
+//! the server emitted every one of them (issue #123).
 //!
 //! Neither side of the comparison is hand-maintained, which is what keeps this
 //! from being the forbidden second copy of a table. The code side is extracted

@@ -257,9 +257,15 @@ pub enum CurrentUserError {
 pub enum SessionRevokeError {
     /// The `{id}` in the path is not a UUID.
     ///
-    /// Declared before the 401 so kynos titles the 400 from here. The
-    /// operation already advertised a 400 it had no way to reach: every store
-    /// error, the id parse included, was flattened into `Internal`, so a
+    /// Its position titles nothing. Kynos titles a status from the first
+    /// declaration it meets, and the `Path` extractor's 400 and `SessionAuth`'s
+    /// 401 are both met before this enum, so the document reads "Bad Request"
+    /// and "Unauthorized" for those statuses whatever order the variants take;
+    /// order decides a title only for a status no extractor or authenticator
+    /// declares.
+    ///
+    /// The operation already advertised a 400 it had no way to reach: every
+    /// store error, the id parse included, was flattened into `Internal`, so a
     /// client's typo came back as "Beam broke" (issue #123). Its own code
     /// rather than the 401, because a malformed id and a session that is not
     /// there are different things for a caller to do something about.

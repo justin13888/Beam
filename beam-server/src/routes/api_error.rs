@@ -40,7 +40,7 @@ pub const SESSION_COOKIE: &str = "beam_session";
 ///
 /// It cannot appear in the attributes below: kynos parses `#[problem(type =
 /// ...)]` and `#[problem(base = ...)]` as string literals, not paths. The
-/// prefix is therefore written out per variant, and `contract_tests` asserts
+/// prefix is therefore written out per variant, and `taxonomy_tests` asserts
 /// that every literal starts with this constant.
 pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 
@@ -62,8 +62,8 @@ pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 // variant name. Kynos can compose one from `#[problem(base = ...)]` plus the
 // variant's name, but then a rename silently changes the published contract
 // with no string to diff and nothing for a reviewer to catch -- and the same
-// code is deliberately emitted by several enums (`media-not-found` by three,
-// `internal` by ten), which an implicit convention would hide.
+// code is deliberately emitted by several enums (`internal` by nearly every
+// one of them), which an implicit convention would hide.
 //
 // 401 and 403 are almost always absent here: they arrive from `SessionAuth`
 // and `AdminAuth`, which is what makes taking the extractor and documenting the
@@ -126,13 +126,17 @@ pub enum MediaLookupError {
 
 /// `GET /v1/media/{id}/sources`.
 ///
-/// Two 400s share one declared response, and `InvalidMediaId` is written first
-/// deliberately: kynos carries one response per status and titles it from the
-/// first variant declaring that status, so declaration order is part of the
-/// published document. Narrowing `type` per branch is what a `oneOf` of
-/// const-constrained problems would express, which kynos cannot emit --
-/// getkono/kynos#103. Until it can, the codes below are correct on the wire
-/// and absent from the contract, and `taxonomy_tests` is what pins them.
+/// Two 400s share one declared response, and neither titles it. Kynos carries
+/// one response per status and titles it from the first declaration it meets,
+/// and the `Path` extractor's own 400 ("Bad Request") is met before anything
+/// the handler returns -- just as `SessionAuth`'s 401 is for that status. So
+/// variant order decides a title only for a status no extractor or
+/// authenticator declares, which is why the 404-carrying enums and
+/// `CrossOriginRejected`'s 403 are careful about it and this pair need not
+/// be. Narrowing `type` per branch is what a `oneOf` of const-constrained
+/// problems would express, which kynos cannot emit -- getkono/kynos#103.
+/// Until it can, the codes below are correct on the wire and absent from the
+/// contract, and `taxonomy_tests` is what pins them.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum MediaSourcesError {
     #[error("{0}")]
@@ -347,7 +351,9 @@ pub enum ProgressError {
 ///
 /// Three of the statuses these operations answer with are not here, and each
 /// absence is deliberate. The 401 and 403 arrive from `SessionAuth` and
-/// `EnforceSameOrigin`. The 416 is declared on [`MediaDelivery`], because
+/// `EnforceSameOrigin`. The 416 is declared on
+/// [`RuntimeDelivery`](crate::routes::delivery::RuntimeDelivery) -- the
+/// generic delivery type file delivery shares with artwork -- because
 /// `Served::deliver` resolves an unsatisfiable range into a problem document
 /// and hands it back as an `Ok` delivery -- the handler never sees an error to
 /// convert. Variants for all three existed here and nothing constructed them.
