@@ -402,10 +402,9 @@ impl BeamClient {
         let client = self.client_for(&server_id)?;
         let record = self.record_for(&server_id)?;
 
-        let response = client
-            .get_media_sources(media_id, None)
+        let response = TransportFailure::capture(client.get_media_sources(media_id, None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
 
         response
             .into_inner()
@@ -603,10 +602,9 @@ impl BeamClient {
     /// and propagates transport failures.
     pub async fn browse_media(&self, query: BrowseQuery) -> Result<MediaPage, BeamError> {
         let (server_id, client, record) = self.active_context()?;
-        let response = client
-            .browse_media(browse_params(&query)?)
+        let response = TransportFailure::capture(client.browse_media(browse_params(&query)?))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(MediaPage::from_generated(response.into_inner(), &record))
     }
 
@@ -633,10 +631,9 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn genres(&self) -> Result<Vec<String>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .list_genres(None)
+        let response = TransportFailure::capture(client.list_genres(None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(response.into_inner().genres)
     }
 
@@ -690,10 +687,9 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn libraries(&self) -> Result<Vec<LibrarySummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .list_libraries(None)
+        let response = TransportFailure::capture(client.list_libraries(None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -708,10 +704,9 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn library(&self, library_id: String) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .get_library(library_id, None)
+        let response = TransportFailure::capture(client.get_library(library_id, None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
     }
 
@@ -725,10 +720,9 @@ impl BeamClient {
         library_id: String,
     ) -> Result<Vec<LibraryFileSummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .get_library_files(library_id, None)
+        let response = TransportFailure::capture(client.get_library_files(library_id, None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -759,10 +753,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = client
-            .get_continue_watching(params)
+        let response = TransportFailure::capture(client.get_continue_watching(params))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
 
         let mut entries: Vec<ContinueWatchingEntry> = response
             .into_inner()
@@ -804,10 +797,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = client
-            .get_history(params)
+        let response = TransportFailure::capture(client.get_history(params))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?
+            .map_err(|failure| self.map_error(&server_id, &failure))?
             .into_inner();
 
         let total = u64::try_from(response.total).unwrap_or(0);
@@ -878,8 +870,7 @@ impl BeamClient {
             duration_secs: duration,
             position_secs: position,
         };
-        match client
-            .report_playback_progress(wire_file_id, None, &body)
+        match TransportFailure::capture(client.report_playback_progress(wire_file_id, None, &body))
             .await
         {
             Ok(response) => {
@@ -888,12 +879,12 @@ impl BeamClient {
                     position_secs: response.into_inner().position_secs,
                 })
             }
-            Err(error) => {
+            Err(failure) => {
                 // The throttle already recorded this as sent, so the next
                 // sample would be held back behind an interval that never
                 // produced a request. Clearing it lets the retry happen.
                 throttle.reset(&file_id);
-                let mapped = self.map_error(&server_id, &TransportFailure::of(&error));
+                let mapped = self.map_error(&server_id, &failure);
 
                 // A rejected body, a forbidden file, a title that no longer
                 // exists: the identical request fails identically forever.
@@ -951,16 +942,18 @@ impl BeamClient {
                 duration_secs: entry.duration_secs,
                 position_secs: entry.position_secs,
             };
-            match client
-                .report_playback_progress(wire_file_id, None, &body)
-                .await
+            match TransportFailure::capture(client.report_playback_progress(
+                wire_file_id,
+                None,
+                &body,
+            ))
+            .await
             {
                 Ok(_) => {
                     queue.remove(&entry.file_id).await?;
                     sent = sent.saturating_add(1);
                 }
-                Err(error) => {
-                    let failure = TransportFailure::of(&error);
+                Err(failure) => {
                     // The server's own interval, where it sent one. Passing
                     // `None` here fell back to blind exponential backoff and
                     // ignored a 429's `Retry-After` -- which this crate reads,
@@ -998,10 +991,9 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn sessions(&self) -> Result<Vec<DeviceSession>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .list_sessions(None)
+        let response = TransportFailure::capture(client.list_sessions(None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -1016,10 +1008,9 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn revoke_session(&self, session_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        client
-            .delete_session(session_id, None)
+        TransportFailure::capture(client.delete_session(session_id, None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(())
     }
 
@@ -1034,10 +1025,9 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn logout_everywhere(&self) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        client
-            .logout_all(None)
+        TransportFailure::capture(client.logout_all(None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
 
         self.with_context(&server_id, |context| context.cookie.clear())?;
         self.storage
@@ -1056,10 +1046,9 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn admin_status(&self) -> Result<AdminStatus, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .get_admin_status(None)
+        let response = TransportFailure::capture(client.get_admin_status(None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(AdminStatus::from_generated(response.into_inner()))
     }
 
@@ -1080,10 +1069,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = client
-            .list_admin_users(params)
+        let response = TransportFailure::capture(client.list_admin_users(params))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?
+            .map_err(|failure| self.map_error(&server_id, &failure))?
             .into_inner();
         Ok(AdminUserPage {
             total: u64::try_from(response.total).unwrap_or(0),
@@ -1109,10 +1097,9 @@ impl BeamClient {
         let wire_user_id = parse_uuid("user_id", &user_id)?;
         let (server_id, client, _) = self.active_context()?;
         let body = crate::api::types::UpdateAdminUserRequest { disabled };
-        client
-            .update_admin_user(wire_user_id, None, &body)
+        TransportFailure::capture(client.update_admin_user(wire_user_id, None, &body))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(())
     }
 
@@ -1133,10 +1120,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = client
-            .get_admin_logs(params)
+        let response = TransportFailure::capture(client.get_admin_logs(params))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -1151,10 +1137,9 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn admin_log_count(&self) -> Result<u64, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .get_admin_log_count(None)
+        let response = TransportFailure::capture(client.get_admin_log_count(None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(u64::try_from(response.into_inner().count).unwrap_or(0))
     }
 
@@ -1179,10 +1164,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = client
-            .get_admin_events(params)
+        let response = TransportFailure::capture(client.get_admin_events(params))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -1202,10 +1186,9 @@ impl BeamClient {
     ) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let body = crate::api::types::CreateLibraryRequest { name, root_path };
-        let response = client
-            .create_library(None, &body)
+        let response = TransportFailure::capture(client.create_library(None, &body))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
     }
 
@@ -1216,10 +1199,9 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn delete_library(&self, library_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        client
-            .delete_library(library_id, None)
+        TransportFailure::capture(client.delete_library(library_id, None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(())
     }
 
@@ -1230,10 +1212,9 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn scan_library(&self, library_id: String) -> Result<u32, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .scan_library(library_id, None)
+        let response = TransportFailure::capture(client.scan_library(library_id, None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(u32::try_from(response.into_inner().added).unwrap_or(0))
     }
 
@@ -1247,10 +1228,9 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn refresh_media_metadata(&self, media_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        client
-            .refresh_media_metadata(media_id.clone(), None)
+        TransportFailure::capture(client.refresh_media_metadata(media_id.clone(), None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         if let Ok(cache) = self.metadata_cache(&server_id) {
             cache.write().expect("metadata lock").remove(&media_id);
         }
@@ -1264,10 +1244,9 @@ impl BeamClient {
     /// Propagates transport failures.
     pub async fn health(&self) -> Result<ServerHealth, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = client
-            .get_health(None)
+        let response = TransportFailure::capture(client.get_health(None))
             .await
-            .map_err(|error| self.map_error(&server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(&server_id, &failure))?;
         Ok(ServerHealth::from_generated(response.into_inner()))
     }
 }
@@ -1319,14 +1298,10 @@ impl BeamClient {
                 detail: format!("could not build an HTTP client: {error}"),
                 retryable: false,
             })?;
-        let backend = MiddlewareBackend::with_middlewares(
+        let client = Self::client_over(
             Arc::new(ReqwestBackend::new(http)),
-            vec![Arc::clone(&middleware) as Arc<dyn crate::api::Middleware>],
-        );
-        let client = GeneratedClient::with_backend(Arc::new(backend), &record.base_url).map_err(
-            |error| BeamError::InvalidServerUrl {
-                detail: error.to_string(),
-            },
+            &middleware,
+            &record.base_url,
         )?;
 
         // A restored cookie is trusted until a request says otherwise, which
@@ -1356,6 +1331,57 @@ impl BeamClient {
                 trust,
             },
         );
+        Ok(())
+    }
+
+    /// The generated client, with the session middleware wrapped around
+    /// whatever transport actually executes the request.
+    fn client_over(
+        transport: Arc<dyn crate::api::HttpBackend>,
+        middleware: &Arc<SessionMiddleware>,
+        base_url: &str,
+    ) -> Result<GeneratedClient, BeamError> {
+        let backend = MiddlewareBackend::with_middlewares(
+            transport,
+            vec![Arc::clone(middleware) as Arc<dyn crate::api::Middleware>],
+        );
+        GeneratedClient::with_backend(Arc::new(backend), base_url).map_err(|error| {
+            BeamError::InvalidServerUrl {
+                detail: error.to_string(),
+            }
+        })
+    }
+
+    /// Re-point one server's client at a canned transport, keeping its
+    /// middleware, session and queue. Tests only: the seam that lets the façade
+    /// see a server's answer without a listener.
+    #[cfg(test)]
+    fn use_transport(
+        &self,
+        server_id: &str,
+        transport: Arc<dyn crate::api::HttpBackend>,
+    ) -> Result<(), BeamError> {
+        let mut servers = self.servers.write().expect("servers lock");
+        let context = servers
+            .get_mut(server_id)
+            .ok_or_else(|| BeamError::UnknownServer {
+                server_id: server_id.to_owned(),
+            })?;
+        // The generated client enforces each operation's `BeamSession`
+        // requirement at construction time and refuses to send without a
+        // registered credential; nothing in the core registers one, so a
+        // canned answer would never be reached. A placeholder here lets the
+        // request through to the transport under test. The middleware still
+        // owns the real cookie: its `insert` replaces this header. Pre-existing
+        // and unrelated to what these tests assert -- see the PR discussion.
+        context.client =
+            Self::client_over(transport, &context.middleware, &context.record.base_url)?
+                .with_credential(
+                    "BeamSession",
+                    crate::api::Credential::ApiKey(secrecy::SecretString::from(
+                        "test-placeholder".to_owned(),
+                    )),
+                );
         Ok(())
     }
 
@@ -1424,10 +1450,8 @@ impl BeamClient {
         if let Some(hit) = cache.read().expect("metadata lock").get(media_id) {
             return Ok(hit.clone());
         }
-        let response = client
-            .get_media_detail(media_id.to_owned(), None)
-            .await
-            .map_err(|error| TransportFailure::of(&error))?;
+        let response =
+            TransportFailure::capture(client.get_media_detail(media_id.to_owned(), None)).await?;
         let detail = MediaDetail::from_generated(response.into_inner(), record);
         cache
             .write()
@@ -1519,14 +1543,9 @@ impl BeamClient {
             return BeamError::UntrustedCertificate { host, details };
         }
 
-        let problem = self
-            .with_context(server_id, |context| context.middleware.take_problem())
-            .ok()
-            .flatten();
-
         match failure.kind {
             FailureKind::Answered(status) => {
-                classify(status, problem.as_ref(), failure.retry_after_secs)
+                classify(status, failure.problem.as_ref(), failure.retry_after_secs)
             }
             FailureKind::Unreachable => BeamError::Network {
                 detail: failure.message.clone(),
@@ -1543,10 +1562,9 @@ impl BeamClient {
 
     async fn fetch_me(&self, server_id: &str) -> Result<UserSummary, BeamError> {
         let client = self.client_for(server_id)?;
-        let response = client
-            .get_current_user(None)
+        let response = TransportFailure::capture(client.get_current_user(None))
             .await
-            .map_err(|error| self.map_error(server_id, &TransportFailure::of(&error)))?;
+            .map_err(|failure| self.map_error(server_id, &failure))?;
         let me = response.into_inner();
         Ok(UserSummary {
             id: me.id,
@@ -1951,6 +1969,110 @@ mod tests {
         let next = client.up_next(seasons, "e1".to_owned());
 
         assert_eq!(next.map(|episode| episode.id), Some("e2".to_owned()));
+    }
+
+    /// A server that answers every request with one canned response.
+    async fn client_answering(status: u16, body: &'static str) -> (Arc<BeamClient>, String) {
+        let (client, id) = client_with_server().await;
+        client
+            .use_transport(
+                &id,
+                Arc::new(crate::transport::CannedBackend {
+                    status,
+                    content_type: "application/problem+json",
+                    body,
+                }),
+            )
+            .expect("the server is registered");
+        (client, id)
+    }
+
+    /// The document the middleware captured is the one the error carries.
+    ///
+    /// Two 404s a viewer must be told about differently is what issue #123
+    /// opened with; that only works if the `type` survives the trip from the
+    /// scope into `classify`.
+    #[tokio::test]
+    async fn a_failed_call_carries_its_own_problem_document_into_the_error() {
+        let (client, _) = client_answering(
+            404,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404,"detail":"Source video file not found"}"#,
+        )
+        .await;
+
+        let error = client
+            .media_sources("7".to_owned())
+            .await
+            .expect_err("the canned 404 fails the call");
+
+        assert_eq!(
+            error,
+            BeamError::NotFound {
+                detail: "Source video file not found".to_owned(),
+                code: "https://beam.justinchung.net/reference/errors/#source-file-missing"
+                    .to_owned(),
+            }
+        );
+    }
+
+    fn failure(
+        kind: FailureKind,
+        problem: Option<crate::transport::ProblemDetail>,
+    ) -> TransportFailure {
+        TransportFailure {
+            kind,
+            retry_after_secs: None,
+            message: "the transport's own words".to_owned(),
+            problem,
+        }
+    }
+
+    /// The three shapes a failure can take, with and without a document.
+    ///
+    /// Only an answered request has a document to classify from; the other two
+    /// never saw a response, so a document on them would be a bug upstream and
+    /// is ignored rather than trusted.
+    #[tokio::test]
+    async fn map_error_classifies_from_the_status_and_the_document_it_was_given() {
+        let (client, id) = client_with_server().await;
+        let document = crate::transport::ProblemDetail {
+            type_uri: "https://beam.justinchung.net/reference/errors/#media-not-found".to_owned(),
+            detail: Some("media 7 not found".to_owned()),
+        };
+
+        assert_eq!(
+            client.map_error(
+                &id,
+                &failure(FailureKind::Answered(404), Some(document.clone()))
+            ),
+            BeamError::NotFound {
+                detail: "media 7 not found".to_owned(),
+                code: "https://beam.justinchung.net/reference/errors/#media-not-found".to_owned(),
+            }
+        );
+        assert!(
+            matches!(
+                client.map_error(&id, &failure(FailureKind::Answered(404), None)),
+                BeamError::NotFound { code, .. } if code == ABOUT_BLANK
+            ),
+            "no document means the status is the whole story"
+        );
+
+        for problem in [None, Some(document.clone())] {
+            assert_eq!(
+                client.map_error(&id, &failure(FailureKind::Unreachable, problem.clone())),
+                BeamError::Network {
+                    detail: "the transport's own words".to_owned(),
+                    retryable: true,
+                }
+            );
+            assert_eq!(
+                client.map_error(&id, &failure(FailureKind::Malformed, problem)),
+                BeamError::Protocol {
+                    detail: "the transport's own words".to_owned(),
+                }
+            );
+        }
     }
 
     #[tokio::test]

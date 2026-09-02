@@ -13,8 +13,8 @@
 
 use crate::api::{ExecuteFuture, Middleware, Next};
 use crate::error::BeamError;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::future::Future;
+use std::sync::{Arc, Mutex, RwLock};
 
 /// The cookie `beam-server` issues and reads. Defined in
 /// `beam-server/src/routes/api_error.rs`.
@@ -61,38 +61,54 @@ impl SessionCookieHolder {
     }
 }
 
-/// How many task slots the problem map holds before it starts evicting.
+/// Where the middleware leaves the problem document for the call in progress.
 ///
-/// A task that fails and never reads its document -- `hydrate` drops the
-/// failures of titles it could not fetch -- would otherwise leave an entry
-/// behind for the life of the client. Eviction under pressure costs the
-/// fallback message rather than the wrong one, which is the right way round.
-const MAX_PENDING_PROBLEMS: usize = 64;
+/// Scoped to the future that made the request, rather than kept on the
+/// middleware. One shared slot was a race, not a store: the write happens after
+/// `response.bytes()` is awaited, so with two requests in flight on one client
+/// the second overwrote the first before the first read it -- and the reader
+/// had no way to notice. What a viewer saw was a title reporting another
+/// title's failure: `BeamErrors.kt` branches on `#source-file-missing`, so a
+/// plain 404 could be shown as "ask an administrator to rescan the library".
+///
+/// Keying the slot by `tokio::task::try_id()` looked like the fix and was not.
+/// uniffi 0.32 wraps each foreign async call in `async_compat::Compat` and
+/// polls it inline on the FFI caller's thread -- there is no `tokio::spawn` --
+/// so the id is `None` for every Kotlin and Swift call, and all concurrent
+/// foreign calls shared one slot: exactly the race the key was meant to close.
+///
+/// `LocalKey::scope` binds the value to the polls of one future, whatever
+/// drives it: a spawned task, a `JoinSet` entry, a bare `block_on`, or uniffi's
+/// inline poll. [`with_problem`] opens the scope and reads it back, and the
+/// middleware writes through [`tokio::task::LocalKey::try_with`], so a request
+/// made with no scope active -- `logout`'s best-effort revoke -- captures
+/// nothing rather than failing.
+tokio::task_local! {
+    static PROBLEM_SLOT: ProblemSlot;
+}
 
-/// Attaches the session cookie, notices when the server rejects it, and keeps
-/// the problem document from whatever failed.
+/// The scope's value. Shared with the caller so the document can be read after
+/// the scoped future has completed and dropped its own handle.
+type ProblemSlot = Arc<Mutex<Option<ProblemDetail>>>;
+
+/// Run `request` with a fresh problem slot in scope, and return whatever the
+/// middleware left in it.
+///
+/// This is the one choke point every call through the generated client goes
+/// through; [`TransportFailure::capture`] is the shape the façade uses.
+pub(crate) async fn with_problem<F: Future>(request: F) -> (F::Output, Option<ProblemDetail>) {
+    let slot: ProblemSlot = Arc::default();
+    let output = PROBLEM_SLOT.scope(Arc::clone(&slot), request).await;
+    let problem = slot.lock().expect("problem slot").take();
+    (output, problem)
+}
+
+/// Attaches the session cookie, notices when the server rejects it, and hands
+/// the problem document from a failed response to the call that made it.
 #[derive(Debug)]
 pub struct SessionMiddleware {
     cookie: Arc<SessionCookieHolder>,
     unauthorized: Arc<std::sync::atomic::AtomicBool>,
-    /// Keyed by the task that made the request.
-    ///
-    /// One shared slot was a race, not a store: the write happens after
-    /// `response.bytes()` is awaited, so with two requests in flight on one
-    /// client the second overwrites the first before the first reads it -- and
-    /// the reader has no way to notice. `hydrate` puts concurrent
-    /// `get_media_detail` calls on one backend through a `JoinSet`, and both
-    /// mobile clients fan out on their home and detail screens, so this was
-    /// reachable without any unusual caller. What a viewer saw was a title
-    /// reporting another title's failure: `BeamErrors.kt` branches on
-    /// `#source-file-missing`, so a plain 404 could be shown as "ask an
-    /// administrator to rescan the library".
-    ///
-    /// Keying by task is what makes the association real. Every concurrent
-    /// request is a separate tokio task -- spawned by `JoinSet`, or by uniffi
-    /// for each foreign async call -- and `map_error` runs in the same task
-    /// that made the request, so it reads its own document or none.
-    problems: Arc<RwLock<HashMap<Option<tokio::task::Id>, ProblemDetail>>>,
 }
 
 impl SessionMiddleware {
@@ -102,7 +118,6 @@ impl SessionMiddleware {
         Self {
             cookie,
             unauthorized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            problems: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -115,27 +130,6 @@ impl SessionMiddleware {
     pub fn take_unauthorized(&self) -> bool {
         self.unauthorized
             .swap(false, std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// The problem document from *this task's* last failed response.
-    ///
-    /// Read here rather than out of the generated error because spargen gives
-    /// each operation its own error enum -- `GetMediaDetailError`,
-    /// `DeleteLibraryError`, thirty-odd of them -- each holding
-    /// `Box<types::Problem>` behind a `StatusNNN` variant, and none of them
-    /// deriving `Serialize` or exposing an accessor. There is no generic way
-    /// to reach the body from `Error::Api`, so the middleware -- which sees
-    /// every response through one function -- reads it instead.
-    ///
-    /// That gap belongs upstream in spargen rather than here: a generated
-    /// error that carries a problem document should be able to hand it back.
-    /// Until a release does, this is where the document comes from.
-    #[must_use]
-    pub fn take_problem(&self) -> Option<ProblemDetail> {
-        self.problems
-            .write()
-            .expect("problem lock")
-            .remove(&tokio::task::try_id())
     }
 }
 
@@ -157,7 +151,6 @@ impl Middleware for SessionMiddleware {
         // (curl, mobile apps)". Sending an Origin would put us in the
         // *checked* path with a value that cannot match.
         let unauthorized = Arc::clone(&self.unauthorized);
-        let problems = Arc::clone(&self.problems);
         Box::pin(async move {
             let response = next.run(request).await?;
             let status = response.status();
@@ -179,31 +172,26 @@ impl Middleware for SessionMiddleware {
                 .bytes()
                 .await
                 .map_err(crate::api::TransportError::new)?;
-            {
-                // `None` outside a task -- a bare `block_on`, which the tests
-                // use. Those cannot interleave two requests the way spawned
-                // tasks can, so they share one slot and lose nothing by it.
-                let id = tokio::task::try_id();
-                let mut problems = problems.write().expect("problem lock");
-                match ProblemDetail::parse(&body) {
-                    Some(parsed) => {
-                        // Bounded: a task that never reads its document would
-                        // otherwise hold a slot forever.
-                        if problems.len() >= MAX_PENDING_PROBLEMS
-                            && !problems.contains_key(&id)
-                            && let Some(&victim) = problems.keys().next()
-                        {
-                            problems.remove(&victim);
-                        }
-                        problems.insert(id, parsed);
-                    }
-                    // A response with no document clears this task's slot, so a
-                    // later failure cannot claim an earlier one's.
-                    None => {
-                        problems.remove(&id);
-                    }
-                }
-            }
+            // Left in the caller's slot, where `with_problem` reads it back.
+            // `None` for a body that is not a document -- a proxy's HTML page
+            // -- so a later failure in the same scope cannot claim an earlier
+            // one's. `Err(AccessError)` means no scope is active, which is a
+            // request whose caller never reads the document; there is nowhere
+            // to put it and nothing lost by not doing so.
+            //
+            // Read here rather than out of the generated error because spargen
+            // gives each operation its own error enum -- `GetMediaDetailError`,
+            // `DeleteLibraryError`, thirty-odd of them -- each holding
+            // `Box<types::Problem>` behind a `StatusNNN` variant, and none of
+            // them exposing an accessor. There is no generic way to reach the
+            // body from `Error::Api`, so the middleware -- which sees every
+            // response through one function -- reads it instead. That gap is
+            // filed upstream as getkono/spargen#85 ("Generated per-operation
+            // error enums expose no accessor for the problem document they
+            // carry"); until a release carries it, this is where the document
+            // comes from.
+            let parsed = ProblemDetail::parse(&body);
+            let _ = PROBLEM_SLOT.try_with(|slot| *slot.lock().expect("problem slot") = parsed);
 
             let mut rebuilt = ::http::Response::new(body);
             *rebuilt.status_mut() = status;
@@ -323,6 +311,11 @@ pub(crate) struct TransportFailure {
     pub(crate) retry_after_secs: Option<u64>,
     /// The transport's own description, used only when there is no response.
     pub(crate) message: String,
+    /// The problem document the response carried, where it carried one.
+    ///
+    /// Read out of the call's own scope by [`TransportFailure::capture`], so it
+    /// is this failure's document and no other's.
+    pub(crate) problem: Option<ProblemDetail>,
 }
 
 /// The three answers a failed request can give, before its body is read.
@@ -345,7 +338,21 @@ pub(crate) enum FailureKind {
 }
 
 impl TransportFailure {
-    pub(crate) fn of<E: std::fmt::Display>(error: &crate::api::Error<E>) -> Self {
+    /// Run one generated-client call and describe its failure, document and all.
+    ///
+    /// The only way the façade obtains a `TransportFailure`, so no call can
+    /// forget to open the scope the middleware writes into.
+    pub(crate) async fn capture<T, E: std::fmt::Display>(
+        request: impl Future<Output = Result<T, crate::api::Error<E>>>,
+    ) -> Result<T, Self> {
+        let (outcome, problem) = with_problem(request).await;
+        outcome.map_err(|error| Self::of(&error, problem))
+    }
+
+    fn of<E: std::fmt::Display>(
+        error: &crate::api::Error<E>,
+        problem: Option<ProblemDetail>,
+    ) -> Self {
         use crate::api::Error;
 
         let (kind, headers) = match error {
@@ -374,15 +381,18 @@ impl TransportFailure {
             kind,
             retry_after_secs: headers.and_then(retry_after_secs),
             message: error.to_string(),
+            problem,
         }
     }
 }
 
 /// `Retry-After` as whole seconds.
 ///
-/// Only the delta-seconds form is read. RFC 9110 also permits an HTTP-date, but
-/// beam-server never sends one, and guessing at a clock skew to convert it
-/// would produce a worse answer than the caller's own default.
+/// Only the delta-seconds form is read. RFC 9110 also permits an HTTP-date
+/// (`Retry-After: Fri, 31 Dec 1999 23:59:59 GMT`), and that form is not
+/// supported: beam-server never sends one, and guessing at a clock skew to
+/// convert it would produce a worse answer than the caller's own default. It
+/// reads as `None`, exactly like a header that is missing or garbage.
 fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)?
@@ -391,6 +401,35 @@ fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .trim()
         .parse()
         .ok()
+}
+
+#[cfg(test)]
+pub(crate) use canned::CannedBackend;
+
+#[mutants::skip]
+#[cfg(test)]
+mod canned {
+    /// A backend that answers every request with one canned response.
+    ///
+    /// The seam spargen provides for exactly this: no listener, no network, and
+    /// the middleware under test is the real one running in the real chain.
+    #[derive(Debug)]
+    pub(crate) struct CannedBackend {
+        pub(crate) status: u16,
+        pub(crate) content_type: &'static str,
+        pub(crate) body: &'static str,
+    }
+
+    impl crate::api::HttpBackend for CannedBackend {
+        fn execute(&self, _request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+            let response = ::http::Response::builder()
+                .status(self.status)
+                .header("content-type", self.content_type)
+                .body(self.body.to_owned())
+                .expect("a canned response is well-formed");
+            Box::pin(async move { Ok(reqwest::Response::from(response)) })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -428,29 +467,13 @@ mod tests {
         );
     }
 
-    /// A backend that answers every request with one canned response.
+    /// Runs one request through the real middleware over `backend`, with no
+    /// problem scope of its own -- the caller decides whether one is open.
     ///
-    /// The seam spargen provides for exactly this: no listener, no network, and
-    /// the middleware under test is the real one running in the real chain.
-    #[derive(Debug)]
-    struct CannedBackend {
-        status: u16,
-        content_type: &'static str,
-        body: &'static str,
-    }
-
-    impl crate::api::HttpBackend for CannedBackend {
-        fn execute(&self, _request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
-            let response = ::http::Response::builder()
-                .status(self.status)
-                .header("content-type", self.content_type)
-                .body(self.body.to_owned())
-                .expect("a canned response is well-formed");
-            Box::pin(async move { Ok(reqwest::Response::from(response)) })
-        }
-    }
-
-    /// Runs one request through the real middleware over `backend`.
+    /// The request is built directly rather than through a `reqwest::Client`:
+    /// under this crate's TLS features `Client::new()` panics with "No provider
+    /// set" unless `install_crypto_provider` has already run in the process,
+    /// which made these tests pass in the full run and fail when run alone.
     async fn drive(
         middleware: &Arc<SessionMiddleware>,
         backend: CannedBackend,
@@ -461,15 +484,25 @@ mod tests {
             Arc::new(backend),
             vec![Arc::clone(middleware) as Arc<dyn Middleware>],
         );
-        let request = reqwest::Client::new()
-            .get("http://beam.invalid/v1/media/7")
-            .build()
-            .expect("a request builds");
+        let request = reqwest::Request::new(
+            reqwest::Method::GET,
+            "http://beam.invalid/v1/media/7"
+                .parse()
+                .expect("a literal URL parses"),
+        );
 
         chain
             .execute(request)
             .await
             .expect("the canned backend answers")
+    }
+
+    /// `drive`, inside its own problem scope: the response and what it left.
+    async fn drive_scoped(
+        middleware: &Arc<SessionMiddleware>,
+        backend: CannedBackend,
+    ) -> (reqwest::Response, Option<ProblemDetail>) {
+        with_problem(drive(middleware, backend)).await
     }
 
     /// The problem document is captured, and the response still reaches the
@@ -483,7 +516,7 @@ mod tests {
     async fn a_problem_document_is_captured_and_the_body_still_arrives() {
         let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
 
-        let response = drive(
+        let (response, problem) = drive_scoped(
             &middleware,
             CannedBackend {
                 status: 404,
@@ -503,9 +536,7 @@ mod tests {
             "the generated client decodes from these bytes, so they must survive the capture"
         );
 
-        let problem = middleware
-            .take_problem()
-            .expect("the document was captured");
+        let problem = problem.expect("the document was captured");
         assert_eq!(
             problem.type_uri,
             "https://beam.justinchung.net/reference/errors/#source-file-missing"
@@ -514,63 +545,50 @@ mod tests {
             problem.detail.as_deref(),
             Some("Source video file not found")
         );
-
-        assert!(
-            middleware.take_problem().is_none(),
-            "taking must clear, or one failure would explain every later one"
-        );
     }
 
-    /// A success is passed through untouched: no buffering, nothing captured.
-    /// Two requests in flight on one client each read their own document.
+    /// Two requests in flight on one client each read their own document --
+    /// in the shape the product actually runs.
     ///
-    /// This is the shape `hydrate` produces: a `JoinSet` of `get_media_detail`
-    /// calls sharing one `MiddlewareBackend`. With a single shared slot the
-    /// second write lands before the first reader gets there, so one caller
-    /// took the other's `type` and the other took none -- and because
-    /// `BeamErrors.kt` branches on `#source-file-missing`, a plain 404 could be
-    /// shown as "ask an administrator to rescan the library".
-    ///
-    /// The barrier is what makes the failure deterministic rather than a race
-    /// the test might win: both responses are captured before either is read,
-    /// which is exactly the interleaving that loses a document.
+    /// uniffi 0.32 polls each foreign async call inline on the caller's thread
+    /// through `async_compat::Compat`; nothing is `tokio::spawn`ed, so every
+    /// Kotlin and Swift call has the same `tokio::task::try_id()` -- `None`.
+    /// Keying the document by task id therefore put all of them in one slot.
+    /// `join!` reproduces that: both futures are polled by this one task, and
+    /// the barrier holds both responses captured before either is read, which
+    /// is exactly the interleaving that lost a document. `BeamErrors.kt`
+    /// branches on `#source-file-missing`, so the loss showed a plain 404 as
+    /// "ask an administrator to rescan the library".
     #[tokio::test]
-    async fn concurrent_requests_each_read_their_own_problem_document() {
+    async fn concurrent_calls_polled_by_one_task_each_read_their_own_document() {
         let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
-        let one = tokio::spawn({
+        let call = |body: &'static str| {
             let middleware = Arc::clone(&middleware);
             let barrier = Arc::clone(&barrier);
-            async move {
-                drive(&middleware, CannedBackend {
-                    status: 404,
-                    content_type: "application/problem+json",
-                    body: r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
-                })
+            with_problem(async move {
+                drive(
+                    &middleware,
+                    CannedBackend {
+                        status: 404,
+                        content_type: "application/problem+json",
+                        body,
+                    },
+                )
                 .await;
                 barrier.wait().await;
-                middleware.take_problem()
-            }
-        });
+            })
+        };
 
-        let two = tokio::spawn({
-            let middleware = Arc::clone(&middleware);
-            let barrier = Arc::clone(&barrier);
-            async move {
-                drive(&middleware, CannedBackend {
-                    status: 404,
-                    content_type: "application/problem+json",
-                    body: r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404}"#,
-                })
-                .await;
-                barrier.wait().await;
-                middleware.take_problem()
-            }
-        });
-
-        let first = one.await.expect("the task completes");
-        let second = two.await.expect("the task completes");
+        let (((), first), ((), second)) = tokio::join!(
+            call(
+                r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
+            ),
+            call(
+                r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404}"#,
+            ),
+        );
 
         assert_eq!(
             first.expect("the first caller has a document").type_uri,
@@ -582,11 +600,114 @@ mod tests {
         );
     }
 
+    /// The same two requests, each on a spawned task -- the shape `hydrate`
+    /// produces through its `JoinSet`. The scope travels with the future, so
+    /// it does not matter which task, or how many, poll it.
+    #[tokio::test]
+    async fn concurrent_spawned_tasks_each_read_their_own_document() {
+        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let spawn = |body: &'static str| {
+            let middleware = Arc::clone(&middleware);
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(with_problem(async move {
+                drive(
+                    &middleware,
+                    CannedBackend {
+                        status: 404,
+                        content_type: "application/problem+json",
+                        body,
+                    },
+                )
+                .await;
+                barrier.wait().await;
+            }))
+        };
+
+        let one = spawn(
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
+        );
+        let two = spawn(
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404}"#,
+        );
+
+        let ((), first) = one.await.expect("the task completes");
+        let ((), second) = two.await.expect("the task completes");
+
+        assert_eq!(
+            first.expect("the first caller has a document").type_uri,
+            "https://beam.justinchung.net/reference/errors/#media-not-found"
+        );
+        assert_eq!(
+            second.expect("the second caller has a document").type_uri,
+            "https://beam.justinchung.net/reference/errors/#source-file-missing"
+        );
+    }
+
+    /// A request made with no scope open -- `logout`'s best-effort revoke --
+    /// still completes, and leaves nothing behind for a later scope to find.
+    #[tokio::test]
+    async fn a_request_outside_any_scope_captures_nothing_and_does_not_panic() {
+        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+
+        let response = drive(
+            &middleware,
+            CannedBackend {
+                status: 404,
+                content_type: "application/problem+json",
+                body: r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
+            },
+        )
+        .await;
+        assert_eq!(response.status(), 404);
+
+        // A scope opened afterwards starts empty: the unscoped write had
+        // nowhere to land, and the slot is per scope rather than per client.
+        let ((), later) = with_problem(async {}).await;
+        assert!(later.is_none());
+    }
+
+    /// A failed response with no document clears the slot rather than leaving
+    /// the previous document in it.
+    ///
+    /// Within one scope the second failure is the one being reported, and a
+    /// gateway's HTML page carries no `type`. Leaving the earlier document in
+    /// place would attach the wrong `code` to it.
+    #[tokio::test]
+    async fn a_failure_without_a_document_clears_an_earlier_one() {
+        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+
+        let ((), problem) = with_problem(async {
+            drive(
+                &middleware,
+                CannedBackend {
+                    status: 404,
+                    content_type: "application/problem+json",
+                    body: r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
+                },
+            )
+            .await;
+            drive(
+                &middleware,
+                CannedBackend {
+                    status: 502,
+                    content_type: "text/html",
+                    body: "<html>502 Bad Gateway</html>",
+                },
+            )
+            .await;
+        })
+        .await;
+
+        assert!(problem.is_none(), "got {problem:?}");
+    }
+
     #[tokio::test]
     async fn a_successful_response_is_not_buffered() {
         let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
 
-        let response = drive(
+        let (response, problem) = drive_scoped(
             &middleware,
             CannedBackend {
                 status: 200,
@@ -597,7 +718,7 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), 200);
-        assert!(middleware.take_problem().is_none());
+        assert!(problem.is_none());
     }
 
     /// The 401 flag and the problem capture are independent.
@@ -608,7 +729,7 @@ mod tests {
     async fn a_401_still_sets_the_flag_while_its_document_is_captured() {
         let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
 
-        drive(
+        let (_, problem) = drive_scoped(
             &middleware,
             CannedBackend {
                 status: 401,
@@ -619,10 +740,7 @@ mod tests {
         .await;
 
         assert!(middleware.take_unauthorized());
-        assert_eq!(
-            middleware.take_problem().expect("captured").type_uri,
-            ABOUT_BLANK
-        );
+        assert_eq!(problem.expect("captured").type_uri, ABOUT_BLANK);
     }
 
     /// The bytes beam-server actually puts on the wire for a missing title.
@@ -729,6 +847,175 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_whitespace_only_detail_falls_back_to_the_generic_message() {
+        // beam-server can send `"detail": ""` for a problem it has no words
+        // for; a viewer shown a blank line has been told nothing.
+        let document = problem("about:blank", Some("   \n\t"));
+        match classify(404, Some(&document), None) {
+            BeamError::NotFound { detail, .. } => {
+                assert!(!detail.trim().is_empty(), "got {detail:?}");
+            }
+            other => panic!("expected not found, got {other:?}"),
+        }
+    }
+
+    fn headers_with_retry_after(value: &str) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            value.parse().expect("a header value"),
+        );
+        headers
+    }
+
+    #[test]
+    fn retry_after_reads_delta_seconds_and_nothing_else() {
+        assert_eq!(retry_after_secs(&headers_with_retry_after("30")), Some(30));
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after("  30  ")),
+            Some(30),
+            "surrounding whitespace is not part of the value"
+        );
+        assert_eq!(
+            retry_after_secs(&reqwest::header::HeaderMap::new()),
+            None,
+            "a missing header is not a zero-second wait"
+        );
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after("soon")),
+            None,
+            "garbage is not a number"
+        );
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after("-5")),
+            None,
+            "a negative delta is not a number of seconds"
+        );
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after("Fri, 31 Dec 1999 23:59:59 GMT")),
+            None,
+            "the HTTP-date form is deliberately unsupported"
+        );
+    }
+
+    /// A `reqwest::Error` without a client or a network: the status check on
+    /// a hand-built response.
+    fn a_reqwest_error() -> reqwest::Error {
+        let response = ::http::Response::builder()
+            .status(500)
+            .body(String::new())
+            .expect("a response builds");
+        reqwest::Response::from(response)
+            .error_for_status()
+            .expect_err("a 500 is an error status")
+    }
+
+    /// A `reqwest::Error` that classifies as a decode failure, which
+    /// `Error::from_reqwest` files under `Protocol`.
+    fn a_reqwest_decode_error() -> reqwest::Error {
+        let response = ::http::Response::builder()
+            .status(200)
+            .body("{".to_owned())
+            .expect("a response builds");
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime")
+            .block_on(reqwest::Response::from(response).json::<serde_json::Value>())
+            .expect_err("`{` is not JSON")
+    }
+
+    /// Which of the three answers each generated failure gives.
+    ///
+    /// The status-bearing variants must surface the status and its
+    /// `Retry-After`; everything with no response must land on the side of
+    /// `Unreachable`/`Malformed` that its retry semantics call for, because
+    /// `is_retryable` and therefore the progress queue follow from that.
+    #[test]
+    fn every_generated_failure_is_classified_by_what_a_retry_could_change() {
+        use crate::api::{Error, ResponseValue, TimeoutKind, TransportError};
+
+        let api: Error<String> = Error::Api(ResponseValue::new(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            headers_with_retry_after("12"),
+            "slow down".to_owned(),
+        ));
+        let failure = TransportFailure::of(&api, None);
+        assert_eq!(failure.kind, FailureKind::Answered(429));
+        assert_eq!(failure.retry_after_secs, Some(12));
+
+        let unexpected: Error<String> = Error::UnexpectedStatus {
+            status: reqwest::StatusCode::IM_A_TEAPOT,
+            headers: reqwest::header::HeaderMap::new(),
+            body: bytes::Bytes::from_static(b"short and stout"),
+        };
+        let failure = TransportFailure::of(&unexpected, None);
+        assert_eq!(failure.kind, FailureKind::Answered(418));
+        assert_eq!(failure.retry_after_secs, None);
+
+        let no_response: [Error<String>; 3] = [
+            Error::Transport(TransportError::new(a_reqwest_error())),
+            Error::Timeout(TimeoutKind::Total),
+            Error::InterruptedBody(TransportError::new(a_reqwest_error())),
+        ];
+        for error in &no_response {
+            let failure = TransportFailure::of(error, None);
+            assert_eq!(failure.kind, FailureKind::Unreachable, "{error}");
+            assert_eq!(failure.retry_after_secs, None);
+            assert!(!failure.message.is_empty());
+        }
+
+        let protocol: Error<String> = Error::from_reqwest(a_reqwest_decode_error());
+        assert!(matches!(protocol, Error::Protocol(_)), "{protocol:?}");
+        assert_eq!(
+            TransportFailure::of(&protocol, None).kind,
+            FailureKind::Malformed
+        );
+    }
+
+    /// The document handed to `of` is the failure's, verbatim: `capture` is
+    /// what reads it from the scope, and nothing downstream re-derives it.
+    #[tokio::test]
+    async fn capture_attaches_the_scoped_document_to_the_failure() {
+        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+
+        let outcome: Result<(), TransportFailure> = TransportFailure::capture(async {
+            let response = drive(
+                &middleware,
+                CannedBackend {
+                    status: 404,
+                    content_type: "application/problem+json",
+                    body: r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
+                },
+            )
+            .await;
+            Err::<(), crate::api::Error<String>>(crate::api::Error::UnexpectedStatus {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: response.bytes().await.expect("a body"),
+            })
+        })
+        .await;
+
+        let failure = outcome.expect_err("the canned 404 is a failure");
+        assert_eq!(failure.kind, FailureKind::Answered(404));
+        assert_eq!(
+            failure.problem.expect("captured").type_uri,
+            "https://beam.justinchung.net/reference/errors/#media-not-found"
+        );
+
+        let clean: Result<(), TransportFailure> = TransportFailure::capture(async {
+            Err::<(), crate::api::Error<String>>(crate::api::Error::Timeout(
+                crate::api::TimeoutKind::Total,
+            ))
+        })
+        .await;
+        assert!(
+            clean.expect_err("a timeout is a failure").problem.is_none(),
+            "a failure with no response has no document"
+        );
+    }
+
     /// A failure with no response is not automatically worth retrying.
     ///
     /// `is_retryable` decides whether the playback-progress queue enqueues or
@@ -745,11 +1032,14 @@ mod tests {
             body: bytes::Bytes::from_static(b"{"),
             truncated: false,
         };
-        assert_eq!(TransportFailure::of(&decode).kind, FailureKind::Malformed);
+        assert_eq!(
+            TransportFailure::of(&decode, None).kind,
+            FailureKind::Malformed
+        );
 
         let unbuildable: Error<std::convert::Infallible> = Error::request_message("not a base URL");
         assert_eq!(
-            TransportFailure::of(&unbuildable).kind,
+            TransportFailure::of(&unbuildable, None).kind,
             FailureKind::Malformed
         );
     }
