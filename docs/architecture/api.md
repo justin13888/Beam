@@ -142,8 +142,10 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   [getkono/kynos#105](https://github.com/getkono/kynos/issues/105).
 
   Statuses in use: `400`, `401`, `403`, `404`, `416` (stream/download range), `429` (rate limiter,
-  with `Retry-After` and `X-RateLimit-Limit`/`-Remaining`/`-Reset`), `500`, `503` (health,
-  `/v1/auth/login` when OIDC is unconfigured, and `/metrics` when metrics are disabled). A wrong
+  with `Retry-After` and `X-RateLimit-Limit`/`-Remaining`/`-Reset`), `500`, `502` (artwork only:
+  `artwork-upstream-failed`, when the metadata provider answered the image fetch unusably or not at
+  all — the fault is the provider's, and `internal` is documented to mean it is Beam's), `503`
+  (health, `/v1/auth/login` when OIDC is unconfigured, and `/metrics` when metrics are disabled). A wrong
   method on a real path returns `405`. The `416` is declared on `MediaDelivery` rather than on
   `DeliveryError`, because `Served::deliver` resolves an unsatisfiable range into a problem document
   and returns it as an `Ok` delivery — the handler never sees an error to convert. `GET /v1/health`
