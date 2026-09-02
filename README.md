@@ -148,9 +148,9 @@ everything *except* an identity provider, which is the shape a real deployment h
 disabled with a clear error until you point `BEAM_OIDC_*` at your own provider. See
 [`docs/operations/deployment.md`](docs/operations/deployment.md).
 
-Its static test users live in `dex/config.yaml` and are for local development only. If your host's
-resolver does not map `*.localhost` to loopback (glibc without `systemd-resolved`), add
-`127.0.0.1 dex.beam.localhost` to `/etc/hosts`.
+Its static test users live in `dex/config.yaml` and are for local development only. If
+`curl http://dex.beam.localhost:5556/dex/.well-known/openid-configuration` fails to resolve on your
+host, add `127.0.0.1 dex.beam.localhost` to `/etc/hosts`.
 
 ## License
 
