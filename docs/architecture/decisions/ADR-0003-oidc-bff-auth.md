@@ -29,8 +29,10 @@ query-parameter stream-token scheme was deleted outright. Users are JIT-provisio
 `(oidc_issuer, oidc_subject)`; admin status is resolved at every login, not read from a stored flag.
 (The original email-allowlist mechanism was later replaced — see issue #85 — by deriving admin
 solely from a configured ID-token claim, `BEAM_OIDC_ADMIN_CLAIM`; the "recompute every login"
-principle here is unchanged.) Dev environments run Dex (a lightweight IdP with static users)
-via `compose.dependencies.yaml`.
+principle here is unchanged.) Dev environments can run Dex (a lightweight IdP with static users)
+from `compose.dependencies.yaml`. (Amended 2026-09-01 — see issue #73 — Dex is opt-in behind the
+`dev-idp` compose profile, enabled by `mise run dev:up`; the default stack starts no IdP, which is
+the production shape.)
 
 ## Consequences
 
@@ -48,7 +50,8 @@ via `compose.dependencies.yaml`.
 - Requires an OIDC issuer to be configured and reachable for login to work at all — there is no
   "just create an account" fallback; this raises the setup bar for a brand-new self-hoster, who must
   stand up (or already have) an IdP. Dex ships in the dev compose stack specifically to soften this
-  for local development and evaluation.
+  for local development and evaluation — opt-in behind the `dev-idp` profile via `mise run dev:up`,
+  so the default stack starts no IdP (see the 2026-09-01 amendment above).
 - The BFF pattern's "cookie authenticates the `<video>` tag" property depends on same-site (dev) or
   same-origin (prod) deployment topology; a deployment that serves the web client and API from
   genuinely cross-site origins would need a different mechanism (this is treated as an unsupported
