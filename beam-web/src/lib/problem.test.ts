@@ -85,6 +85,17 @@ describe("apiError", () => {
 		expect(error.message).toBe("Failed to load media");
 	});
 
+	// A present-but-blank `detail` is the same as none: rendering it would put
+	// an empty red paragraph where the explanation should be.
+	it("falls back when the detail is only whitespace", () => {
+		const error = apiError(
+			{ type: `${BASE}#media-not-found`, status: 404, detail: " \n\t " },
+			"Failed to load media",
+		);
+
+		expect(error.message).toBe("Failed to load media");
+	});
+
 	// The leak guard reads `status` out of the body it is judging, so a
 	// document is free to understate its own status. beam-server never does --
 	// kynos writes both from one StatusCode -- but a proxy sitting in front of

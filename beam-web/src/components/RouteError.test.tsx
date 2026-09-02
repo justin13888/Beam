@@ -77,6 +77,31 @@ describe("RouteError", () => {
 		expect(screen.queryByText(/10\.0\.0\.7/)).not.toBeInTheDocument();
 	});
 
+	// The rule has two halves, and the tests above only exercise the one that
+	// shows something. A loader can also throw something that never went
+	// through `apiError` -- here `fetch` itself rejecting -- and that message
+	// is an unvetted exception string, so in production it stays off the
+	// screen entirely (NFR-108). Without pinning `DEV`, vitest's default of
+	// true would render it and this test would pass against a component that
+	// showed every error's message.
+	it("keeps a plain Error's message behind the DEV gate in production", async () => {
+		vi.stubEnv("DEV", false);
+		server.use(
+			http.get(`${BASE_URL}/v1/media/:id`, () => HttpResponse.error()),
+		);
+		renderRoute("/media/movie-1");
+
+		const heading = await screen.findByRole("heading", {
+			name: /Something went wrong/,
+		});
+		expect(
+			screen.getByRole("button", { name: /Try again/ }),
+		).toBeInTheDocument();
+		// The card renders a message only as a <p> beneath the heading; a plain
+		// Error must contribute none.
+		expect(heading.parentElement?.querySelector("p")).toBeNull();
+	});
+
 	it("retrying re-runs the failed request and recovers when it succeeds", async () => {
 		let attempts = 0;
 		server.use(
