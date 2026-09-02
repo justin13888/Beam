@@ -82,7 +82,6 @@ Read by the compose files, not by application code:
 | `POSTGRES_HOST_PORT` | `5432` | Host port for Postgres. |
 | `BEAM_SERVER_HOST_PORT` | `8000` | Host port for the API server. |
 | `WEB_HOST_PORT` | `8080` | Host port for the web app. |
-| `DEX_HOST_PORT` | `5556` | Host port for the dev-only Dex IdP. Only meaningful with the `dev-idp` compose profile enabled; see [`deployment.md`](deployment.md). Not freely overridable: `5556` is part of the issuer URL in `dex/config.yaml` and in the `dev:up` task, and OIDC discovery compares issuer strings byte-for-byte, so changing this alone breaks login. Change all three together. |
 | `TRAEFIK_HTTP_PORT` / `TRAEFIK_HTTPS_PORT` / `TRAEFIK_DASHBOARD_PORT` | `80` / `443` / `8888` | Traefik entrypoints (dashboard is loopback-only). |
 | `HOST_VIDEO_DIR` | `server_videos` named volume | Host path mounted read-only at `BEAM_VIDEO_DIR`. |
 | `HOST_DATA_DIR` | `server_data` named volume | Host path mounted at `BEAM_DATA_DIR`. |

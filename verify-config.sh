@@ -132,7 +132,6 @@ echo "Checking Port Mappings:"
 check_var "BEAM_SERVER_HOST_PORT"
 check_var "WEB_HOST_PORT"
 check_var "POSTGRES_HOST_PORT"
-check_var "DEX_HOST_PORT"
 echo ""
 
 # Security warnings

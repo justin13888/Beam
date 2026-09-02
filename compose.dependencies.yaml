@@ -46,8 +46,14 @@ services:
     volumes:
       - ./dex/config.yaml:/etc/dex/config.yaml:ro
       - dex:/var/dex
+    # Fixed on both sides, unlike the `${*_HOST_PORT}` knobs on the other
+    # services: 5556 is part of the issuer string (dex/config.yaml, dev:up), and
+    # the browser reaches it through this host mapping while beam-server reaches
+    # it through the `dex.beam.localhost` alias on the container side. Host port,
+    # container port and the issuer's port therefore have to be one number, so
+    # a variable here could only ever break login.
     ports:
-      - "${DEX_HOST_PORT:-5556}:5556"
+      - "5556:5556"
     networks:
       default:
         aliases:
