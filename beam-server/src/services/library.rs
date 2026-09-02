@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use sea_orm::DbErr;
 use thiserror::Error;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::models::{Library, LibraryFile};
@@ -28,9 +28,13 @@ impl PathValidator for OsPathValidator {
         requested: &Path,
         root: &Path,
     ) -> Result<PathBuf, LibraryError> {
+        // The messages below reach an administrator's browser as the `detail`
+        // of a 400, so none of them names a filesystem path (NFR-108). The
+        // paths go to the log, which is where the operator who can act on them
+        // is looking.
         let canonical_root = root.canonicalize().map_err(|e| {
-            error!("Failed to canonicalize video_dir: {}", e);
-            LibraryError::PathNotFound(root.to_string_lossy().to_string())
+            error!(root = %root.display(), error = %e, "failed to canonicalize video_dir");
+            LibraryError::PathNotFound("Video directory is not accessible".to_string())
         })?;
 
         let target_path = if requested.is_absolute() {
@@ -40,14 +44,19 @@ impl PathValidator for OsPathValidator {
         };
 
         let canonical_target = target_path.canonicalize().map_err(|e| {
-            LibraryError::PathNotFound(format!("Library path does not exist or invalid: {}", e))
+            warn!(requested = %target_path.display(), error = %e, "library path does not resolve");
+            LibraryError::PathNotFound("Library path does not exist".to_string())
         })?;
 
         if !canonical_target.starts_with(&canonical_root) {
-            return Err(LibraryError::PathOutsideRoot(format!(
-                "Library path must be within the video directory: {}",
-                root.display()
-            )));
+            warn!(
+                requested = %canonical_target.display(),
+                root = %canonical_root.display(),
+                "library path resolves outside the video directory"
+            );
+            return Err(LibraryError::PathOutsideRoot(
+                "Library path must be within the configured video directory".to_string(),
+            ));
         }
 
         Ok(canonical_target)

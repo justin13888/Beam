@@ -707,6 +707,22 @@ mod os_path_validator {
         OsPathValidator.validate_library_path(requested, root)
     }
 
+    /// The rejection's message reaches an administrator's browser as the
+    /// `detail` of a 400, so it must not name either the path that was asked
+    /// for or the root it was checked against (NFR-108). The paths go to the
+    /// log instead.
+    fn assert_names_no_path(err: &LibraryError, paths: &[&Path]) {
+        let message = err.to_string();
+        for path in paths {
+            let path = path.to_string_lossy();
+            assert!(
+                !message.contains(path.as_ref()),
+                "a client-facing rejection must not carry a filesystem path; \
+                 {message:?} names {path:?}"
+            );
+        }
+    }
+
     #[test]
     fn absolute_path_inside_root_is_accepted_and_canonicalized() {
         let (_tmp, root) = root_with_children();
@@ -756,6 +772,7 @@ mod os_path_validator {
             matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
+        assert_names_no_path(&err, &[&root, outside.path()]);
     }
 
     #[cfg(unix)]
@@ -773,6 +790,9 @@ mod os_path_validator {
             matches!(err, LibraryError::PathOutsideRoot(_)),
             "expected Validation, got {err:?}"
         );
+        // The resolved target is the one a naive message would print, and it
+        // is exactly the location an administrator would rather not disclose.
+        assert_names_no_path(&err, &[&root, &outside_real]);
     }
 
     #[cfg(unix)]
@@ -822,6 +842,8 @@ mod os_path_validator {
             matches!(err, LibraryError::PathNotFound(_)),
             "expected PathNotFound, got {err:?}"
         );
+        // This one used to be the root path verbatim, as the whole message.
+        assert_names_no_path(&err, &[&missing_root]);
     }
 
     #[test]

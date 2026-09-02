@@ -91,7 +91,15 @@ impl From<LibraryError> for LibraryScanError {
             LibraryError::InvalidId => Self::InvalidLibraryId(err.to_string()),
             LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
             // Reachable here: a rescan revisits the root, which may have gone.
-            LibraryError::PathNotFound(_) => Self::PathNotFound(err.to_string()),
+            // The message is replaced rather than passed through because
+            // `beam-index` builds it from the library's `root_path`, and a
+            // filesystem path must not reach a client response (NFR-108). The
+            // original goes to the log, where the operator who can act on it
+            // is looking.
+            LibraryError::PathNotFound(ref reason) => {
+                tracing::warn!(%reason, "library root is not accessible for a rescan");
+                Self::PathNotFound("Library root is no longer accessible".to_string())
+            }
             // Unreachable: containment is decided at registration.
             LibraryError::PathOutsideRoot(_) | LibraryError::Db(_) => {
                 Self::Internal(err.to_string())
