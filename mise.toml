@@ -909,27 +909,33 @@ description = "Assert the compose topology keeps the dev IdP opt-in and declares
 #      service makes the profile-less project invalid outright, so a bare
 #      `compose up` would fail hard rather than simply omit the IdP. Ordering
 #      lives in `dev:up` instead; this is the guard on that decision.
-#   3. Every network a service attaches to is declared at the top level.
-#      Compose creates `default` implicitly, but podman-compose refuses a
-#      project that references an undeclared network, so an implicit `default`
-#      breaks `mise run dev:up` on any host where podman-compose is the
-#      provider -- which the README documents first.
+#   3. Every network a service attaches to is declared in the same file.
+#      Compose creates `default` implicitly, but podman-compose refuses a file
+#      that references a network it does not declare -- and it checks each
+#      file on its own, so a declaration in a sibling include does not rescue
+#      the standalone `compose -f compose.beam.yaml` path the install guide
+#      documents, even while the root project passes.
+#
+# The files are the ones compose.yaml `include`s, read from there rather than
+# restated, so a compose file is under these checks from the moment it is
+# included. The directory argument points the gate at a copy of the files; that
+# is how its negative cases are exercised without editing the tracked ones.
 #
 # Parsed with Bun's YAML rather than grepped: mise pins bun, so CI runs the
 # exact same parser, and a textual assertion about YAML drifts the moment
 # someone reflows a block.
+usage = 'arg "[dir]" help="Directory holding compose.yaml and the files it includes" default="."'
 run = '''
 set -eu
+cd "$usage_dir"
 bun -e '
-const files = ["compose.beam.yaml", "compose.dependencies.yaml"];
+const root = Bun.YAML.parse(await Bun.file("compose.yaml").text());
+// An include entry is a path, or an object whose `path` is one path or a list.
+const files = (root.include ?? []).flatMap((entry) =>
+  typeof entry === "string" ? [entry] : [entry.path].flat(),
+);
 const docs = new Map();
 for (const f of files) docs.set(f, Bun.YAML.parse(await Bun.file(f).text()));
-
-// Top-level networks merge across the files the root compose.yaml includes,
-// so declared-ness is a property of the project, not of one file.
-const declared = new Set();
-for (const doc of docs.values())
-  for (const n of Object.keys(doc.networks ?? {})) declared.add(n);
 
 let status = 0;
 const check = (ok, what) => {
@@ -937,14 +943,22 @@ const check = (ok, what) => {
   if (!ok) status = 1;
 };
 
-const dex = docs.get("compose.dependencies.yaml").services?.dex;
-check(dex !== undefined, "compose.dependencies.yaml declares a dex service");
-check(
-  (dex?.profiles ?? []).includes("dev-idp"),
-  "dex is gated behind the dev-idp profile",
-);
+check(files.length > 0, "compose.yaml includes at least one file");
 
-for (const [f, doc] of docs)
+const dexFiles = [...docs].filter(([, doc]) => doc.services?.dex !== undefined);
+check(
+  dexFiles.length === 1,
+  `exactly one included file declares a dex service (found: ${dexFiles.map(([f]) => f).join(", ") || "none"})`,
+);
+for (const [f, doc] of dexFiles)
+  check(
+    (doc.services.dex.profiles ?? []).includes("dev-idp"),
+    `${f}: dex is gated behind the dev-idp profile`,
+  );
+
+for (const [f, doc] of docs) {
+  // Per file, never unioned across the project -- property 3 above.
+  const declared = new Set(Object.keys(doc.networks ?? {}));
   for (const [name, svc] of Object.entries(doc.services ?? {})) {
     const deps = Array.isArray(svc?.depends_on)
       ? svc.depends_on
@@ -956,8 +970,9 @@ for (const [f, doc] of docs)
       ? svc.networks
       : Object.keys(svc?.networks ?? {});
     for (const n of nets)
-      check(declared.has(n), `${f}: service ${name} attaches to declared network ${n}`);
+      check(declared.has(n), `${f}: service ${name} attaches to network ${n}, declared in ${f}`);
   }
+}
 
 process.exit(status);
 '

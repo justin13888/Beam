@@ -147,5 +147,12 @@ volumes:
   server_data:
 
 networks:
+  # Declared here as well as in compose.dependencies.yaml. podman-compose
+  # checks each file's services against that file's own declarations, and this
+  # file is also brought up on its own: `compose -f compose.beam.yaml` with an
+  # operator's own Postgres is the path the install guide offers anyone who
+  # does not want Traefik. Docker Compose would create `default` implicitly;
+  # `check:compose-invariants` asserts the declaration for every file.
+  default:
   beam_proxy:
     name: beam_proxy
