@@ -2333,6 +2333,130 @@ mod tests {
         );
     }
 
+    /// The three paths that decide the credential but were covered by no test
+    /// of their own. Each answers one question: is the cookie on the client
+    /// afterwards -- observed as whether a secured call leaves at all.
+    ///
+    /// A cookie the server rejected at sign-in must not stay registered, or
+    /// every later call would send it and fail in a way the user cannot see.
+    #[tokio::test]
+    async fn a_rejected_login_leaves_no_credential_behind() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let id = client
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added")
+            .id;
+        // 403 rather than 401, so that only `complete_login`'s own failure
+        // branch withdraws the cookie -- a 401 would have the expiry path do
+        // it too, and this test would not know which one did.
+        let backend = Arc::new(CannedBackend::answering(
+            403,
+            "application/problem+json",
+            r#"{"type":"about:blank","status":403,"detail":"disabled"}"#,
+        ));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .complete_login(id.clone(), "refused-value".to_owned())
+            .await
+            .expect_err("the canned 403 rejects the cookie");
+
+        assert!(matches!(error, BeamError::Forbidden { .. }), "{error:?}");
+        assert!(matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::LoggedOut
+        ));
+        let sent_before = backend.recorded().len();
+        assert_eq!(
+            client.media_sources("7".to_owned()).await,
+            Err(BeamError::Unauthenticated)
+        );
+        assert_eq!(
+            backend.recorded().len(),
+            sent_before,
+            "the refused cookie is not on the client"
+        );
+        assert!(!storage.has_secret(&format!("session/{id}")));
+    }
+
+    /// Signing out everywhere ends this device's session too, credential
+    /// included.
+    #[tokio::test]
+    async fn logging_out_everywhere_withdraws_this_devices_credential() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+        let backend = Arc::new(CannedBackend::answering(204, "text/plain", ""));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        client
+            .logout_everywhere()
+            .await
+            .expect("the canned 204 is the server's yes");
+
+        assert_eq!(backend.recorded().len(), 1, "the logout-all itself");
+        assert_eq!(
+            client.media_sources("7".to_owned()).await,
+            Err(BeamError::Unauthenticated)
+        );
+        assert_eq!(
+            backend.recorded().len(),
+            1,
+            "nothing else reaches the transport without a credential"
+        );
+        assert!(!storage.has_secret(&format!("session/{id}")));
+        assert!(matches!(
+            client.session_state(id).expect("known"),
+            SessionState::LoggedOut
+        ));
+    }
+
+    /// Withdrawing trust rebuilds the client; the session must come with it.
+    /// A viewer who forgets a certificate has not signed out.
+    #[tokio::test]
+    async fn forgetting_certificates_keeps_the_session_on_the_rebuilt_client() {
+        let (client, id, _) = signed_in_client().await;
+        client
+            .trust_certificate(id.clone(), "AA:BB".to_owned())
+            .await
+            .expect("trusted");
+
+        client
+            .forget_certificates(id.clone())
+            .await
+            .expect("forgotten");
+
+        // `install` put a real transport under the rebuilt client; the canned
+        // one goes back in the way production swaps nothing else.
+        let backend = Arc::new(CannedBackend::answering(200, "application/json", "[]"));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        client
+            .media_sources("7".to_owned())
+            .await
+            .expect("an empty list decodes");
+
+        let recorded = backend.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(cookies_of(&recorded[0]), vec!["beam_session=opaque-value"]);
+        assert!(client.trusted_certificates(id).expect("known").is_empty());
+    }
+
     /// The reason the queue exists: an interrupted session must not lose the
     /// resume point. A 401 is not retryable *now*, and used to be dropped for
     /// it -- contradicting `SessionExpired`'s own doc comment and both
