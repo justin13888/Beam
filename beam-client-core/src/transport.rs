@@ -270,7 +270,7 @@ pub(crate) struct TransportFailure {
     pub(crate) problem: Option<ProblemDetail>,
 }
 
-/// The three answers a failed request can give, before its body is read.
+/// The four answers a failed request can give, before its body is read.
 ///
 /// Split because `is_retryable` drives the progress queue, and its own doc
 /// comment warns that a permanently-failing sample must not be able to occupy
@@ -283,9 +283,14 @@ pub(crate) enum FailureKind {
     /// No response arrived, and the same request could plausibly get one:
     /// connection refused, TLS handshake, timeout, a stream that stopped.
     Unreachable,
-    /// The request or the response could not be made sense of: a base URL that
-    /// will not build, a body that does not match the contract the client was
-    /// generated from. Retrying reproduces it exactly.
+    /// The request could not be built, so nothing was sent. What that means
+    /// depends on what the caller holds -- see the `RequestConstruction` arm
+    /// of [`TransportFailure::of`] -- so it is kept apart for the façade to
+    /// read against its own session.
+    Unbuildable,
+    /// The response could not be made sense of: a body that does not match
+    /// the contract the client was generated from. Retrying reproduces it
+    /// exactly.
     Malformed,
 }
 
@@ -321,22 +326,23 @@ impl TransportFailure {
             | Error::Redirect(_)
             | Error::InterruptedBody(_) => (FailureKind::Unreachable, None),
 
-            // A URL that will not build and a body that will not decode are
-            // both permanent: the identical request produces the identical
-            // failure, so offering a retry would be a dead end.
-            //
-            // `RequestConstruction` is also what a secured operation fails
-            // with when no `BeamSession` credential is registered -- a call
-            // made while logged out. That is not malformed, it is
-            // unauthenticated, but spargen carries the distinction only in
+            // A body that will not decode is permanent: the identical request
+            // produces the identical failure, so offering a retry would be a
+            // dead end.
+            Error::Protocol(_) | Error::Decode { .. } => (FailureKind::Malformed, None),
+
+            // `RequestConstruction` is what a secured operation fails with
+            // when no `BeamSession` credential is registered -- a call made
+            // while logged out or after an expiry. That is not malformed, it
+            // is unauthenticated, but spargen carries the distinction only in
             // the message text, and matching on a string the generator may
-            // reword is not a contract. It is filed upstream as
+            // reword is not a contract. A typed error is filed upstream as
             // getkono/spargen#86 ("Typed error for a missing credential so
-            // consumers can map it to unauthenticated"); until a release
-            // carries it, the case stays here, as `Protocol`.
-            Error::RequestConstruction(_) | Error::Protocol(_) | Error::Decode { .. } => {
-                (FailureKind::Malformed, None)
-            }
+            // consumers can map it to unauthenticated"), which would let this
+            // layer say so itself. Until a release carries it, the kind is
+            // kept apart and the façade infers the meaning from the session
+            // it holds: no cookie registered means this is the refusal.
+            Error::RequestConstruction(_) => (FailureKind::Unbuildable, None),
         };
 
         Self {
@@ -1005,6 +1011,13 @@ mod tests {
             TransportFailure::of(&protocol, None).kind,
             FailureKind::Malformed
         );
+
+        let unbuildable: Error<String> = Error::request_message("no registered credential");
+        assert_eq!(
+            TransportFailure::of(&unbuildable, None).kind,
+            FailureKind::Unbuildable,
+            "kept apart from Malformed: only the façade knows what it means"
+        );
     }
 
     /// The document handed to `of` is the failure's, verbatim: `capture` is
@@ -1051,8 +1064,9 @@ mod tests {
     /// `is_retryable` decides whether the playback-progress queue enqueues or
     /// drops, and its own doc comment says a permanently-failing sample must
     /// not be able to occupy that queue forever. A body that will not decode
-    /// and a base URL that will not build both reproduce exactly on a retry,
-    /// so they are `Protocol`, not a retryable `Network`.
+    /// reproduces exactly on a retry, so it is `Protocol`, not a retryable
+    /// `Network` -- and not `Unbuildable` either, which the façade may read
+    /// as a missing session.
     #[test]
     fn a_permanent_failure_is_not_classified_as_a_retryable_network_error() {
         use crate::api::Error;
@@ -1064,12 +1078,6 @@ mod tests {
         };
         assert_eq!(
             TransportFailure::of(&decode, None).kind,
-            FailureKind::Malformed
-        );
-
-        let unbuildable: Error<std::convert::Infallible> = Error::request_message("not a base URL");
-        assert_eq!(
-            TransportFailure::of(&unbuildable, None).kind,
             FailureKind::Malformed
         );
     }

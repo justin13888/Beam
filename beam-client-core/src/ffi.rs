@@ -1616,6 +1616,30 @@ impl BeamClient {
             FailureKind::Malformed => BeamError::Protocol {
                 detail: failure.message.clone(),
             },
+            // The request never left. With no cookie registered that is, by
+            // construction, the generated client refusing a secured operation
+            // for want of its `BeamSession` credential: the base URL was
+            // validated at install, and serialising the crate's own request
+            // types does not fail. Read from the session the façade already
+            // holds rather than from the error's text -- see the
+            // `RequestConstruction` arm of `TransportFailure::of`, and
+            // getkono/spargen#86 for the typed error that would make this
+            // inference unnecessary. Both answers are cured by the user
+            // signing in, which is what lets a progress sample wait for them
+            // instead of being dropped as malformed. With a cookie held, the
+            // request really could not be built, and that is what it says.
+            FailureKind::Unbuildable => {
+                let session = self.with_context(server_id, |context| {
+                    (context.cookie.is_some(), context.state.clone())
+                });
+                match session {
+                    Ok((false, SessionState::Expired)) => BeamError::SessionExpired,
+                    Ok((false, _)) => BeamError::Unauthenticated,
+                    Ok((true, _)) | Err(_) => BeamError::Protocol {
+                        detail: failure.message.clone(),
+                    },
+                }
+            }
         }
     }
 
@@ -2161,7 +2185,8 @@ mod tests {
 
     /// Signing out withdraws the credential, and the generated client then
     /// refuses the request before it is sent: nothing reaches the transport,
-    /// and what the caller gets is permanent rather than something to retry.
+    /// and what the caller gets is "sign in" -- not a malformed request, and
+    /// not something permanent, because signing in cures it.
     #[tokio::test]
     async fn after_logout_a_secured_call_never_reaches_the_transport() {
         let (client, id, backend) = signed_in_client().await;
@@ -2173,12 +2198,47 @@ mod tests {
             .await
             .expect_err("no credential, no request");
 
-        assert!(error.is_permanent(), "{error:?}");
+        assert_eq!(error, BeamError::Unauthenticated);
+        assert!(
+            !error.is_permanent(),
+            "a resume point must wait for the sign-in"
+        );
         assert_eq!(
             backend.recorded().len(),
             sent_before,
             "the refusal happens at construction, not on the wire"
         );
+    }
+
+    /// The twin of the logout case: once the server has rejected the session,
+    /// the next secured call is refused at construction too, and it says
+    /// "your session expired" rather than "sign in" -- the state the 401 left
+    /// behind is what tells the two apart.
+    #[tokio::test]
+    async fn after_an_expiry_a_secured_call_is_reported_as_expired_not_malformed() {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering(
+            401,
+            "application/problem+json",
+            r#"{"type":"about:blank","status":401}"#,
+        ));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        let _ = client.media_sources("7".to_owned()).await;
+        let sent_before = backend.recorded().len();
+
+        let error = client
+            .media_sources("7".to_owned())
+            .await
+            .expect_err("no credential, no request");
+
+        assert_eq!(error, BeamError::SessionExpired);
+        assert!(!error.is_permanent(), "{error:?}");
+        assert_eq!(backend.recorded().len(), sent_before);
     }
 
     /// A cookie found in secret storage at startup is registered with the
@@ -2415,6 +2475,26 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// `Unbuildable` is read against the session, not the message: with no
+    /// cookie it is the missing credential, with one it is a request that
+    /// genuinely could not be built.
+    #[tokio::test]
+    async fn an_unbuildable_request_is_read_against_the_session_it_was_made_under() {
+        let (logged_out, id) = client_with_server().await;
+        assert_eq!(
+            logged_out.map_error(&id, &failure(FailureKind::Unbuildable, None)),
+            BeamError::Unauthenticated
+        );
+
+        let (signed_in, id, _) = signed_in_client().await;
+        assert_eq!(
+            signed_in.map_error(&id, &failure(FailureKind::Unbuildable, None)),
+            BeamError::Protocol {
+                detail: "the transport's own words".to_owned(),
+            }
+        );
     }
 
     #[tokio::test]
