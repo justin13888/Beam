@@ -452,9 +452,9 @@ impl BeamClient {
         let client = self.client_for(&server_id)?;
         let record = self.record_for(&server_id)?;
 
-        let response = TransportFailure::capture(client.get_media_sources(media_id, None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.get_media_sources(media_id, None))
+            .await?;
 
         response
             .into_inner()
@@ -656,9 +656,9 @@ impl BeamClient {
     /// and propagates transport failures.
     pub async fn browse_media(&self, query: BrowseQuery) -> Result<MediaPage, BeamError> {
         let (server_id, client, record) = self.active_context()?;
-        let response = TransportFailure::capture(client.browse_media(browse_params(&query)?))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.browse_media(browse_params(&query)?))
+            .await?;
         Ok(MediaPage::from_generated(response.into_inner(), &record))
     }
 
@@ -673,9 +673,10 @@ impl BeamClient {
     pub async fn media_detail(&self, media_id: String) -> Result<MediaDetail, BeamError> {
         let (server_id, client, record) = self.active_context()?;
         let cache = self.metadata_cache(&server_id)?;
-        Self::fetch_detail(&client, &record, &cache, &media_id)
-            .await
-            .map_err(|error| self.map_error(&server_id, &error))
+        match Self::fetch_detail(&client, &record, &cache, &media_id).await {
+            Ok(detail) => Ok(detail),
+            Err(failure) => Err(self.fail(&server_id, &failure).await),
+        }
     }
 
     /// Every genre the catalog contains, for the explore filters.
@@ -685,9 +686,7 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn genres(&self) -> Result<Vec<String>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.list_genres(None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self.send(&server_id, client.list_genres(None)).await?;
         Ok(response.into_inner().genres)
     }
 
@@ -741,9 +740,7 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn libraries(&self) -> Result<Vec<LibrarySummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.list_libraries(None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self.send(&server_id, client.list_libraries(None)).await?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -758,9 +755,9 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn library(&self, library_id: String) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.get_library(library_id, None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.get_library(library_id, None))
+            .await?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
     }
 
@@ -774,9 +771,9 @@ impl BeamClient {
         library_id: String,
     ) -> Result<Vec<LibraryFileSummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.get_library_files(library_id, None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.get_library_files(library_id, None))
+            .await?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -807,9 +804,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = TransportFailure::capture(client.get_continue_watching(params))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.get_continue_watching(params))
+            .await?;
 
         let mut entries: Vec<ContinueWatchingEntry> = response
             .into_inner()
@@ -851,9 +848,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = TransportFailure::capture(client.get_history(params))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?
+        let response = self
+            .send(&server_id, client.get_history(params))
+            .await?
             .into_inner();
 
         let total = u64::try_from(response.total).unwrap_or(0);
@@ -938,7 +935,7 @@ impl BeamClient {
                 // sample would be held back behind an interval that never
                 // produced a request. Clearing it lets the retry happen.
                 throttle.reset(&file_id);
-                let mapped = self.map_error(&server_id, &failure);
+                let mapped = self.fail(&server_id, &failure).await;
 
                 // A rejected body, a forbidden file, a title that no longer
                 // exists: the identical request fails identically forever.
@@ -1025,7 +1022,7 @@ impl BeamClient {
                         .await?;
                     // A queue drain stops at the first failure rather than
                     // hammering an unreachable server with the whole backlog.
-                    let _ = self.map_error(&server_id, &failure);
+                    let _ = self.fail(&server_id, &failure).await;
                     break;
                 }
             }
@@ -1053,9 +1050,7 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn sessions(&self) -> Result<Vec<DeviceSession>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.list_sessions(None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self.send(&server_id, client.list_sessions(None)).await?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -1070,9 +1065,8 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn revoke_session(&self, session_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        TransportFailure::capture(client.delete_session(session_id, None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        self.send(&server_id, client.delete_session(session_id, None))
+            .await?;
         Ok(())
     }
 
@@ -1087,9 +1081,7 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn logout_everywhere(&self) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        TransportFailure::capture(client.logout_all(None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        self.send(&server_id, client.logout_all(None)).await?;
 
         self.with_context_mut(&server_id, |context| context.set_session(None))??;
         self.storage
@@ -1108,9 +1100,7 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn admin_status(&self) -> Result<AdminStatus, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.get_admin_status(None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self.send(&server_id, client.get_admin_status(None)).await?;
         Ok(AdminStatus::from_generated(response.into_inner()))
     }
 
@@ -1131,9 +1121,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = TransportFailure::capture(client.list_admin_users(params))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?
+        let response = self
+            .send(&server_id, client.list_admin_users(params))
+            .await?
             .into_inner();
         Ok(AdminUserPage {
             total: u64::try_from(response.total).unwrap_or(0),
@@ -1159,9 +1149,11 @@ impl BeamClient {
         let wire_user_id = parse_uuid("user_id", &user_id)?;
         let (server_id, client, _) = self.active_context()?;
         let body = crate::api::types::UpdateAdminUserRequest { disabled };
-        TransportFailure::capture(client.update_admin_user(wire_user_id, None, &body))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        self.send(
+            &server_id,
+            client.update_admin_user(wire_user_id, None, &body),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1182,9 +1174,7 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = TransportFailure::capture(client.get_admin_logs(params))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self.send(&server_id, client.get_admin_logs(params)).await?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -1199,9 +1189,9 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn admin_log_count(&self) -> Result<u64, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.get_admin_log_count(None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.get_admin_log_count(None))
+            .await?;
         Ok(u64::try_from(response.into_inner().count).unwrap_or(0))
     }
 
@@ -1226,9 +1216,9 @@ impl BeamClient {
             origin: None,
             referer: None,
         };
-        let response = TransportFailure::capture(client.get_admin_events(params))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.get_admin_events(params))
+            .await?;
         Ok(response
             .into_inner()
             .into_iter()
@@ -1248,9 +1238,9 @@ impl BeamClient {
     ) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let body = crate::api::types::CreateLibraryRequest { name, root_path };
-        let response = TransportFailure::capture(client.create_library(None, &body))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.create_library(None, &body))
+            .await?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
     }
 
@@ -1261,9 +1251,8 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn delete_library(&self, library_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        TransportFailure::capture(client.delete_library(library_id, None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        self.send(&server_id, client.delete_library(library_id, None))
+            .await?;
         Ok(())
     }
 
@@ -1274,9 +1263,9 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn scan_library(&self, library_id: String) -> Result<u32, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.scan_library(library_id, None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self
+            .send(&server_id, client.scan_library(library_id, None))
+            .await?;
         Ok(u32::try_from(response.into_inner().added).unwrap_or(0))
     }
 
@@ -1290,9 +1279,11 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn refresh_media_metadata(&self, media_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        TransportFailure::capture(client.refresh_media_metadata(media_id.clone(), None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        self.send(
+            &server_id,
+            client.refresh_media_metadata(media_id.clone(), None),
+        )
+        .await?;
         if let Ok(cache) = self.metadata_cache(&server_id) {
             cache.write().expect("metadata lock").remove(&media_id);
         }
@@ -1306,9 +1297,7 @@ impl BeamClient {
     /// Propagates transport failures.
     pub async fn health(&self) -> Result<ServerHealth, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = TransportFailure::capture(client.get_health(None))
-            .await
-            .map_err(|failure| self.map_error(&server_id, &failure))?;
+        let response = self.send(&server_id, client.get_health(None)).await?;
         Ok(ServerHealth::from_generated(response.into_inner()))
     }
 }
@@ -1586,11 +1575,21 @@ impl BeamClient {
     /// and `RateLimited` were unreachable from the server, `is_retryable` said
     /// "retry" for a 400, and the doc comments on the operations below promised
     /// variants the code could not produce (issue #123).
+    ///
+    /// Synchronous by design, so it can sit inside a `map_err`; the one effect
+    /// of a rejected session that needs an await -- deleting the stored cookie
+    /// -- is [`Self::fail`]'s, which every call site goes through.
     fn map_error(&self, server_id: &str, failure: &TransportFailure) -> BeamError {
         let saw_401 = self
             .with_context(server_id, |context| context.middleware.take_unauthorized())
             .unwrap_or(false);
         if saw_401 {
+            // The transition's own effects, performed rather than read back:
+            // `InstallCookie(false)` is the credential coming off the client,
+            // so the next secured call is refused here instead of sent with a
+            // cookie the server has already rejected -- and so
+            // `server_http_config` stops handing that cookie to the player.
+            let _ = self.with_context_mut(server_id, |context| context.set_session(None));
             let _ = self.apply(server_id, SessionEvent::UnauthorizedObserved);
             return BeamError::SessionExpired;
         }
@@ -1620,11 +1619,47 @@ impl BeamClient {
         }
     }
 
+    /// Run one generated-client call against `server_id`, and turn its
+    /// failure into the core's error.
+    ///
+    /// The single shape every operation takes, so that no call can reach the
+    /// server without the problem scope open ([`TransportFailure::capture`])
+    /// or fail without the session machine hearing about it ([`Self::fail`]).
+    async fn send<T, E: std::fmt::Display>(
+        &self,
+        server_id: &str,
+        request: impl std::future::Future<Output = Result<T, crate::api::Error<E>>>,
+    ) -> Result<T, BeamError> {
+        match TransportFailure::capture(request).await {
+            Ok(value) => Ok(value),
+            Err(failure) => Err(self.fail(server_id, &failure).await),
+        }
+    }
+
+    /// [`Self::map_error`], plus the transition effect that needs an await.
+    ///
+    /// `ClearCookie`: a session the server has rejected is deleted from secret
+    /// storage, or the next cold start would restore it and send it again.
+    /// Removing an absent key is a no-op, so this asks no question `map_error`
+    /// would have to answer twice. The removal failing is logged and not
+    /// returned: the caller's error is the expired session, which stands, and
+    /// the in-memory credential is already gone.
+    async fn fail(&self, server_id: &str, failure: &TransportFailure) -> BeamError {
+        let mapped = self.map_error(server_id, failure);
+        if matches!(mapped, BeamError::SessionExpired)
+            && let Err(error) = self
+                .storage
+                .remove_secret(format!("session/{server_id}"))
+                .await
+        {
+            tracing::warn!(server_id, %error, "could not delete the rejected session cookie");
+        }
+        mapped
+    }
+
     async fn fetch_me(&self, server_id: &str) -> Result<UserSummary, BeamError> {
         let client = self.client_for(server_id)?;
-        let response = TransportFailure::capture(client.get_current_user(None))
-            .await
-            .map_err(|failure| self.map_error(server_id, &failure))?;
+        let response = self.send(server_id, client.get_current_user(None)).await?;
         let me = response.into_inner();
         Ok(UserSummary {
             id: me.id,
@@ -2041,7 +2076,19 @@ mod tests {
     ///
     /// Returns the backend too, so a test can read what reached the wire.
     async fn signed_in_client() -> (Arc<BeamClient>, String, Arc<CannedBackend>) {
-        let (client, id) = client_with_server().await;
+        signed_in_client_over(Arc::new(InMemoryKeyValueStore::new())).await
+    }
+
+    /// `signed_in_client`, over a storage the test keeps a handle to.
+    async fn signed_in_client_over(
+        storage: Arc<InMemoryKeyValueStore>,
+    ) -> (Arc<BeamClient>, String, Arc<CannedBackend>) {
+        let client = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        let id = client
+            .add_server("https://beam.test".to_owned(), Some("Home".to_owned()))
+            .await
+            .expect("adding a server is offline")
+            .id;
         let backend = Arc::new(CannedBackend::answering(200, "application/json", ME));
         client
             .use_transport(
@@ -2173,6 +2220,56 @@ mod tests {
         assert_eq!(
             cookies_of(&recorded[0]),
             vec!["beam_session=restored-value"]
+        );
+    }
+
+    /// Everything the machine's `UnauthorizedObserved` transition promises, in
+    /// one place: the state, the client's credential, the player's copy, and
+    /// the stored one. Leaving any behind means a cookie the server has
+    /// already refused is sent again -- by the next call, by Media3, or by the
+    /// next cold start.
+    #[tokio::test]
+    async fn a_401_mid_session_withdraws_the_credential_everywhere() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+        let secret_key = format!("session/{id}");
+        assert!(storage.has_secret(&secret_key), "signing in stored it");
+        let backend = Arc::new(CannedBackend::answering(
+            401,
+            "application/problem+json",
+            r#"{"type":"about:blank","status":401,"detail":"session expired"}"#,
+        ));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .media_sources("7".to_owned())
+            .await
+            .expect_err("the canned 401 fails the call");
+
+        assert_eq!(error, BeamError::SessionExpired);
+        assert!(matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::Expired
+        ));
+        let sent_before = backend.recorded().len();
+        let _ = client.media_sources("7".to_owned()).await;
+        assert_eq!(
+            backend.recorded().len(),
+            sent_before,
+            "the rejected cookie is not sent again"
+        );
+        assert!(
+            matches!(client.server_http_config(), Err(BeamError::Unauthenticated)),
+            "nor handed to the player"
+        );
+        assert!(
+            !storage.has_secret(&secret_key),
+            "nor kept for the next cold start"
         );
     }
 

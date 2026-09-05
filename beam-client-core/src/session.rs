@@ -88,7 +88,9 @@ pub enum SessionEffect {
     PersistCookie,
     /// Delete the stored cookie.
     ClearCookie,
-    /// Install the cookie into the transport, or remove it when `None`.
+    /// Register the cookie as the generated client's `BeamSession`
+    /// credential (`true`), or withdraw it so secured requests are refused
+    /// before they are sent (`false`).
     InstallCookie(bool),
     /// Call `GET /v1/me`.
     VerifyIdentity,
