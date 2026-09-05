@@ -26,7 +26,7 @@ use beam_domain::models::file::{CreateMediaFile, FileStatus};
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::{EnrichmentStateRepository, FileRepository};
-use beam_index::services::index::MockIndexService;
+use beam_index::services::index::{IndexError, MockIndexService};
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
@@ -203,6 +203,20 @@ fn make_test_state() -> TestFixture {
 }
 
 fn make_test_state_with_notification(notification: Arc<dyn NotificationService>) -> TestFixture {
+    let mut mock_index = MockIndexService::new();
+    mock_index.expect_scan_library().returning(|_| Ok(0));
+    make_test_state_with(notification, mock_index)
+}
+
+/// Like [`make_test_state`], with an indexer the test scripts itself.
+fn make_test_state_with_index(mock_index: MockIndexService) -> TestFixture {
+    make_test_state_with(Arc::new(InMemoryNotificationService::new()), mock_index)
+}
+
+fn make_test_state_with(
+    notification: Arc<dyn NotificationService>,
+    mock_index: MockIndexService,
+) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
 
@@ -222,11 +236,7 @@ fn make_test_state_with_notification(notification: Arc<dyn NotificationService>)
         file_repo.clone(),
         PathBuf::from("/videos"),
         notification.clone(),
-        Arc::new({
-            let mut mock_index = MockIndexService::new();
-            mock_index.expect_scan_library().returning(|_| Ok(0));
-            mock_index
-        }),
+        Arc::new(mock_index),
         Arc::new(InMemoryPathValidator::success(PathBuf::from(
             "/videos/movies",
         ))),
@@ -498,6 +508,54 @@ async fn scanning_a_library_as_an_admin_returns_the_added_count() {
     // The mocked indexer scans trivially, so this verifies wiring/auth/response
     // shape rather than scan semantics (covered where the indexer is).
     assert_eq!(response.json::<ScanLibraryResponse>().added, 0);
+}
+
+/// A rescan of a library whose root has gone since registration is a 400 whose
+/// `detail` is the indexer's own message, passed through unchanged. That
+/// message is path-free by construction in `beam-index` (asserted there), so
+/// the route has no reason to replace it -- and must not (NFR-108).
+#[tokio::test]
+async fn scanning_a_library_whose_root_has_gone_is_400_without_a_path() {
+    const REASON: &str = "Library root path does not exist or is not a directory";
+    let expected_detail = IndexError::PathNotFound(REASON.into()).to_string();
+    let mut mock_index = MockIndexService::new();
+    mock_index
+        .expect_scan_library()
+        .returning(|_| Err(IndexError::PathNotFound(REASON.into())));
+    let fixture = make_test_state_with_index(mock_index);
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    let created: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+
+    let response = client
+        .post(&format!("/v1/admin/libraries/{}/scan", created.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    response.assert_problem_type(
+        "https://beam.justinchung.net/reference/errors/#library-path-not-found",
+    );
+    let detail = response.json::<Value>()["detail"]
+        .as_str()
+        .expect("problem detail is a string")
+        .to_string();
+    assert_eq!(detail, expected_detail);
+    assert!(
+        !detail.contains('/'),
+        "no filesystem path may reach the client: {detail}"
+    );
 }
 
 #[tokio::test]
