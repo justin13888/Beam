@@ -399,7 +399,7 @@ impl LocalIndexService {
         info!("Processing new file: {}", path.display());
 
         let (size, mtime) = read_fs_meta(path).map_err(|e| {
-            error!(path = %path.display(), error = %e, "Failed to read file metadata");
+            warn!(path = %path.display(), error = %e, "Failed to read file metadata");
             IndexError::PathNotFound(format!("Could not read file metadata: {e}"))
         })?;
 
@@ -975,11 +975,11 @@ impl IndexService for LocalIndexService {
             .update_scan_progress(lib_uuid, Some(start_time), None, None)
             .await?;
 
-        if !library.root_path.exists() {
+        if !library.root_path.is_dir() {
             self.notification_service.publish(AdminEvent::error(
                 EventCategory::LibraryScan,
                 format!(
-                    "Library '{}' path not found: {}",
+                    "Library '{}' root path does not exist or is not a directory: {}",
                     library.name,
                     library.root_path.display()
                 ),
@@ -992,7 +992,7 @@ impl IndexService for LocalIndexService {
                     AdminLogLevel::Error,
                     AdminLogCategory::LibraryScan,
                     format!(
-                        "Library scan failed: path not found for \"{}\"",
+                        "Library scan failed: root path does not exist or is not a directory for \"{}\"",
                         library.name
                     ),
                     Some(serde_json::json!({
@@ -2766,6 +2766,51 @@ mod tests {
         assert!(logs.iter().any(|l| {
             l.level == AdminLogLevel::Error && l.category == AdminLogCategory::LibraryScan
         }));
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_root_is_a_file() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        // The root exists, but as a regular file: there is nothing to walk.
+        let root_path = dir.path().join("movies.mkv");
+        std::fs::write(&root_path, b"not a directory").unwrap();
+        let library = lib_repo
+            .create(CreateLibrary {
+                name: "File Root".to_string(),
+                root_path: root_path.clone(),
+                description: None,
+            })
+            .await
+            .unwrap();
+
+        // No expectations: reaching the hasher or the prober would be a bug.
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let err = service
+            .scan_library(library.id.to_string())
+            .await
+            .expect_err("a root that is not a directory must fail the scan");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        let message = err.to_string();
+        assert!(
+            !message.contains(root_path.to_str().unwrap()),
+            "error message must not carry the library root: {message}"
+        );
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert!(files.is_empty(), "nothing may be indexed under a file root");
     }
 
     #[tokio::test]
