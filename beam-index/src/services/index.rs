@@ -98,6 +98,8 @@ pub enum IndexError {
     LibraryNotFound,
     #[error("Invalid Library ID")]
     InvalidId,
+    /// The message never contains a filesystem path (NFR-108): the path goes
+    /// to a `tracing` field and the admin-log payload, both at the failing site.
     #[error("Path not found: {0}")]
     PathNotFound(String),
 }
@@ -397,11 +399,8 @@ impl LocalIndexService {
         info!("Processing new file: {}", path.display());
 
         let (size, mtime) = read_fs_meta(path).map_err(|e| {
-            IndexError::PathNotFound(format!(
-                "Failed to read metadata for {}: {}",
-                path.display(),
-                e
-            ))
+            error!(path = %path.display(), error = %e, "Failed to read file metadata");
+            IndexError::PathNotFound(format!("Could not read file metadata: {e}"))
         })?;
 
         if !is_known_video(path) {
@@ -1003,7 +1002,7 @@ impl IndexService for LocalIndexService {
                 )
                 .await;
             return Err(IndexError::PathNotFound(
-                library.root_path.to_string_lossy().to_string(),
+                "Library root path does not exist or is not a directory".to_string(),
             ));
         }
 
@@ -2377,6 +2376,40 @@ mod tests {
         assert!(result.unwrap());
     }
 
+    #[tokio::test]
+    async fn test_process_file_missing_path_reports_no_filesystem_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("movies/Vanished (2020).mkv");
+        // Nothing is created: metadata cannot be read, so the file is refused
+        // before any repository, hash, or probe call.
+        let service = LocalIndexService::new(
+            Arc::new(MockLibraryRepository::new()),
+            Arc::new(MockFileRepository::new()),
+            Arc::new(MockMovieRepository::new()),
+            Arc::new(MockShowRepository::new()),
+            Arc::new(MockMediaStreamRepository::new()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let err = service
+            .process_new_file(&path, Uuid::new_v4())
+            .await
+            .expect_err("a file that cannot be stat'ed must be refused");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        let message = err.to_string();
+        assert!(
+            !message.contains(path.to_str().unwrap()),
+            "error message must not carry the file path: {message}"
+        );
+        assert!(
+            !message.contains('/'),
+            "error message must not carry any path component: {message}"
+        );
+    }
+
     // ============================
     // SCAN LIBRARY INTEGRATION TESTS
     // ============================
@@ -2676,10 +2709,11 @@ mod tests {
         let notification_svc = Arc::new(InMemoryNotificationService::new());
 
         // Insert a library whose root_path does not exist on disk
+        let root_path = PathBuf::from("/tmp/beam-nonexistent-xyzzy-12345");
         let library = Library {
             id: Uuid::new_v4(),
             name: "Bad Library".to_string(),
-            root_path: PathBuf::from("/tmp/beam-nonexistent-xyzzy-12345"),
+            root_path: root_path.clone(),
             description: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -2711,7 +2745,15 @@ mod tests {
         );
 
         let result = service.scan_library(library.id.to_string()).await;
-        assert!(matches!(result, Err(IndexError::PathNotFound(_))));
+        let err = result.expect_err("a missing root must fail the scan");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        // The path reaches the operator through the notification and admin
+        // log below, never through the error message (NFR-108).
+        let message = err.to_string();
+        assert!(
+            !message.contains(root_path.to_str().unwrap()),
+            "error message must not carry the library root: {message}"
+        );
 
         // An error-level notification must have been published
         let events = notification_svc.published_events();
