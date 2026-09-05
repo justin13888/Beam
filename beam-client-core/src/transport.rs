@@ -1,65 +1,26 @@
-//! Getting the session cookie onto every request.
+//! What sits between the generated client and the network.
 //!
-//! `beam-server` reads exactly one credential -- the `beam_session` cookie --
-//! and the exported spec declares no security schemes at all, so the generated
-//! client has no auth parameter to fill in. The credential therefore has to be
-//! attached below the generated code, at the transport seam.
+//! The session cookie itself is not attached here. `api/openapi.json` declares
+//! the `BeamSession` scheme -- an API key in the `beam_session` cookie -- and
+//! the generated client attaches a registered credential of that scheme as
+//! `Cookie: beam_session=<value>` on every operation that requires it. The
+//! façade registers the current cookie with `with_credential("BeamSession", ..)`
+//! and rebuilds the client when it changes, so the credential has exactly one
+//! owner and this module never sees it.
 //!
-//! spargen offers two places to do that. A replacement [`HttpBackend`] would
-//! mean reimplementing request execution; a [`Middleware`] wraps the stock
-//! `ReqwestBackend` and gets to inspect the response as well, which is what
-//! makes a mid-session 401 observable in one place instead of at every call
-//! site. The middleware is the smaller and better-placed of the two.
+//! What is left for a [`Middleware`] is what only the response can tell: a
+//! mid-session 401, observable in one place instead of at every call site, and
+//! the problem document a failed response carried, handed back to the call
+//! that made it.
 
 use crate::api::{ExecuteFuture, Middleware, Next};
 use crate::error::BeamError;
 use std::future::Future;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 /// The cookie `beam-server` issues and reads. Defined in
 /// `beam-server/src/routes/api_error.rs`.
 pub const SESSION_COOKIE: &str = "beam_session";
-
-/// The current session cookie for one server, swappable at runtime.
-///
-/// Runtime-swappable rather than baked into the `reqwest::Client`'s default
-/// headers, because the credential changes on login, logout, and expiry --
-/// and rebuilding the client for each would discard the connection pool and
-/// TLS session cache that Media3's neighbouring range requests benefit from.
-#[derive(Debug, Default)]
-pub struct SessionCookieHolder {
-    cookie: RwLock<Option<String>>,
-}
-
-impl SessionCookieHolder {
-    /// An empty holder.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Install a cookie value, replacing any current one.
-    pub fn set(&self, value: &str) {
-        *self.cookie.write().expect("cookie lock") = Some(value.to_owned());
-    }
-
-    /// Remove the cookie, so requests go out unauthenticated.
-    pub fn clear(&self) {
-        *self.cookie.write().expect("cookie lock") = None;
-    }
-
-    /// The current value, if any.
-    #[must_use]
-    pub fn get(&self) -> Option<String> {
-        self.cookie.read().expect("cookie lock").clone()
-    }
-
-    /// Whether a cookie is installed.
-    #[must_use]
-    pub fn is_set(&self) -> bool {
-        self.cookie.read().expect("cookie lock").is_some()
-    }
-}
 
 tokio::task_local! {
     /// Where the middleware leaves the problem document for the call in progress.
@@ -103,22 +64,18 @@ pub(crate) async fn with_problem<F: Future>(request: F) -> (F::Output, Option<Pr
     (output, problem)
 }
 
-/// Attaches the session cookie, notices when the server rejects it, and hands
-/// the problem document from a failed response to the call that made it.
-#[derive(Debug)]
+/// Notices when the server rejects the session, and hands the problem
+/// document from a failed response to the call that made it.
+#[derive(Debug, Default)]
 pub struct SessionMiddleware {
-    cookie: Arc<SessionCookieHolder>,
     unauthorized: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SessionMiddleware {
-    /// Wrap a cookie holder.
+    /// A middleware that has seen no 401 yet.
     #[must_use]
-    pub fn new(cookie: Arc<SessionCookieHolder>) -> Self {
-        Self {
-            cookie,
-            unauthorized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Whether a 401 has been seen since this was last cleared.
@@ -134,16 +91,11 @@ impl SessionMiddleware {
 }
 
 impl Middleware for SessionMiddleware {
-    fn handle<'a>(&'a self, mut request: reqwest::Request, next: Next<'a>) -> ExecuteFuture<'a> {
-        if let Some(value) = self.cookie.get()
-            && let Ok(header) =
-                reqwest::header::HeaderValue::from_str(&format!("{SESSION_COOKIE}={value}"))
-        {
-            request
-                .headers_mut()
-                .insert(reqwest::header::COOKIE, header);
-        }
-
+    fn handle<'a>(&'a self, request: reqwest::Request, next: Next<'a>) -> ExecuteFuture<'a> {
+        // The request goes through as the generated client built it, `Cookie`
+        // header included: the credential is registered with the client, not
+        // added here.
+        //
         // Deliberately sets neither Origin nor Referer. beam-server's CSRF
         // hoop rejects an unsafe method whose Origin does not match, but
         // explicitly allows a request carrying neither -- the branch its own
@@ -372,6 +324,16 @@ impl TransportFailure {
             // A URL that will not build and a body that will not decode are
             // both permanent: the identical request produces the identical
             // failure, so offering a retry would be a dead end.
+            //
+            // `RequestConstruction` is also what a secured operation fails
+            // with when no `BeamSession` credential is registered -- a call
+            // made while logged out. That is not malformed, it is
+            // unauthenticated, but spargen carries the distinction only in
+            // the message text, and matching on a string the generator may
+            // reword is not a contract. It is filed upstream as
+            // getkono/spargen#86 ("Typed error for a missing credential so
+            // consumers can map it to unauthenticated"); until a release
+            // carries it, the case stays here, as `Protocol`.
             Error::RequestConstruction(_) | Error::Protocol(_) | Error::Decode { .. } => {
                 (FailureKind::Malformed, None)
             }
@@ -412,24 +374,67 @@ fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 }
 
 #[cfg(test)]
-pub(crate) use canned::CannedBackend;
+pub(crate) use canned::{CannedBackend, RecordedRequest};
 
 #[mutants::skip]
 #[cfg(test)]
 mod canned {
-    /// A backend that answers every request with one canned response.
+    use std::sync::Mutex;
+
+    /// A backend that answers every request with one canned response, and
+    /// keeps what each request looked like when it arrived.
     ///
     /// The seam spargen provides for exactly this: no listener, no network, and
     /// the middleware under test is the real one running in the real chain.
+    /// Recording the requests is what lets a test assert what the generated
+    /// client actually put on the wire -- the `Cookie` header above all.
     #[derive(Debug)]
     pub(crate) struct CannedBackend {
-        pub(crate) status: u16,
-        pub(crate) content_type: &'static str,
-        pub(crate) body: &'static str,
+        status: u16,
+        content_type: &'static str,
+        body: &'static str,
+        recorded: Mutex<Vec<RecordedRequest>>,
+    }
+
+    /// One request as the backend received it.
+    #[derive(Debug, Clone)]
+    pub(crate) struct RecordedRequest {
+        pub(crate) method: reqwest::Method,
+        pub(crate) url: reqwest::Url,
+        pub(crate) headers: reqwest::header::HeaderMap,
+    }
+
+    impl CannedBackend {
+        /// A backend answering everything with `status` and this body.
+        pub(crate) fn answering(
+            status: u16,
+            content_type: &'static str,
+            body: &'static str,
+        ) -> Self {
+            Self {
+                status,
+                content_type,
+                body,
+                recorded: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Every request that reached this backend, in order.
+        pub(crate) fn recorded(&self) -> Vec<RecordedRequest> {
+            self.recorded.lock().expect("recorded requests").clone()
+        }
     }
 
     impl crate::api::HttpBackend for CannedBackend {
-        fn execute(&self, _request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+        fn execute(&self, request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+            self.recorded
+                .lock()
+                .expect("recorded requests")
+                .push(RecordedRequest {
+                    method: request.method().clone(),
+                    url: request.url().clone(),
+                    headers: request.headers().clone(),
+                });
             let response = ::http::Response::builder()
                 .status(self.status)
                 .header("content-type", self.content_type)
@@ -445,24 +450,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_cookie_can_be_installed_replaced_and_cleared() {
-        let holder = SessionCookieHolder::new();
-        assert!(!holder.is_set());
-
-        holder.set("abc");
-        assert_eq!(holder.get().as_deref(), Some("abc"));
-
-        holder.set("def");
-        assert_eq!(holder.get().as_deref(), Some("def"));
-
-        holder.clear();
-        assert!(!holder.is_set());
-        assert_eq!(holder.get(), None);
-    }
-
-    #[test]
     fn the_unauthorized_flag_is_consumed_when_taken() {
-        let middleware = SessionMiddleware::new(Arc::new(SessionCookieHolder::new()));
+        let middleware = SessionMiddleware::new();
         assert!(!middleware.take_unauthorized());
 
         middleware
@@ -486,23 +475,65 @@ mod tests {
         middleware: &Arc<SessionMiddleware>,
         backend: CannedBackend,
     ) -> reqwest::Response {
+        drive_request(middleware, Arc::new(backend), a_request()).await
+    }
+
+    /// `drive`, for a request the test built itself, over a backend it keeps a
+    /// handle to.
+    async fn drive_request(
+        middleware: &Arc<SessionMiddleware>,
+        backend: Arc<CannedBackend>,
+        request: reqwest::Request,
+    ) -> reqwest::Response {
         use crate::api::{HttpBackend, MiddlewareBackend};
 
         let chain = MiddlewareBackend::with_middlewares(
-            Arc::new(backend),
+            backend as Arc<dyn crate::api::HttpBackend>,
             vec![Arc::clone(middleware) as Arc<dyn Middleware>],
         );
-        let request = reqwest::Request::new(
-            reqwest::Method::GET,
-            "http://beam.invalid/v1/media/7"
-                .parse()
-                .expect("a literal URL parses"),
-        );
-
         chain
             .execute(request)
             .await
             .expect("the canned backend answers")
+    }
+
+    fn a_request() -> reqwest::Request {
+        reqwest::Request::new(
+            reqwest::Method::GET,
+            "http://beam.invalid/v1/media/7"
+                .parse()
+                .expect("a literal URL parses"),
+        )
+    }
+
+    /// The credential is the generated client's to attach, so the middleware
+    /// must neither add a second `Cookie` nor rewrite the one it is handed.
+    #[tokio::test]
+    async fn an_existing_cookie_header_passes_through_untouched() {
+        let middleware = Arc::new(SessionMiddleware::new());
+        let backend = Arc::new(CannedBackend::answering(200, "application/json", "{}"));
+        let mut request = a_request();
+        request.headers_mut().insert(
+            reqwest::header::COOKIE,
+            reqwest::header::HeaderValue::from_static("beam_session=from-the-client"),
+        );
+
+        drive_request(&middleware, Arc::clone(&backend), request).await;
+
+        let recorded = backend.recorded();
+        assert_eq!(recorded.len(), 1);
+        let cookies: Vec<_> = recorded[0]
+            .headers
+            .get_all(reqwest::header::COOKIE)
+            .iter()
+            .collect();
+        assert_eq!(
+            cookies,
+            vec![&reqwest::header::HeaderValue::from_static(
+                "beam_session=from-the-client"
+            )],
+            "one Cookie header, exactly as the client built it"
+        );
     }
 
     /// `drive`, inside its own problem scope: the response and what it left.
@@ -522,15 +553,11 @@ mod tests {
     /// would trade one bug for a worse one.
     #[tokio::test]
     async fn a_problem_document_is_captured_and_the_body_still_arrives() {
-        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let middleware = Arc::new(SessionMiddleware::new());
 
         let (response, problem) = drive_scoped(
             &middleware,
-            CannedBackend {
-                status: 404,
-                content_type: "application/problem+json",
-                body: r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404,"detail":"Source video file not found"}"#,
-            },
+            CannedBackend::answering(404, "application/problem+json", r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404,"detail":"Source video file not found"}"#),
         )
         .await;
 
@@ -569,7 +596,7 @@ mod tests {
     /// "ask an administrator to rescan the library".
     #[tokio::test]
     async fn concurrent_calls_polled_by_one_task_each_read_their_own_document() {
-        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let middleware = Arc::new(SessionMiddleware::new());
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
         let call = |body: &'static str| {
@@ -578,11 +605,7 @@ mod tests {
             with_problem(async move {
                 drive(
                     &middleware,
-                    CannedBackend {
-                        status: 404,
-                        content_type: "application/problem+json",
-                        body,
-                    },
+                    CannedBackend::answering(404, "application/problem+json", body),
                 )
                 .await;
                 barrier.wait().await;
@@ -613,7 +636,7 @@ mod tests {
     /// it does not matter which task, or how many, poll it.
     #[tokio::test]
     async fn concurrent_spawned_tasks_each_read_their_own_document() {
-        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let middleware = Arc::new(SessionMiddleware::new());
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
         let spawn = |body: &'static str| {
@@ -622,11 +645,7 @@ mod tests {
             tokio::spawn(with_problem(async move {
                 drive(
                     &middleware,
-                    CannedBackend {
-                        status: 404,
-                        content_type: "application/problem+json",
-                        body,
-                    },
+                    CannedBackend::answering(404, "application/problem+json", body),
                 )
                 .await;
                 barrier.wait().await;
@@ -657,15 +676,11 @@ mod tests {
     /// still completes, and leaves nothing behind for a later scope to find.
     #[tokio::test]
     async fn a_request_outside_any_scope_captures_nothing_and_does_not_panic() {
-        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let middleware = Arc::new(SessionMiddleware::new());
 
         let response = drive(
             &middleware,
-            CannedBackend {
-                status: 404,
-                content_type: "application/problem+json",
-                body: r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
-            },
+            CannedBackend::answering(404, "application/problem+json", r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#),
         )
         .await;
         assert_eq!(response.status(), 404);
@@ -684,25 +699,17 @@ mod tests {
     /// place would attach the wrong `code` to it.
     #[tokio::test]
     async fn a_failure_without_a_document_clears_an_earlier_one() {
-        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let middleware = Arc::new(SessionMiddleware::new());
 
         let ((), problem) = with_problem(async {
             drive(
                 &middleware,
-                CannedBackend {
-                    status: 404,
-                    content_type: "application/problem+json",
-                    body: r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
-                },
+                CannedBackend::answering(404, "application/problem+json", r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#),
             )
             .await;
             drive(
                 &middleware,
-                CannedBackend {
-                    status: 502,
-                    content_type: "text/html",
-                    body: "<html>502 Bad Gateway</html>",
-                },
+                CannedBackend::answering(502, "text/html", "<html>502 Bad Gateway</html>"),
             )
             .await;
         })
@@ -713,15 +720,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_successful_response_is_not_buffered() {
-        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let middleware = Arc::new(SessionMiddleware::new());
 
         let (response, problem) = drive_scoped(
             &middleware,
-            CannedBackend {
-                status: 200,
-                content_type: "application/json",
-                body: r#"{"id":"7"}"#,
-            },
+            CannedBackend::answering(200, "application/json", r#"{"id":"7"}"#),
         )
         .await;
 
@@ -735,15 +738,15 @@ mod tests {
     /// machine still has to see it.
     #[tokio::test]
     async fn a_401_still_sets_the_flag_while_its_document_is_captured() {
-        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let middleware = Arc::new(SessionMiddleware::new());
 
         let (_, problem) = drive_scoped(
             &middleware,
-            CannedBackend {
-                status: 401,
-                content_type: "application/problem+json",
-                body: r#"{"type":"about:blank","status":401,"detail":"no session"}"#,
-            },
+            CannedBackend::answering(
+                401,
+                "application/problem+json",
+                r#"{"type":"about:blank","status":401,"detail":"no session"}"#,
+            ),
         )
         .await;
 
@@ -1008,16 +1011,12 @@ mod tests {
     /// what reads it from the scope, and nothing downstream re-derives it.
     #[tokio::test]
     async fn capture_attaches_the_scoped_document_to_the_failure() {
-        let middleware = Arc::new(SessionMiddleware::new(Arc::new(SessionCookieHolder::new())));
+        let middleware = Arc::new(SessionMiddleware::new());
 
         let outcome: Result<(), TransportFailure> = TransportFailure::capture(async {
             let response = drive(
                 &middleware,
-                CannedBackend {
-                    status: 404,
-                    content_type: "application/problem+json",
-                    body: r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#,
-                },
+                CannedBackend::answering(404, "application/problem+json", r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404}"#),
             )
             .await;
             Err::<(), crate::api::Error<String>>(crate::api::Error::UnexpectedStatus {
