@@ -1147,6 +1147,27 @@ mod tests {
 
     // ─── helpers ─────────────────────────────────────────────────────────────
 
+    /// `beam-server` passes an `IndexError::PathNotFound` message straight
+    /// through as the `detail` of a 400 an administrator's browser renders, so
+    /// the guarantee written on the variant has to hold at *every* construction
+    /// site (NFR-108). The path reaches the operator through the `tracing`
+    /// field, the admin notification and the admin log instead.
+    fn assert_names_no_path(err: &IndexError, paths: &[&Path]) {
+        let message = err.to_string();
+        for path in paths {
+            let path = path.to_string_lossy();
+            assert!(
+                !message.contains(path.as_ref()),
+                "a client-facing rejection must not carry a filesystem path; \
+                 {message:?} names {path:?}"
+            );
+        }
+        assert!(
+            !message.contains(std::path::MAIN_SEPARATOR),
+            "a client-facing rejection must not carry any path component: {message:?}"
+        );
+    }
+
     fn make_classify_service() -> (
         LocalIndexService,
         Arc<InMemoryMovieRepository>,
@@ -2404,15 +2425,53 @@ mod tests {
             .await
             .expect_err("a file that cannot be stat'ed must be refused");
         assert!(matches!(err, IndexError::PathNotFound(_)));
-        let message = err.to_string();
-        assert!(
-            !message.contains(path.to_str().unwrap()),
-            "error message must not carry the file path: {message}"
+        assert_names_no_path(&err, &[&path]);
+    }
+
+    #[tokio::test]
+    async fn test_process_file_hash_failure_reports_no_filesystem_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("Vanished (2020).mkv");
+        std::fs::write(&path, b"video data").unwrap();
+
+        // The error the real hasher yields when the file goes away between the
+        // walk and the hash: an OS error from opening that very path. Whether
+        // its `Display` carries the path is precisely what the guarantee on
+        // `IndexError::PathNotFound` rests on at this construction site, so the
+        // error has to be a real one rather than a hand-written string.
+        let io_error = std::fs::File::open(temp_dir.path().join("Vanished (2020).mkv.part"))
+            .expect_err("that file was never created");
+
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Ok(make_video_metadata()));
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .return_once(move |_| Err(io_error));
+
+        let service = LocalIndexService::new(
+            Arc::new(MockLibraryRepository::new()),
+            Arc::new(MockFileRepository::new()),
+            Arc::new(MockMovieRepository::new()),
+            Arc::new(MockShowRepository::new()),
+            Arc::new(MockMediaStreamRepository::new()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
         );
-        assert!(
-            !message.contains('/'),
-            "error message must not carry any path component: {message}"
-        );
+
+        let err = service
+            .process_new_file(&path, Uuid::new_v4())
+            .await
+            .expect_err("a file that cannot be hashed must be refused");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        assert_names_no_path(&err, &[&path]);
     }
 
     // ============================
@@ -2754,11 +2813,7 @@ mod tests {
         assert!(matches!(err, IndexError::PathNotFound(_)));
         // The path reaches the operator through the notification and admin
         // log below, never through the error message (NFR-108).
-        let message = err.to_string();
-        assert!(
-            !message.contains(root_path.to_str().unwrap()),
-            "error message must not carry the library root: {message}"
-        );
+        assert_names_no_path(&err, &[&root_path]);
 
         // An error-level notification must have been published
         let events = notification_svc.published_events();
@@ -2808,11 +2863,7 @@ mod tests {
             .await
             .expect_err("a root that is not a directory must fail the scan");
         assert!(matches!(err, IndexError::PathNotFound(_)));
-        let message = err.to_string();
-        assert!(
-            !message.contains(root_path.to_str().unwrap()),
-            "error message must not carry the library root: {message}"
-        );
+        assert_names_no_path(&err, &[&root_path]);
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         assert!(files.is_empty(), "nothing may be indexed under a file root");
