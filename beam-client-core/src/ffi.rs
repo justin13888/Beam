@@ -97,24 +97,64 @@ pub struct PlaybackHttpConfig {
     pub pinned_host: String,
 }
 
+/// The one live copy of a server's session cookie.
+///
+/// The generated client reads it through a [`crate::api::Credential::Provider`]
+/// registered once, at install, so a sign-in or a sign-out is a write here
+/// rather than a rebuilt client. The same handle is what
+/// [`BeamClient::server_http_config`] reads to hand the credential to the
+/// platform player.
+#[derive(Default)]
+struct SessionCookie(RwLock<Option<SecretString>>);
+
+impl SessionCookie {
+    /// A holder carrying `cookie`, which may be nothing.
+    fn new(cookie: Option<SecretString>) -> Self {
+        Self(RwLock::new(cookie))
+    }
+
+    /// The cookie to send, or none.
+    fn get(&self) -> Option<SecretString> {
+        self.0.read().expect("cookie lock").clone()
+    }
+
+    /// Make `cookie` the one sent from now on.
+    fn set(&self, cookie: Option<SecretString>) {
+        *self.0.write().expect("cookie lock") = cookie;
+    }
+
+    /// Whether a cookie is registered at all.
+    fn is_registered(&self) -> bool {
+        self.0.read().expect("cookie lock").is_some()
+    }
+}
+
+impl std::fmt::Debug for SessionCookie {
+    /// Hand-written, because the value here *is* the credential. `SecretString`
+    /// already redacts itself and `Credential`'s own `Debug` prints
+    /// `Provider(***)` without touching the closure that captures this, so
+    /// nothing today would print it -- which is exactly why the guarantee is
+    /// stated here rather than left resting on two other crates' choices.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let held = if self.is_registered() {
+            "registered"
+        } else {
+            "none"
+        };
+        formatter.debug_tuple("SessionCookie").field(&held).finish()
+    }
+}
+
 /// One server's live state.
 struct ServerContext {
     record: ServerRecord,
-    /// The transport requests execute over: the `reqwest::Client` built for
-    /// this server's trust decision, wrapped as a backend. Kept so the
-    /// generated client can be rebuilt around it when the session changes,
-    /// without a new `reqwest::Client` -- which would discard the connection
-    /// pool and TLS session cache that Media3's neighbouring range requests
-    /// benefit from.
-    transport: Arc<dyn crate::api::HttpBackend>,
-    /// The generated client, carrying the current session as its
-    /// `BeamSession` credential. Replaced, never mutated: see
+    /// The generated client, built once with the `BeamSession` credential
+    /// already registered. Never replaced on a session change: see
     /// [`ServerContext::set_session`].
     client: GeneratedClient,
-    /// The session cookie the client was last built with, or none. This is
-    /// the copy the platform player is handed; the client's own is the one
-    /// on the wire.
-    cookie: Option<SecretString>,
+    /// The session cookie the client sends, shared with the credential
+    /// provider registered on it.
+    cookie: Arc<SessionCookie>,
     middleware: Arc<SessionMiddleware>,
     state: SessionState,
     throttle: Arc<ProgressThrottle>,
@@ -135,39 +175,52 @@ impl ServerContext {
     /// Make `cookie` the session this server's requests carry -- or none.
     ///
     /// The spec declares the `BeamSession` scheme on every operation that
-    /// needs a session, and the generated client attaches a credential
-    /// registered under that name as `Cookie: beam_session=<value>` -- and
-    /// refuses, before anything is sent, an operation whose requirement no
-    /// registered credential satisfies. So the cookie has one owner, the
-    /// client, and the client is rebuilt whenever the cookie changes. The
-    /// rebuild is a URL parse and a struct: the transport, and with it the
-    /// connection pool, is shared with the client being replaced.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BeamError::InvalidServerUrl`] if the record's base URL no
-    /// longer parses -- which a record that was installed cannot do.
-    fn set_session(&mut self, cookie: Option<SecretString>) -> Result<(), BeamError> {
-        let client = BeamClient::client_over(
-            Arc::clone(&self.transport),
-            &self.middleware,
-            &self.record.base_url,
-        )?;
-        self.client = match &cookie {
-            Some(value) => client.with_credential(
-                SESSION_SCHEME,
-                crate::api::Credential::ApiKey(value.clone()),
-            ),
-            None => client,
-        };
-        self.cookie = cookie;
-        Ok(())
+    /// needs a session, and the generated client attaches the credential
+    /// registered under that name as `Cookie: beam_session=<value>`. That
+    /// credential is a [`crate::api::Credential::Provider`] reading this
+    /// holder, registered once at install, so the cookie still has exactly one
+    /// owner and changing it touches neither the client nor the transport.
+    fn set_session(&self, cookie: Option<SecretString>) {
+        self.cookie.set(cookie);
+        // A 401 belongs to the era of the cookie that provoked it. Left
+        // standing across a session boundary it would be consumed by some
+        // unrelated later failure, which would then withdraw and delete a
+        // credential the server had never rejected.
+        self.middleware.clear_unauthorized();
     }
 }
 
 /// The `components.securitySchemes` key the spec declares for the session
 /// cookie; the name a credential is registered under.
 const SESSION_SCHEME: &str = "BeamSession";
+
+/// What the credential provider says when the server has no session.
+///
+/// Reaches the façade only as the type of `Error::RequestConstruction`'s
+/// source -- see the `RequestConstruction` arm of
+/// [`crate::transport::TransportFailure::of`] -- so this text is for a log and
+/// never for a decision. It names no cookie, because there is none.
+const NO_SESSION: &str = "no BeamSession cookie is registered for this server";
+
+/// The `BeamSession` credential: whatever cookie `holder` carries when a
+/// request is built.
+///
+/// A provider rather than a fixed [`crate::api::Credential::ApiKey`], which is
+/// the whole reason the client survives a session change. The generated client
+/// awaits this while building a secured request -- before `build()` and before
+/// the request reaches the transport -- so a server with no session still
+/// refuses the call rather than sending it uncredentialled.
+fn session_credential(holder: &Arc<SessionCookie>) -> crate::api::Credential {
+    let holder = Arc::clone(holder);
+    crate::api::Credential::Provider(Arc::new(move || {
+        let holder = Arc::clone(&holder);
+        Box::pin(async move {
+            holder
+                .get()
+                .ok_or_else(|| crate::api::AuthError::new(NO_SESSION))
+        })
+    }))
+}
 
 impl std::fmt::Debug for ServerContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -376,9 +429,9 @@ impl BeamClient {
         session_cookie: String,
     ) -> Result<UserSummary, BeamError> {
         self.apply(&server_id, SessionEvent::LoginStarted)?;
-        self.with_context_mut(&server_id, |context| {
+        self.with_context(&server_id, |context| {
             context.set_session(Some(SecretString::from(session_cookie.clone())))
-        })??;
+        })?;
         self.apply(&server_id, SessionEvent::CookieCaptured)?;
 
         match self.fetch_me(&server_id).await {
@@ -393,7 +446,7 @@ impl BeamClient {
                 Ok(user)
             }
             Err(error) => {
-                self.with_context_mut(&server_id, |context| context.set_session(None))??;
+                self.with_context(&server_id, |context| context.set_session(None))?;
                 self.storage
                     .remove_secret(format!("session/{server_id}"))
                     .await?;
@@ -414,7 +467,7 @@ impl BeamClient {
         let client = self.client_for(&server_id)?;
         let _ = client.logout(None).await;
 
-        self.with_context_mut(&server_id, |context| context.set_session(None))??;
+        self.with_context(&server_id, |context| context.set_session(None))?;
         self.storage
             .remove_secret(format!("session/{server_id}"))
             .await?;
@@ -549,7 +602,7 @@ impl BeamClient {
                 })?;
             let mut record = context.record.clone();
             record.trusted_fingerprints.clear();
-            (record, context.cookie.clone())
+            (record, context.cookie.get())
         };
         self.install(record.clone(), cookie)?;
         self.persist_record(&record).await
@@ -611,11 +664,8 @@ impl BeamClient {
             server_id: server_id.clone(),
         })?;
 
-        let cookie = context
-            .cookie
-            .as_ref()
-            .ok_or(BeamError::Unauthenticated)?
-            .expose_secret();
+        let cookie = context.cookie.get().ok_or(BeamError::Unauthenticated)?;
+        let cookie = cookie.expose_secret();
         let base_url = context.record.base_url.clone();
         let host = url::Url::parse(&base_url)
             .ok()
@@ -1083,7 +1133,7 @@ impl BeamClient {
         let (server_id, client, _) = self.active_context()?;
         self.send(&server_id, client.logout_all(None)).await?;
 
-        self.with_context_mut(&server_id, |context| context.set_session(None))??;
+        self.with_context(&server_id, |context| context.set_session(None))?;
         self.storage
             .remove_secret(format!("session/{server_id}"))
             .await?;
@@ -1345,12 +1395,17 @@ impl BeamClient {
                 detail: format!("could not build an HTTP client: {error}"),
                 retryable: false,
             })?;
+        // The transport is handed straight to the client and kept only there:
+        // nothing rebuilds the client for a session change any more, so the
+        // connection pool and TLS session cache that Media3's neighbouring
+        // range requests benefit from outlive everything but a trust change.
         let transport: Arc<dyn crate::api::HttpBackend> = Arc::new(ReqwestBackend::new(http));
-        let client = Self::client_over(Arc::clone(&transport), &middleware, &record.base_url)?;
+        let cookie = Arc::new(SessionCookie::new(cookie));
+        let client = Self::client_over(transport, &middleware, &record.base_url, &cookie)?;
 
         // A restored cookie is trusted until a request says otherwise, which
         // is what keeps a cold start off the network.
-        let state = if cookie.is_some() {
+        let state = if cookie.is_registered() {
             SessionState::Expired
         } else {
             SessionState::LoggedOut
@@ -1361,11 +1416,10 @@ impl BeamClient {
             Arc::clone(&self.clock),
             &record.id,
         ));
-        let mut context = ServerContext {
+        let context = ServerContext {
             record,
-            transport,
             client,
-            cookie: None,
+            cookie,
             middleware,
             state,
             throttle: Arc::new(ProgressThrottle::new(Arc::clone(&self.clock))),
@@ -1373,7 +1427,6 @@ impl BeamClient {
             metadata: Arc::new(RwLock::new(HashMap::new())),
             trust,
         };
-        context.set_session(cookie)?;
         self.servers
             .write()
             .expect("servers lock")
@@ -1382,31 +1435,38 @@ impl BeamClient {
     }
 
     /// The generated client, with the session middleware wrapped around
-    /// whatever transport actually executes the request -- and no credential
-    /// yet: [`ServerContext::set_session`] registers that.
+    /// whatever transport actually executes the request, and the `BeamSession`
+    /// credential registered as a provider over `cookie`.
+    ///
+    /// Called once per server at install, and once more only when the
+    /// transport itself is replaced -- a trust change, or a test's canned
+    /// backend. A session change is a write to `cookie`, not a call to this.
     fn client_over(
         transport: Arc<dyn crate::api::HttpBackend>,
         middleware: &Arc<SessionMiddleware>,
         base_url: &str,
+        cookie: &Arc<SessionCookie>,
     ) -> Result<GeneratedClient, BeamError> {
         let backend = MiddlewareBackend::with_middlewares(
             transport,
             vec![Arc::clone(middleware) as Arc<dyn crate::api::Middleware>],
         );
-        GeneratedClient::with_backend(Arc::new(backend), base_url).map_err(|error| {
-            BeamError::InvalidServerUrl {
-                detail: error.to_string(),
-            }
-        })
+        let client =
+            GeneratedClient::with_backend(Arc::new(backend), base_url).map_err(|error| {
+                BeamError::InvalidServerUrl {
+                    detail: error.to_string(),
+                }
+            })?;
+        Ok(client.with_credential(SESSION_SCHEME, session_credential(cookie)))
     }
 
     /// Re-point one server's client at a canned transport, keeping its
     /// middleware, session and queue. Tests only: the seam that lets the façade
     /// see a server's answer without a listener.
     ///
-    /// The client is rebuilt the way production rebuilds it, with whatever
-    /// session the server currently has -- so a test sees exactly the
-    /// credential a device would send, or its absence.
+    /// The client is rebuilt the way `install` builds it, over the same cookie
+    /// holder -- so a test sees exactly the credential a device would send, or
+    /// its absence.
     #[cfg(test)]
     fn use_transport(
         &self,
@@ -1414,12 +1474,20 @@ impl BeamClient {
         transport: Arc<dyn crate::api::HttpBackend>,
     ) -> Result<(), BeamError> {
         self.with_context_mut(server_id, |context| {
-            context.transport = transport;
-            let cookie = context.cookie.clone();
-            context.set_session(cookie)
+            context.client = Self::client_over(
+                transport,
+                &context.middleware,
+                &context.record.base_url,
+                &context.cookie,
+            )?;
+            Ok(())
         })?
     }
 
+    /// Used only by [`Self::use_transport`]: nothing in production mutates a
+    /// context in place any more, because the session lives behind its own
+    /// handle rather than in the client.
+    #[cfg(test)]
     fn with_context_mut<T>(
         &self,
         server_id: &str,
@@ -1589,7 +1657,7 @@ impl BeamClient {
             // so the next secured call is refused here instead of sent with a
             // cookie the server has already rejected -- and so
             // `server_http_config` stops handing that cookie to the player.
-            let _ = self.with_context_mut(server_id, |context| context.set_session(None));
+            let _ = self.with_context(server_id, |context| context.set_session(None));
             let _ = self.apply(server_id, SessionEvent::UnauthorizedObserved);
             return BeamError::SessionExpired;
         }
@@ -1616,30 +1684,30 @@ impl BeamClient {
             FailureKind::Malformed => BeamError::Protocol {
                 detail: failure.message.clone(),
             },
-            // The request never left. With no cookie registered that is, by
-            // construction, the generated client refusing a secured operation
-            // for want of its `BeamSession` credential: the base URL was
-            // validated at install, and serialising the crate's own request
-            // types does not fail. Read from the session the façade already
-            // holds rather than from the error's text -- see the
-            // `RequestConstruction` arm of `TransportFailure::of`, and
-            // getkono/spargen#86 for the typed error that would make this
-            // inference unnecessary. Both answers are cured by the user
-            // signing in, which is what lets a progress sample wait for them
-            // instead of being dropped as malformed. With a cookie held, the
-            // request really could not be built, and that is what it says.
-            FailureKind::Unbuildable => {
-                let session = self.with_context(server_id, |context| {
-                    (context.cookie.is_some(), context.state.clone())
-                });
-                match session {
-                    Ok((false, SessionState::Expired)) => BeamError::SessionExpired,
-                    Ok((false, _)) => BeamError::Unauthenticated,
-                    Ok((true, _)) | Err(_) => BeamError::Protocol {
-                        detail: failure.message.clone(),
-                    },
+            // The request never left, because the `BeamSession` provider had
+            // no cookie to give it. That the credential is what was missing is
+            // the client's own answer, downcast from the provider's
+            // `AuthError` -- not inferred from what this façade happens to
+            // hold. *Which* of the two unauthenticated answers to give is the
+            // session's business, though, and the UI treats them differently:
+            // a device that never signed in is sent to a cold sign-in, one
+            // whose session the server rejected keeps its work in progress.
+            // Both are cured by signing in, which is what lets a progress
+            // sample wait for the user instead of being dropped.
+            FailureKind::NoCredential => {
+                match self.with_context(server_id, |context| context.state.clone()) {
+                    Ok(SessionState::Expired) => BeamError::SessionExpired,
+                    _ => BeamError::Unauthenticated,
                 }
             }
+            // Anything else that never left is a request that genuinely could
+            // not be built: the base URL was validated at install and
+            // serialising the crate's own request types does not fail, so this
+            // is a contract failure rather than a session one, and no amount
+            // of signing in changes it.
+            FailureKind::Unbuildable => BeamError::Protocol {
+                detail: failure.message.clone(),
+            },
         }
     }
 
@@ -2553,11 +2621,13 @@ mod tests {
         }
     }
 
-    /// The three shapes a failure can take, with and without a document.
+    /// The shapes a failure can take that classify from the response alone,
+    /// with and without a document.
     ///
-    /// Only an answered request has a document to classify from; the other two
+    /// Only an answered request has a document to classify from; the others
     /// never saw a response, so a document on them would be a bug upstream and
-    /// is ignored rather than trusted.
+    /// is ignored rather than trusted. `NoCredential` is the one kind that is
+    /// read against the session instead, and has its own test below.
     #[tokio::test]
     async fn map_error_classifies_from_the_status_and_the_document_it_was_given() {
         let (client, id) = client_with_server().await;
@@ -2593,7 +2663,13 @@ mod tests {
                 }
             );
             assert_eq!(
-                client.map_error(&id, &failure(FailureKind::Malformed, problem)),
+                client.map_error(&id, &failure(FailureKind::Malformed, problem.clone())),
+                BeamError::Protocol {
+                    detail: "the transport's own words".to_owned(),
+                }
+            );
+            assert_eq!(
+                client.map_error(&id, &failure(FailureKind::Unbuildable, problem)),
                 BeamError::Protocol {
                     detail: "the transport's own words".to_owned(),
                 }
@@ -2601,23 +2677,54 @@ mod tests {
         }
     }
 
-    /// `Unbuildable` is read against the session, not the message: with no
-    /// cookie it is the missing credential, with one it is a request that
-    /// genuinely could not be built.
+    /// A refused credential is read against the session -- which of the two
+    /// unauthenticated answers to give -- while a request that genuinely could
+    /// not be built is read against nothing at all. The two used to be one
+    /// kind told apart by whether a cookie happened to be registered.
     #[tokio::test]
-    async fn an_unbuildable_request_is_read_against_the_session_it_was_made_under() {
+    async fn a_refused_credential_is_read_against_the_session_and_a_failed_build_is_not() {
         let (logged_out, id) = client_with_server().await;
         assert_eq!(
-            logged_out.map_error(&id, &failure(FailureKind::Unbuildable, None)),
+            logged_out.map_error(&id, &failure(FailureKind::NoCredential, None)),
             BeamError::Unauthenticated
         );
 
         let (signed_in, id, _) = signed_in_client().await;
+        signed_in
+            .apply(&id, SessionEvent::UnauthorizedObserved)
+            .expect("registered");
         assert_eq!(
-            signed_in.map_error(&id, &failure(FailureKind::Unbuildable, None)),
-            BeamError::Protocol {
-                detail: "the transport's own words".to_owned(),
-            }
+            signed_in.map_error(&id, &failure(FailureKind::NoCredential, None)),
+            BeamError::SessionExpired,
+            "a device whose session the server rejected keeps its work in progress"
+        );
+    }
+
+    /// The credential is read when a request is built, not baked into the
+    /// client at construction. Every fan-out holds a client clone taken before
+    /// the call it is part of, so a clone that went on carrying a withdrawn
+    /// cookie would send it after the sign-out that withdrew it.
+    #[tokio::test]
+    async fn a_client_taken_before_a_sign_out_stops_carrying_the_cookie() {
+        let (client, id, backend) = signed_in_client().await;
+        let held = client.client_for(&id).expect("the server is registered");
+
+        client.logout(id).await.expect("logged out");
+        let sent_before = backend.recorded().len();
+
+        let refused = held
+            .get_current_user(None)
+            .await
+            .expect_err("no cookie, no request");
+
+        assert!(
+            matches!(refused, crate::api::Error::RequestConstruction(_)),
+            "{refused:?}"
+        );
+        assert_eq!(
+            backend.recorded().len(),
+            sent_before,
+            "the withdrawn cookie must not reach the wire on a client handed out earlier"
         );
     }
 

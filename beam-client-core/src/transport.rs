@@ -4,9 +4,10 @@
 //! the `BeamSession` scheme -- an API key in the `beam_session` cookie -- and
 //! the generated client attaches a registered credential of that scheme as
 //! `Cookie: beam_session=<value>` on every operation that requires it. The
-//! façade registers the current cookie with `with_credential("BeamSession", ..)`
-//! and rebuilds the client when it changes, so the credential has exactly one
-//! owner and this module never sees it.
+//! façade registers one `Credential::Provider` under that name at install and
+//! never replaces it; the provider reads whatever cookie the server currently
+//! holds, so the credential has exactly one owner and this module never sees
+//! it.
 //!
 //! What is left for a [`Middleware`] is what only the response can tell: a
 //! mid-session 401, observable in one place instead of at every call site, and
@@ -87,6 +88,17 @@ impl SessionMiddleware {
     pub fn take_unauthorized(&self) -> bool {
         self.unauthorized
             .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Forget any 401 seen so far.
+    ///
+    /// Called whenever the cookie changes, so the flag cannot outlive the
+    /// session that provoked it. A 401 observed under one credential says
+    /// nothing about the next one, and consuming it later would withdraw a
+    /// credential no server had rejected.
+    pub fn clear_unauthorized(&self) {
+        self.unauthorized
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -270,7 +282,7 @@ pub(crate) struct TransportFailure {
     pub(crate) problem: Option<ProblemDetail>,
 }
 
-/// The four answers a failed request can give, before its body is read.
+/// The five answers a failed request can give, before its body is read.
 ///
 /// Split because `is_retryable` drives the progress queue, and its own doc
 /// comment warns that a permanently-failing sample must not be able to occupy
@@ -283,10 +295,14 @@ pub(crate) enum FailureKind {
     /// No response arrived, and the same request could plausibly get one:
     /// connection refused, TLS handshake, timeout, a stream that stopped.
     Unreachable,
-    /// The request could not be built, so nothing was sent. What that means
-    /// depends on what the caller holds -- see the `RequestConstruction` arm
-    /// of [`TransportFailure::of`] -- so it is kept apart for the façade to
-    /// read against its own session.
+    /// A secured operation was refused because the `BeamSession` credential
+    /// had no cookie to give it, so nothing was sent. The refusal is the
+    /// generated client's own, reported by the provider the façade registers
+    /// -- see the `RequestConstruction` arm of [`TransportFailure::of`].
+    NoCredential,
+    /// The request could not be built for any other reason, so nothing was
+    /// sent. Kept apart from [`FailureKind::NoCredential`] because it is not
+    /// something signing in cures.
     Unbuildable,
     /// The response could not be made sense of: a body that does not match
     /// the contract the client was generated from. Retrying reproduces it
@@ -331,18 +347,25 @@ impl TransportFailure {
             // dead end.
             Error::Protocol(_) | Error::Decode { .. } => (FailureKind::Malformed, None),
 
-            // `RequestConstruction` is what a secured operation fails with
-            // when no `BeamSession` credential is registered -- a call made
-            // while logged out or after an expiry. That is not malformed, it
-            // is unauthenticated, but spargen carries the distinction only in
-            // the message text, and matching on a string the generator may
-            // reword is not a contract. A typed error is filed upstream as
-            // getkono/spargen#86 ("Typed error for a missing credential so
-            // consumers can map it to unauthenticated"), which would let this
-            // layer say so itself. Until a release carries it, the kind is
-            // kept apart and the façade infers the meaning from the session
-            // it holds: no cookie registered means this is the refusal.
-            Error::RequestConstruction(_) => (FailureKind::Unbuildable, None),
+            // `RequestConstruction` covers two unrelated things, and which one
+            // this is is *observed* rather than guessed. The façade registers
+            // the `BeamSession` scheme as a `Credential::Provider`, and a
+            // provider that has no cookie answers with an [`AuthError`]; the
+            // generated client carries that verbatim as this error's source
+            // (`Error::request_construction`). Downcasting to `AuthError` --
+            // a type spargen exports as part of its supported surface -- is
+            // therefore a contract, where matching the message text the
+            // generator may reword would not be. Anything else here is a
+            // request that genuinely could not be built.
+            Error::RequestConstruction(request) => {
+                let refused = std::error::Error::source(request)
+                    .is_some_and(|source| source.is::<crate::api::AuthError>());
+                if refused {
+                    (FailureKind::NoCredential, None)
+                } else {
+                    (FailureKind::Unbuildable, None)
+                }
+            }
         };
 
         Self {
