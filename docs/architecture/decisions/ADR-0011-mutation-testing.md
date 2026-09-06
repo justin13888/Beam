@@ -22,7 +22,7 @@ gate, the suite contained several classes of test that cannot fail for a reason 
   literally `Ok(())` returns `Ok(())`.
 - **A security control tested only through its fake.** Four tests named for directory-escape
   containment each configured `InMemoryPathValidator` to return "path escapes root" and asserted that
-  error came back. `OsPathValidator::validate_library_path`, which performs the real `canonicalize()`
+  error came back. `OsPathValidator::validate_library_root`, which performs the real `canonicalize()`
   and `starts_with()` check, had no tests at all. The suite claimed a containment guarantee it did
   not have.
 - **~1,900 lines of persistence that could not be tested.** Nine SeaORM repositories, `PgSessionStore`
