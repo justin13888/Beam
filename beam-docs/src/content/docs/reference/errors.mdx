@@ -76,11 +76,16 @@ not this error — it returns an empty list.
 
 ### library-path-not-found
 
-**400.** The root path does not exist, or could not be resolved.
+**400.** The library root does not resolve to a directory on the server: it does not exist, it could
+not be resolved, or it resolves to something that is not a directory — a media file rather than the
+folder holding it, most often. Registering a library and rescanning one apply the same rule, so a
+root that fails here cannot be registered and, if it was registered before it changed, cannot be
+scanned.
 
 **What to do.** The path is resolved **on the server**, not on the machine running the request.
-Check that the directory exists inside the container and that the bind mount is present. A rescan
-can also raise this if the root has gone since the library was registered.
+Check that a *directory* by that name exists inside the container and that the bind mount is
+present. A rescan can also raise this if the root has gone — or been replaced by a file — since the
+library was registered.
 
 ### library-path-outside-root
 
