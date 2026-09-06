@@ -997,9 +997,10 @@ cd beam-android && ./gradlew lintDebug
 description = "Rewrite the Kotlin sources to satisfy ktlint"
 run = "ktlint --format --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'"
 
-# The three Gradle tasks are ordered against each other for the same reason the
-# pre-push hook chains them: they drive ./gradlew against one project, which
-# serialises on its own lock anyway, so running them at once only contends.
+# The chained Gradle tasks -- lint, test, screenshot, minify -- are ordered
+# against each other for the same reason the pre-push hook chains them: they
+# drive ./gradlew against one project, which serialises on its own lock anyway,
+# so running them at once only contends.
 [tasks."android:test"]
 description = "Run the Android unit tests (JVM and Robolectric)"
 wait_for = ["android:lint"]
@@ -1009,6 +1010,31 @@ run = "cd beam-android && ./gradlew testDebugUnitTest"
 description = "Check the rendered screens against the recorded references"
 wait_for = ["android:lint", "android:test"]
 run = "cd beam-android && ./gradlew verifyRoborazziDebug"
+
+[tasks."android:minify"]
+description = "Run R8 over the release build, the only build type that shrinks"
+wait_for = ["android:lint", "android:test", "android:screenshot"]
+# Every other Android gate is debug-only, and `isMinifyEnabled` /
+# `isShrinkResources` are set on the release build type alone (see
+# AndroidApplicationConventionPlugin), with `android.enableR8.fullMode=true` in
+# gradle.properties. Without this task the first thing to exercise R8 is
+# `android:release`, which `.github/workflows/release.yml` runs only after the
+# tag is cut -- so a toolchain bump that R8 rejects lands green and breaks after
+# release. That is the gap the Kotlin comment in gradle/libs.versions.toml
+# leans on, so it has to be real.
+#
+# `:app:minifyReleaseWithR8` rather than `assembleRelease`: it is the narrowest
+# task AGP exposes that actually invokes R8. It consumes compiled classes, the
+# merged Java resources and the aapt keep rules, and has no native-library
+# input, so it does not drag in `cargoNdkRelease` and the NDK cross-compile of
+# every ABI. `:core:ffi:uniffiBindgen` still runs, as it does for the other
+# Android gates -- the Kotlin bindings are generated, not checked in.
+#
+# What it therefore does NOT cover: resource shrinking (`shrinkReleaseRes`),
+# dexing, packaging and signing, and the release-profile Rust cross-compile.
+# Those stay with `android:release`. What is left uncovered is packaging, not
+# the compiler-and-annotation-processor contract this gate exists to hold.
+run = "cd beam-android && ./gradlew :app:minifyReleaseWithR8"
 
 [tasks."android:screenshot:record"]
 description = "Re-record the screenshot references after an intended visual change"
@@ -1436,6 +1462,7 @@ depends = [
     "android:lint",
     "android:test",
     "android:screenshot",
+    "android:minify",
     # No-ops on a non-Darwin host, so `mise run ci` stays runnable on Linux
     # while a Mac runs the same set CI enforces. See the apple:* tasks above.
     "apple:lint",

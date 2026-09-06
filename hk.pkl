@@ -176,6 +176,11 @@ hooks {
                 depends = List("android-test")
                 check = "mise run android:screenshot"
             }
+            // `android:minify` is deliberately absent, for the same reason
+            // `android:build` is: a full release compile plus an R8 pass over
+            // the whole app is minutes, and CI's android-minify job blocks the
+            // merge, so nothing reaches master unshrunk either way.
+
             // The Apple steps watch beam-client-core for the same reason the
             // Android ones do: the Swift bindings and the XCFramework are
             // generated from it, so a change there can break the Apple build
