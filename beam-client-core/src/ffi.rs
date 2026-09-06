@@ -1080,7 +1080,14 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Storage`] when the queue cannot be read or written.
+    /// Returns [`BeamError::Storage`] when the queue cannot be read or written,
+    /// and [`BeamError::SessionExpired`] when the server rejected the session
+    /// part-way through. That second one is not incidental bookkeeping: the
+    /// rejection takes the credential off the client and deletes the stored
+    /// cookie, so a flush that answered with a count alone signed the device
+    /// out and told the caller only how many samples went. Whatever was
+    /// accepted before it has already left the queue, and
+    /// [`Self::pending_progress_count`] says what is still waiting.
     pub async fn flush_progress(&self) -> Result<u32, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let queue = self.with_context(&server_id, |context| Arc::clone(&context.queue))?;
@@ -1119,7 +1126,12 @@ impl BeamClient {
                         .await?;
                     // A queue drain stops at the first failure rather than
                     // hammering an unreachable server with the whole backlog.
-                    let _ = self.fail(&server_id, &failure).await;
+                    // An expiry stops it *and says so*: this is a background
+                    // call, and it has just signed the device out.
+                    let mapped = self.fail(&server_id, &failure).await;
+                    if matches!(mapped, BeamError::SessionExpired) {
+                        return Err(mapped);
+                    }
                     break;
                 }
             }
@@ -2961,6 +2973,67 @@ mod tests {
                 SessionState::Expired
             ),
             "a 401 with a session in place is that session expiring"
+        );
+    }
+
+    /// A flush is a background call, and a 401 during one is a sign-out: the
+    /// credential comes off the client and the stored cookie is deleted. It
+    /// used to answer `Ok(0)` and leave the caller with no way to know.
+    #[tokio::test]
+    async fn a_flush_that_expires_the_session_reports_it_rather_than_a_count() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+        let file_id = uuid::Uuid::nil().to_string();
+
+        // Queued by the ordinary path, against a failure that leaves the
+        // session alone -- so the expiry below is the flush's own doing.
+        client
+            .use_transport(
+                &id,
+                Arc::new(CannedBackend::answering(
+                    503,
+                    "application/problem+json",
+                    r#"{"type":"about:blank","status":503,"detail":"restarting"}"#,
+                )),
+            )
+            .expect("the server is registered");
+        assert_eq!(
+            client
+                .report_progress(file_id, 120.0, Some(7200.0), true)
+                .await
+                .expect("a failed send is an outcome, not an error"),
+            ProgressOutcome::Queued { pending: 1 }
+        );
+
+        client
+            .use_transport(
+                &id,
+                Arc::new(CannedBackend::answering(
+                    401,
+                    "application/problem+json",
+                    r#"{"type":"about:blank","status":401}"#,
+                )),
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .flush_progress()
+            .await
+            .expect_err("a teardown is not a count");
+
+        assert_eq!(error, BeamError::SessionExpired);
+        assert!(matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::Expired
+        ));
+        assert!(
+            !storage.has_secret(&format!("session/{id}")),
+            "the flush really did sign the device out"
+        );
+        assert_eq!(
+            client.pending_progress_count().await.expect("countable"),
+            1,
+            "and the resume point is still waiting for the sign-in"
         );
     }
 
