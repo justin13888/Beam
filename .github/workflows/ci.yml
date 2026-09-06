@@ -509,6 +509,26 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       - run: mise run android:build
 
+  # The only job that exercises R8. Every other Android job is debug-only, and
+  # minification and resource shrinking are configured on the release build type
+  # alone, so without this the release path is first built by release.yml --
+  # after the tag is cut. See the android:minify task for what it does and does
+  # not cover.
+  android-minify:
+    name: Android minify
+    needs: [changes]
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/setup-android
+      - uses: gradle/actions/setup-gradle@v6
+      - run: mise run android:minify
+
   # The Apple jobs need macOS runners, which are free for a public repository
   # but slower and scarcer than the Linux ones -- hence the path filter, and
   # hence four focused jobs rather than one that redoes the cross-compile four
@@ -660,6 +680,7 @@ jobs:
       - android-test
       - android-screenshot
       - android-build
+      - android-minify
       - apple-lint
       - apple-test
       - apple-snapshot
