@@ -21,7 +21,7 @@ use crate::progress::{
     ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress, ThrottleDecision,
 };
 use crate::servers::{ServerRecord, normalize_base_url, server_id_for};
-use crate::session::{SessionEvent, SessionState, UserSummary};
+use crate::session::{SessionEffect, SessionEvent, SessionState, UserSummary};
 use crate::transport::{ABOUT_BLANK, FailureKind, SessionMiddleware, TransportFailure, classify};
 use crate::upnext::{UpNextSeason, next_playable_episode};
 use secrecy::{ExposeSecret, SecretString};
@@ -428,29 +428,38 @@ impl BeamClient {
         server_id: String,
         session_cookie: String,
     ) -> Result<UserSummary, BeamError> {
-        self.apply(&server_id, SessionEvent::LoginStarted)?;
-        self.with_context(&server_id, |context| {
-            context.set_session(Some(SecretString::from(session_cookie.clone())))
-        })?;
-        self.apply(&server_id, SessionEvent::CookieCaptured)?;
+        let captured = SecretString::from(session_cookie.clone());
+
+        let effects = self.apply(&server_id, SessionEvent::LoginStarted)?;
+        self.perform(&server_id, &effects, None).await?;
+
+        // `CookieCaptured` is what registers the credential, so the `/v1/me`
+        // below is a secured call the client will actually build.
+        let effects = self.apply(&server_id, SessionEvent::CookieCaptured)?;
+        self.perform(&server_id, &effects, Some(&captured)).await?;
 
         match self.fetch_me(&server_id).await {
             Ok(user) => {
+                // `PersistCookie`, performed here because this is the only
+                // place that holds the cookie the server has just confirmed.
                 self.storage
                     .put_secret(format!("session/{server_id}"), session_cookie)
                     .await?;
-                self.apply(
+                let effects = self.apply(
                     &server_id,
                     SessionEvent::IdentityConfirmed(Box::new(user.clone())),
                 )?;
+                self.perform(&server_id, &effects, Some(&captured)).await?;
                 Ok(user)
             }
             Err(error) => {
-                self.with_context(&server_id, |context| context.set_session(None))?;
-                self.storage
-                    .remove_secret(format!("session/{server_id}"))
-                    .await?;
-                self.apply(&server_id, SessionEvent::IdentityRejected)?;
+                // `IdentityRejected` withdraws and deletes the cookie. That is
+                // this flow rejecting its own unconfirmed credential, not the
+                // 401 path expiring an established session -- which is why it
+                // is reached by the event rather than by whatever `fetch_me`
+                // happened to return.
+                let effects = self.apply(&server_id, SessionEvent::IdentityRejected)?;
+                self.perform(&server_id, &effects, None).await?;
                 Err(error)
             }
         }
@@ -465,14 +474,12 @@ impl BeamClient {
     /// out with no signal is still signed out on this device.
     pub async fn logout(&self, server_id: String) -> Result<(), BeamError> {
         let client = self.client_for(&server_id)?;
+        // `RevokeRemoteSession`, performed before the transition because the
+        // request needs the credential the transition withdraws.
         let _ = client.logout(None).await;
 
-        self.with_context(&server_id, |context| context.set_session(None))?;
-        self.storage
-            .remove_secret(format!("session/{server_id}"))
-            .await?;
-        self.apply(&server_id, SessionEvent::LogoutRequested)?;
-        Ok(())
+        let effects = self.apply(&server_id, SessionEvent::LogoutRequested)?;
+        self.perform(&server_id, &effects, None).await
     }
 
     /// The current authentication state of a server.
@@ -1133,12 +1140,8 @@ impl BeamClient {
         let (server_id, client, _) = self.active_context()?;
         self.send(&server_id, client.logout_all(None)).await?;
 
-        self.with_context(&server_id, |context| context.set_session(None))?;
-        self.storage
-            .remove_secret(format!("session/{server_id}"))
-            .await?;
-        self.apply(&server_id, SessionEvent::LogoutRequested)?;
-        Ok(())
+        let effects = self.apply(&server_id, SessionEvent::LogoutRequested)?;
+        self.perform(&server_id, &effects, None).await
     }
 
     // -- administration ---------------------------------------------------
@@ -1516,15 +1519,76 @@ impl BeamClient {
             })
     }
 
-    fn apply(&self, server_id: &str, event: SessionEvent) -> Result<(), BeamError> {
+    /// Drive the session machine, and hand back what it asked for.
+    ///
+    /// The effects are returned rather than dropped because the machine is the
+    /// only thing that knows which transitions are destructive. Discarding
+    /// them meant the credential was withdrawn and the stored cookie deleted
+    /// by whichever call site felt like it, from states the machine says must
+    /// be left alone -- a 401 racing a sign-in among them.
+    fn apply(&self, server_id: &str, event: SessionEvent) -> Result<Vec<SessionEffect>, BeamError> {
         let mut servers = self.servers.write().expect("servers lock");
         let context = servers
             .get_mut(server_id)
             .ok_or_else(|| BeamError::UnknownServer {
                 server_id: server_id.to_owned(),
             })?;
-        let (next, _effects) = crate::session::transition(&context.state, event);
+        let (next, effects) = crate::session::transition(&context.state, event);
         context.state = next;
+        Ok(effects)
+    }
+
+    /// Perform the effects one transition emitted.
+    ///
+    /// The one place `InstallCookie` and `ClearCookie` happen, so the
+    /// credential comes off the client and the cookie leaves the platform
+    /// keystore exactly when the machine says and never otherwise.
+    ///
+    /// `captured` is the cookie the event carried, where it carried one: only
+    /// `CookieCaptured` and `StoredSessionRestored` ask for a cookie to be
+    /// installed, and both are applied by a caller that is holding it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when `ClearCookie` cannot be performed,
+    /// and [`BeamError::UnknownServer`] for a server that has been removed.
+    /// Whether that is fatal is the caller's to decide: a sign-out propagates
+    /// it, while the 401 path swallows it -- see [`Self::fail`].
+    async fn perform(
+        &self,
+        server_id: &str,
+        effects: &[SessionEffect],
+        captured: Option<&SecretString>,
+    ) -> Result<(), BeamError> {
+        for effect in effects {
+            match effect {
+                // Installing means installing what the event carried; asking
+                // for a cookie the caller did not supply is asking for none.
+                SessionEffect::InstallCookie(install) => {
+                    let cookie = (*install).then(|| captured.cloned()).flatten();
+                    self.with_context(server_id, |context| context.set_session(cookie))?;
+                }
+                SessionEffect::ClearCookie => {
+                    // Removing an absent key succeeds, so this asks no
+                    // question the caller would have to answer twice.
+                    self.storage
+                        .remove_secret(format!("session/{server_id}"))
+                        .await?;
+                }
+                // Performed by the call site, which has what the effect needs
+                // and this does not: the confirmed cookie for `PersistCookie`,
+                // and a client to make the request with for the other two.
+                SessionEffect::PersistCookie
+                | SessionEffect::VerifyIdentity
+                | SessionEffect::RevokeRemoteSession => {}
+                // Nothing implements this. The core has no observer channel --
+                // the foreign side polls `session_state` -- so there is no
+                // handler to call, and inventing one is a change to the FFI
+                // surface rather than a fix to this one. Named here so the
+                // gap is visible at the point it would be filled.
+                SessionEffect::NotifyObserver => {}
+            }
+        }
         Ok(())
     }
 
@@ -1644,23 +1708,12 @@ impl BeamClient {
     /// "retry" for a 400, and the doc comments on the operations below promised
     /// variants the code could not produce (issue #123).
     ///
-    /// Synchronous by design, so it can sit inside a `map_err`; the one effect
-    /// of a rejected session that needs an await -- deleting the stored cookie
-    /// -- is [`Self::fail`]'s, which every call site goes through.
+    /// Classification only: it drives no session and performs no effect. A 401
+    /// is the session machine's business and is handled by [`Self::fail`],
+    /// which is this function's one caller -- so an answered 401 that reaches
+    /// here is one the machine declined to act on, and `classify` gives it the
+    /// honest name of [`BeamError::Unauthenticated`].
     fn map_error(&self, server_id: &str, failure: &TransportFailure) -> BeamError {
-        let saw_401 = self
-            .with_context(server_id, |context| context.middleware.take_unauthorized())
-            .unwrap_or(false);
-        if saw_401 {
-            // The transition's own effects, performed rather than read back:
-            // `InstallCookie(false)` is the credential coming off the client,
-            // so the next secured call is refused here instead of sent with a
-            // cookie the server has already rejected -- and so
-            // `server_http_config` stops handing that cookie to the player.
-            let _ = self.with_context(server_id, |context| context.set_session(None));
-            let _ = self.apply(server_id, SessionEvent::UnauthorizedObserved);
-            return BeamError::SessionExpired;
-        }
         // Checked before the generic network error, because a rejected
         // certificate reaches this point as an ordinary transport failure
         // whose text names neither the certificate nor what to do about it.
@@ -1728,25 +1781,41 @@ impl BeamClient {
         }
     }
 
-    /// [`Self::map_error`], plus the transition effect that needs an await.
+    /// Tell the session machine what the server said, perform whatever it
+    /// asks for, and name the failure.
     ///
-    /// `ClearCookie`: a session the server has rejected is deleted from secret
-    /// storage, or the next cold start would restore it and send it again.
-    /// Removing an absent key is a no-op, so this asks no question `map_error`
-    /// would have to answer twice. The removal failing is logged and not
-    /// returned: the caller's error is the expired session, which stands, and
-    /// the in-memory credential is already gone.
+    /// The 401 the middleware saw is fed in as `UnauthorizedObserved` and the
+    /// machine decides: from `Authenticated` that is the session expiring, and
+    /// the credential comes off the client and the cookie out of the keystore.
+    /// From any other state it is a late answer to a cancelled request, the
+    /// machine emits nothing, and nothing is destroyed -- which is the whole
+    /// point of asking it rather than acting on the flag directly.
+    ///
+    /// The deletion is keyed on the emitted `ClearCookie`, not on the error
+    /// this returns. Keying it on the error meant every failing call deleted
+    /// the key again while the device sat in `Expired`, and meant a path where
+    /// nothing was ever sent could delete a cookie no server had rejected.
     async fn fail(&self, server_id: &str, failure: &TransportFailure) -> BeamError {
-        let mapped = self.map_error(server_id, failure);
-        if matches!(mapped, BeamError::SessionExpired)
-            && let Err(error) = self
-                .storage
-                .remove_secret(format!("session/{server_id}"))
-                .await
-        {
-            tracing::warn!(server_id, %error, "could not delete the rejected session cookie");
+        let rejected = self
+            .with_context(server_id, |context| context.middleware.take_unauthorized())
+            .unwrap_or(false);
+        if rejected {
+            let effects = self
+                .apply(server_id, SessionEvent::UnauthorizedObserved)
+                .unwrap_or_default();
+            // `InstallCookie(false)` is the credential coming off the client,
+            // so the next secured call is refused here instead of sent with a
+            // cookie the server has already rejected -- and so
+            // `server_http_config` stops handing that cookie to the player.
+            let expired = effects.contains(&SessionEffect::InstallCookie(false));
+            if let Err(error) = self.perform(server_id, &effects, None).await {
+                tracing::warn!(server_id, %error, "could not delete the rejected session cookie");
+            }
+            if expired {
+                return BeamError::SessionExpired;
+            }
         }
-        mapped
+        self.map_error(server_id, failure)
     }
 
     async fn fetch_me(&self, server_id: &str) -> Result<UserSummary, BeamError> {
@@ -2523,6 +2592,169 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(cookies_of(&recorded[0]), vec!["beam_session=opaque-value"]);
         assert!(client.trusted_certificates(id).expect("known").is_empty());
+    }
+
+    /// A certificate to drive the machine into `Untrusted` with. Never
+    /// verified against anything; the state is what the test is about.
+    fn certificate() -> crate::trust::CertificateDetails {
+        crate::trust::CertificateDetails {
+            sha256_fingerprint: "AA:BB".to_owned(),
+            spki_sha256_base64: "c3BraQ==".to_owned(),
+            subject: "CN=beam.test".to_owned(),
+            issuer: "CN=beam.test".to_owned(),
+            not_before_unix: 0,
+            not_after_unix: i64::MAX,
+            subject_alt_names: vec!["beam.test".to_owned()],
+            serial_hex: "01".to_owned(),
+            is_self_signed: true,
+            is_expired: false,
+        }
+    }
+
+    /// A 401 observed outside `Authenticated` must withdraw nothing and delete
+    /// nothing.
+    ///
+    /// The machine emits no effects for one -- its own comment says a late 401
+    /// "must not clobber a sign-in already in progress" -- and every other
+    /// state falls through to that. `map_error` used to withdraw the
+    /// credential and `fail` to delete the stored cookie on *any* 401, read
+    /// off a flag rather than off the transition, so a late answer to a
+    /// cancelled request destroyed whatever session had replaced it.
+    #[tokio::test]
+    async fn a_401_outside_an_authenticated_session_withdraws_nothing() {
+        for reached_by in [
+            SessionEvent::LoginStarted,
+            SessionEvent::LogoutRequested,
+            SessionEvent::UnauthorizedObserved,
+            SessionEvent::CertificateRejected(Box::new(certificate())),
+        ] {
+            let storage = Arc::new(InMemoryKeyValueStore::new());
+            let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+            // Applied without performing the effects, so the state moves on
+            // while the credential stays in place -- the shape a 401 racing a
+            // sign-in or a sign-out actually has.
+            let _effects = client
+                .apply(&id, reached_by)
+                .expect("the server is registered");
+            let state = client.session_state(id.clone()).expect("known");
+
+            let backend = Arc::new(CannedBackend::answering(
+                401,
+                "application/problem+json",
+                r#"{"type":"about:blank","status":401}"#,
+            ));
+            client
+                .use_transport(
+                    &id,
+                    Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+                )
+                .expect("the server is registered");
+
+            let error = client
+                .media_sources("7".to_owned())
+                .await
+                .expect_err("the canned 401 fails the call");
+
+            assert_eq!(
+                error,
+                BeamError::Unauthenticated,
+                "a 401 the machine declined to act on is not an expiry, from {state:?}"
+            );
+            assert_eq!(
+                client.session_state(id.clone()).expect("known"),
+                state,
+                "the state is left where it was"
+            );
+            assert!(
+                storage.has_secret(&format!("session/{id}")),
+                "the stored cookie survives, from {state:?}"
+            );
+            assert!(
+                client.server_http_config().is_ok(),
+                "and the player keeps its copy, from {state:?}"
+            );
+        }
+    }
+
+    /// A 401 whose failure is dropped -- `hydrate` shows a continue-watching
+    /// row plainly rather than failing the whole screen over one unresolved
+    /// title -- leaves the middleware's flag set with nothing to consume it.
+    ///
+    /// The flag belongs to the session that provoked it. Left standing across
+    /// a sign-in it was spent on the next unrelated failure, expiring a
+    /// credential the server had never rejected and deleting it from the
+    /// platform keystore, which is not recoverable.
+    #[tokio::test]
+    async fn a_401_no_call_consumed_cannot_expire_the_session_that_replaced_it() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+
+        let rejecting = Arc::new(CannedBackend::answering(
+            401,
+            "application/problem+json",
+            r#"{"type":"about:blank","status":401}"#,
+        ));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&rejecting) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        let resolved = BeamClient::hydrate(
+            &client.client_for(&id).expect("the server is registered"),
+            &client.record_for(&id).expect("the server is registered"),
+            &client
+                .metadata_cache(&id)
+                .expect("the server is registered"),
+            vec!["7".to_owned()],
+        )
+        .await;
+        assert!(
+            resolved.is_empty(),
+            "the 401 is dropped, which is what leaves the flag unconsumed"
+        );
+
+        // The user signs in again: a new cookie, which no server has rejected.
+        let confirming = Arc::new(CannedBackend::answering(200, "application/json", ME));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&confirming) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        client
+            .complete_login(id.clone(), "second-value".to_owned())
+            .await
+            .expect("the canned /v1/me confirms the new cookie");
+
+        // Then something entirely unrelated fails under it.
+        let missing = Arc::new(CannedBackend::answering(
+            404,
+            "application/problem+json",
+            r#"{"type":"about:blank","status":404,"detail":"no such title"}"#,
+        ));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&missing) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .media_sources("7".to_owned())
+            .await
+            .expect_err("the canned 404 fails the call");
+
+        assert!(matches!(error, BeamError::NotFound { .. }), "{error:?}");
+        assert!(matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::Authenticated { .. }
+        ));
+        assert!(
+            storage.has_secret(&format!("session/{id}")),
+            "the second session is still on the device"
+        );
+        assert!(client.server_http_config().is_ok());
     }
 
     /// The reason the queue exists: an interrupted session must not lose the
