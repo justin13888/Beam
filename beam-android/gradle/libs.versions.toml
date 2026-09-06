@@ -1,8 +1,12 @@
 [versions]
-# Toolchain. Kotlin, KSP and Hilt are verified together by the Android CI jobs
-# (lint, unit tests, screenshots, build); the KSP 2 and Hilt releases below
-# accept Kotlin 2.4, so move Kotlin freely and take KSP or Hilt along only when
-# one of them objects at build time.
+# Toolchain. Kotlin, KSP and Hilt are verified together by the Android CI jobs:
+# lint, unit tests and screenshots on debug, plus `android:minify`, which runs
+# R8 in full mode over the release classes so a bump that only the shrunk build
+# rejects fails before the tag rather than after it. So move Kotlin freely and
+# take KSP or Hilt along only when one of them objects at build time.
+#
+# `ksp` is a bare version, not the `<kotlin>-<ksp>` form: KSP 2 has its own
+# version line and does not track Kotlin's, so this pin need not trail `kotlin`.
 agp = "9.3.2"
 kotlin = "2.4.10"
 ksp = "2.3.11"
