@@ -93,6 +93,8 @@ Read by the `mise` tasks, not by the compose files or by application code:
 | Variable | Default | Meaning |
 |---|---|---|
 | `BEAM_COMPOSE` | `podman compose` if `podman` is on `PATH`, else `docker compose` | Container runtime the `dev:*` mise tasks drive. Set it (e.g. `docker compose`) when both are installed but only one is usable. |
+| `BEAM_CONTAINER` | `docker` if it is on `PATH`, else `podman` | Image builder `check:ffmpeg-build` drives. Prefers `docker` -- the reverse of `BEAM_COMPOSE` -- so that where both exist the gate exercises the same `docker buildx build` the release workflow publishes with. |
+| `BEAM_CONTAINER_CACHE_DIR` | unset (no layer cache) | Directory for buildx's local layer cache in `check:ffmpeg-build`. CI points it at a cached path. Docker only -- podman's `--cache-to` takes a registry reference, so the task warns and ignores it there, relying on podman's own layer cache instead. |
 
 ## Validation
 

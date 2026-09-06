@@ -1,5 +1,5 @@
 # ----------------------------------------------------
-# Stage 1: Build FFmpeg 8.1 from source
+# Stage 1: Build FFmpeg 9.0 from source
 #
 # Must stay in lockstep with the `ffmpeg-next` pin in the workspace
 # Cargo.toml and with .github/actions/setup-ffmpeg. `mise run
@@ -18,9 +18,9 @@ RUN apt-get update && \
 
 WORKDIR /tmp/ffmpeg
 
-RUN wget -q https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz && \
-    tar xf ffmpeg-8.1.tar.xz && \
-    cd ffmpeg-8.1 && \
+RUN wget -q https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz && \
+    tar xf ffmpeg-9.0.tar.xz && \
+    cd ffmpeg-9.0 && \
     ./configure \
     --prefix=/opt/ffmpeg \
     --disable-debug \
@@ -63,7 +63,7 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ----------------------------------------------------
-# Builder: Build Rust application with FFmpeg 8
+# Builder: Build Rust application with FFmpeg 9
 # ----------------------------------------------------
 FROM chef AS builder
 
@@ -77,7 +77,7 @@ RUN apt-get update && \
     libfribidi-dev libogg-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy FFmpeg 8 from ffmpeg-builder
+# Copy FFmpeg 9 from ffmpeg-builder
 COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
 
 # Set up environment for FFmpeg
@@ -108,7 +108,7 @@ RUN apt-get update && \
     libfribidi0 libogg0 libssl3* \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy FFmpeg 8 from ffmpeg-builder
+# Copy FFmpeg 9 from ffmpeg-builder
 COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
 
 # Set up FFmpeg library path

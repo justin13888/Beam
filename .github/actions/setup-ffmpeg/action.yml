@@ -1,6 +1,6 @@
 name: Setup FFmpeg
 description: >
-  Builds FFmpeg 8.1 from source if not cached, restores from cache if available,
+  Builds FFmpeg 9.0 from source if not cached, restores from cache if available,
   and configures PKG_CONFIG_PATH / LD_LIBRARY_PATH / PATH for the job. Kept in
   lockstep with the `ffmpeg-next` version pinned in the workspace Cargo.toml.
 
@@ -13,12 +13,12 @@ runs:
     # updates those .so files underneath a restored cache, the result is not a
     # build failure but a SIGSEGV the first time anything decodes -- ffprobe
     # keeps demuxing happily, which makes it look like the caller's bug.
-    - name: Cache FFmpeg 8.1 build
+    - name: Cache FFmpeg 9.0 build
       id: cache-ffmpeg
       uses: actions/cache@v6
       with:
         path: /opt/ffmpeg
-        key: ffmpeg-8.1-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-v2
+        key: ffmpeg-9.0-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-v2
 
     - name: Install FFmpeg build dependencies
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -31,14 +31,14 @@ runs:
           libfribidi-dev libogg-dev libssl-dev
         version: 1.0
 
-    - name: Build FFmpeg 8.1 from source
+    - name: Build FFmpeg 9.0 from source
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
       shell: bash
       run: |
         mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg
-        wget -q https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz
-        tar xf ffmpeg-8.1.tar.xz
-        cd ffmpeg-8.1
+        wget -q https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz
+        tar xf ffmpeg-9.0.tar.xz
+        cd ffmpeg-9.0
         ./configure \
           --prefix=/opt/ffmpeg \
           --disable-debug \
