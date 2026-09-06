@@ -87,7 +87,10 @@ path-traversal bug in file-serving code cannot modify or delete library content.
 writable storage (`BEAM_DATA_DIR`) is a separate location; nothing about playback or indexing writes
 into the library tree. The API reinforces the boundary at another layer: clients only ever see
 opaque IDs (`fileId`, `movieId`), never filesystem paths — every resource reference is resolved
-server-side against the catalog.
+server-side against the catalog. The AdminAuth-gated operational surface is the one exemption
+(NFR-108): admin events, the admin event stream and the admin log carry the configured root path so
+that the operator can fix it. Nothing there is a resource reference — no request path is ever
+resolved from a client-supplied string.
 
 ## Operational hardening
 

@@ -35,7 +35,13 @@ requirements (referenced below as FR-xxx).
   bursts range requests). Tunable and switchable via the `BEAM_RATE_LIMIT_*` variables.
 - **NFR-108**: The domain API MUST NOT expose raw filesystem paths, database primary keys of internal
   infrastructure tables, or other implementation details capable of enabling path traversal or
-  infrastructure-probing, in any client-facing response (FR-407).
+  infrastructure-probing, in any unauthenticated or ordinary client-facing response, including the
+  `detail` of a problem response (FR-407). The AdminAuth-gated operational surface is exempt: admin
+  events, the admin event stream and the admin log MAY carry a configured library root path, because
+  the operator reading them is the only party who can act on a bad root and already holds every
+  privilege the disclosure would grant. Process logs are not a client-facing response and are
+  likewise unrestricted — a failure that must stay path-free in its error message is expected to put
+  the path in a structured `tracing` field at the failing site.
 
 ## NFR-2xx — Testability
 
@@ -160,8 +166,9 @@ requirements (referenced below as FR-xxx).
   season/episode id, user id) and MUST NOT require a client to know or construct filesystem paths,
   internal database row identifiers unrelated to the domain, or web-framework-specific conventions,
   so that a native client (see [#78](https://github.com/justin13888/beam/issues/78)) can consume the
-  same API. This holds for the catalog, playback and administrative surfaces. It does *not* hold for
-  authentication — see NFR-605.
+  same API. This holds for the catalog, playback and administrative surfaces. An administrative view
+  that *displays* a configured library root is not a client constructing one, and is permitted under
+  the operational exemption in NFR-108. It does *not* hold for authentication — see NFR-605.
 - **NFR-605**: Authentication currently requires a browser context, and a native client MUST NOT be
   described as needing no server changes on that account. `beam-server` reads exactly one credential,
   the `beam_session` cookie, and `sanitize_redirect_path` accepts only same-origin relative paths, so
