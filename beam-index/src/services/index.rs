@@ -976,6 +976,11 @@ impl IndexService for LocalIndexService {
             .await?;
 
         if !library.root_path.is_dir() {
+            warn!(
+                root = %library.root_path.display(),
+                library_id = %lib_uuid,
+                "library root is not a directory"
+            );
             self.notification_service.publish(AdminEvent::error(
                 EventCategory::LibraryScan,
                 format!(
