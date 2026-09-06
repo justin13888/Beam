@@ -12,10 +12,19 @@ use beam_domain::models::Library as DomainLibrary;
 use beam_index::services::index::{IndexError, IndexService};
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
-    /// Validates that `requested` is within `root`, returning the canonical absolute path.
-    /// Returns `LibraryError::PathNotFound` if the path does not exist.
-    /// Returns `LibraryError::PathOutsideRoot` if the path escapes root.
-    fn validate_library_path(&self, requested: &Path, root: &Path)
+    /// Validates a *library root* at registration, returning the canonical
+    /// absolute path.
+    ///
+    /// Named for the root deliberately: the rules below are the ones a root has
+    /// to satisfy, not the ones an arbitrary path inside a library does. Beam
+    /// never validates the latter -- file references are resolved server-side
+    /// from the catalog (NFR-601) -- so nothing here has to hold for a media
+    /// file.
+    ///
+    /// Returns `LibraryError::PathNotFound` if the root does not resolve, or
+    /// resolves to something that is not a directory.
+    /// Returns `LibraryError::PathOutsideRoot` if the root escapes `root`.
+    fn validate_library_root(&self, requested: &Path, root: &Path)
     -> Result<PathBuf, LibraryError>;
 }
 
@@ -23,7 +32,7 @@ pub trait PathValidator: Send + Sync + std::fmt::Debug {
 pub struct OsPathValidator;
 
 impl PathValidator for OsPathValidator {
-    fn validate_library_path(
+    fn validate_library_root(
         &self,
         requested: &Path,
         root: &Path,
@@ -56,6 +65,20 @@ impl PathValidator for OsPathValidator {
             );
             return Err(LibraryError::PathOutsideRoot(
                 "Library path must be within the configured video directory".to_string(),
+            ));
+        }
+
+        // A scan refuses a root that is not a directory, so accepting one here
+        // would register a library that returns 201 and then fails every scan
+        // for the rest of its life. Refuse it at the point the operator can
+        // still correct the path.
+        if !canonical_target.is_dir() {
+            warn!(
+                requested = %canonical_target.display(),
+                "library root is not a directory"
+            );
+            return Err(LibraryError::PathNotFound(
+                "Library root path is not a directory".to_string(),
             ));
         }
 
@@ -109,7 +132,7 @@ pub mod in_memory {
     }
 
     impl PathValidator for InMemoryPathValidator {
-        fn validate_library_path(
+        fn validate_library_root(
             &self,
             _requested: &Path,
             _root: &Path,
@@ -284,7 +307,7 @@ impl LibraryService for LocalLibraryService {
 
         let canonical_target = self
             .path_validator
-            .validate_library_path(&requested_path, &self.video_dir)?;
+            .validate_library_root(&requested_path, &self.video_dir)?;
 
         let create = CreateLibrary {
             name: name.clone(),

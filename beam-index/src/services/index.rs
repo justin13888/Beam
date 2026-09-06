@@ -98,6 +98,8 @@ pub enum IndexError {
     LibraryNotFound,
     #[error("Invalid Library ID")]
     InvalidId,
+    /// The message never contains a filesystem path (NFR-108): the path goes
+    /// to a `tracing` field and the admin-log payload, both at the failing site.
     #[error("Path not found: {0}")]
     PathNotFound(String),
 }
@@ -397,11 +399,8 @@ impl LocalIndexService {
         info!("Processing new file: {}", path.display());
 
         let (size, mtime) = read_fs_meta(path).map_err(|e| {
-            IndexError::PathNotFound(format!(
-                "Failed to read metadata for {}: {}",
-                path.display(),
-                e
-            ))
+            warn!(path = %path.display(), error = %e, "Failed to read file metadata");
+            IndexError::PathNotFound(format!("Could not read file metadata: {e}"))
         })?;
 
         if !is_known_video(path) {
@@ -976,11 +975,16 @@ impl IndexService for LocalIndexService {
             .update_scan_progress(lib_uuid, Some(start_time), None, None)
             .await?;
 
-        if !library.root_path.exists() {
+        if !library.root_path.is_dir() {
+            warn!(
+                root = %library.root_path.display(),
+                library_id = %lib_uuid,
+                "library root is not a directory"
+            );
             self.notification_service.publish(AdminEvent::error(
                 EventCategory::LibraryScan,
                 format!(
-                    "Library '{}' path not found: {}",
+                    "Library '{}' root path does not exist or is not a directory: {}",
                     library.name,
                     library.root_path.display()
                 ),
@@ -993,7 +997,7 @@ impl IndexService for LocalIndexService {
                     AdminLogLevel::Error,
                     AdminLogCategory::LibraryScan,
                     format!(
-                        "Library scan failed: path not found for \"{}\"",
+                        "Library scan failed: root path does not exist or is not a directory for \"{}\"",
                         library.name
                     ),
                     Some(serde_json::json!({
@@ -1003,7 +1007,7 @@ impl IndexService for LocalIndexService {
                 )
                 .await;
             return Err(IndexError::PathNotFound(
-                library.root_path.to_string_lossy().to_string(),
+                "Library root path does not exist or is not a directory".to_string(),
             ));
         }
 
@@ -1142,6 +1146,27 @@ mod tests {
     use tempfile::TempDir;
 
     // ─── helpers ─────────────────────────────────────────────────────────────
+
+    /// `beam-server` passes an `IndexError::PathNotFound` message straight
+    /// through as the `detail` of a 400 an administrator's browser renders, so
+    /// the guarantee written on the variant has to hold at *every* construction
+    /// site (NFR-108). The path reaches the operator through the `tracing`
+    /// field, the admin notification and the admin log instead.
+    fn assert_names_no_path(err: &IndexError, paths: &[&Path]) {
+        let message = err.to_string();
+        for path in paths {
+            let path = path.to_string_lossy();
+            assert!(
+                !message.contains(path.as_ref()),
+                "a client-facing rejection must not carry a filesystem path; \
+                 {message:?} names {path:?}"
+            );
+        }
+        assert!(
+            !message.contains(std::path::MAIN_SEPARATOR),
+            "a client-facing rejection must not carry any path component: {message:?}"
+        );
+    }
 
     fn make_classify_service() -> (
         LocalIndexService,
@@ -2377,6 +2402,78 @@ mod tests {
         assert!(result.unwrap());
     }
 
+    #[tokio::test]
+    async fn test_process_file_missing_path_reports_no_filesystem_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("movies/Vanished (2020).mkv");
+        // Nothing is created: metadata cannot be read, so the file is refused
+        // before any repository, hash, or probe call.
+        let service = LocalIndexService::new(
+            Arc::new(MockLibraryRepository::new()),
+            Arc::new(MockFileRepository::new()),
+            Arc::new(MockMovieRepository::new()),
+            Arc::new(MockShowRepository::new()),
+            Arc::new(MockMediaStreamRepository::new()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let err = service
+            .process_new_file(&path, Uuid::new_v4())
+            .await
+            .expect_err("a file that cannot be stat'ed must be refused");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        assert_names_no_path(&err, &[&path]);
+    }
+
+    #[tokio::test]
+    async fn test_process_file_hash_failure_reports_no_filesystem_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("Vanished (2020).mkv");
+        std::fs::write(&path, b"video data").unwrap();
+
+        // The error the real hasher yields when the file goes away between the
+        // walk and the hash: an OS error from opening that very path. Whether
+        // its `Display` carries the path is precisely what the guarantee on
+        // `IndexError::PathNotFound` rests on at this construction site, so the
+        // error has to be a real one rather than a hand-written string.
+        let io_error = std::fs::File::open(temp_dir.path().join("Vanished (2020).mkv.part"))
+            .expect_err("that file was never created");
+
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Ok(make_video_metadata()));
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .return_once(move |_| Err(io_error));
+
+        let service = LocalIndexService::new(
+            Arc::new(MockLibraryRepository::new()),
+            Arc::new(MockFileRepository::new()),
+            Arc::new(MockMovieRepository::new()),
+            Arc::new(MockShowRepository::new()),
+            Arc::new(MockMediaStreamRepository::new()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let err = service
+            .process_new_file(&path, Uuid::new_v4())
+            .await
+            .expect_err("a file that cannot be hashed must be refused");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        assert_names_no_path(&err, &[&path]);
+    }
+
     // ============================
     // SCAN LIBRARY INTEGRATION TESTS
     // ============================
@@ -2676,10 +2773,11 @@ mod tests {
         let notification_svc = Arc::new(InMemoryNotificationService::new());
 
         // Insert a library whose root_path does not exist on disk
+        let root_path = PathBuf::from("/tmp/beam-nonexistent-xyzzy-12345");
         let library = Library {
             id: Uuid::new_v4(),
             name: "Bad Library".to_string(),
-            root_path: PathBuf::from("/tmp/beam-nonexistent-xyzzy-12345"),
+            root_path: root_path.clone(),
             description: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -2711,7 +2809,11 @@ mod tests {
         );
 
         let result = service.scan_library(library.id.to_string()).await;
-        assert!(matches!(result, Err(IndexError::PathNotFound(_))));
+        let err = result.expect_err("a missing root must fail the scan");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        // The path reaches the operator through the notification and admin
+        // log below, never through the error message (NFR-108).
+        assert_names_no_path(&err, &[&root_path]);
 
         // An error-level notification must have been published
         let events = notification_svc.published_events();
@@ -2724,6 +2826,47 @@ mod tests {
         assert!(logs.iter().any(|l| {
             l.level == AdminLogLevel::Error && l.category == AdminLogCategory::LibraryScan
         }));
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_root_is_a_file() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        // The root exists, but as a regular file: there is nothing to walk.
+        let root_path = dir.path().join("movies.mkv");
+        std::fs::write(&root_path, b"not a directory").unwrap();
+        let library = lib_repo
+            .create(CreateLibrary {
+                name: "File Root".to_string(),
+                root_path: root_path.clone(),
+                description: None,
+            })
+            .await
+            .unwrap();
+
+        // No expectations: reaching the hasher or the prober would be a bug.
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        let err = service
+            .scan_library(library.id.to_string())
+            .await
+            .expect_err("a root that is not a directory must fail the scan");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        assert_names_no_path(&err, &[&root_path]);
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert!(files.is_empty(), "nothing may be indexed under a file root");
     }
 
     #[tokio::test]
