@@ -25,7 +25,7 @@ use crate::session::{SessionEffect, SessionEvent, SessionState, UserSummary};
 use crate::transport::{ABOUT_BLANK, FailureKind, SessionMiddleware, TransportFailure, classify};
 use crate::upnext::{UpNextSeason, next_playable_episode};
 use secrecy::{ExposeSecret, SecretString};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// Storage key holding the list of known server ids.
@@ -240,6 +240,16 @@ pub struct BeamClient {
     servers: RwLock<HashMap<String, ServerContext>>,
     active: RwLock<Option<String>>,
     device_profile: RwLock<Option<DeviceProfile>>,
+    /// Servers whose rejected cookie is still in the platform keystore.
+    ///
+    /// `ClearCookie` on the 401 path is swallowed rather than returned -- the
+    /// caller's error is the expired session, which stands, and the in-memory
+    /// credential is already gone. Swallowing it alone was not safe: the
+    /// cookie the server had just rejected was still in the keystore, and the
+    /// next `restore` would register it and send it again. Naming the server
+    /// here is what stops that. Held in memory, so it lasts as long as the
+    /// process that failed the delete.
+    abandoned_sessions: RwLock<HashSet<String>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -254,6 +264,7 @@ impl BeamClient {
             servers: RwLock::new(HashMap::new()),
             active: RwLock::new(None),
             device_profile: RwLock::new(None),
+            abandoned_sessions: RwLock::new(HashSet::new()),
         })
     }
 
@@ -279,8 +290,28 @@ impl BeamClient {
             let Ok(record) = serde_json::from_str::<ServerRecord>(&raw) else {
                 continue;
             };
-            let cookie = self.storage.get_secret(format!("session/{id}")).await?;
-            self.install(record, cookie.map(SecretString::from))?;
+            let cookie = if self.is_abandoned(&id) {
+                // A cookie the device could not delete is not a session: the
+                // server rejected it, and registering it again would put it
+                // straight back on the wire. The delete is retried first,
+                // because the keystore that refused it may since have
+                // unlocked; the cookie is dropped either way.
+                if self
+                    .storage
+                    .remove_secret(format!("session/{id}"))
+                    .await
+                    .is_ok()
+                {
+                    self.forget_abandoned(&id);
+                }
+                None
+            } else {
+                self.storage
+                    .get_secret(format!("session/{id}"))
+                    .await?
+                    .map(SecretString::from)
+            };
+            self.install(record, cookie)?;
         }
 
         *self.active.write().expect("active lock") =
@@ -379,6 +410,7 @@ impl BeamClient {
         self.storage
             .remove_secret(format!("session/{server_id}"))
             .await?;
+        self.forget_abandoned(&server_id);
         self.storage
             .remove(format!("progress_queue/{server_id}"))
             .await?;
@@ -445,6 +477,9 @@ impl BeamClient {
                 self.storage
                     .put_secret(format!("session/{server_id}"), session_cookie)
                     .await?;
+                // Whatever was stranded under this key has just been
+                // overwritten by a cookie the server has confirmed.
+                self.forget_abandoned(&server_id);
                 let effects = self.apply(
                     &server_id,
                     SessionEvent::IdentityConfirmed(Box::new(user.clone())),
@@ -1574,6 +1609,7 @@ impl BeamClient {
                     self.storage
                         .remove_secret(format!("session/{server_id}"))
                         .await?;
+                    self.forget_abandoned(server_id);
                 }
                 // Performed by the call site, which has what the effect needs
                 // and this does not: the confirmed cookie for `PersistCookie`,
@@ -1590,6 +1626,30 @@ impl BeamClient {
             }
         }
         Ok(())
+    }
+
+    /// Note that this server's stored cookie could not be deleted.
+    fn abandon_session(&self, server_id: &str) {
+        self.abandoned_sessions
+            .write()
+            .expect("abandoned sessions lock")
+            .insert(server_id.to_owned());
+    }
+
+    /// Forget that note: the key has since been deleted or overwritten.
+    fn forget_abandoned(&self, server_id: &str) {
+        self.abandoned_sessions
+            .write()
+            .expect("abandoned sessions lock")
+            .remove(server_id);
+    }
+
+    /// Whether this server's stored cookie is one the device failed to delete.
+    fn is_abandoned(&self, server_id: &str) -> bool {
+        self.abandoned_sessions
+            .read()
+            .expect("abandoned sessions lock")
+            .contains(server_id)
     }
 
     fn client_for(&self, server_id: &str) -> Result<GeneratedClient, BeamError> {
@@ -1809,7 +1869,12 @@ impl BeamClient {
             // `server_http_config` stops handing that cookie to the player.
             let expired = effects.contains(&SessionEffect::InstallCookie(false));
             if let Err(error) = self.perform(server_id, &effects, None).await {
+                // Swallowed: the caller's error is the expired session, which
+                // stands, and the credential is already off the client. Marked,
+                // because the cookie the server rejected is still in the
+                // keystore and a restore would otherwise send it again.
                 tracing::warn!(server_id, %error, "could not delete the rejected session cookie");
+                self.abandon_session(server_id);
             }
             if expired {
                 return BeamError::SessionExpired;
@@ -2674,6 +2739,67 @@ mod tests {
                 "and the player keeps its copy, from {state:?}"
             );
         }
+    }
+
+    /// The keystore refusing the delete an expiry asks for is swallowed -- the
+    /// caller's answer is still the expired session -- but the cookie is then
+    /// still on the device. Restoring it would hand the client back the exact
+    /// credential the server has just rejected, so the server is marked and
+    /// its stored cookie is not registered again.
+    #[tokio::test]
+    async fn a_cookie_that_could_not_be_deleted_is_not_registered_again() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+        let secret_key = format!("session/{id}");
+        assert!(storage.has_secret(&secret_key), "signing in stored it");
+
+        let backend = Arc::new(CannedBackend::answering(
+            401,
+            "application/problem+json",
+            r#"{"type":"about:blank","status":401}"#,
+        ));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        // A locked keystore: reads still answer, writes and deletes do not.
+        storage.set_failure(FailureMode::FailWrites);
+
+        let error = client
+            .media_sources("7".to_owned())
+            .await
+            .expect_err("the canned 401 fails the call");
+
+        assert_eq!(
+            error,
+            BeamError::SessionExpired,
+            "swallowing the delete must not change the caller's answer"
+        );
+        assert!(
+            storage.has_secret(&secret_key),
+            "the delete really did fail, which is what the mark is for"
+        );
+
+        client
+            .restore()
+            .await
+            .expect("the registry itself is still readable");
+
+        assert!(matches!(
+            client.session_state(id).expect("known"),
+            SessionState::LoggedOut
+        ));
+        assert_eq!(
+            client.media_sources("7".to_owned()).await,
+            Err(BeamError::Unauthenticated),
+            "the rejected cookie is not back on the client"
+        );
+        assert!(
+            matches!(client.server_http_config(), Err(BeamError::Unauthenticated)),
+            "nor handed to the player"
+        );
     }
 
     /// A 401 whose failure is dropped -- `hydrate` shows a continue-watching
