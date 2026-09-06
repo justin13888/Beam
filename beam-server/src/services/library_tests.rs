@@ -704,7 +704,7 @@ mod os_path_validator {
     }
 
     fn validate(requested: &Path, root: &Path) -> Result<PathBuf, LibraryError> {
-        OsPathValidator.validate_library_path(requested, root)
+        OsPathValidator.validate_library_root(requested, root)
     }
 
     /// The rejection's message reaches an administrator's browser as the
@@ -847,11 +847,18 @@ mod os_path_validator {
     }
 
     #[test]
-    fn a_file_inside_root_is_accepted() {
-        // The validator checks containment, not that the target is a directory.
+    fn a_file_inside_root_is_rejected() {
+        // Containment is not enough: a scan refuses a root that is not a
+        // directory, so a regular file has to be refused at registration too --
+        // otherwise the library is created and then fails every scan forever.
         let (_tmp, root) = root_with_children();
-        fs::write(root.join("movies/note.txt"), b"x").expect("write");
-        let got = validate(Path::new("movies/note.txt"), &root).expect("inside root");
-        assert_eq!(got, root.join("movies/note.txt"));
+        let file = root.join("movies/note.txt");
+        fs::write(&file, b"x").expect("write");
+        let err = validate(Path::new("movies/note.txt"), &root).expect_err("not a directory");
+        assert!(
+            matches!(err, LibraryError::PathNotFound(_)),
+            "expected PathNotFound, got {err:?}"
+        );
+        assert_names_no_path(&err, &[&root, &file]);
     }
 }
