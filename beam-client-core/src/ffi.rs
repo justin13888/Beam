@@ -311,7 +311,7 @@ impl BeamClient {
                     .await?
                     .map(SecretString::from)
             };
-            self.install(record, cookie)?;
+            self.install(record, cookie, None)?;
         }
 
         *self.active.write().expect("active lock") =
@@ -342,7 +342,7 @@ impl BeamClient {
             // that did not yet contain this server, so the very first server
             // added was never in it -- and `restore` found nothing, sending
             // the viewer back to the address field on every cold start.
-            self.install(record.clone(), None)?;
+            self.install(record.clone(), None, None)?;
             self.persist_record(&record).await?;
         }
 
@@ -635,7 +635,7 @@ impl BeamClient {
     ///
     /// Returns [`BeamError::UnknownServer`] when the server is not registered.
     pub async fn forget_certificates(&self, server_id: String) -> Result<(), BeamError> {
-        let (record, cookie) = {
+        let (record, cookie, state) = {
             let servers = self.servers.read().expect("servers lock");
             let context = servers
                 .get(&server_id)
@@ -644,9 +644,14 @@ impl BeamClient {
                 })?;
             let mut record = context.record.clone();
             record.trusted_fingerprints.clear();
-            (record, context.cookie.get())
+            (record, context.cookie.get(), context.state.clone())
         };
-        self.install(record.clone(), cookie)?;
+        // The session comes across with the cookie. Withdrawing a certificate
+        // is a trust decision and says nothing about who is signed in; letting
+        // `install` derive the state afresh reset a signed-in server to
+        // `Expired`, so forgetting a certificate told the viewer their session
+        // had expired.
+        self.install(record.clone(), cookie, Some(state))?;
         self.persist_record(&record).await
     }
 
@@ -1415,7 +1420,21 @@ fn find_episode(detail: &MediaDetail, episode_id: &str) -> Option<EpisodeSummary
 }
 
 impl BeamClient {
-    fn install(&self, record: ServerRecord, cookie: Option<SecretString>) -> Result<(), BeamError> {
+    /// Build a server's context from scratch and put it in the registry.
+    ///
+    /// `carried` is the session state to keep across the rebuild, for the one
+    /// caller that is rebuilding a server it already had. `None` derives it
+    /// from the cookie, which is what a cold start and a newly added server
+    /// want. Deliberately only the *state*: the queue is persisted under the
+    /// server's own key and reloads itself, and the throttle and the metadata
+    /// cache are operational rather than security-bearing, so rebuilding them
+    /// costs a round trip and no correctness.
+    fn install(
+        &self,
+        record: ServerRecord,
+        cookie: Option<SecretString>,
+        carried: Option<SessionState>,
+    ) -> Result<(), BeamError> {
         let middleware = Arc::new(SessionMiddleware::new());
 
         // A `reqwest::Client` built without a preconfigured `ClientConfig`
@@ -1443,11 +1462,11 @@ impl BeamClient {
 
         // A restored cookie is trusted until a request says otherwise, which
         // is what keeps a cold start off the network.
-        let state = if cookie.is_registered() {
+        let state = carried.unwrap_or(if cookie.is_registered() {
             SessionState::Expired
         } else {
             SessionState::LoggedOut
-        };
+        });
 
         let queue = Arc::new(ProgressQueue::new(
             Arc::clone(&self.storage),
@@ -2622,6 +2641,36 @@ mod tests {
             client.session_state(id).expect("known"),
             SessionState::LoggedOut
         ));
+    }
+
+    /// Withdrawing a certificate is a trust decision and says nothing about
+    /// who is signed in. The rebuild `forget_certificates` performs went
+    /// through `install`, which derives the state from the cookie alone, so a
+    /// signed-in server came back `Expired` -- and the viewer was told their
+    /// session had expired for having forgotten a certificate.
+    #[tokio::test]
+    async fn forgetting_certificates_keeps_the_viewer_signed_in() {
+        let (client, id, _) = signed_in_client().await;
+        client
+            .trust_certificate(id.clone(), "AA:BB".to_owned())
+            .await
+            .expect("trusted");
+        let before = client.session_state(id.clone()).expect("known");
+        assert!(
+            matches!(before, SessionState::Authenticated { .. }),
+            "{before:?}"
+        );
+
+        client
+            .forget_certificates(id.clone())
+            .await
+            .expect("forgotten");
+
+        assert_eq!(
+            client.session_state(id).expect("known"),
+            before,
+            "forgetting a certificate is not signing out"
+        );
     }
 
     /// Withdrawing trust rebuilds the client; the session must come with it.
