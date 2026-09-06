@@ -172,6 +172,12 @@ Individual tasks, if you need them: `rust:fmt`, `rust:clippy`, `rust:test`, `rus
 `docker compose -f compose.dependencies.yaml up -d` and `BEAM_TEST_DATABASE_URL`. `cargo test
 --workspace` must always pass with none of that running (NFR-201).
 
+`check:ffmpeg-build` builds the `ffmpeg-builder` stage of `beam-server/Containerfile`, proving the
+FFmpeg pin compiles on Debian and not only that the three pinned strings match. It needs a container
+runtime, so like `rust:test:pg` it is outside `ci` (an image build, which `ci` excludes by
+definition) and outside the pre-push hook. CI runs it in the `ffmpeg-build` job, under the same path
+filter as `check:ffmpeg-version`.
+
 The `rust:mutants*` tasks are advisory and deliberately outside `ci` -- they take hours, and a
 surviving mutant is a prompt to harden the code, not a broken build. See the hardening loop above.
 

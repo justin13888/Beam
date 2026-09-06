@@ -184,6 +184,44 @@ jobs:
       - uses: jdx/mise-action@v4
       - run: mise run check:ffmpeg-version
 
+  # ffmpeg-version above only compares the three pinned strings; it never
+  # compiles. This is the job that proves the pin actually builds on
+  # `debian:trixie-slim` with that stage's apt set, which is a different distro
+  # and package set from the ubuntu-latest build in setup-ffmpeg. Before it,
+  # the only job that built beam-server/Containerfile was release.yml's
+  # `images` -- gated on `release_created == 'true'`, so a broken FFmpeg
+  # surfaced after the tag and the GitHub Release already existed.
+  #
+  # Only the ffmpeg-builder stage, not the whole image: the Rust build above it
+  # is already covered by rust-clippy and rust-test, and redoing it here would
+  # cost far more than it proves.
+  ffmpeg-build:
+    name: FFmpeg container stage builds
+    needs: [changes]
+    if: needs.changes.outputs.ffmpeg == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BEAM_CONTAINER_CACHE_DIR: /tmp/ffmpeg-builder-cache
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      # The default `docker` driver cannot export a cache; the container driver
+      # this installs can. Same builder release.yml's images job uses.
+      - uses: docker/setup-buildx-action@v4
+
+      # Keyed on the Containerfile, so any edit to the FFmpeg stage misses the
+      # cache and genuinely rebuilds -- which is the whole point of the job --
+      # while an unrelated tooling change that trips the `ffmpeg` path filter
+      # restores it. An exact key hit saves nothing back, so the entry does not
+      # grow across runs.
+      - name: Cache the ffmpeg-builder layers
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.BEAM_CONTAINER_CACHE_DIR }}
+          key: ffmpeg-builder-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('beam-server/Containerfile') }}
+
+      - run: mise run check:ffmpeg-build
+
   compose-invariants:
     name: Compose invariants
     needs: [changes]
@@ -645,6 +683,7 @@ jobs:
       - rust-fmt
       - rust-lockfile
       - ffmpeg-version
+      - ffmpeg-build
       - compose-invariants
       - rust-deny
       - rust-clippy

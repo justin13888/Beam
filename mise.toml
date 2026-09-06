@@ -838,6 +838,74 @@ fi
 exit "$status"
 '''
 
+[tasks."check:ffmpeg-build"]
+description = "Build the ffmpeg-builder stage of beam-server/Containerfile (needs a container runtime)"
+# `check:ffmpeg-version` only proves the three pins read the same string. It
+# never compiles anything, so a version that does not configure or `make` on
+# `debian:trixie-slim` -- a different distro and apt set from the composite
+# action's ubuntu-latest build -- passes it. Until this task existed, the only
+# job that built this Containerfile was release.yml's `images`, gated on
+# `release_created == 'true'` -- so any such failure surfaced *after* the tag
+# and the GitHub Release, leaving a released version with no server image. This
+# builds the FFmpeg stage alone, which is the half of the image that the FFmpeg
+# pin actually decides.
+#
+# Deliberately outside `ci`: that task is "every check CI enforces, except
+# coverage and image builds", and it must stay runnable with no container
+# runtime (NFR-201) -- the same reason dev:verify-oidc sits outside it. It is
+# equally deliberately outside the hk.pkl pre-push hook: this compiles FFmpeg,
+# and no push should pay for that. ci.yml's ffmpeg-build job runs it under the
+# same path filter that routes beam-server/Containerfile.
+#
+# docker first, podman second -- the reverse of scripts/compose.sh, and for a
+# reason. This gate exists to prove release.yml's `docker buildx build`
+# succeeds, so where both are installed it must exercise the same builder.
+# `podman buildx build` is an alias for `podman build`, so the invocation is
+# identical either way. BEAM_CONTAINER overrides, as BEAM_COMPOSE does.
+#
+# BEAM_CONTAINER_CACHE_DIR turns on buildx's local layer cache. It is a bare
+# directory rather than the flags themselves so that the whole command stays
+# here and the workflow only decides where GitHub stores it; unset (the local
+# default) means no cache flags at all, since `type=local` needs a real builder
+# driver to export to. It is docker-only -- see the warning below.
+run = '''
+set -eu
+
+engine=${BEAM_CONTAINER:-}
+if [ -z "$engine" ]; then
+    for candidate in docker podman; do
+        if command -v "$candidate" > /dev/null 2>&1; then
+            engine="$candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$engine" ]; then
+    echo "check:ffmpeg-build: no container runtime found -- install docker or podman, or set BEAM_CONTAINER." >&2
+    exit 1
+fi
+
+set -- buildx build --target ffmpeg-builder --file beam-server/Containerfile
+
+if [ -n "${BEAM_CONTAINER_CACHE_DIR:-}" ]; then
+    if [ "$engine" = "docker" ]; then
+        mkdir -p "$BEAM_CONTAINER_CACHE_DIR"
+        set -- "$@" \
+            --cache-from "type=local,src=$BEAM_CONTAINER_CACHE_DIR" \
+            --cache-to "type=local,dest=$BEAM_CONTAINER_CACHE_DIR,mode=max"
+    else
+        # podman's --cache-to takes a registry reference, not a buildx cache
+        # exporter, and rejects `type=local,...` outright. Its own layer cache
+        # already covers the local rebuild loop, so warn and carry on rather
+        # than failing over an optimisation.
+        echo "check:ffmpeg-build: BEAM_CONTAINER_CACHE_DIR ignored -- $engine has no buildx local cache exporter." >&2
+    fi
+fi
+
+echo "check:ffmpeg-build: $engine $* ."
+"$engine" "$@" .
+'''
+
 [tasks."check:mutants-skip-fakes"]
 description = "Assert every test-utils-gated item is also marked #[mutants::skip]"
 # cargo-mutants decides what not to mutate by looking for the *literal*
