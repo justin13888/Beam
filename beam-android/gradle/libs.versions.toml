@@ -18,8 +18,8 @@
 # `ksp` is a bare version, not the `<kotlin>-<ksp>` form: KSP 2 has its own
 # version line and does not track Kotlin's, so this pin need not trail `kotlin`.
 agp = "9.3.2"
-kotlin = "2.4.10"
-ksp = "2.3.11"
+kotlin = "2.4.20"
+ksp = "2.3.12"
 
 # Platform. The SDK now ships minor platform versions, so compileSdk is paired
 # with compileSdkMinor -- the installed platform is android-37.2.
@@ -55,7 +55,7 @@ hiltNavigationCompose = "1.4.0"
 hiltWork = "1.4.0"
 
 # Libraries
-coil = "3.6.0"
+coil = "3.6.2"
 jna = "5.19.1"
 kotlinxCoroutines = "1.11.0"
 kotlinxSerialization = "1.11.0"
@@ -65,8 +65,8 @@ desugarJdkLibs = "2.1.5"
 
 # Test
 junit = "4.13.2"
-robolectric = "4.16.1"
-roborazzi = "1.73.0"
+robolectric = "4.17"
+roborazzi = "1.74.0"
 turbine = "1.2.1"
 androidxTestExt = "1.3.0"
 
