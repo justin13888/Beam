@@ -578,13 +578,16 @@ impl MediaSummary {
 
     fn from_show(show: &wire::ShowMetadata, record: &ServerRecord) -> Self {
         let title = &show.title;
-        // A series carries its artwork and genres on its seasons rather than
-        // on itself, so a tile takes the first season that has any. Without
-        // this every series renders as a blank placeholder.
-        let poster = show
-            .seasons
-            .iter()
-            .find_map(|season| season.poster_url.clone());
+        // A series' own poster wins. One without -- specials, season-less
+        // shows, a series the provider has no art for -- borrows the first
+        // season poster there is, so it still renders as more than a blank
+        // placeholder. Genres, rating and runtime are recorded per season, so
+        // a tile takes them from the first season that has any.
+        let poster = show.poster_url.clone().or_else(|| {
+            show.seasons
+                .iter()
+                .find_map(|season| season.poster_url.clone())
+        });
         let genres = show
             .seasons
             .iter()
@@ -611,7 +614,7 @@ impl MediaSummary {
             year: narrow_u32(show.year),
             description: show.description.clone(),
             poster_url: absolute(record, poster),
-            backdrop_url: None,
+            backdrop_url: absolute(record, show.backdrop_url.clone()),
             genres,
             runtime_minutes: narrow_u32(runtime),
             tmdb_rating: narrow_u32(rating),
@@ -1142,11 +1145,38 @@ mod tests {
         );
     }
 
+    /// A series carrying its own artwork, as the server publishes it whenever
+    /// enrichment found any, alongside a season that also has a poster.
+    const SHOW_WITH_ARTWORK: &str = r#"{"Show":{
+        "id":"s1",
+        "title":{"original":"Le Bureau"},
+        "poster_url":"/v1/artwork/show/s1/poster",
+        "backdrop_url":"/v1/artwork/show/s1/backdrop",
+        "seasons":[
+            {"id":"s2","season_number":2,"dates":{},"genres":[],
+             "poster_url":"/artwork/s1/2.jpg","episodes":[]}
+        ]
+    }}"#;
+
     #[test]
-    fn a_show_borrows_artwork_and_genres_from_the_first_season_that_has_them() {
-        // The catalog records these per season, so a series that took them
-        // only from itself would render as an untitled grey placeholder.
+    fn a_show_prefers_its_own_artwork_over_a_seasons() {
+        let summary = MediaSummary::from_generated(node(SHOW_WITH_ARTWORK), &record());
+        assert_eq!(
+            summary.poster_url.as_deref(),
+            Some("https://beam.local:8000/v1/artwork/show/s1/poster")
+        );
+        assert_eq!(
+            summary.backdrop_url.as_deref(),
+            Some("https://beam.local:8000/v1/artwork/show/s1/backdrop")
+        );
+    }
+
+    #[test]
+    fn a_show_borrows_artwork_and_genres_from_the_first_season_when_the_show_has_none() {
+        // A series with no poster of its own would otherwise render as an
+        // untitled grey placeholder, and genres are recorded per season.
         let summary = MediaSummary::from_generated(node(SHOW), &record());
+        assert_eq!(summary.backdrop_url, None, "no season carries a backdrop");
         assert_eq!(summary.kind, MediaKind::Show);
         assert_eq!(
             summary.poster_url.as_deref(),

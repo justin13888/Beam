@@ -17,6 +17,12 @@ pub struct ShowMetadata {
     pub description: Option<String>,
     /// Year the show was released
     pub year: Option<u32>,
+    /// Path of the show's own poster image, served by the artwork route;
+    /// absent when the show has no poster.
+    pub poster_url: Option<String>,
+    /// Path of the show's own backdrop image, served by the artwork route;
+    /// absent when the show has no backdrop.
+    pub backdrop_url: Option<String>,
     /// List of seasons in the show
     pub seasons: Vec<SeasonMetadata>,
 }
