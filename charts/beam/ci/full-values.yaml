@@ -20,6 +20,7 @@ oidc:
   issuer: https://idp.example.test/realms/beam
   clientId: beam
   existingSecret: beam-oidc
+  clientAuthMethod: client_secret_post
   adminClaim: groups
   adminValue: beam-admin
 tmdb:

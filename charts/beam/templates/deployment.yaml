@@ -145,6 +145,10 @@ spec:
                   key: oidc-client-secret
                   {{- end }}
             {{- end }}
+            {{- with .Values.oidc.clientAuthMethod }}
+            - name: BEAM_OIDC_CLIENT_AUTH_METHOD
+              value: {{ . | quote }}
+            {{- end }}
             - name: BEAM_OIDC_SCOPES
               value: {{ .Values.oidc.scopes | quote }}
             {{- with .Values.oidc.adminClaim }}

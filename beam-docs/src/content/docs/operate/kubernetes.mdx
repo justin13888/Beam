@@ -108,6 +108,10 @@ chart rejects any key it does not know. Other server settings from the
 [configuration reference](/reference/configuration/) go under `server.env`; the ones the chart sets
 itself, such as `BEAM_VIDEO_DIR`, are refused there.
 
+The `oidc` block sets every `BEAM_OIDC_*` setting, so a provider guide's
+`BEAM_OIDC_CLIENT_AUTH_METHOD` is `oidc.clientAuthMethod` here; leave it empty for
+`client_secret_basic`.
+
 ## Health and restarts
 
 The server is taken out of rotation while it cannot reach the database, but it is not restarted: a

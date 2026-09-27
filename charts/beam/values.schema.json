@@ -111,6 +111,7 @@
                 "BEAM_OIDC_ISSUER",
                 "BEAM_OIDC_CLIENT_ID",
                 "BEAM_OIDC_CLIENT_SECRET",
+                "BEAM_OIDC_CLIENT_AUTH_METHOD",
                 "BEAM_OIDC_SCOPES",
                 "BEAM_OIDC_ADMIN_CLAIM",
                 "BEAM_OIDC_ADMIN_VALUE",
@@ -157,6 +158,10 @@
         "clientSecret": { "type": "string" },
         "existingSecret": { "type": "string" },
         "existingSecretKey": { "$ref": "#/definitions/nonEmptyString" },
+        "clientAuthMethod": {
+          "type": "string",
+          "enum": ["", "client_secret_basic", "client_secret_post"]
+        },
         "scopes": { "type": "string" },
         "adminClaim": { "type": "string" },
         "adminValue": { "type": "string" }
