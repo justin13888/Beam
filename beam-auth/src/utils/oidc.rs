@@ -1,5 +1,6 @@
-//! OIDC Authorization Code + PKCE, behind a trait so beam-server's login
-//! flow never touches the `openidconnect` crate directly (see ADR-0003).
+//! OIDC Authorization Code + PKCE, and the RFC 8628 device authorization
+//! grant, behind a trait so beam-server's login flows never touch the
+//! `openidconnect` crate directly (see ADR-0003 and ADR-0017).
 //!
 //! [`DiscoveredOidcClient`] wraps a real IdP via discovery; [`FakeOidcClient`]
 //! (test-utils only) is a programmable double for subcutaneous tests that
@@ -43,6 +44,42 @@ pub struct OidcIdentity {
     pub claims: serde_json::Value,
 }
 
+/// What the IdP's device authorization endpoint answered (RFC 8628 §3.2):
+/// the secret `device_code` the server polls with, and what the user is shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAuthStart {
+    /// The secret the token endpoint is polled with. Never leaves the server.
+    pub device_code: String,
+    /// The short code the user types at `verification_uri`.
+    pub user_code: String,
+    /// Where the user goes, on any device with a browser, to approve.
+    pub verification_uri: String,
+    /// `verification_uri` with the user code already filled in, when the IdP
+    /// offers one (e.g. for a QR code).
+    pub verification_uri_complete: Option<String>,
+    /// How long the device code stays valid, in seconds.
+    pub expires_in_secs: u64,
+    /// The minimum wait between polls the IdP asks for, in seconds.
+    pub interval_secs: u64,
+}
+
+/// The outcome of one poll of the IdP's token endpoint with a device code
+/// (RFC 8628 §3.5).
+#[derive(Debug, Clone)]
+pub enum DevicePoll {
+    /// The user has not finished approving yet.
+    Pending,
+    /// The user has not finished, and the poll came too fast: the interval
+    /// must grow by five seconds.
+    SlowDown,
+    /// The user refused.
+    Denied,
+    /// The device code expired, or the IdP no longer recognises it.
+    Expired,
+    /// The user approved; the ID token verified.
+    Complete(OidcIdentity),
+}
+
 #[derive(Debug, Error)]
 pub enum OidcError {
     #[error("OIDC discovery failed: {0}")]
@@ -55,6 +92,10 @@ pub enum OidcError {
     ClaimsVerification(String),
     #[error("nonce mismatch")]
     NonceMismatch,
+    /// The IdP's discovery document names no `device_authorization_endpoint`,
+    /// so the device grant cannot be offered (the browser flow still works).
+    #[error("the identity provider does not support the device authorization grant")]
+    DeviceFlowUnsupported,
 }
 
 /// The whole OIDC conversation, abstracted so the rest of the auth flow
@@ -77,19 +118,42 @@ pub trait OidcClient: Send + Sync + std::fmt::Debug {
         pkce_verifier: &str,
         nonce: &str,
     ) -> Result<OidcIdentity, OidcError>;
+
+    /// Begins an RFC 8628 device authorization grant: asks the IdP's device
+    /// authorization endpoint for a device code and the user code to show.
+    /// [`OidcError::DeviceFlowUnsupported`] when the IdP has no such endpoint.
+    async fn begin_device_auth(&self) -> Result<DeviceAuthStart, OidcError>;
+
+    /// Polls the IdP's token endpoint **once** with `device_code`.
+    ///
+    /// One request per call, never a loop: the caller -- a client's own poll
+    /// -- decides the pacing, so a request handler never sleeps waiting for a
+    /// user who may never approve.
+    async fn poll_device_token(&self, device_code: &str) -> Result<DevicePoll, OidcError>;
 }
 
 #[cfg(feature = "oidc")]
 mod discovered {
-    use super::{BeginAuth, OidcClient, OidcError, OidcIdentity};
+    use super::{BeginAuth, DeviceAuthStart, DevicePoll, OidcClient, OidcError, OidcIdentity};
     use async_trait::async_trait;
-    use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
-    use openidconnect::{AsyncHttpClient, HttpClientError, HttpRequest, HttpResponse};
+    use openidconnect::core::{
+        CoreAuthDisplay, CoreAuthenticationFlow, CoreClaimName, CoreClaimType, CoreClient,
+        CoreClientAuthMethod, CoreDeviceAuthorizationResponse, CoreGrantType, CoreIdToken,
+        CoreIdTokenClaims, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm,
+        CoreJweKeyManagementAlgorithm, CoreResponseMode, CoreResponseType,
+        CoreSubjectIdentifierType, CoreTokenResponse,
+    };
     use openidconnect::{
-        AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet,
+        AdditionalProviderMetadata, AsyncHttpClient, HttpClientError, HttpRequest, HttpResponse,
+        ProviderMetadata,
+    };
+    use openidconnect::{
+        AuthorizationCode, ClientId, ClientSecret, CsrfToken, DeviceAuthorizationUrl,
+        DeviceCodeErrorResponse, DeviceCodeErrorResponseType, EndpointMaybeSet, EndpointNotSet,
         EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
         TokenResponse,
     };
+    use serde::{Deserialize, Serialize};
     use std::future::Future;
     use std::pin::Pin;
     use std::time::Duration;
@@ -181,6 +245,50 @@ mod discovered {
         EndpointMaybeSet,
     >;
 
+    /// The one discovery field `CoreProviderMetadata` drops that Beam reads:
+    /// RFC 8628's `device_authorization_endpoint` (RFC 8414 section 2
+    /// registers it in the discovery document). Optional, because plenty of
+    /// IdPs do not offer the grant -- its absence turns the device login off,
+    /// not discovery.
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub(crate) struct DeviceAwareMetadata {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_authorization_endpoint: Option<DeviceAuthorizationUrl>,
+    }
+
+    impl AdditionalProviderMetadata for DeviceAwareMetadata {}
+
+    /// `CoreProviderMetadata` with [`DeviceAwareMetadata`] in place of
+    /// `EmptyAdditionalProviderMetadata` -- the pattern openidconnect's own
+    /// `okta_device_grant` example uses.
+    pub(crate) type DeviceAwareProviderMetadata = ProviderMetadata<
+        DeviceAwareMetadata,
+        CoreAuthDisplay,
+        CoreClientAuthMethod,
+        CoreClaimName,
+        CoreClaimType,
+        CoreGrantType,
+        CoreJweContentEncryptionAlgorithm,
+        CoreJweKeyManagementAlgorithm,
+        CoreJsonWebKey,
+        CoreResponseMode,
+        CoreResponseType,
+        CoreSubjectIdentifierType,
+    >;
+
+    /// The device authorization endpoint a discovery document names, if any.
+    pub(crate) fn device_endpoint(
+        metadata: &DeviceAwareProviderMetadata,
+    ) -> Option<DeviceAuthorizationUrl> {
+        metadata
+            .additional_metadata()
+            .device_authorization_endpoint
+            .clone()
+    }
+
+    /// RFC 8628 section 3.4's grant type for polling the token endpoint.
+    const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
     /// Real OIDC client, backed by discovery against a configured issuer.
     /// Construct once at process startup (discovery is an async network
     /// call); the resulting client is reused for every login.
@@ -189,6 +297,12 @@ mod discovered {
         client: DiscoveredCoreClient,
         http_client: OidcHttpClient,
         scopes: Vec<String>,
+        /// From discovery; `None` when the IdP does not offer the grant.
+        device_url: Option<DeviceAuthorizationUrl>,
+        /// Kept for the device-token poll, which Beam sends itself (see
+        /// `poll_device_token`).
+        client_id: String,
+        client_secret: String,
     }
 
     impl DiscoveredOidcClient {
@@ -204,9 +318,11 @@ mod discovered {
 
             let issuer_url = IssuerUrl::new(issuer.to_string())
                 .map_err(|e| OidcError::Discovery(e.to_string()))?;
-            let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
-                .await
-                .map_err(|e| OidcError::Discovery(e.to_string()))?;
+            let provider_metadata =
+                DeviceAwareProviderMetadata::discover_async(issuer_url, &http_client)
+                    .await
+                    .map_err(|e| OidcError::Discovery(e.to_string()))?;
+            let device_url = device_endpoint(&provider_metadata);
 
             let redirect_url = RedirectUrl::new(redirect_url.to_string())
                 .map_err(|e| OidcError::Discovery(e.to_string()))?;
@@ -222,7 +338,134 @@ mod discovered {
                 client,
                 http_client,
                 scopes,
+                device_url,
+                client_id: client_id.to_owned(),
+                client_secret: client_secret.to_owned(),
             })
+        }
+
+        /// The one form POST RFC 8628 section 3.4 describes, authenticated
+        /// the way `openidconnect` authenticates the code exchange
+        /// (`client_secret_basic`, RFC 6749 section 2.3.1 -- id and secret
+        /// each form-url-encoded before base64).
+        fn device_token_request(
+            &self,
+            token_url: &str,
+            device_code: &str,
+        ) -> Result<HttpRequest, OidcError> {
+            device_token_request(token_url, &self.client_id, &self.client_secret, device_code)
+        }
+    }
+
+    /// Builds the device-code poll. Free-standing so a test can read exactly
+    /// what goes on the wire without an IdP.
+    pub(crate) fn device_token_request(
+        token_url: &str,
+        client_id: &str,
+        client_secret: &str,
+        device_code: &str,
+    ) -> Result<HttpRequest, OidcError> {
+        use base64::Engine as _;
+        use openidconnect::http::{Method, header};
+        use openidconnect::url::form_urlencoded;
+
+        let encode =
+            |value: &str| -> String { form_urlencoded::byte_serialize(value.as_bytes()).collect() };
+        let credential = base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            encode(client_id),
+            encode(client_secret)
+        ));
+        let body = form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", DEVICE_CODE_GRANT)
+            .append_pair("device_code", device_code)
+            .finish();
+
+        openidconnect::http::Request::builder()
+            .method(Method::POST)
+            .uri(token_url)
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::AUTHORIZATION, format!("Basic {credential}"))
+            .body(body.into_bytes())
+            .map_err(|e| OidcError::Exchange(e.to_string()))
+    }
+
+    /// What one device-token poll answered, before any ID token is verified.
+    #[derive(Debug)]
+    pub(crate) enum DeviceTokenOutcome {
+        Pending,
+        SlowDown,
+        Denied,
+        Expired,
+        Issued(Box<CoreTokenResponse>),
+    }
+
+    /// Classifies a token-endpoint response to a device-code poll (RFC 8628
+    /// section 3.5). Pure, so every branch is reachable from a table.
+    ///
+    /// A success status is a token response. Anything else is read as an
+    /// OAuth error body: the four RFC 8628 codes map to their outcomes, and
+    /// `invalid_grant` -- what an IdP answers for a device code it no longer
+    /// holds -- is read as expiry, since the user's remedy is the same:
+    /// start again. Every other error is an exchange failure.
+    pub(crate) fn classify_device_token_response(
+        status: openidconnect::http::StatusCode,
+        body: &[u8],
+    ) -> Result<DeviceTokenOutcome, OidcError> {
+        if status.is_success() {
+            let token: CoreTokenResponse = serde_json::from_slice(body).map_err(|e| {
+                OidcError::Exchange(format!("unreadable device token response: {e}"))
+            })?;
+            return Ok(DeviceTokenOutcome::Issued(Box::new(token)));
+        }
+
+        let error: DeviceCodeErrorResponse = serde_json::from_slice(body).map_err(|e| {
+            OidcError::Exchange(format!(
+                "device token request failed with {status} and an unreadable body: {e}"
+            ))
+        })?;
+        match error.error() {
+            DeviceCodeErrorResponseType::AuthorizationPending => Ok(DeviceTokenOutcome::Pending),
+            DeviceCodeErrorResponseType::SlowDown => Ok(DeviceTokenOutcome::SlowDown),
+            DeviceCodeErrorResponseType::AccessDenied => Ok(DeviceTokenOutcome::Denied),
+            DeviceCodeErrorResponseType::ExpiredToken => Ok(DeviceTokenOutcome::Expired),
+            DeviceCodeErrorResponseType::Basic(
+                openidconnect::core::CoreErrorResponseType::InvalidGrant,
+            ) => Ok(DeviceTokenOutcome::Expired),
+            other => Err(OidcError::Exchange(format!(
+                "device token request failed with {status}: {other}"
+            ))),
+        }
+    }
+
+    /// The identity a verified ID token asserts.
+    ///
+    /// Shared by the code exchange and the device grant so the two logins
+    /// cannot disagree about who somebody is.
+    fn identity_from(id_token: &CoreIdToken, claims: &CoreIdTokenClaims) -> OidcIdentity {
+        // `claims` verified the token's signature (and, for the code flow,
+        // its nonce), but the typed `CoreIdTokenClaims` (with
+        // `EmptyAdditionalClaims`) drops any non-standard claim -- e.g. the
+        // `groups`/`roles` a deployment binds admin to (issue #85). Re-decode
+        // the now-trusted payload as raw JSON to carry every claim through for
+        // admin evaluation.
+        let raw_claims = decode_claims_payload(&id_token.to_string());
+
+        OidcIdentity {
+            issuer: claims.issuer().as_str().to_string(),
+            subject: claims.subject().as_str().to_string(),
+            email: claims.email().map(|e| e.as_str().to_string()),
+            email_verified: claims.email_verified().unwrap_or(false),
+            name: claims
+                .name()
+                .and_then(|n| n.get(None))
+                .map(|n| n.as_str().to_string()),
+            picture: claims
+                .picture()
+                .and_then(|p| p.get(None))
+                .map(|p| p.as_str().to_string()),
+            claims: raw_claims,
         }
     }
 
@@ -272,28 +515,82 @@ mod discovered {
                 .claims(&self.client.id_token_verifier(), &expected_nonce)
                 .map_err(|e| OidcError::ClaimsVerification(e.to_string()))?;
 
-            // `claims` above verified the token's signature and nonce, but the
-            // typed `CoreIdTokenClaims` (with `EmptyAdditionalClaims`) drops any
-            // non-standard claim -- e.g. the `groups`/`roles` a deployment binds
-            // admin to (issue #85). Re-decode the now-trusted payload as raw JSON
-            // to carry every claim through for admin evaluation.
-            let raw_claims = decode_claims_payload(&id_token.to_string());
+            Ok(identity_from(id_token, claims))
+        }
 
-            Ok(OidcIdentity {
-                issuer: claims.issuer().as_str().to_string(),
-                subject: claims.subject().as_str().to_string(),
-                email: claims.email().map(|e| e.as_str().to_string()),
-                email_verified: claims.email_verified().unwrap_or(false),
-                name: claims
-                    .name()
-                    .and_then(|n| n.get(None))
-                    .map(|n| n.as_str().to_string()),
-                picture: claims
-                    .picture()
-                    .and_then(|p| p.get(None))
-                    .map(|p| p.as_str().to_string()),
-                claims: raw_claims,
+        async fn begin_device_auth(&self) -> Result<DeviceAuthStart, OidcError> {
+            let device_url = self
+                .device_url
+                .clone()
+                .ok_or(OidcError::DeviceFlowUnsupported)?;
+            let client = self.client.clone().set_device_authorization_url(device_url);
+
+            let mut request = client.exchange_device_code();
+            for scope in &self.scopes {
+                request = request.add_scope(Scope::new(scope.clone()));
+            }
+            let details: CoreDeviceAuthorizationResponse = request
+                .request_async(&self.http_client)
+                .await
+                .map_err(|e| OidcError::Exchange(e.to_string()))?;
+
+            Ok(DeviceAuthStart {
+                device_code: details.device_code().secret().clone(),
+                user_code: details.user_code().secret().clone(),
+                verification_uri: details.verification_uri().to_string(),
+                verification_uri_complete: details
+                    .verification_uri_complete()
+                    .map(|uri| uri.secret().clone()),
+                expires_in_secs: details.expires_in().as_secs(),
+                interval_secs: details.interval().as_secs(),
             })
+        }
+
+        /// One request, sent by Beam rather than by `oauth2`: oauth2 5.0.0's
+        /// `DeviceAccessTokenRequest` polls in a loop until the user decides,
+        /// and the single-request step inside it is private. Beam's client
+        /// does the pacing (ADR-0017), so a handler makes exactly one request
+        /// and returns.
+        async fn poll_device_token(&self, device_code: &str) -> Result<DevicePoll, OidcError> {
+            // An IdP that stopped offering the grant since the flow began is
+            // not polled with a code it may no longer honour.
+            if self.device_url.is_none() {
+                return Err(OidcError::DeviceFlowUnsupported);
+            }
+            let token_url = self
+                .client
+                .token_uri()
+                .ok_or_else(|| {
+                    OidcError::Exchange("the identity provider has no token endpoint".to_owned())
+                })?
+                .to_string();
+
+            let request = self.device_token_request(&token_url, device_code)?;
+            let response = self
+                .http_client
+                .call(request)
+                .await
+                .map_err(|e| OidcError::Exchange(e.to_string()))?;
+
+            let token = match classify_device_token_response(response.status(), response.body())? {
+                DeviceTokenOutcome::Pending => return Ok(DevicePoll::Pending),
+                DeviceTokenOutcome::SlowDown => return Ok(DevicePoll::SlowDown),
+                DeviceTokenOutcome::Denied => return Ok(DevicePoll::Denied),
+                DeviceTokenOutcome::Expired => return Ok(DevicePoll::Expired),
+                DeviceTokenOutcome::Issued(token) => token,
+            };
+
+            let id_token = token.id_token().ok_or(OidcError::MissingIdToken)?;
+            // No nonce: the device grant has no authorization request to bind
+            // one into (RFC 8628 section 3.1 takes only `client_id` and
+            // `scope`). Signature, issuer, audience and expiry are all still
+            // verified.
+            let no_nonce = |_: Option<&Nonce>| -> Result<(), String> { Ok(()) };
+            let claims = id_token
+                .claims(&self.client.id_token_verifier(), no_nonce)
+                .map_err(|e| OidcError::ClaimsVerification(e.to_string()))?;
+
+            Ok(DevicePoll::Complete(identity_from(id_token, claims)))
         }
     }
 
@@ -498,6 +795,206 @@ mod discovered {
     }
 
     #[cfg(test)]
+    mod device_grant_tests {
+        use super::{
+            DeviceAwareProviderMetadata, DeviceTokenOutcome, classify_device_token_response,
+            device_endpoint, device_token_request,
+        };
+        use crate::utils::oidc::OidcError;
+        use base64::Engine as _;
+        use openidconnect::TokenResponse as _;
+        use openidconnect::http::{Method, StatusCode, header};
+        use serde_json::{Value, json};
+
+        fn discovery(extra: Value) -> DeviceAwareProviderMetadata {
+            let mut document = json!({
+                "issuer": "https://idp.test",
+                "authorization_endpoint": "https://idp.test/auth",
+                "token_endpoint": "https://idp.test/token",
+                "jwks_uri": "https://idp.test/keys",
+                "response_types_supported": ["code"],
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["RS256"],
+            });
+            document
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(document).expect("a valid discovery document")
+        }
+
+        #[test]
+        fn a_discovery_document_naming_a_device_endpoint_enables_the_grant() {
+            let metadata = discovery(json!({
+                "device_authorization_endpoint": "https://idp.test/device/code",
+            }));
+            assert_eq!(
+                device_endpoint(&metadata).map(|url| url.to_string()),
+                Some("https://idp.test/device/code".to_owned())
+            );
+        }
+
+        #[test]
+        fn a_discovery_document_without_one_still_discovers_with_the_grant_off() {
+            // Most IdPs that do not offer the grant simply omit the field; that
+            // must not fail discovery and take the browser login down with it.
+            assert!(device_endpoint(&discovery(json!({}))).is_none());
+        }
+
+        fn body(value: Value) -> Vec<u8> {
+            value.to_string().into_bytes()
+        }
+
+        #[test]
+        fn each_rfc_8628_error_code_maps_to_its_outcome() {
+            for (code, expected) in [
+                ("authorization_pending", "Pending"),
+                ("slow_down", "SlowDown"),
+                ("access_denied", "Denied"),
+                ("expired_token", "Expired"),
+                // An IdP that no longer holds the device code: start again.
+                ("invalid_grant", "Expired"),
+            ] {
+                let outcome = classify_device_token_response(
+                    StatusCode::BAD_REQUEST,
+                    &body(json!({ "error": code })),
+                )
+                .unwrap_or_else(|e| panic!("{code} must classify, got {e}"));
+                let name = match outcome {
+                    DeviceTokenOutcome::Pending => "Pending",
+                    DeviceTokenOutcome::SlowDown => "SlowDown",
+                    DeviceTokenOutcome::Denied => "Denied",
+                    DeviceTokenOutcome::Expired => "Expired",
+                    DeviceTokenOutcome::Issued(_) => "Issued",
+                };
+                assert_eq!(name, expected, "for {code}");
+            }
+        }
+
+        #[test]
+        fn any_other_oauth_error_is_an_exchange_failure() {
+            // `invalid_client` is a misconfigured deployment, not a user who
+            // has not decided yet: polling on would never end.
+            for (status, code) in [
+                (StatusCode::UNAUTHORIZED, "invalid_client"),
+                (StatusCode::BAD_REQUEST, "unsupported_grant_type"),
+                (StatusCode::BAD_REQUEST, "server_error"),
+            ] {
+                let outcome =
+                    classify_device_token_response(status, &body(json!({ "error": code })));
+                assert!(
+                    matches!(outcome, Err(OidcError::Exchange(ref message)) if message.contains(code)),
+                    "{code} -> {outcome:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_error_status_with_an_unreadable_body_is_an_exchange_failure() {
+            let outcome =
+                classify_device_token_response(StatusCode::BAD_GATEWAY, b"<html>upstream</html>");
+            assert!(
+                matches!(outcome, Err(OidcError::Exchange(ref message)) if message.contains("502")),
+                "{outcome:?}"
+            );
+        }
+
+        fn compact_jwt(payload: &Value) -> String {
+            let encode =
+                |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+            format!(
+                "{}.{}.{}",
+                encode(br#"{"alg":"RS256","typ":"JWT"}"#),
+                encode(payload.to_string().as_bytes()),
+                encode(b"signature-checked-later")
+            )
+        }
+
+        #[test]
+        fn a_success_is_a_token_response_carrying_the_id_token() {
+            let id_token = compact_jwt(&json!({
+                "iss": "https://idp.test",
+                "sub": "subj-1",
+                "aud": "beam",
+                "exp": 2_000_000_000u64,
+                "iat": 1_700_000_000u64,
+            }));
+            let outcome = classify_device_token_response(
+                StatusCode::OK,
+                &body(json!({
+                    "access_token": "access",
+                    "token_type": "Bearer",
+                    "id_token": id_token,
+                })),
+            )
+            .unwrap();
+            match outcome {
+                DeviceTokenOutcome::Issued(token) => assert_eq!(
+                    token.id_token().map(ToString::to_string),
+                    Some(id_token),
+                    "the ID token must reach verification byte-for-byte"
+                ),
+                _ => panic!("a 200 is an issued token"),
+            }
+        }
+
+        #[test]
+        fn a_success_that_is_not_a_token_response_is_an_exchange_failure() {
+            let outcome = classify_device_token_response(StatusCode::OK, b"{\"hello\":1}");
+            assert!(
+                matches!(outcome, Err(OidcError::Exchange(_))),
+                "{outcome:?}"
+            );
+        }
+
+        #[test]
+        fn the_poll_is_a_device_code_grant_authenticated_with_client_secret_basic() {
+            let request = device_token_request(
+                "https://idp.test/token",
+                "beam",
+                "s3cret:with&odd=chars",
+                "the-device-code",
+            )
+            .unwrap();
+
+            assert_eq!(request.method(), Method::POST);
+            assert_eq!(request.uri(), "https://idp.test/token");
+            assert_eq!(
+                request.headers()[header::CONTENT_TYPE],
+                "application/x-www-form-urlencoded"
+            );
+
+            let form: Vec<(String, String)> =
+                openidconnect::url::form_urlencoded::parse(request.body())
+                    .into_owned()
+                    .collect();
+            assert_eq!(
+                form,
+                [
+                    (
+                        "grant_type".to_owned(),
+                        "urn:ietf:params:oauth:grant-type:device_code".to_owned()
+                    ),
+                    ("device_code".to_owned(), "the-device-code".to_owned()),
+                ],
+                "the client secret belongs in the header, never the body"
+            );
+
+            // RFC 6749 section 2.3.1: id and secret are each form-encoded
+            // before being joined and base64-encoded.
+            let authorization = request.headers()[header::AUTHORIZATION].to_str().unwrap();
+            let encoded = authorization.strip_prefix("Basic ").expect("basic auth");
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(decoded).unwrap(),
+                "beam:s3cret%3Awith%26odd%3Dchars"
+            );
+        }
+    }
+
+    #[cfg(test)]
     mod claims_payload_tests {
         use super::decode_claims_payload;
         use base64::Engine as _;
@@ -594,6 +1091,14 @@ impl OidcClient for NotConfiguredOidcClient {
     ) -> Result<OidcIdentity, OidcError> {
         Err(OidcError::Discovery(self.reason.clone()))
     }
+
+    async fn begin_device_auth(&self) -> Result<DeviceAuthStart, OidcError> {
+        Err(OidcError::Discovery(self.reason.clone()))
+    }
+
+    async fn poll_device_token(&self, _device_code: &str) -> Result<DevicePoll, OidcError> {
+        Err(OidcError::Discovery(self.reason.clone()))
+    }
 }
 
 /// Programmable [`OidcClient`] double for tests. Verifies the nonce/PKCE
@@ -603,8 +1108,9 @@ impl OidcClient for NotConfiguredOidcClient {
 #[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod fake {
-    use super::{BeginAuth, OidcClient, OidcError, OidcIdentity};
+    use super::{BeginAuth, DeviceAuthStart, DevicePoll, OidcClient, OidcError, OidcIdentity};
     use async_trait::async_trait;
+    use std::collections::VecDeque;
     use std::sync::Mutex;
 
     #[derive(Debug)]
@@ -612,6 +1118,15 @@ pub mod fake {
         last_begin: Mutex<Option<BeginAuth>>,
         response: Mutex<Result<OidcIdentity, String>>,
         begin_counter: Mutex<u64>,
+        /// `false` models an IdP whose discovery names no device endpoint.
+        device_flow: bool,
+        /// Answers for successive device polls, front first. Once empty,
+        /// every poll is `Pending` -- the user simply has not decided.
+        device_script: Mutex<VecDeque<Result<DevicePoll, String>>>,
+        device_polls: Mutex<u64>,
+        device_begins: Mutex<u64>,
+        /// Every device code the server polled with, in order.
+        polled_codes: Mutex<Vec<String>>,
     }
 
     impl Default for FakeOidcClient {
@@ -620,9 +1135,21 @@ pub mod fake {
                 last_begin: Mutex::new(None),
                 response: Mutex::new(Err("no identity configured".to_string())),
                 begin_counter: Mutex::new(0),
+                device_flow: true,
+                device_script: Mutex::new(VecDeque::new()),
+                device_polls: Mutex::new(0),
+                device_begins: Mutex::new(0),
+                polled_codes: Mutex::new(Vec::new()),
             }
         }
     }
+
+    /// The user code every fake device authorization shows.
+    pub const FAKE_USER_CODE: &str = "BCDF-GHJK";
+    /// The interval every fake device authorization asks for.
+    pub const FAKE_DEVICE_INTERVAL_SECS: u64 = 5;
+    /// The lifetime every fake device authorization grants.
+    pub const FAKE_DEVICE_EXPIRES_IN_SECS: u64 = 600;
 
     impl FakeOidcClient {
         /// Configures the identity `exchange_code` returns on a successful,
@@ -646,6 +1173,32 @@ pub mod fake {
         /// values back (or deliberately tampered ones).
         pub fn last_begin(&self) -> Option<BeginAuth> {
             self.last_begin.lock().unwrap().clone()
+        }
+
+        /// Scripts what successive device-token polls answer. An `Err` is an
+        /// IdP failure (`OidcError::Exchange`). Polls past the end of the
+        /// script are `Pending`.
+        #[must_use]
+        pub fn with_device_script(self, script: Vec<Result<DevicePoll, String>>) -> Self {
+            *self.device_script.lock().unwrap() = script.into();
+            self
+        }
+
+        /// An IdP that does not offer the device authorization grant.
+        #[must_use]
+        pub fn without_device_flow(mut self) -> Self {
+            self.device_flow = false;
+            self
+        }
+
+        /// How many times the token endpoint was polled with a device code.
+        pub fn device_poll_count(&self) -> u64 {
+            *self.device_polls.lock().unwrap()
+        }
+
+        /// Every device code the token endpoint was polled with, in order.
+        pub fn polled_device_codes(&self) -> Vec<String> {
+            self.polled_codes.lock().unwrap().clone()
         }
     }
 
@@ -685,6 +1238,41 @@ pub mod fake {
                 .lock()
                 .unwrap()
                 .clone()
+                .map_err(OidcError::Exchange)
+        }
+
+        async fn begin_device_auth(&self) -> Result<DeviceAuthStart, OidcError> {
+            if !self.device_flow {
+                return Err(OidcError::DeviceFlowUnsupported);
+            }
+            let mut begins = self.device_begins.lock().unwrap();
+            *begins += 1;
+            Ok(DeviceAuthStart {
+                device_code: format!("fake-device-code-{begins}"),
+                user_code: FAKE_USER_CODE.to_owned(),
+                verification_uri: "https://fake-idp.test/device".to_owned(),
+                verification_uri_complete: Some(format!(
+                    "https://fake-idp.test/device?user_code={FAKE_USER_CODE}"
+                )),
+                expires_in_secs: FAKE_DEVICE_EXPIRES_IN_SECS,
+                interval_secs: FAKE_DEVICE_INTERVAL_SECS,
+            })
+        }
+
+        async fn poll_device_token(&self, device_code: &str) -> Result<DevicePoll, OidcError> {
+            if !self.device_flow {
+                return Err(OidcError::DeviceFlowUnsupported);
+            }
+            *self.device_polls.lock().unwrap() += 1;
+            self.polled_codes
+                .lock()
+                .unwrap()
+                .push(device_code.to_owned());
+            self.device_script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(DevicePoll::Pending))
                 .map_err(OidcError::Exchange)
         }
     }
