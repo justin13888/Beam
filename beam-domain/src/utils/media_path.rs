@@ -19,11 +19,14 @@ use crate::utils::filename::{
 };
 use crate::utils::identity::{normalize_title, title_identity_key};
 
-/// The version of the rules [`infer_media`] classifies by. Stored on every
-/// file row the indexer classifies; a row carrying an older version is
-/// reclassified from its path by the next scan, so a change to these rules
-/// reaches files indexed before it. Bump it whenever a path would classify
-/// differently. Rows indexed before versions existed carry `0`.
+/// The version of the rules [`infer_media`] classifies by, and of the title
+/// fold ([`crate::utils::identity`]) that turns its titles into identity
+/// keys. Stored on every file row the indexer classifies, and beside every
+/// title's identity key; a row or key carrying an older version is
+/// re-derived from its paths by the next scan, so a change to these rules
+/// reaches files and titles indexed before it. Bump it whenever a path would
+/// classify differently or a title would key differently. Rows and keys
+/// stored before versions existed carry `0`.
 pub const CLASSIFIER_VERSION: u16 = 1;
 
 /// A title and year as a path spells them -- what a movie or show is keyed by.

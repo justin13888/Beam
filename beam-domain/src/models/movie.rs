@@ -47,6 +47,9 @@ pub struct MovieEntry {
 pub struct CreateMovie {
     /// The movie's identity; see [`crate::utils::identity`].
     pub identity_key: String,
+    /// The version of the rules that derived `identity_key`; see
+    /// [`crate::repositories::MovieRepository::find_keyed_before_version`].
+    pub identity_key_version: u16,
     pub title: String,
     pub year: Option<u32>,
     pub runtime: Option<Duration>,
@@ -58,6 +61,7 @@ impl CreateMovie {
         let title = title.into();
         Self {
             identity_key: crate::utils::identity::title_identity_key(&title, year),
+            identity_key_version: crate::utils::media_path::CLASSIFIER_VERSION,
             title,
             year,
             runtime,
@@ -139,6 +143,7 @@ mod entity_conversion_tests {
             id: Uuid::new_v4(),
             title: "Arrival".to_string(),
             identity_key: Some("arrival|2016".to_string()),
+            identity_key_version: 1,
             title_localized: None,
             description: None,
             year: Some(2016),

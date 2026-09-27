@@ -57,6 +57,9 @@ pub struct Episode {
 pub struct CreateShow {
     /// The show's identity; see [`crate::utils::identity`].
     pub identity_key: String,
+    /// The version of the rules that derived `identity_key`; see
+    /// [`crate::repositories::MovieRepository::find_keyed_before_version`].
+    pub identity_key_version: u16,
     pub title: String,
     pub year: Option<u32>,
 }
@@ -68,6 +71,7 @@ impl CreateShow {
         let title = title.into();
         Self {
             identity_key: crate::utils::identity::title_identity_key(&title, year),
+            identity_key_version: crate::utils::media_path::CLASSIFIER_VERSION,
             title,
             year,
         }

@@ -590,8 +590,10 @@ async fn the_classifier_migration_merges_duplicate_entries_and_constrains_what_i
     let seed = [
         "INSERT INTO libraries (id, name, root_path, created_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
-        "INSERT INTO movies (id, title, created_at, updated_at) VALUES \
-         ('00000000-0000-0000-0000-00000000000b', 'Movie', now(), now())",
+        "INSERT INTO movies (id, title, identity_key, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000b', 'Movie', 'movie|', now(), now())",
+        "INSERT INTO shows (id, title, identity_key, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000c', 'Grey''s Anatomy', 'grey s anatomy|', now(), now())",
         "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) VALUES \
          ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', \
           '00000000-0000-0000-0000-00000000000b', NULL, true, now() - interval '2 days'), \
@@ -648,6 +650,15 @@ async fn the_classifier_migration_merges_duplicate_entries_and_constrains_what_i
         vec!["0"],
         "existing rows are marked as classified before versions existed"
     );
+    assert_eq!(
+        text(
+            "SELECT identity_key_version::text AS v FROM movies \
+             UNION ALL SELECT identity_key_version::text FROM shows"
+        )
+        .await,
+        vec!["0", "0"],
+        "keys stored before versions existed are marked for re-derivation"
+    );
 
     assert!(
         db.execute_unprepared(
@@ -672,7 +683,7 @@ async fn the_classifier_migration_merges_duplicate_entries_and_constrains_what_i
     scoped.drop_schema().await.expect("drop schema");
 }
 
-/// Issue #182's migration reverses: `down()` drops the two columns (and the
+/// Issue #182's migration reverses: `down()` drops the columns it added (and the
 /// `CHECK` that reads one of them) and restores the unique index's old,
 /// `NULL`s-distinct semantics; `up()` then applies again over the result.
 #[tokio::test]
@@ -705,10 +716,13 @@ async fn the_classifier_migration_rolls_back_and_reapplies() {
             .map(|row| row.try_get::<String>("", "v").expect("a text column v"))
             .collect::<Vec<String>>()
     };
-    let added_columns = "SELECT column_name::text AS v FROM information_schema.columns \
-                          WHERE table_schema = current_schema() AND table_name = 'files' \
-                            AND column_name IN ('classifier_version', 'last_episode_number') \
-                          ORDER BY column_name";
+    let added_columns = "SELECT (table_name || '.' || column_name)::text AS v \
+                           FROM information_schema.columns \
+                          WHERE table_schema = current_schema() \
+                            AND table_name IN ('files', 'movies', 'shows') \
+                            AND column_name IN ('classifier_version', 'last_episode_number', \
+                                                'identity_key_version') \
+                          ORDER BY 1";
     let nulls_not_distinct = "SELECT i.indnullsnotdistinct::text AS v FROM pg_index i \
                                JOIN pg_class c ON c.oid = i.indexrelid \
                                JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -716,7 +730,12 @@ async fn the_classifier_migration_rolls_back_and_reapplies() {
                                 AND n.nspname = current_schema()";
     assert_eq!(
         text(added_columns).await,
-        vec!["classifier_version", "last_episode_number"]
+        vec![
+            "files.classifier_version",
+            "files.last_episode_number",
+            "movies.identity_key_version",
+            "shows.identity_key_version"
+        ]
     );
     assert_eq!(text(nulls_not_distinct).await, vec!["true"]);
 
@@ -726,7 +745,7 @@ async fn the_classifier_migration_rolls_back_and_reapplies() {
 
     assert!(
         text(added_columns).await.is_empty(),
-        "down() drops both columns"
+        "down() drops every column it added"
     );
     assert_eq!(
         text(nulls_not_distinct).await,

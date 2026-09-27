@@ -1012,6 +1012,13 @@ macro_rules! show_repository_contract {
         use $crate::providers::enrichment::ShowEnrichment;
         use $crate::repositories::ShowRepository;
         use $crate::repositories::contract::fixture::ShowRepositoryFixture;
+        use $crate::utils::media_path::CLASSIFIER_VERSION;
+
+        /// A show parsed as a title of its own; a fresh UUID keeps tests
+        /// apart.
+        fn new_show(name: &str) -> CreateShow {
+            CreateShow::new(format!("{name} {}", Uuid::new_v4()), None)
+        }
 
         /// A show of its own -- the title carries a fresh UUID so parallel
         /// tests against one database never share a show -- and its seasons
@@ -1426,7 +1433,7 @@ macro_rules! show_repository_contract {
             );
 
             assert!(
-                repo.assign_identity_key(legacy, &parsed.identity_key)
+                repo.assign_identity_key(legacy, &parsed.identity_key, CLASSIFIER_VERSION)
                     .await
                     .unwrap()
             );
@@ -1446,7 +1453,7 @@ macro_rules! show_repository_contract {
             );
             assert!(
                 !repo
-                    .assign_identity_key(legacy, "another key|")
+                    .assign_identity_key(legacy, "another key|", CLASSIFIER_VERSION)
                     .await
                     .unwrap(),
                 "a key is assigned once, never replaced"
@@ -1500,7 +1507,11 @@ macro_rules! show_repository_contract {
 
             assert!(
                 !repo
-                    .assign_identity_key(legacy, keyed.identity_key.as_deref().unwrap())
+                    .assign_identity_key(
+                        legacy,
+                        keyed.identity_key.as_deref().unwrap(),
+                        CLASSIFIER_VERSION
+                    )
                     .await
                     .unwrap(),
                 "a key another show holds is refused"
@@ -1508,6 +1519,210 @@ macro_rules! show_repository_contract {
             assert_eq!(
                 repo.find_by_id(legacy).await.unwrap().unwrap().identity_key,
                 None
+            );
+        }
+
+        #[tokio::test]
+        async fn a_show_key_records_the_rules_version_that_derived_it() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let current = repo
+                .find_or_create_by_identity(new_show("Current"))
+                .await
+                .unwrap();
+            let stale = repo
+                .find_or_create_by_identity(CreateShow {
+                    identity_key_version: 0,
+                    ..new_show("Stale")
+                })
+                .await
+                .unwrap();
+            // Whole seconds, as in the oldest-first test above.
+            let base = ::chrono::DateTime::from_timestamp(1_600_000_000, 0).unwrap();
+            let legacy = new_show("Legacy");
+            let older = fixture.new_unkeyed_show(&legacy.title, base).await;
+            assert!(
+                repo.assign_identity_key(older, &legacy.identity_key, 0)
+                    .await
+                    .unwrap()
+            );
+            let fresh = new_show("Fresh");
+            let fresh_legacy = fixture.new_unkeyed_show(&fresh.title, base).await;
+            assert!(
+                repo.assign_identity_key(fresh_legacy, &fresh.identity_key, CLASSIFIER_VERSION)
+                    .await
+                    .unwrap()
+            );
+            let unkeyed = fixture
+                .new_unkeyed_show(&format!("Unkeyed {}", Uuid::new_v4()), base)
+                .await;
+            let ours = [current.id, stale.id, older, fresh_legacy, unkeyed];
+
+            let listed = |version: u16| async move {
+                repo.find_keyed_before_version(version)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|t| t.id)
+                    .filter(|id| ours.contains(id))
+                    .collect::<Vec<Uuid>>()
+            };
+            assert_eq!(
+                listed(CLASSIFIER_VERSION).await,
+                vec![older, stale.id],
+                "keys older rules derived, oldest first; never a keyless row"
+            );
+            let mut next = listed(CLASSIFIER_VERSION + 1).await;
+            next.sort();
+            let mut keyed = vec![current.id, stale.id, older, fresh_legacy];
+            keyed.sort();
+            assert_eq!(next, keyed, "every key is older than rules not yet written");
+        }
+
+        #[tokio::test]
+        async fn a_show_is_found_by_its_key() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let created = repo
+                .find_or_create_by_identity(new_show("Keyed"))
+                .await
+                .unwrap();
+            let key = created.identity_key.clone().unwrap();
+
+            assert_eq!(
+                repo.find_by_identity_key(&key).await.unwrap().map(|t| t.id),
+                Some(created.id)
+            );
+            assert!(
+                repo.find_by_identity_key(&format!("nobody {}|", Uuid::new_v4()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn rekeying_a_show_replaces_its_key_and_keeps_the_show() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let old = CreateShow {
+                identity_key_version: 0,
+                ..new_show("Old Spelling")
+            };
+            let created = repo.find_or_create_by_identity(old.clone()).await.unwrap();
+            repo.apply_enrichment(
+                created.id,
+                &ShowEnrichment {
+                    title: "Provider Title".to_string(),
+                    tmdb_id: Some(42),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let new = new_show("New Spelling");
+
+            assert!(
+                repo.rekey(
+                    created.id,
+                    Some(new.identity_key.clone()),
+                    CLASSIFIER_VERSION
+                )
+                .await
+                .unwrap()
+            );
+            let stored = repo
+                .find_by_identity_key(&new.identity_key)
+                .await
+                .unwrap()
+                .expect("found by its new key");
+            assert_eq!(stored.id, created.id, "the same row, not a new one");
+            assert_eq!(stored.tmdb_id, Some(42), "with its enrichment");
+            assert!(
+                repo.find_by_identity_key(&old.identity_key)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the old key is free"
+            );
+            assert!(
+                !repo
+                    .find_keyed_before_version(CLASSIFIER_VERSION)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|t| t.id == created.id),
+                "the new key carries the version that derived it"
+            );
+            assert_eq!(
+                repo.find_or_create_by_identity(new.clone())
+                    .await
+                    .unwrap()
+                    .id,
+                created.id,
+                "the next file of the new spelling finds it"
+            );
+            assert!(
+                repo.rekey(
+                    created.id,
+                    Some(new.identity_key.clone()),
+                    CLASSIFIER_VERSION
+                )
+                .await
+                .unwrap(),
+                "a key it already holds is no clash"
+            );
+        }
+
+        #[tokio::test]
+        async fn rekeying_a_show_refuses_a_held_key_and_can_release_its_own() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let a = repo
+                .find_or_create_by_identity(new_show("A"))
+                .await
+                .unwrap();
+            let b = repo
+                .find_or_create_by_identity(new_show("B"))
+                .await
+                .unwrap();
+            let b_key = b.identity_key.clone().unwrap();
+
+            assert!(
+                !repo
+                    .rekey(a.id, Some(b_key.clone()), CLASSIFIER_VERSION)
+                    .await
+                    .unwrap(),
+                "another title holds it"
+            );
+            assert_eq!(
+                repo.find_by_id(a.id).await.unwrap().unwrap().identity_key,
+                a.identity_key,
+                "a refused rekey changes nothing"
+            );
+
+            assert!(repo.rekey(b.id, None, CLASSIFIER_VERSION).await.unwrap());
+            assert_eq!(
+                repo.find_by_id(b.id).await.unwrap().unwrap().identity_key,
+                None,
+                "released: never matched again"
+            );
+            assert!(
+                repo.rekey(a.id, Some(b_key.clone()), CLASSIFIER_VERSION)
+                    .await
+                    .unwrap(),
+                "a released key is free"
+            );
+            assert!(
+                !repo
+                    .rekey(
+                        Uuid::new_v4(),
+                        Some("nobody|".to_string()),
+                        CLASSIFIER_VERSION
+                    )
+                    .await
+                    .unwrap(),
+                "an unknown title is not rekeyed"
             );
         }
     };
@@ -1528,11 +1743,17 @@ macro_rules! movie_repository_contract {
         use $crate::providers::enrichment::MovieEnrichment;
         use $crate::repositories::MovieRepository;
         use $crate::repositories::contract::fixture::MovieRepositoryFixture;
+        use $crate::utils::media_path::CLASSIFIER_VERSION;
 
         /// A movie parsed as a title of its own -- a fresh UUID keeps tests
         /// apart -- released in `year`.
         fn parsed(name: &str, year: Option<u32>) -> CreateMovie {
             CreateMovie::new(format!("{name} {}", Uuid::new_v4()), year, None)
+        }
+
+        /// [`parsed`] with no year.
+        fn new_movie(name: &str) -> CreateMovie {
+            parsed(name, None)
         }
 
         /// Give `movie` an entry, and -- when `with_file` -- a present file
@@ -1853,7 +2074,7 @@ macro_rules! movie_repository_contract {
                     .any(|m| m.id == legacy)
             );
             assert!(
-                repo.assign_identity_key(legacy, &create.identity_key)
+                repo.assign_identity_key(legacy, &create.identity_key, CLASSIFIER_VERSION)
                     .await
                     .unwrap()
             );
@@ -1873,7 +2094,7 @@ macro_rules! movie_repository_contract {
             );
             assert!(
                 !repo
-                    .assign_identity_key(legacy, "another key|")
+                    .assign_identity_key(legacy, "another key|", CLASSIFIER_VERSION)
                     .await
                     .unwrap(),
                 "a key is assigned once, never replaced"
@@ -1929,7 +2150,7 @@ macro_rules! movie_repository_contract {
 
             assert!(
                 !repo
-                    .assign_identity_key(legacy, &create.identity_key)
+                    .assign_identity_key(legacy, &create.identity_key, CLASSIFIER_VERSION)
                     .await
                     .unwrap(),
                 "a key another movie holds is refused"
@@ -1940,10 +2161,214 @@ macro_rules! movie_repository_contract {
             );
             assert!(
                 !repo
-                    .assign_identity_key(Uuid::new_v4(), "nobody|")
+                    .assign_identity_key(Uuid::new_v4(), "nobody|", CLASSIFIER_VERSION)
                     .await
                     .unwrap(),
                 "an unknown movie is not keyed"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_movie_key_records_the_rules_version_that_derived_it() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let current = repo
+                .find_or_create_by_identity(new_movie("Current"))
+                .await
+                .unwrap();
+            let stale = repo
+                .find_or_create_by_identity(CreateMovie {
+                    identity_key_version: 0,
+                    ..new_movie("Stale")
+                })
+                .await
+                .unwrap();
+            // Whole seconds, as in the oldest-first test above.
+            let base = ::chrono::DateTime::from_timestamp(1_600_000_000, 0).unwrap();
+            let legacy = new_movie("Legacy");
+            let older = fixture.new_unkeyed_movie(&legacy.title, base).await;
+            assert!(
+                repo.assign_identity_key(older, &legacy.identity_key, 0)
+                    .await
+                    .unwrap()
+            );
+            let fresh = new_movie("Fresh");
+            let fresh_legacy = fixture.new_unkeyed_movie(&fresh.title, base).await;
+            assert!(
+                repo.assign_identity_key(fresh_legacy, &fresh.identity_key, CLASSIFIER_VERSION)
+                    .await
+                    .unwrap()
+            );
+            let unkeyed = fixture
+                .new_unkeyed_movie(&format!("Unkeyed {}", Uuid::new_v4()), base)
+                .await;
+            let ours = [current.id, stale.id, older, fresh_legacy, unkeyed];
+
+            let listed = |version: u16| async move {
+                repo.find_keyed_before_version(version)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|t| t.id)
+                    .filter(|id| ours.contains(id))
+                    .collect::<Vec<Uuid>>()
+            };
+            assert_eq!(
+                listed(CLASSIFIER_VERSION).await,
+                vec![older, stale.id],
+                "keys older rules derived, oldest first; never a keyless row"
+            );
+            let mut next = listed(CLASSIFIER_VERSION + 1).await;
+            next.sort();
+            let mut keyed = vec![current.id, stale.id, older, fresh_legacy];
+            keyed.sort();
+            assert_eq!(next, keyed, "every key is older than rules not yet written");
+        }
+
+        #[tokio::test]
+        async fn a_movie_is_found_by_its_key() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let created = repo
+                .find_or_create_by_identity(new_movie("Keyed"))
+                .await
+                .unwrap();
+            let key = created.identity_key.clone().unwrap();
+
+            assert_eq!(
+                repo.find_by_identity_key(&key).await.unwrap().map(|t| t.id),
+                Some(created.id)
+            );
+            assert!(
+                repo.find_by_identity_key(&format!("nobody {}|", Uuid::new_v4()))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn rekeying_a_movie_replaces_its_key_and_keeps_the_movie() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let old = CreateMovie {
+                identity_key_version: 0,
+                ..new_movie("Old Spelling")
+            };
+            let created = repo.find_or_create_by_identity(old.clone()).await.unwrap();
+            repo.apply_enrichment(
+                created.id,
+                &MovieEnrichment {
+                    title: "Provider Title".to_string(),
+                    tmdb_id: Some(42),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let new = new_movie("New Spelling");
+
+            assert!(
+                repo.rekey(
+                    created.id,
+                    Some(new.identity_key.clone()),
+                    CLASSIFIER_VERSION
+                )
+                .await
+                .unwrap()
+            );
+            let stored = repo
+                .find_by_identity_key(&new.identity_key)
+                .await
+                .unwrap()
+                .expect("found by its new key");
+            assert_eq!(stored.id, created.id, "the same row, not a new one");
+            assert_eq!(stored.tmdb_id, Some(42), "with its enrichment");
+            assert!(
+                repo.find_by_identity_key(&old.identity_key)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the old key is free"
+            );
+            assert!(
+                !repo
+                    .find_keyed_before_version(CLASSIFIER_VERSION)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|t| t.id == created.id),
+                "the new key carries the version that derived it"
+            );
+            assert_eq!(
+                repo.find_or_create_by_identity(new.clone())
+                    .await
+                    .unwrap()
+                    .id,
+                created.id,
+                "the next file of the new spelling finds it"
+            );
+            assert!(
+                repo.rekey(
+                    created.id,
+                    Some(new.identity_key.clone()),
+                    CLASSIFIER_VERSION
+                )
+                .await
+                .unwrap(),
+                "a key it already holds is no clash"
+            );
+        }
+
+        #[tokio::test]
+        async fn rekeying_a_movie_refuses_a_held_key_and_can_release_its_own() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let a = repo
+                .find_or_create_by_identity(new_movie("A"))
+                .await
+                .unwrap();
+            let b = repo
+                .find_or_create_by_identity(new_movie("B"))
+                .await
+                .unwrap();
+            let b_key = b.identity_key.clone().unwrap();
+
+            assert!(
+                !repo
+                    .rekey(a.id, Some(b_key.clone()), CLASSIFIER_VERSION)
+                    .await
+                    .unwrap(),
+                "another title holds it"
+            );
+            assert_eq!(
+                repo.find_by_id(a.id).await.unwrap().unwrap().identity_key,
+                a.identity_key,
+                "a refused rekey changes nothing"
+            );
+
+            assert!(repo.rekey(b.id, None, CLASSIFIER_VERSION).await.unwrap());
+            assert_eq!(
+                repo.find_by_id(b.id).await.unwrap().unwrap().identity_key,
+                None,
+                "released: never matched again"
+            );
+            assert!(
+                repo.rekey(a.id, Some(b_key.clone()), CLASSIFIER_VERSION)
+                    .await
+                    .unwrap(),
+                "a released key is free"
+            );
+            assert!(
+                !repo
+                    .rekey(
+                        Uuid::new_v4(),
+                        Some("nobody|".to_string()),
+                        CLASSIFIER_VERSION
+                    )
+                    .await
+                    .unwrap(),
+                "an unknown title is not rekeyed"
             );
         }
     };

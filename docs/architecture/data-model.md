@@ -105,6 +105,7 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `id` | UUID | no | PK |
 | `title` | TEXT | no | the **display** title: the filename parse until enrichment replaces it with the provider's. Never used to find the movie |
 | `identity_key` | TEXT | yes | unique — what the indexer matches a file to this movie by; see *Title identity* below. NULL only on a row that predates the column and could not be backfilled |
+| `identity_key_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that derived `identity_key`. A key an older version derived is re-derived from the title's files (*Rekey* below); `0` marks keys stored before versions existed |
 | `title_localized` | TEXT | yes | |
 | `description` | TEXT | yes | |
 | `year` | INTEGER | yes | |
@@ -126,7 +127,7 @@ has the same.
 
 ### `shows`
 Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `identity_key` (unique,
-nullable — as for movies), `title_localized`, `description`, `year`, `poster_url`,
+nullable — as for movies), `identity_key_version` (as for movies), `title_localized`, `description`, `year`, `poster_url`,
 `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id` (each unique, nullable),
 `created_at`, `updated_at`.
 

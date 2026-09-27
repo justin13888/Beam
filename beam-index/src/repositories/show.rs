@@ -96,6 +96,7 @@ impl ShowRepository for SqlShowRepository {
 
         let CreateShow {
             identity_key,
+            identity_key_version,
             title,
             year,
         } = create;
@@ -107,6 +108,7 @@ impl ShowRepository for SqlShowRepository {
         let active = show::ActiveModel {
             id: Set(Uuid::new_v4()),
             identity_key: Set(Some(identity_key.clone())),
+            identity_key_version: Set(identity_key_version as i16),
             title: Set(title),
             year: Set(year.map(|y| y as i32)),
             created_at: Set(now.into()),
@@ -144,7 +146,12 @@ impl ShowRepository for SqlShowRepository {
         Ok(models.into_iter().map(Show::from).collect())
     }
 
-    async fn assign_identity_key(&self, show_id: Uuid, identity_key: &str) -> Result<bool, DbErr> {
+    async fn assign_identity_key(
+        &self,
+        show_id: Uuid,
+        identity_key: &str,
+        version: u16,
+    ) -> Result<bool, DbErr> {
         use beam_entity::show;
         use sea_orm::sea_query::{Expr, Query};
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -155,6 +162,10 @@ impl ShowRepository for SqlShowRepository {
             .col_expr(
                 show::Column::IdentityKey,
                 Expr::value(Some(identity_key.to_string())),
+            )
+            .col_expr(
+                show::Column::IdentityKeyVersion,
+                Expr::value(version as i16),
             )
             .filter(show::Column::Id.eq(show_id))
             .filter(show::Column::IdentityKey.is_null())
@@ -168,6 +179,69 @@ impl ShowRepository for SqlShowRepository {
             .exec(self.db.as_ref())
             .await;
         match result {
+            Ok(result) => Ok(result.rows_affected == 1),
+            Err(err) if super::movie::is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn find_by_identity_key(&self, identity_key: &str) -> Result<Option<Show>, DbErr> {
+        use beam_entity::show;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let model = show::Entity::find()
+            .filter(show::Column::IdentityKey.eq(identity_key))
+            .one(self.db.as_ref())
+            .await?;
+        Ok(model.map(Show::from))
+    }
+
+    async fn find_keyed_before_version(&self, version: u16) -> Result<Vec<Show>, DbErr> {
+        use beam_entity::show;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+        let models = show::Entity::find()
+            .filter(show::Column::IdentityKey.is_not_null())
+            .filter(show::Column::IdentityKeyVersion.lt(version as i16))
+            .order_by_asc(show::Column::CreatedAt)
+            .order_by_asc(show::Column::Id)
+            .all(self.db.as_ref())
+            .await?;
+        Ok(models.into_iter().map(Show::from).collect())
+    }
+
+    async fn rekey(
+        &self,
+        show_id: Uuid,
+        identity_key: Option<String>,
+        version: u16,
+    ) -> Result<bool, DbErr> {
+        use beam_entity::show;
+        use sea_orm::sea_query::{Alias, Expr, ExprTrait, Query};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let mut update = show::Entity::update_many()
+            .col_expr(show::Column::IdentityKey, Expr::value(identity_key.clone()))
+            .col_expr(
+                show::Column::IdentityKeyVersion,
+                Expr::value(version as i16),
+            )
+            .filter(show::Column::Id.eq(show_id));
+        // As in `assign_identity_key`: `NOT EXISTS` answers the ordinary
+        // clash, the unique index a concurrent one. The show itself may
+        // already hold the key.
+        if let Some(key) = identity_key.as_deref() {
+            let other = Alias::new("other");
+            update = update.filter(Expr::not_exists(
+                Query::select()
+                    .expr(Expr::val(1))
+                    .from_as(show::Entity, other.clone())
+                    .and_where(Expr::col((other.clone(), show::Column::IdentityKey)).eq(key))
+                    .and_where(Expr::col((other, show::Column::Id)).ne(show_id))
+                    .to_owned(),
+            ));
+        }
+        match update.exec(self.db.as_ref()).await {
             Ok(result) => Ok(result.rows_affected == 1),
             Err(err) if super::movie::is_unique_violation(&err) => Ok(false),
             Err(err) => Err(err),

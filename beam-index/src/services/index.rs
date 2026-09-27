@@ -1386,7 +1386,11 @@ impl LocalIndexService {
                     continue;
                 }
             };
-            if self.movie_repo.assign_identity_key(movie.id, &key).await? {
+            if self
+                .movie_repo
+                .assign_identity_key(movie.id, &key, CLASSIFIER_VERSION)
+                .await?
+            {
                 report.keyed += 1;
             } else {
                 report.clashing_movies.push(movie.id);
@@ -1421,7 +1425,11 @@ impl LocalIndexService {
                     continue;
                 }
             };
-            if self.show_repo.assign_identity_key(show.id, &key).await? {
+            if self
+                .show_repo
+                .assign_identity_key(show.id, &key, CLASSIFIER_VERSION)
+                .await?
+            {
                 report.keyed += 1;
             } else {
                 report.clashing_shows.push(show.id);
