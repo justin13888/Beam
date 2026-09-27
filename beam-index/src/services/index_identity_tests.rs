@@ -1229,6 +1229,23 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
         details["merged_movies"],
         serde_json::json!([{ "kept": older, "retired": newer }])
     );
+
+    // Every key is current now, so a second pass finds nothing to do, and a
+    // second scan leaves the merged titles as they are.
+    let IdentityRekey {
+        rekeyed,
+        merged_movies,
+        merged_shows,
+        ambiguous_movies,
+        ambiguous_shows,
+    } = h.service.rekey_stale_titles().await.unwrap();
+    assert_eq!(rekeyed, 0);
+    assert!(merged_movies.is_empty() && merged_shows.is_empty());
+    assert!(ambiguous_movies.is_empty() && ambiguous_shows.is_empty());
+    h.scan().await;
+    assert_eq!(h.only_show().id, folder);
+    assert_eq!(h.only_movie().id, older);
+    assert_eq!(h.season_one(folder).len(), 2);
 }
 
 /// If another writer takes the key between the merge releasing the loser and
