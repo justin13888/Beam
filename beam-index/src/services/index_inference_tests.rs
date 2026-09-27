@@ -411,6 +411,11 @@ async fn excluded_files_are_never_indexed() {
     h.write("Movie (2019)/Movie.2019.mkv");
     for excluded in [
         "Movie (2019)/Extras/Making Of.mkv",
+        // Extras of a yearless show, and a scene release's sample: neither
+        // becomes a movie or a show of its own.
+        "Breaking Bad/Extras/Making of Breaking Bad.mkv",
+        "Breaking Bad/Featurettes/Inside Episode 1.mkv",
+        "Breaking.Bad.S01E01.720p.HDTV.x264-GRP/Sample/sample-breaking.bad.s01e01.720p.hdtv.x264-grp.mkv",
         "Movie (2019)/Movie-trailer.mkv",
         "Movie (2019)/sample.mkv",
         "Movie (2019)/.Movie.2019.mkv",

@@ -38,24 +38,27 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
 ];
 
 /// Folders that hold a title's extras rather than the title (the Plex and
-/// Jellyfin conventions). Matched case-insensitively, and only inside a title
-/// folder: `Movie (2019)/Trailers/` holds trailers, but a top-level `Shorts/`
-/// folder is a collection of short films, and `Movies/Trailers/` -- directly
-/// under a category folder -- a collection of trailers.
+/// Jellyfin conventions), and could not plausibly be anything else. Matched
+/// case-insensitively below the top level, whatever the folder above them:
+/// `Breaking Bad/Extras/` is a yearless show's extras, and a release folder's
+/// `Sample/` holds its sample.
 const EXTRAS_DIRECTORIES: &[&str] = &[
     "extras",
     "featurettes",
     "behind the scenes",
     "deleted scenes",
     "interviews",
-    "scenes",
-    "shorts",
-    "trailers",
-    "other",
     "sample",
     "samples",
     "bonus",
 ];
+
+/// Extras folder names that can also name a category, so are excluded only
+/// inside a title folder: `Movie (2019)/Trailers/` holds trailers, but a
+/// top-level `Shorts/` folder is a collection of short films, and
+/// `Movies/Trailers/` -- directly under a category folder -- a collection of
+/// trailers.
+const CATEGORY_OR_EXTRAS_DIRECTORIES: &[&str] = &["trailers", "shorts", "other", "scenes"];
 
 /// Filename-stem suffixes that mark an extra (`Movie-trailer.mkv`), matched
 /// case-insensitively.
@@ -194,8 +197,9 @@ impl PathPolicy {
                 return Some(ExclusionReason::SystemDirectory);
             }
             if depth >= 1
-                && EXTRAS_DIRECTORIES.contains(&lower.as_str())
-                && is_title_folder(dirs, depth - 1)
+                && (EXTRAS_DIRECTORIES.contains(&lower.as_str())
+                    || (CATEGORY_OR_EXTRAS_DIRECTORIES.contains(&lower.as_str())
+                        && is_title_folder(dirs, depth - 1)))
             {
                 return Some(ExclusionReason::ExtrasDirectory);
             }
@@ -312,12 +316,45 @@ mod tests {
             ("Movie (2019)/Trailers/t.mkv", Excluded(ExtrasDirectory)),
             ("TV/Show/Extras/Making Of.mkv", Excluded(ExtrasDirectory)),
             ("Season 1/Featurettes/x.mkv", Excluded(ExtrasDirectory)),
-            // ... but a top-level folder of that name is a collection, and
-            // so is one directly under a category folder.
+            // A name that can only mean extras is excluded under any folder:
+            // a yearless show or movie folder, a scene release's folder.
+            (
+                "Breaking Bad/Extras/Making of Breaking Bad.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            (
+                "Breaking Bad/Featurettes/Inside Episode 1.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            (
+                "Stranger Things/Behind the Scenes/Making of.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            (
+                "Breaking Bad/Deleted Scenes/Scene 1.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            ("The Matrix/Extras/Making of.mkv", Excluded(ExtrasDirectory)),
+            (
+                "Show.S01E01.720p-GRP/Sample/sample-show.s01e01.720p-grp.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            ("Movies/Samples/x.mkv", Excluded(ExtrasDirectory)),
+            // A name that can also mean a category needs a title folder: at
+            // the top level it is a collection, and so directly under a
+            // category folder.
+            (
+                "Breaking Bad (2008)/Trailers/t.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            ("Show/Season 1/Scenes/x.mkv", Excluded(ExtrasDirectory)),
             ("Shorts/Short Film (2019).mkv", Media),
             ("Trailers/x.mkv", Media),
+            ("Extras/x.mkv", Media),
             ("Movies/Trailers/Teaser (2019).mkv", Media),
             ("Movies/Shorts/Short Film (2019).mkv", Media),
+            ("Movies/Other/Film (2019).mkv", Media),
+            ("Movies/Scenes/Film (2019).mkv", Media),
             // Extras by name.
             ("Movie (2019)/Movie-trailer.mkv", Excluded(ExtraFile)),
             ("Movie (2019)/movie-sample.mkv", Excluded(ExtraFile)),
@@ -388,7 +425,13 @@ mod tests {
     #[test]
     fn excluded_directories_are_pruned_and_ordinary_ones_are_not() {
         let policy = PathPolicy::default();
-        for dir in [".git", "@eaDir", "Movie (2019)/Extras", "Show/.snapshots"] {
+        for dir in [
+            ".git",
+            "@eaDir",
+            "Movie (2019)/Extras",
+            "Show/Extras",
+            "Show/.snapshots",
+        ] {
             assert!(policy.excludes_directory(Path::new(dir)), "{dir}");
         }
         for dir in [
