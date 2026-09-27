@@ -143,6 +143,7 @@ fn build(
         pending_auth_store: base.services.pending_auth_store.clone(),
         device_auth_store: flows.clone(),
         oidc_config: oidc_config.clone(),
+        watch_status: base.services.watch_status.clone(),
     };
     let state = AppState::with_clock(
         base.config.clone(),
