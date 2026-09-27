@@ -29,9 +29,14 @@ state, whatever the migrator did.
 migrator takes (startup, the CLI, the `pg-integration` tier) -- takes
 `pg_advisory_xact_lock(MIGRATION_LOCK_KEY)` inside its batch transaction before reading the ledger.
 A second migrator waits, then reads what the first committed and finds nothing pending. The lock is
-transaction-scoped, so a migrator that dies cannot leave it held. This is what makes migrate-on-boot
-safe on Kubernetes, and it is covered by a deterministic `pg-integration` test that fails without
-the lock.
+transaction-scoped, so a migrator that dies cannot leave it held. Nothing runs DDL before the lock:
+sea-orm's ledger `CREATE TABLE IF NOT EXISTS` is not safe against a concurrent creator (the second
+fails with a unique violation on `pg_type`), so the server's startup count of pending migrations is
+read inside the locked batch (`beam_migration::apply_pending`), and `beam-migration status` reads the
+ledger read-only instead of creating it. This is what makes migrate-on-boot safe on Kubernetes, and
+it is covered by deterministic `pg-integration` tests that fail without it: two migrators racing,
+and the server's exact startup sequence starting beside an in-flight `beam-migration up` on a fresh
+database.
 
 **The chart runs exactly one server replica, with the Recreate strategy.** There is no
 `replicaCount` value at all -- the schema rejects one. Recreate means the old pod is gone before the

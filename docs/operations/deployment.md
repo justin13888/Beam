@@ -59,9 +59,11 @@ supported way to get a working login locally, and is for development only.
 `beam-server` applies pending migrations at startup (`BEAM_AUTO_MIGRATE`, default `true`), so a
 container-only deployment needs no separate migration step. Every migrator serialises on a
 Postgres advisory lock (`pg_advisory_xact_lock`, key `beam_migration::MIGRATION_LOCK_KEY`, held for
-the duration of the batch): if two processes start against the same database at once -- an
-overlapping restart, a Kubernetes pod replaced while its predecessor is still terminating, the CLI
-run beside a live server -- the second waits, then finds nothing pending. The lock makes
+the duration of the batch, and taken before the batch reads or creates the migration ledger): if
+two processes start against the same database at once -- an overlapping restart, a Kubernetes pod
+replaced while its predecessor is still terminating, the CLI run beside a live server -- the second
+waits, then finds nothing pending. `beam-migration status` only reads the ledger, so it is safe to
+run at any time. The lock makes
 migrate-on-boot safe; it does not make Beam multi-replica (the indexer is not leader-elected), so
 the supported topologies still run exactly one server process. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam-migration` CLI
 (`cargo run -p beam-migration -- up|down|status` with `DATABASE_URL` set).

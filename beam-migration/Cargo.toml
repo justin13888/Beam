@@ -18,6 +18,8 @@ argon2 = "0.6.0"
 async-trait = { workspace = true }
 sea-orm-migration = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `status` logs through the subscriber sea-orm-migration's CLI installs.
+tracing = { workspace = true }
 
 [dev-dependencies]
 beam-test-support = { path = "../beam-test-support" }

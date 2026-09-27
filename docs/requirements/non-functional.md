@@ -130,7 +130,8 @@ requirements (referenced below as FR-xxx).
   ([ADR-0001](../architecture/decisions/ADR-0001-modular-monolith.md)). Database migrations apply
   automatically at startup (`BEAM_AUTO_MIGRATE`, default `true`), so no separate migration step is
   required to deploy. Concurrent migrators against one database MUST serialise (a Postgres advisory
-  lock held for the batch), so overlapping processes never race the same migration.
+  lock held for the batch, taken before any ledger read or DDL), so overlapping processes never race
+  the same migration or the ledger's creation.
 - **NFR-402**: All environment-specific configuration MUST be configurable via `BEAM_`-prefixed
   environment variables (e.g., `BEAM_VIDEO_DIR`, `BEAM_DATA_DIR`, `BEAM_DATABASE_URL`,
   `BEAM_OIDC_ISSUER`, `BEAM_OIDC_ADMIN_CLAIM`, `BEAM_TMDB_API_TOKEN`), with sensible behavior (per

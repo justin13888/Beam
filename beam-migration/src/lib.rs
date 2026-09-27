@@ -82,10 +82,43 @@ pub const MIGRATION_LOCK_KEY: i64 = i64::from_be_bytes(*b"beam-mig");
 /// commit or rollback that ends the batch, so a migrator that dies mid-batch
 /// cannot leave it held.
 ///
-/// Every caller that applies migrations -- `beam-server` at startup, the
-/// `beam-migration up` CLI, the `pg-integration` tier -- goes through this, so
-/// there is one upgrade path.
+/// Nothing on the way to the lock touches the database's schema: sea-orm
+/// creates its ledger table (`CREATE TABLE IF NOT EXISTS seaql_migrations`)
+/// inside the batch, after the lock. That `IF NOT EXISTS` is not safe against
+/// a concurrent creator -- a second session creating the same table blocks on
+/// the first's uncommitted catalog rows and then fails with a unique violation
+/// on `pg_type` -- so any ledger DDL issued before the lock would reopen the
+/// race on a fresh database. Read the ledger with sea-orm's `*_read_only`
+/// methods anywhere outside a batch.
+///
+/// Every caller that applies migrations -- `beam-server` at startup (through
+/// [`apply_pending`]), the `beam-migration up` CLI, the `pg-integration` tier
+/// -- goes through this, so there is one upgrade path.
 pub async fn up_all_or_nothing<'c, M, C>(db: C, steps: Option<u32>) -> Result<(), DbErr>
+where
+    M: MigratorTrait,
+    C: IntoSchemaManagerConnection<'c>,
+{
+    locked_batch::<M, C>(db, steps).await.map(|_applied| ())
+}
+
+/// What `beam-server` runs at startup: every pending migration, through
+/// [`up_all_or_nothing`]'s locked, all-or-nothing batch. Returns how many
+/// migrations the batch applied.
+///
+/// The count is read inside the batch, under the lock, so it is exact: a
+/// server that waited on another migrator reports 0, not what was pending
+/// before it waited.
+pub async fn apply_pending<M>(db: &sea_orm::DatabaseConnection) -> Result<usize, DbErr>
+where
+    M: MigratorTrait,
+{
+    locked_batch::<M, _>(db, None).await
+}
+
+/// The body of [`up_all_or_nothing`], returning how many migrations were
+/// pending under the lock -- with `steps` of `None`, how many it applied.
+async fn locked_batch<'c, M, C>(db: C, steps: Option<u32>) -> Result<usize, DbErr>
 where
     M: MigratorTrait,
     C: IntoSchemaManagerConnection<'c>,
@@ -95,10 +128,10 @@ where
     let executor = db.into_database_executor();
     let batch = executor.begin().await?;
     // Postgres only: MySQL and SQLite have no `pg_advisory_xact_lock`, and
-    // Beam ships against Postgres alone. Taken before `M::up` so that the
-    // ledger read which decides what is pending happens under the lock --
-    // under READ COMMITTED every statement after it sees what the previous
-    // holder committed.
+    // Beam ships against Postgres alone. Taken before anything reads the
+    // ledger, so that the read which decides what is pending happens under the
+    // lock -- under READ COMMITTED every statement after it sees what the
+    // previous holder committed.
     if batch.get_database_backend() == DbBackend::Postgres {
         batch
             .execute_raw(Statement::from_sql_and_values(
@@ -108,8 +141,12 @@ where
             ))
             .await?;
     }
-    match M::up(&batch, steps).await {
-        Ok(()) => batch.commit().await,
+    let outcome = match M::get_pending_migrations_read_only(&batch).await {
+        Ok(pending) => M::up(&batch, steps).await.map(|()| pending.len()),
+        Err(ledger_error) => Err(ledger_error),
+    };
+    match outcome {
+        Ok(pending) => batch.commit().await.map(|()| pending),
         Err(migration_error) => match batch.rollback().await {
             Ok(()) => Err(migration_error),
             Err(rollback_error) => Err(DbErr::Custom(format!(
@@ -119,17 +156,21 @@ where
     }
 }
 
-/// `M` with `up` applied through [`up_all_or_nothing`]; every other command is
-/// `M`'s own.
+/// `M` with `up` applied through [`up_all_or_nothing`] and a read-only
+/// `status`; every other command is `M`'s own.
 ///
 /// The `beam-migration` CLI runs `AllOrNothing::<Migrator>`. The CLI dispatches
 /// on `MigratorTraitSelf`, whose blanket impl for every [`MigratorTrait`]
 /// forwards to the static `up`, so overriding `up` here is what routes
 /// `beam-migration up` through the shared path. `migrations` and
 /// `migration_table_name` delegate to `M`, so the ledger and the migration list
-/// are `M`'s. `down`, `fresh`, `refresh` and `reset` keep sea-orm's
-/// per-migration transactions: the trait defaults call its internal executor
-/// directly, not `up`.
+/// are `M`'s. `status` reads the ledger without sea-orm's default `CREATE TABLE
+/// IF NOT EXISTS`, so `beam-migration status` beside a starting server on a
+/// fresh database cannot race its ledger creation (see
+/// [`up_all_or_nothing`]). `down`, `fresh`, `refresh` and `reset` keep
+/// sea-orm's per-migration transactions: the trait defaults call its internal
+/// executor directly, not `up`. They are destructive operator commands, run
+/// with the server stopped.
 pub struct AllOrNothing<M>(PhantomData<fn() -> M>);
 
 impl<M> AllOrNothing<M> {
@@ -159,5 +200,16 @@ impl<M: MigratorTrait> MigratorTrait for AllOrNothing<M> {
         C: IntoSchemaManagerConnection<'c>,
     {
         up_all_or_nothing::<M, C>(db, steps).await
+    }
+
+    async fn status<C>(db: &C) -> Result<(), DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        tracing::info!("Checking migration status");
+        for migration in M::get_migration_with_status_read_only(db).await? {
+            tracing::info!("Migration '{}'... {}", migration.name(), migration.status());
+        }
+        Ok(())
     }
 }
