@@ -3,10 +3,15 @@
 //!
 //! # Scope (deliberate)
 //!
-//! Two limiter *classes*, each keyed per client:
+//! Three limiter *classes*, each keyed per client:
 //!
-//! * **auth** — `/v1/auth/login` and `/v1/auth/callback`. These start an OIDC
-//!   flow and are the classic credential-stuffing / callback-replay target.
+//! * **auth** — `/v1/auth/login`, `/v1/auth/callback` and `/v1/auth/device`.
+//!   These start an OIDC flow and are the classic credential-stuffing /
+//!   callback-replay target.
+//! * **device_poll** — `POST /v1/auth/device/token`. A waiting device polls
+//!   every few seconds for minutes, which the auth budget would refuse, so it
+//!   has its own. The per-flow interval (ADR-0017) is what paces the IdP; this
+//!   caps how many flows one client can drive at once.
 //! * **search** — `GET /v1/media` (the browse/search endpoint), the single
 //!   most expensive read path (it fans out into metadata queries).
 //!
@@ -72,14 +77,16 @@ struct Bucket {
 
 /// Which named class a limiter enforces.
 ///
-/// The two differ only in which config key supplies `per_minute`, so they are
-/// one policy with two instances rather than two policies.
+/// They differ only in which config key supplies `per_minute`, so they are
+/// one policy with several instances rather than several policies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
-    /// `/v1/auth/login` and `/v1/auth/callback`.
+    /// `/v1/auth/login`, `/v1/auth/callback` and `/v1/auth/device`.
     Auth,
     /// `GET /v1/media`.
     Search,
+    /// `POST /v1/auth/device/token`.
+    DevicePoll,
 }
 
 impl Class {
@@ -88,6 +95,7 @@ impl Class {
         match self {
             Self::Auth => "auth",
             Self::Search => "search",
+            Self::DevicePoll => "device_poll",
         }
     }
 
@@ -96,6 +104,7 @@ impl Class {
         match self {
             Self::Auth => config.rate_limit_auth_per_minute,
             Self::Search => config.rate_limit_search_per_minute,
+            Self::DevicePoll => config.rate_limit_device_poll_per_minute,
         }
         .max(1)
     }

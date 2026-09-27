@@ -188,6 +188,7 @@ mod tests {
             session_store: session_dyn,
             oidc_client: oidc_dyn,
             pending_auth_store,
+            device_auth_store: base.services.device_auth_store.clone(),
             oidc_config: config,
         };
 

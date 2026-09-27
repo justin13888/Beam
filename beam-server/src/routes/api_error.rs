@@ -703,6 +703,7 @@ provides_service! {
     Arc<dyn beam_auth::utils::session_store::SessionStore> => session_store,
     Arc<dyn beam_auth::utils::oidc::OidcClient> => oidc_client,
     Arc<dyn beam_auth::utils::pending_auth_store::PendingAuthStore> => pending_auth_store,
+    Arc<dyn beam_auth::utils::device_auth_store::DeviceAuthStore> => device_auth_store,
 }
 
 impl kynos::di::Provides<beam_auth::utils::oidc_config::OidcRuntimeConfig> for AppState {

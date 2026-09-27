@@ -238,9 +238,10 @@ pub struct ServerConfig {
     #[config(env = "BEAM_RATE_LIMIT_ENABLED", default = true)]
     pub rate_limit_enabled: bool,
 
-    /// Sustained request rate — and burst capacity — for the auth endpoints
-    /// (`/v1/auth/login`, `/v1/auth/callback`), per client key, in requests per
-    /// minute. Must be at least 1.
+    /// Sustained request rate — and burst capacity — for the endpoints that
+    /// begin a login (`/v1/auth/login`, `/v1/auth/callback`,
+    /// `/v1/auth/device`), per client key, in requests per minute. Must be at
+    /// least 1.
     #[config(env = "BEAM_RATE_LIMIT_AUTH_PER_MINUTE", default = 10)]
     pub rate_limit_auth_per_minute: u32,
 
@@ -249,6 +250,15 @@ pub struct ServerConfig {
     /// per minute. Must be at least 1.
     #[config(env = "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE", default = 60)]
     pub rate_limit_search_per_minute: u32,
+
+    /// Sustained request rate — and burst capacity — for device-login polls
+    /// (`POST /v1/auth/device/token`), per client key, in requests per
+    /// minute. Must be at least 1. Its own budget because a waiting TV polls
+    /// every few seconds for minutes -- far more than the login budget allows
+    /// -- while each flow's own interval (ADR-0017) already paces what reaches
+    /// the IdP.
+    #[config(env = "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE", default = 30)]
+    pub rate_limit_device_poll_per_minute: u32,
 
     /// Whether to trust a client-supplied `X-Forwarded-For` header when
     /// deriving the rate-limit client key. Off by default: the header is
@@ -304,6 +314,7 @@ impl fmt::Debug for ServerConfig {
             rate_limit_enabled,
             rate_limit_auth_per_minute,
             rate_limit_search_per_minute,
+            rate_limit_device_poll_per_minute,
             rate_limit_trust_forwarded_for,
         } = self;
         f.debug_struct("ServerConfig")
@@ -346,6 +357,10 @@ impl fmt::Debug for ServerConfig {
             .field("rate_limit_enabled", rate_limit_enabled)
             .field("rate_limit_auth_per_minute", rate_limit_auth_per_minute)
             .field("rate_limit_search_per_minute", rate_limit_search_per_minute)
+            .field(
+                "rate_limit_device_poll_per_minute",
+                rate_limit_device_poll_per_minute,
+            )
             .field(
                 "rate_limit_trust_forwarded_for",
                 rate_limit_trust_forwarded_for,
@@ -551,6 +566,13 @@ impl ServerConfig {
         if self.rate_limit_search_per_minute == 0 {
             return Err(ConfigError::InvalidValue(
                 "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+
+        if self.rate_limit_device_poll_per_minute == 0 {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE".to_string(),
                 "must be at least 1".to_string(),
             ));
         }
@@ -959,10 +981,12 @@ mod tests {
         for field in [
             "BEAM_RATE_LIMIT_AUTH_PER_MINUTE",
             "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE",
+            "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE",
         ] {
             let config = ServerConfig {
                 rate_limit_auth_per_minute: if field.contains("AUTH") { 0 } else { 10 },
                 rate_limit_search_per_minute: if field.contains("SEARCH") { 0 } else { 60 },
+                rate_limit_device_poll_per_minute: if field.contains("DEVICE") { 0 } else { 30 },
                 ..config_with_secrets()
             };
             let err = config

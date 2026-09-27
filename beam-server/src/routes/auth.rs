@@ -1,12 +1,14 @@
 //! OIDC BFF endpoints (see ADR-0003): `login`/`callback` drive the
-//! Authorization Code + PKCE round-trip, `me`/`logout`/`logout-all`/
-//! `sessions`/`sessions/{id}` operate on the resulting `beam_session`
-//! cookie -- the sole credential beam-server issues. `login`/`callback` are
-//! mounted under `/v1/auth/*` and the rest at the top level (`/v1/me`,
-//! `/v1/logout`, ...).
+//! Authorization Code + PKCE round-trip, `device`/`device/token` drive the
+//! RFC 8628 device authorization grant for a native client with no browser
+//! (ADR-0017), and `me`/`logout`/`logout-all`/`sessions`/`sessions/{id}`
+//! operate on the resulting `beam_session` credential -- the sole credential
+//! beam-server issues. `login`/`callback`/`device*` are mounted under
+//! `/v1/auth/*` and the rest at the top level (`/v1/me`, `/v1/logout`, ...).
 //!
-//! The browser never sees an IdP token; `beam_session` is the only
-//! credential it holds, set as an httpOnly, `SameSite=Lax` cookie.
+//! No client ever sees an IdP token. A browser holds `beam_session` as an
+//! httpOnly, `SameSite=Lax` cookie; a device-grant client receives the same
+//! opaque value in the poll's body and presents it as that cookie.
 //!
 //! This module lived in `beam-auth` until the Kynos migration. ADR-0010
 //! requires the HTTP adapter to sit in `beam-server` so `beam-auth` stays
@@ -23,20 +25,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use beam_auth::utils::admin_claim::admin_claim_matches;
-use beam_auth::utils::models::CreateUser;
-use beam_auth::utils::oidc::{OidcClient, OidcError};
+use beam_auth::utils::device_auth_store::{
+    Claim, DeviceAuthStore, NewDeviceAuth, generate_handle, hash_handle,
+};
+use beam_auth::utils::login::{
+    ClientContext, LoginError, MintedSession, client_ip, complete_login,
+};
+use beam_auth::utils::models::User;
+use beam_auth::utils::oidc::{DevicePoll, OidcClient, OidcError};
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
-use beam_auth::utils::session_store::{SessionData, SessionError, SessionStore};
-use chrono::Utc;
+use beam_auth::utils::session_store::{SessionError, SessionStore};
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
 use kynos::response::headers::WithHeaders;
 use kynos::response::status::{NoContent, Redirect};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::routes::api_error::{InternalError, SESSION_COOKIE, SessionAuth};
@@ -44,6 +49,15 @@ use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
 const STATE_TTL_SECS: u64 = 600; // 10 minutes to complete the round trip
+
+/// The longest a device login may stay open, whatever the IdP grants.
+///
+/// RFC 8628 leaves the lifetime to the authorization server, and IdPs range
+/// from five minutes to a day. Half an hour is long enough to walk to another
+/// room and find a phone, and short enough that an abandoned flow -- whose
+/// user code is the one thing a phisher needs (RFC 8628 section 5.4) -- does
+/// not stay redeemable all day.
+const DEVICE_LOGIN_MAX_SECS: u64 = 1800;
 
 // ── Wire types ───────────────────────────────────────────────────────────────
 
@@ -83,6 +97,85 @@ pub struct CallbackQuery {
     pub code: Option<String>,
     pub error: Option<String>,
     pub error_description: Option<String>,
+}
+
+/// What `POST /v1/auth/device` answers: what to show the user, and the handle
+/// to poll with.
+///
+/// The IdP's device code is not here. Beam keeps it and polls the IdP itself,
+/// so a client can only ever turn an approval into a Beam session -- never
+/// into IdP tokens (ADR-0003's BFF property, kept for native clients).
+#[derive(Debug, Serialize, Deserialize, Schema)]
+pub struct DeviceLoginStart {
+    /// Opaque, single-flow secret the client polls `POST
+    /// /v1/auth/device/token` with. Only its SHA-256 is stored.
+    pub device_handle: String,
+    /// The code the user enters at `verification_uri`.
+    pub user_code: String,
+    /// Where the user approves the sign-in, on any device with a browser.
+    pub verification_uri: String,
+    /// `verification_uri` with the code filled in, when the IdP offers one --
+    /// suitable for a QR code.
+    pub verification_uri_complete: Option<String>,
+    /// How long the user has to approve, in seconds.
+    pub expires_in_secs: u64,
+    /// The minimum wait between polls, in seconds.
+    pub interval_secs: u32,
+}
+
+/// The body of `POST /v1/auth/device/token`.
+#[derive(Debug, Serialize, Deserialize, Schema)]
+pub struct DeviceLoginPoll {
+    /// The `device_handle` `POST /v1/auth/device` returned.
+    pub device_handle: String,
+}
+
+/// Why a device login is still waiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceLoginWait {
+    /// The user has not approved yet. Poll again after `interval_secs`.
+    AuthorizationPending,
+    /// The poll came too soon. The interval has grown; wait the new
+    /// `interval_secs` before polling again.
+    SlowDown,
+}
+
+/// A device login that has not finished yet.
+#[derive(Debug, Serialize, Deserialize, Schema)]
+pub struct DeviceLoginPending {
+    pub status: DeviceLoginWait,
+    /// The minimum wait before the next poll, in seconds.
+    pub interval_secs: u32,
+}
+
+/// A device login the user approved: the session it minted.
+#[derive(Debug, Serialize, Deserialize, Schema)]
+pub struct DeviceLoginComplete {
+    /// The `beam_session` credential. Present it as the `beam_session`
+    /// cookie on every later request; it is the same opaque session a
+    /// browser login mints, with the same idle and absolute expiry.
+    pub session_token: String,
+    /// The session's hard lifetime from now, in seconds.
+    pub session_expires_in_secs: u64,
+    /// Who signed in.
+    pub user: MeResponse,
+}
+
+/// The two answers a device-login poll can give.
+///
+/// Two statuses rather than one body with a flag, so a generated client
+/// distinguishes "keep waiting" from "signed in" by type.
+#[derive(Reply)]
+pub enum DeviceLoginPollReply {
+    #[reply(status = 200, description = "The user approved; a session was minted")]
+    SignedIn(DeviceLoginComplete),
+
+    #[reply(
+        status = 202,
+        description = "The user has not approved yet; poll again"
+    )]
+    Pending(DeviceLoginPending),
 }
 
 /// What `/v1/sessions/{id}` captures.
@@ -223,6 +316,108 @@ pub enum LoginCallbackError {
     Internal(String),
 }
 
+/// `POST /v1/auth/device`.
+#[derive(Debug, thiserror::Error, kynos::ApiError)]
+pub enum DeviceLoginStartError {
+    /// The IdP's discovery document names no device authorization endpoint,
+    /// so this deployment offers only the browser login. A client falls back
+    /// to it rather than retrying.
+    #[error("{0}")]
+    #[problem(
+        status = 501,
+        type = "https://beam.justinchung.net/reference/errors/#device-login-unsupported",
+        title = "Device login is not supported"
+    )]
+    Unsupported(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 503,
+        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
+        title = "Login unavailable"
+    )]
+    OidcUnavailable(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `POST /v1/auth/device/token`.
+///
+/// `Invalid` is written first so it titles the 400: it is what a client
+/// meets by polling a flow that already ended, the common mistake.
+#[derive(Debug, thiserror::Error, kynos::ApiError)]
+pub enum DeviceLoginPollError {
+    /// No open device login has this handle: it was never issued, or the
+    /// flow already ended (signed in, denied, or expired and collected).
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#device-login-invalid",
+        title = "Device login is not valid"
+    )]
+    Invalid(String),
+
+    /// The IdP's answer did not verify.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#login-failed",
+        title = "Login failed"
+    )]
+    LoginFailed(String),
+
+    /// The user refused the sign-in at the IdP.
+    #[error("{0}")]
+    #[problem(
+        status = 403,
+        type = "https://beam.justinchung.net/reference/errors/#device-login-denied",
+        title = "Device login was denied"
+    )]
+    Denied(String),
+
+    /// The identity verified; the local account is disabled (issue #85).
+    #[error("{0}")]
+    #[problem(
+        status = 403,
+        type = "https://beam.justinchung.net/reference/errors/#account-disabled",
+        title = "Account is disabled"
+    )]
+    AccountDisabled(String),
+
+    /// The user did not approve in time. Start a new device login.
+    #[error("{0}")]
+    #[problem(
+        status = 410,
+        type = "https://beam.justinchung.net/reference/errors/#device-login-expired",
+        title = "Device login expired"
+    )]
+    Expired(String),
+
+    /// The IdP could not be reached or refused Beam itself. The flow is kept:
+    /// polling again may succeed.
+    #[error("{0}")]
+    #[problem(
+        status = 503,
+        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
+        title = "Login unavailable"
+    )]
+    OidcUnavailable(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// `GET /v1/me`.
 ///
 /// Keeps a 401 of its own rather than leaving it to `SessionAuth`, because it
@@ -323,26 +518,6 @@ impl From<CookieEncodingError> for InternalError {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn device_hash(user_agent: Option<&str>) -> String {
-    // `beam_auth`'s encoder, not a local one. Session rows are looked up by
-    // equality against this string, and `sha2` 0.11 returns a
-    // `hybrid_array::Array` with no `LowerHex`, so the `{:x}` this used to be
-    // stopped compiling. A second implementation here would be a second thing
-    // that has to keep producing identical bytes.
-    beam_auth::utils::hex::encode_lower(&Sha256::digest(user_agent.unwrap_or("").as_bytes()))
-}
-
-/// The client address, as the deployment's proxy reports it.
-fn client_ip(forwarded_for: Option<&str>, real_ip: Option<&str>) -> String {
-    if let Some(first) = forwarded_for.and_then(|value| value.split(',').next()) {
-        let first = first.trim();
-        if !first.is_empty() {
-            return first.to_owned();
-        }
-    }
-    real_ip.map_or_else(|| "unknown".to_owned(), str::to_owned)
-}
-
 /// The proxy-supplied headers the session record stores.
 #[derive(Debug, Schema, HeaderParams)]
 pub struct ClientHeaders {
@@ -384,22 +559,25 @@ fn sanitize_redirect_path(raw: Option<&str>) -> String {
     }
 }
 
-/// Picks a display name when the IdP doesn't release a `name` claim: the
-/// local part of the email if one is available, else a subject-derived
-/// placeholder. Real IdPs (including Dex) send `name`, so this is a rare
-/// fallback, not the common case.
-fn derive_display_name(name: Option<&str>, email: Option<&str>, subject: &str) -> String {
-    if let Some(name) = name
-        && !name.is_empty()
-    {
-        return name.to_owned();
+impl ClientHeaders {
+    /// The session record's view of the caller.
+    fn context(&self) -> ClientContext {
+        ClientContext {
+            user_agent: self.user_agent.clone(),
+            ip: client_ip(self.x_forwarded_for.as_deref(), self.x_real_ip.as_deref()),
+        }
     }
-    if let Some(local_part) = email.and_then(|e| e.split('@').next())
-        && !local_part.is_empty()
-    {
-        return local_part.to_owned();
+}
+
+/// The wire shape of a user, shared by `GET /v1/me` and a device login.
+fn me_from(user: User) -> MeResponse {
+    MeResponse {
+        id: user.id.to_string(),
+        email: user.email,
+        is_admin: user.is_admin,
+        display_name: user.display_name,
+        avatar_url: user.avatar_url,
     }
-    format!("user-{subject}")
 }
 
 // ── Endpoints ────────────────────────────────────────────────────────────────
@@ -516,82 +694,22 @@ pub async fn oidc_callback(
             other => LoginCallbackError::LoginFailed(format!("Login failed: {other}")),
         })?;
 
-    // Admin is derived solely from a configured ID-token claim asserted by the
-    // IdP (issue #85): the IdP is the single authority. Recomputed on every
-    // login below, so it both grants and revokes -- and with no admin claim
-    // configured, `false` here demotes any previously-admin user at next login.
-    let is_admin = match config.admin_claim.as_deref() {
-        Some(claim_name) => {
-            admin_claim_matches(&identity.claims, claim_name, config.admin_value.as_deref())
-        }
-        None => false,
-    };
-    let display_name = derive_display_name(
-        identity.name.as_deref(),
-        identity.email.as_deref(),
-        &identity.subject,
-    );
-
-    let user = match user_repo
-        .find_by_oidc_identity(&identity.issuer, &identity.subject)
-        .await
-        .map_err(|e| LoginCallbackError::Internal(e.to_string()))?
-    {
-        Some(existing) => {
-            // A disabled account is blocked at the door: no session is minted
-            // and no profile/admin fields are touched (issue #85). Only an
-            // already-provisioned account can be disabled -- JIT-provisioned
-            // new users below are always created enabled.
-            if existing.disabled {
-                return Err(LoginCallbackError::AccountDisabled(
-                    "This account has been disabled. Contact an administrator.".to_owned(),
-                ));
-            }
-            if existing.is_admin != is_admin {
-                user_repo
-                    .set_admin(existing.id, is_admin)
-                    .await
-                    .map_err(|e| LoginCallbackError::Internal(e.to_string()))?;
-            }
-            if existing.display_name != display_name || existing.avatar_url != identity.picture {
-                user_repo
-                    .update_oidc_profile(existing.id, display_name, identity.picture.clone())
-                    .await
-                    .map_err(|e| LoginCallbackError::Internal(e.to_string()))?;
-            }
-            existing
-        }
-        None => user_repo
-            .create(CreateUser {
-                oidc_issuer: identity.issuer.clone(),
-                oidc_subject: identity.subject.clone(),
-                email: identity.email.clone(),
-                display_name,
-                avatar_url: identity.picture.clone(),
-                is_admin,
-            })
-            .await
-            .map_err(|e| LoginCallbackError::Internal(format!("Failed to provision user: {e}")))?,
-    };
-
-    let idle_ttl_secs = config.idle_ttl_secs();
-    let absolute_ttl_secs = config.absolute_ttl_secs();
-
-    let session_data = SessionData {
-        user_id: user.id.to_string(),
-        device_hash: device_hash(headers.user_agent.as_deref()),
-        ip: client_ip(
-            headers.x_forwarded_for.as_deref(),
-            headers.x_real_ip.as_deref(),
-        ),
-        created_at: Utc::now().timestamp(),
-        last_active: Utc::now().timestamp(),
-    };
-
-    let token = session_store
-        .create(&session_data, idle_ttl_secs, absolute_ttl_secs)
-        .await
-        .map_err(|e| LoginCallbackError::Internal(e.to_string()))?;
+    let MintedSession {
+        token,
+        user: _,
+        absolute_ttl_secs,
+    } = complete_login(
+        &identity,
+        &headers.context(),
+        user_repo.as_ref(),
+        session_store.as_ref(),
+        &config,
+    )
+    .await
+    .map_err(|e| match e {
+        e @ LoginError::AccountDisabled => LoginCallbackError::AccountDisabled(e.to_string()),
+        LoginError::Internal(message) => LoginCallbackError::Internal(message),
+    })?;
 
     let cookie = build_cookie(
         SESSION_COOKIE,
@@ -609,6 +727,223 @@ pub async fn oidc_callback(
     ))
 }
 
+/// Starts a device login (RFC 8628) for a client that has no browser.
+///
+/// Asks the IdP for a device code, keeps it, and hands the client an opaque
+/// handle plus the user code to display. The user approves on any other
+/// device; the client polls `POST /v1/auth/device/token` meanwhile.
+///
+/// Answers 501 when the IdP does not offer the grant: the deployment still
+/// signs browsers in, and a client with a browser falls back to that.
+#[kynos::post("/auth/device", tag = Auth, operation_id = "startDeviceLogin")]
+pub async fn start_device_login(
+    Inject(oidc_client): Inject<Arc<dyn OidcClient>>,
+    Inject(device_auth_store): Inject<Arc<dyn DeviceAuthStore>>,
+) -> Result<Json<DeviceLoginStart>, DeviceLoginStartError> {
+    let started = oidc_client.begin_device_auth().await.map_err(|e| match e {
+        OidcError::DeviceFlowUnsupported => DeviceLoginStartError::Unsupported(e.to_string()),
+        other => DeviceLoginStartError::OidcUnavailable(format!("OIDC login unavailable: {other}")),
+    })?;
+
+    let handle = generate_handle();
+    let expires_in_secs = started.expires_in_secs.min(DEVICE_LOGIN_MAX_SECS);
+    // An IdP that asks for no interval at all would switch the pacing off;
+    // one second is the floor.
+    let interval_secs = u32::try_from(started.interval_secs.max(1)).unwrap_or(u32::MAX);
+
+    device_auth_store
+        .create(&NewDeviceAuth {
+            handle_hash: hash_handle(&handle),
+            device_code: started.device_code,
+            user_code: started.user_code.clone(),
+            verification_uri: started.verification_uri.clone(),
+            verification_uri_complete: started.verification_uri_complete.clone(),
+            interval_secs,
+            expires_in_secs,
+        })
+        .await
+        .map_err(|e| {
+            DeviceLoginStartError::Internal(format!("Failed to start device login: {e}"))
+        })?;
+
+    Ok(Json(DeviceLoginStart {
+        device_handle: handle,
+        user_code: started.user_code,
+        verification_uri: started.verification_uri,
+        verification_uri_complete: started.verification_uri_complete,
+        expires_in_secs,
+        interval_secs,
+    }))
+}
+
+/// Polls a device login once.
+///
+/// Each call reaches the IdP at most once, and not at all when it comes
+/// sooner than the flow's interval allows -- that answers `slow_down` and
+/// grows the interval, as RFC 8628 section 3.5 has the IdP do. On approval
+/// the session is minted exactly as the browser callback mints it (same
+/// admin claim, JIT provisioning, disabled gate, and expiry) and its opaque
+/// value returned in the body.
+///
+/// The credential is presented afterwards as the `beam_session` cookie, not
+/// as `Authorization: Bearer`. Kynos 0.3's `Auth<S>` binds one scheme per
+/// operation and has no way to declare "cookie or bearer" (an OpenAPI
+/// security requirement list of alternatives), so accepting a bearer token
+/// would mean either a second, undescribed authenticator or re-declaring
+/// every secured operation. That is an upstream gap in kynos, recorded in
+/// ADR-0017 to be filed on getkono/kynos; until a release closes it, the one
+/// described scheme is the one every client uses.
+#[kynos::post("/auth/device/token", tag = Auth, operation_id = "pollDeviceLogin")]
+pub async fn poll_device_login(
+    Headers(headers): Headers<ClientHeaders>,
+    Inject(oidc_client): Inject<Arc<dyn OidcClient>>,
+    Inject(device_auth_store): Inject<Arc<dyn DeviceAuthStore>>,
+    Inject(session_store): Inject<Arc<dyn SessionStore>>,
+    Inject(user_repo): Inject<Arc<dyn UserRepository>>,
+    Inject(config): Inject<OidcRuntimeConfig>,
+    Json(body): Json<DeviceLoginPoll>,
+) -> Result<DeviceLoginPollReply, DeviceLoginPollError> {
+    let internal = |e: beam_auth::utils::device_auth_store::DeviceAuthError| {
+        DeviceLoginPollError::Internal(e.to_string())
+    };
+    let handle_hash = hash_handle(&body.device_handle);
+
+    let auth = match device_auth_store
+        .claim_poll(&handle_hash)
+        .await
+        .map_err(internal)?
+    {
+        Claim::NotFound => {
+            return Err(DeviceLoginPollError::Invalid(
+                "Unknown or already-finished device login".into(),
+            ));
+        }
+        Claim::Expired => {
+            device_auth_store
+                .consume(&handle_hash)
+                .await
+                .map_err(internal)?;
+            return Err(DeviceLoginPollError::Expired(
+                "The device login expired before it was approved".into(),
+            ));
+        }
+        Claim::TooEarly { interval_secs } => {
+            // The IdP is not asked: answering for it is the point.
+            let interval_secs = device_auth_store
+                .bump_interval(&handle_hash)
+                .await
+                .map_err(internal)?
+                .unwrap_or(interval_secs);
+            return Ok(DeviceLoginPollReply::Pending(DeviceLoginPending {
+                status: DeviceLoginWait::SlowDown,
+                interval_secs,
+            }));
+        }
+        Claim::Claimed(auth) => auth,
+    };
+
+    let identity = match oidc_client.poll_device_token(&auth.device_code).await {
+        Ok(DevicePoll::Pending) => {
+            return Ok(DeviceLoginPollReply::Pending(DeviceLoginPending {
+                status: DeviceLoginWait::AuthorizationPending,
+                interval_secs: auth.interval_secs,
+            }));
+        }
+        Ok(DevicePoll::SlowDown) => {
+            let interval_secs = device_auth_store
+                .bump_interval(&handle_hash)
+                .await
+                .map_err(internal)?
+                .unwrap_or(auth.interval_secs);
+            return Ok(DeviceLoginPollReply::Pending(DeviceLoginPending {
+                status: DeviceLoginWait::SlowDown,
+                interval_secs,
+            }));
+        }
+        Ok(DevicePoll::Denied) => {
+            device_auth_store
+                .consume(&handle_hash)
+                .await
+                .map_err(internal)?;
+            return Err(DeviceLoginPollError::Denied(
+                "The sign-in was refused at the identity provider".into(),
+            ));
+        }
+        Ok(DevicePoll::Expired) => {
+            device_auth_store
+                .consume(&handle_hash)
+                .await
+                .map_err(internal)?;
+            return Err(DeviceLoginPollError::Expired(
+                "The device login expired before it was approved".into(),
+            ));
+        }
+        Ok(DevicePoll::Complete(identity)) => identity,
+        // The IdP could not be reached, or Beam is misconfigured against it:
+        // nothing about this flow is wrong, so it is kept for the next poll.
+        Err(
+            e @ (OidcError::Discovery(_)
+            | OidcError::Exchange(_)
+            | OidcError::DeviceFlowUnsupported),
+        ) => {
+            return Err(DeviceLoginPollError::OidcUnavailable(format!(
+                "OIDC login unavailable: {e}"
+            )));
+        }
+        // An answer that did not verify will not verify on a retry.
+        Err(
+            e @ (OidcError::MissingIdToken
+            | OidcError::ClaimsVerification(_)
+            | OidcError::NonceMismatch),
+        ) => {
+            device_auth_store
+                .consume(&handle_hash)
+                .await
+                .map_err(internal)?;
+            return Err(DeviceLoginPollError::LoginFailed(format!(
+                "Login failed: {e}"
+            )));
+        }
+    };
+
+    // Ending the flow before minting is what makes an approval single-use: of
+    // two polls that both saw it approved, only the one that removes the row
+    // signs in.
+    if device_auth_store
+        .consume(&handle_hash)
+        .await
+        .map_err(internal)?
+        .is_none()
+    {
+        return Err(DeviceLoginPollError::Invalid(
+            "Unknown or already-finished device login".into(),
+        ));
+    }
+
+    let MintedSession {
+        token,
+        user,
+        absolute_ttl_secs,
+    } = complete_login(
+        &identity,
+        &headers.context(),
+        user_repo.as_ref(),
+        session_store.as_ref(),
+        &config,
+    )
+    .await
+    .map_err(|e| match e {
+        e @ LoginError::AccountDisabled => DeviceLoginPollError::AccountDisabled(e.to_string()),
+        LoginError::Internal(message) => DeviceLoginPollError::Internal(message),
+    })?;
+
+    Ok(DeviceLoginPollReply::SignedIn(DeviceLoginComplete {
+        session_token: token,
+        session_expires_in_secs: absolute_ttl_secs,
+        user: me_from(user),
+    }))
+}
+
 /// Returns the currently authenticated user (via the `beam_session` cookie).
 #[kynos::get("/me", tag = Auth, operation_id = "getCurrentUser")]
 pub async fn oidc_me(
@@ -624,13 +959,7 @@ pub async fn oidc_me(
         .map_err(|e| CurrentUserError::Internal(e.to_string()))?
         .ok_or_else(|| CurrentUserError::AccountRemoved("User no longer exists".into()))?;
 
-    Ok(Json(MeResponse {
-        id: user.id.to_string(),
-        email: user.email,
-        is_admin: user.is_admin,
-        display_name: user.display_name,
-        avatar_url: user.avatar_url,
-    }))
+    Ok(Json(me_from(user)))
 }
 
 /// Logs out the current session (deletes it and clears the cookie).
@@ -785,6 +1114,10 @@ impl kynos::response::Responses for SessionRevoked {
 mod auth_tests;
 
 #[cfg(test)]
+#[path = "device_login_tests.rs"]
+mod device_login_tests;
+
+#[cfg(test)]
 mod helper_tests {
     use super::*;
 
@@ -809,37 +1142,5 @@ mod helper_tests {
             "/"
         );
         assert_eq!(sanitize_redirect_path(None), "/");
-    }
-
-    #[test]
-    fn the_forwarded_chain_yields_its_first_entry() {
-        assert_eq!(
-            client_ip(Some("203.0.113.7, 70.41.3.18"), Some("10.0.0.1")),
-            "203.0.113.7"
-        );
-    }
-
-    #[test]
-    fn the_real_ip_header_is_the_fallback() {
-        assert_eq!(client_ip(None, Some("10.0.0.1")), "10.0.0.1");
-        assert_eq!(client_ip(None, None), "unknown");
-    }
-
-    #[test]
-    fn a_name_claim_wins_over_the_email_local_part() {
-        assert_eq!(
-            derive_display_name(Some("Ada Lovelace"), Some("ada@example.com"), "sub"),
-            "Ada Lovelace"
-        );
-    }
-
-    #[test]
-    fn an_absent_name_falls_back_to_the_email_local_part_then_the_subject() {
-        assert_eq!(
-            derive_display_name(None, Some("ada@example.com"), "sub"),
-            "ada"
-        );
-        assert_eq!(derive_display_name(Some(""), None, "sub"), "user-sub");
-        assert_eq!(derive_display_name(None, None, "sub"), "user-sub");
     }
 }

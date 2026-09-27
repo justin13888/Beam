@@ -6,6 +6,7 @@ pub mod admin_claim;
 pub mod contract;
 pub mod device_auth_store;
 pub mod hex;
+pub mod login;
 pub mod models;
 pub mod oidc;
 pub mod oidc_config;

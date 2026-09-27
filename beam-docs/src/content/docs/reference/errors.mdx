@@ -204,8 +204,8 @@ and naming which half of a CSRF check failed tells an attacker more than it tell
 
 ### login-failed
 
-**400.** From `/v1/auth/callback`. The identity provider returned an error, or the token exchange
-did not verify.
+**400.** From `/v1/auth/callback` or `/v1/auth/device/token`. The identity provider returned an
+error, or the token exchange did not verify. On a device login the flow ends with it.
 
 **What to do.** Read the server log for the provider's own message. A nonce mismatch here usually
 means two sign-ins raced in the same browser.
@@ -218,11 +218,45 @@ means two sign-ins raced in the same browser.
 
 ### oidc-unavailable
 
-**503.** From `/v1/auth/login`. Beam could not start a sign-in flow.
+**503.** From `/v1/auth/login`, `/v1/auth/device` or `/v1/auth/device/token`. Beam could not start
+a sign-in flow, or could not reach the identity provider to finish one.
 
 **What to do.** Beam needs `BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID` and `BEAM_OIDC_CLIENT_SECRET`
 **all three** set, and must be able to reach the issuer's `.well-known/openid-configuration`. This
-is a 503 rather than a 500 because the server is working and the identity provider is not.
+is a 503 rather than a 500 because the server is working and the identity provider is not. A device
+login that meets it mid-flow is kept: poll again after the interval.
+
+### device-login-unsupported
+
+**501.** From `/v1/auth/device`. The identity provider does not offer the OAuth 2.0 device
+authorization grant — its discovery document names no `device_authorization_endpoint` — so this
+server can sign in browsers only.
+
+**What to do.** Apps: fall back to the in-app browser sign-in; do not retry. Operators: enable the
+device grant at your identity provider (see [Identity and access](/operate/identity-and-access/))
+and restart Beam, which reads the discovery document at startup.
+
+### device-login-invalid
+
+**400.** From `/v1/auth/device/token`. No open device login has this handle: it was never issued,
+or the flow already ended — signed in, denied, or expired.
+
+**What to do.** Start a new device login. Polling after a sign-in completed is the usual cause: a
+handle is good for exactly one session.
+
+### device-login-denied
+
+**403.** From `/v1/auth/device/token`. The user refused the sign-in at the identity provider. The
+flow has ended.
+
+**What to do.** Start again if the refusal was a mistake.
+
+### device-login-expired
+
+**410.** From `/v1/auth/device/token`. Nobody approved the sign-in before the code expired — at most
+thirty minutes, less if the identity provider grants less. The flow has ended.
+
+**What to do.** Start a new device login; it shows a new code.
 
 ### account-removed
 
@@ -285,7 +319,8 @@ Carries **`Retry-After`** in seconds, plus `X-RateLimit-Limit`, `-Remaining` and
 
 | Class | Endpoints | Default |
 |---|---|---|
-| Auth | `/v1/auth/login`, `/v1/auth/callback` | 10 per minute |
+| Auth | `/v1/auth/login`, `/v1/auth/callback`, `/v1/auth/device` | 10 per minute |
+| Device poll | `/v1/auth/device/token` | 30 per minute |
 | Search | `/v1/media` (browse and search) | 60 per minute |
 
 The allowance is also the burst: a client starts with a full bucket that refills steadily, so the
@@ -293,8 +328,8 @@ auth default is ten immediately and then one more every six seconds. **Streaming
 deliberately never limited** — a player legitimately issues a burst of range requests, and limiting
 it would break seeking.
 
-**What to do.** Wait for `Retry-After`. Operators: raise `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` or
-`BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`. If every user shares one bucket because they arrive through a
+**What to do.** Wait for `Retry-After`. Operators: raise `BEAM_RATE_LIMIT_AUTH_PER_MINUTE`,
+`BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE` or `BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`. If every user shares one bucket because they arrive through a
 proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only behind a proxy that **overwrites**
 `X-Forwarded-For`, since a proxy that appends lets a client forge the header and evade the limit.
 

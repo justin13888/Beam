@@ -244,6 +244,9 @@ pub(crate) fn make_app_state_full(
         session_store: Arc::new(InMemorySessionStore::default()),
         oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in routing tests")),
         pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
+        device_auth_store: Arc::new(
+            beam_auth::utils::device_auth_store::in_memory::InMemoryDeviceAuthStore::default(),
+        ),
         oidc_config: OidcRuntimeConfig {
             web_url: "http://localhost:5173".to_string(),
             cookie_secure: false,
