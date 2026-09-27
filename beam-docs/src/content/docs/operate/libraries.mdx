@@ -78,6 +78,11 @@ and Beam handles both by **polling** the affected library instead — walking it
   limit on the host — for example `sysctl fs.inotify.max_user_watches=524288`, persisted in
   `/etc/sysctl.d/` — and restart Beam to watch those libraries natively again.
 
+When a library starts being polled — when Beam first watches a network share, or moves a library
+past the watch limit — Beam scans it once, so files added before polling began (such as the new
+season whose folder could not get a watch) are not left waiting for the periodic rescan. A deleted
+library stops being watched or polled within one `BEAM_SCAN_INTERVAL_SECS`.
+
 The admin status endpoint (`GET /v1/admin/status`, field `watcher`) reports, for every library,
 whether it is watched natively, polled (and why), or not watched at all, together with the watch
 limit and whether it has been reached. The periodic rescan (`BEAM_SCAN_INTERVAL_SECS`) remains the

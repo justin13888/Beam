@@ -45,15 +45,26 @@ pub enum WatchError {
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait FsWatcher: Send + Sync + std::fmt::Debug {
-    /// Recursively watch a library's root directory.
-    fn watch_library(&self, library_id: Uuid, root: &Path) -> Result<(), WatchError>;
+    /// Recursively watch a library's root directory, returning how it is
+    /// watched.
+    ///
+    /// A polled library's changes are measured against a snapshot taken
+    /// here, so a change made before this call is never reported; the caller
+    /// reconciles a library that comes back [`WatchMode::Polling`] once. May
+    /// block on a tree walk.
+    fn watch_library(&self, library_id: Uuid, root: &Path) -> Result<WatchMode, WatchError>;
     /// Stop watching a library. Watching an unknown library is a no-op.
     fn unwatch_library(&self, library_id: Uuid) -> Result<(), WatchError>;
     /// Rescan every polled library, first moving any natively watched library
     /// that has since hit the watch limit onto the poller. Called by the
     /// runtime once per poll interval; changes it finds arrive through
     /// [`Self::next_event`] like any other. May block on a tree walk.
-    fn poll_once(&self);
+    ///
+    /// Returns the libraries moved to the poller by this call. Their native
+    /// watch was already missing changes -- that is what the watch limit
+    /// means -- and the poller's snapshot, taken now, includes them, so the
+    /// caller reconciles each one once.
+    fn poll_once(&self) -> Vec<Uuid>;
     /// Await the next event. Returns `None` once the watcher is closed.
     async fn next_event(&self) -> Option<FsEvent>;
 }
@@ -67,6 +78,55 @@ fn translate_event_kind(kind: &notify::EventKind) -> Option<FsEventKind> {
         EventKind::Modify(_) => Some(FsEventKind::Modified),
         EventKind::Remove(_) => Some(FsEventKind::Removed),
         _ => None,
+    }
+}
+
+/// The operations [`NotifyFsWatcher`] needs from its native backend.
+///
+/// A seam only because the two native failures the watcher handles -- no
+/// native watcher at all, and the OS watch limit -- cannot be produced on a
+/// `TempDir` without exhausting the host's own limit. Production uses
+/// [`notify::RecommendedWatcher`] through [`RecommendedNativeWatcherFactory`].
+pub trait NativeBackend: Send {
+    /// Recursively watch `root`.
+    fn watch(&mut self, root: &Path) -> notify::Result<()>;
+    fn unwatch(&mut self, root: &Path) -> notify::Result<()>;
+}
+
+impl NativeBackend for notify::RecommendedWatcher {
+    fn watch(&mut self, root: &Path) -> notify::Result<()> {
+        notify::Watcher::watch(self, root, notify::RecursiveMode::Recursive)
+    }
+
+    fn unwatch(&mut self, root: &Path) -> notify::Result<()> {
+        notify::Watcher::unwatch(self, root)
+    }
+}
+
+/// Where a native backend's results go.
+pub type NotifyHandler = Box<dyn FnMut(notify::Result<notify::Event>) + Send + 'static>;
+
+/// Creates the native backend, or reports that none is available.
+pub trait NativeWatcherFactory: Send + Sync + std::fmt::Debug {
+    fn create(
+        &self,
+        handler: NotifyHandler,
+        config: notify::Config,
+    ) -> notify::Result<Box<dyn NativeBackend>>;
+}
+
+/// The production factory: inotify on Linux, FSEvents on macOS.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RecommendedNativeWatcherFactory;
+
+impl NativeWatcherFactory for RecommendedNativeWatcherFactory {
+    fn create(
+        &self,
+        handler: NotifyHandler,
+        config: notify::Config,
+    ) -> notify::Result<Box<dyn NativeBackend>> {
+        use notify::Watcher as _;
+        Ok(Box::new(notify::RecommendedWatcher::new(handler, config)?))
     }
 }
 
@@ -109,11 +169,14 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The library whose root contains `path`.
+/// The library whose root contains `path`. Registration keeps one entry per
+/// root, so two can only both match when their roots nest -- libraries
+/// registered before overlaps were refused -- and the innermost wins.
 fn library_owning(libraries: &[WatchedLibrary], path: &Path) -> Option<Uuid> {
     libraries
         .iter()
-        .find(|library| path.starts_with(&library.root))
+        .filter(|library| path.starts_with(&library.root))
+        .max_by_key(|library| library.root.components().count())
         .map(|library| library.id)
 }
 
@@ -182,7 +245,7 @@ fn handle_notify_result(result: notify::Result<notify::Event>, shared: &Shared) 
 /// Neither backend follows symbolic links: Beam's library policy is that a
 /// symlink under a root is not part of the library.
 pub struct NotifyFsWatcher {
-    native: Option<Mutex<notify::RecommendedWatcher>>,
+    native: Option<Mutex<Box<dyn NativeBackend>>>,
     poll: Option<Mutex<notify::PollWatcher>>,
     probe: Arc<dyn FilesystemProbe>,
     shared: Arc<Shared>,
@@ -203,8 +266,15 @@ impl NotifyFsWatcher {
     /// Build both backends. Never fails: a backend that cannot be created is
     /// logged and left out, and every library then goes to the other one.
     pub fn new(probe: Arc<dyn FilesystemProbe>, status: Arc<WatchStatus>) -> Self {
-        use notify::Watcher as _;
+        Self::with_native_factory(probe, status, &RecommendedNativeWatcherFactory)
+    }
 
+    /// [`Self::new`] with the native backend built by `native_factory`.
+    pub fn with_native_factory(
+        probe: Arc<dyn FilesystemProbe>,
+        status: Arc<WatchStatus>,
+        native_factory: &dyn NativeWatcherFactory,
+    ) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             libraries: Mutex::new(Vec::new()),
@@ -216,8 +286,10 @@ impl NotifyFsWatcher {
 
         let native = {
             let shared = shared.clone();
-            match notify::RecommendedWatcher::new(
-                move |result: notify::Result<notify::Event>| handle_notify_result(result, &shared),
+            match native_factory.create(
+                Box::new(move |result: notify::Result<notify::Event>| {
+                    handle_notify_result(result, &shared)
+                }),
                 config,
             ) {
                 Ok(watcher) => Some(Mutex::new(watcher)),
@@ -252,15 +324,37 @@ impl NotifyFsWatcher {
         }
     }
 
-    /// Record a library's backend, replacing any earlier registration.
+    /// Record a library's backend, replacing any earlier registration of the
+    /// same library *or of the same root*.
+    ///
+    /// A root registered under another id belongs to a library that has been
+    /// deleted and re-created at the same path: the root is the backend's
+    /// key, so the old entry is superseded rather than kept alongside. Its
+    /// status entry and any queued demotion go with it, and a later
+    /// `unwatch_library` for the old id finds nothing to do -- it must not
+    /// unwatch the root the new library now owns.
     fn register(&self, library_id: Uuid, root: &Path, backend: Backend) {
-        let mut libraries = lock(&self.shared.libraries);
-        libraries.retain(|library| library.id != library_id);
-        libraries.push(WatchedLibrary {
-            id: library_id,
-            root: root.to_path_buf(),
-            backend,
-        });
+        let superseded: Vec<Uuid> = {
+            let mut libraries = lock(&self.shared.libraries);
+            let superseded = libraries
+                .iter()
+                .filter(|library| library.id != library_id && library.root == root)
+                .map(|library| library.id)
+                .collect();
+            libraries.retain(|library| library.id != library_id && library.root != root);
+            libraries.push(WatchedLibrary {
+                id: library_id,
+                root: root.to_path_buf(),
+                backend,
+            });
+            superseded
+        };
+        if !superseded.is_empty() {
+            lock(&self.shared.pending_demotions).retain(|id| !superseded.contains(id));
+            for id in superseded {
+                self.shared.status.remove(id);
+            }
+        }
     }
 
     fn deregister(&self, library_id: Uuid) {
@@ -273,7 +367,7 @@ impl NotifyFsWatcher {
         library_id: Uuid,
         root: &Path,
         reason: PollReason,
-    ) -> Result<(), WatchError> {
+    ) -> Result<WatchMode, WatchError> {
         use notify::Watcher as _;
 
         let Some(poll) = &self.poll else {
@@ -287,51 +381,51 @@ impl NotifyFsWatcher {
             self.deregister(library_id);
             return Err(WatchError::Watch(root.to_path_buf(), e.to_string()));
         }
-        self.shared
-            .status
-            .set_mode(library_id, WatchMode::Polling(reason));
+        let mode = WatchMode::Polling(reason);
+        self.shared.status.set_mode(library_id, mode);
         info!(
             library_id = %library_id,
             root = %root.display(),
             ?reason,
             "polling library for changes"
         );
-        Ok(())
+        Ok(mode)
     }
 
-    /// Move a natively watched library that hit the watch limit to the poller.
-    fn demote(&self, library_id: Uuid) {
-        use notify::Watcher as _;
-
+    /// Move a natively watched library that hit the watch limit to the
+    /// poller. Whether it was moved.
+    fn demote(&self, library_id: Uuid) -> bool {
         let root = lock(&self.shared.libraries)
             .iter()
             .find(|library| library.id == library_id && library.backend == Backend::Native)
             .map(|library| library.root.clone());
         let Some(root) = root else {
             // Unwatched, or already demoted, since it was queued.
-            return;
+            return false;
         };
         if let Some(native) = &self.native {
             // The partial native watch is dropped so it stops consuming
             // watches another library could use. It may already be gone.
             let _ = lock(native).unwatch(&root);
         }
-        if let Err(e) = self.watch_polled(library_id, &root, PollReason::WatchLimitReached) {
-            error!(
-                library_id = %library_id,
-                error = %e,
-                "could not poll a library that hit the watch limit"
-            );
-            self.shared.status.remove(library_id);
+        match self.watch_polled(library_id, &root, PollReason::WatchLimitReached) {
+            Ok(_) => true,
+            Err(e) => {
+                error!(
+                    library_id = %library_id,
+                    error = %e,
+                    "could not poll a library that hit the watch limit"
+                );
+                self.shared.status.remove(library_id);
+                false
+            }
         }
     }
 }
 
 #[async_trait::async_trait]
 impl FsWatcher for NotifyFsWatcher {
-    fn watch_library(&self, library_id: Uuid, root: &Path) -> Result<(), WatchError> {
-        use notify::Watcher as _;
-
+    fn watch_library(&self, library_id: Uuid, root: &Path) -> Result<WatchMode, WatchError> {
         let kind = self.probe.kind(root).unwrap_or_else(|e| {
             // Unknown is treated as local: native watching is what Beam did
             // before it could tell, and the periodic rescan still backs it up.
@@ -350,11 +444,11 @@ impl FsWatcher for NotifyFsWatcher {
                 // Registered first so events raised while the recursive
                 // watch is still being added are attributed.
                 self.register(library_id, root, Backend::Native);
-                let result = lock(native).watch(root, notify::RecursiveMode::Recursive);
+                let result = lock(native).watch(root);
                 match result {
                     Ok(()) => {
                         self.shared.status.set_mode(library_id, WatchMode::Native);
-                        return Ok(());
+                        return Ok(WatchMode::Native);
                     }
                     Err(e) if matches!(e.kind, notify::ErrorKind::MaxFilesWatch) => {
                         warn!(
@@ -400,11 +494,12 @@ impl FsWatcher for NotifyFsWatcher {
         result.map_err(|e| WatchError::Watch(removed.root, e.to_string()))
     }
 
-    fn poll_once(&self) {
+    fn poll_once(&self) -> Vec<Uuid> {
         let demotions = std::mem::take(&mut *lock(&self.shared.pending_demotions));
-        for library_id in demotions {
-            self.demote(library_id);
-        }
+        let demoted: Vec<Uuid> = demotions
+            .into_iter()
+            .filter(|library_id| self.demote(*library_id))
+            .collect();
 
         let any_polled = lock(&self.shared.libraries)
             .iter()
@@ -415,6 +510,7 @@ impl FsWatcher for NotifyFsWatcher {
         {
             warn!("could not start a filesystem poll: {e}");
         }
+        demoted
     }
 
     async fn next_event(&self) -> Option<FsEvent> {
@@ -442,6 +538,10 @@ pub mod in_memory {
         receiver: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FsEvent>>,
         watched: std::sync::Mutex<Vec<Uuid>>,
         polls: std::sync::atomic::AtomicUsize,
+        /// What `watch_library` reports per library; `Native` when absent.
+        modes: std::sync::Mutex<std::collections::HashMap<Uuid, WatchMode>>,
+        /// What the next `poll_once` reports as demoted.
+        demotions: std::sync::Mutex<Vec<Uuid>>,
     }
 
     impl InMemoryFsWatcher {
@@ -452,7 +552,19 @@ pub mod in_memory {
                 receiver: tokio::sync::Mutex::new(receiver),
                 watched: std::sync::Mutex::new(Vec::new()),
                 polls: std::sync::atomic::AtomicUsize::new(0),
+                modes: std::sync::Mutex::new(std::collections::HashMap::new()),
+                demotions: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        /// Make `watch_library` report `mode` for `library_id`.
+        pub fn register_as(&self, library_id: Uuid, mode: WatchMode) {
+            self.modes.lock().unwrap().insert(library_id, mode);
+        }
+
+        /// Make the next `poll_once` report `library_id` as moved to polling.
+        pub fn demote_on_next_poll(&self, library_id: Uuid) {
+            self.demotions.lock().unwrap().push(library_id);
         }
 
         /// Push a synthetic event to the consumer.
@@ -479,9 +591,15 @@ pub mod in_memory {
 
     #[async_trait::async_trait]
     impl FsWatcher for InMemoryFsWatcher {
-        fn watch_library(&self, library_id: Uuid, _root: &Path) -> Result<(), WatchError> {
+        fn watch_library(&self, library_id: Uuid, _root: &Path) -> Result<WatchMode, WatchError> {
             self.watched.lock().unwrap().push(library_id);
-            Ok(())
+            Ok(self
+                .modes
+                .lock()
+                .unwrap()
+                .get(&library_id)
+                .copied()
+                .unwrap_or(WatchMode::Native))
         }
 
         fn unwatch_library(&self, library_id: Uuid) -> Result<(), WatchError> {
@@ -489,12 +607,61 @@ pub mod in_memory {
             Ok(())
         }
 
-        fn poll_once(&self) {
+        fn poll_once(&self) -> Vec<Uuid> {
             self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::mem::take(&mut *self.demotions.lock().unwrap())
         }
 
         async fn next_event(&self) -> Option<FsEvent> {
             self.receiver.lock().await.recv().await
+        }
+    }
+
+    /// A host with no native watcher: creating one fails.
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct UnavailableNativeWatcherFactory;
+
+    impl NativeWatcherFactory for UnavailableNativeWatcherFactory {
+        fn create(
+            &self,
+            _handler: NotifyHandler,
+            _config: notify::Config,
+        ) -> notify::Result<Box<dyn NativeBackend>> {
+            Err(notify::Error::generic("no native watcher on this host"))
+        }
+    }
+
+    /// A native backend already at the OS watch limit: every `watch` fails
+    /// with `MaxFilesWatch`. Records what it was asked to unwatch.
+    #[derive(Debug, Default, Clone)]
+    pub struct WatchLimitNativeWatcherFactory {
+        pub unwatched: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    struct WatchLimitBackend {
+        unwatched: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl NativeBackend for WatchLimitBackend {
+        fn watch(&mut self, root: &Path) -> notify::Result<()> {
+            Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path(root.to_path_buf()))
+        }
+
+        fn unwatch(&mut self, root: &Path) -> notify::Result<()> {
+            self.unwatched.lock().unwrap().push(root.to_path_buf());
+            Ok(())
+        }
+    }
+
+    impl NativeWatcherFactory for WatchLimitNativeWatcherFactory {
+        fn create(
+            &self,
+            _handler: NotifyHandler,
+            _config: notify::Config,
+        ) -> notify::Result<Box<dyn NativeBackend>> {
+            Ok(Box::new(WatchLimitBackend {
+                unwatched: self.unwatched.clone(),
+            }))
         }
     }
 }
@@ -813,7 +980,11 @@ mod tests {
             "the callback only queues the demotion"
         );
 
-        watcher.poll_once();
+        assert_eq!(
+            watcher.poll_once(),
+            vec![lib],
+            "the poll reports the library it moved, so the caller can reconcile it"
+        );
         let snapshot = status.snapshot();
         assert_eq!(
             snapshot.libraries.get(&lib),
@@ -825,10 +996,11 @@ mod tests {
             "a library the error did not name keeps its native watch"
         );
 
-        // The demoted library is now found by polls.
+        // The demoted library is now found by polls, and is not reported as
+        // demoted a second time.
         let file = root.join("movie.mkv");
         std::fs::write(&file, b"x").unwrap();
-        watcher.poll_once();
+        assert!(watcher.poll_once().is_empty());
         assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
     }
 
@@ -872,6 +1044,138 @@ mod tests {
         watcher.poll_once();
 
         assert!(status.snapshot().libraries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_library_recreated_at_the_same_root_takes_over_its_events() {
+        let (_dir, root) = canonical_tempdir();
+        let (watcher, status) = notify_watcher(FilesystemKind::Local);
+        let deleted = Uuid::new_v4();
+        let recreated = Uuid::new_v4();
+        watcher.watch_library(deleted, &root).unwrap();
+
+        // Re-created before the refresh has unwatched the deleted id, then
+        // the refresh catches up.
+        watcher.watch_library(recreated, &root).unwrap();
+        watcher.unwatch_library(deleted).unwrap();
+
+        let libraries = status.snapshot().libraries;
+        assert_eq!(libraries.get(&recreated), Some(&WatchMode::Native));
+        assert!(!libraries.contains_key(&deleted));
+
+        // The late unwatch did not take the root's watch with it, and the
+        // event belongs to the library that exists.
+        let file = root.join("movie.mkv");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(next_event_for(&watcher, &file).await.library_id, recreated);
+    }
+
+    #[test]
+    fn an_event_under_nested_roots_belongs_to_the_innermost() {
+        let outer = Uuid::new_v4();
+        let inner = Uuid::new_v4();
+        let libraries = [
+            WatchedLibrary {
+                id: outer,
+                root: PathBuf::from("/m"),
+                backend: Backend::Native,
+            },
+            WatchedLibrary {
+                id: inner,
+                root: PathBuf::from("/m/movies"),
+                backend: Backend::Native,
+            },
+        ];
+        let cases = [
+            ("/m/movies/a.mkv", Some(inner)),
+            ("/m/movies2/a.mkv", Some(outer)),
+            ("/m/a.mkv", Some(outer)),
+            ("/elsewhere/a.mkv", None),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                library_owning(&libraries, Path::new(path)),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_root_whose_filesystem_cannot_be_probed_is_watched_natively() {
+        use crate::services::filesystem_probe::FailingFilesystemProbe;
+
+        let (_dir, root) = canonical_tempdir();
+        let status = Arc::new(WatchStatus::new());
+        let watcher = NotifyFsWatcher::new(Arc::new(FailingFilesystemProbe), status.clone());
+        let lib = Uuid::new_v4();
+
+        assert_eq!(
+            watcher.watch_library(lib, &root).unwrap(),
+            WatchMode::Native
+        );
+        assert_eq!(
+            status.snapshot().libraries.get(&lib),
+            Some(&WatchMode::Native)
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_native_watcher_every_library_is_polled() {
+        use in_memory::UnavailableNativeWatcherFactory;
+
+        let (_dir, root) = canonical_tempdir();
+        let status = Arc::new(WatchStatus::new());
+        let watcher = NotifyFsWatcher::with_native_factory(
+            Arc::new(FixedFilesystemProbe(FilesystemKind::Local)),
+            status.clone(),
+            &UnavailableNativeWatcherFactory,
+        );
+        let lib = Uuid::new_v4();
+
+        let mode = watcher.watch_library(lib, &root).unwrap();
+        assert_eq!(mode, WatchMode::Polling(PollReason::NativeUnavailable));
+        assert_eq!(status.snapshot().libraries.get(&lib), Some(&mode));
+        assert!(!status.snapshot().limit_reached);
+
+        let file = root.join("movie.mkv");
+        std::fs::write(&file, b"x").unwrap();
+        watcher.poll_once();
+        assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
+    }
+
+    #[tokio::test]
+    async fn hitting_the_watch_limit_while_registering_polls_the_library_instead() {
+        use in_memory::WatchLimitNativeWatcherFactory;
+
+        let (_dir, root) = canonical_tempdir();
+        let status = Arc::new(WatchStatus::new());
+        let factory = WatchLimitNativeWatcherFactory::default();
+        let watcher = NotifyFsWatcher::with_native_factory(
+            Arc::new(FixedFilesystemProbe(FilesystemKind::Local)),
+            status.clone(),
+            &factory,
+        );
+        let lib = Uuid::new_v4();
+
+        let mode = watcher.watch_library(lib, &root).unwrap();
+        assert_eq!(mode, WatchMode::Polling(PollReason::WatchLimitReached));
+        let snapshot = status.snapshot();
+        assert!(snapshot.limit_reached);
+        assert_eq!(snapshot.libraries.get(&lib), Some(&mode));
+        assert_eq!(
+            *factory.unwatched.lock().unwrap(),
+            vec![root.clone()],
+            "the partial native watch is released"
+        );
+
+        let file = root.join("movie.mkv");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(
+            watcher.poll_once().is_empty(),
+            "registered as polled, so no demotion to report"
+        );
+        assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
     }
 
     #[test]

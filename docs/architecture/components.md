@@ -86,7 +86,12 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   `notify::PollWatcher` for roots `filesystem_probe.rs` (`statfs(2)`) classifies as a network
   filesystem and for libraries demoted after hitting the inotify watch limit, polled by the runtime
   on the injected `Clock`; neither backend follows symlinks, and the scan walk does not either —
-  plus `InMemoryFsWatcher` for tests; `watch_status.rs` records each library's watch mode for the
+  plus `InMemoryFsWatcher` for tests. The native backend is built through the narrow
+  `NativeWatcherFactory` seam so "no native watcher" and "watch limit at registration" are
+  testable. `runtime.rs` calls the watcher on the blocking pool, scans a library once when it
+  starts being polled (the poller's first snapshot hides earlier changes), and on each maintenance
+  cycle unwatches libraries that no longer exist; the watcher keeps one registration per root, so a
+  library re-created at a deleted one's root owns its events; `watch_status.rs` records each library's watch mode for the
   admin status); `enrichment/` (queue-driven async worker with retry/backoff and
   candidate matching/scoring); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
   `notification.rs` (the latter two back the admin log and SSE progress events).

@@ -144,10 +144,20 @@ pub mod in_memory {
             Ok(self.0)
         }
     }
+
+    /// Fails for every path, as `statfs` does when it is denied.
+    #[derive(Debug, Clone, Copy)]
+    pub struct FailingFilesystemProbe;
+
+    impl FilesystemProbe for FailingFilesystemProbe {
+        fn kind(&self, _path: &Path) -> io::Result<FilesystemKind> {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-pub use in_memory::FixedFilesystemProbe;
+pub use in_memory::{FailingFilesystemProbe, FixedFilesystemProbe};
 
 #[cfg(test)]
 mod tests {

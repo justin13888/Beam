@@ -84,8 +84,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   library file, so a row whose path has become one is treated as missing (FR-211).
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
-  events, with no configuration switch; the admin status MUST report each library's watch mode and
-  whether the watch limit has been reached.
+  events, with no configuration switch, and MUST be scanned once when it starts being polled so
+  changes made before polling began are not missed; a deleted library MUST stop being watched; the
+  admin status MUST report each library's watch mode and whether the watch limit has been reached.
 
 ## FR-3xx — Metadata Enrichment
 

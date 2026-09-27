@@ -22,8 +22,8 @@ use beam_domain::services::{Clock, RealClock};
 
 use crate::services::enrichment::MetadataEnrichmentService;
 use crate::services::filesystem_probe::StatfsFilesystemProbe;
-use crate::services::index::{IndexError, LocalIndexService};
-use crate::services::watch_status::{WatchStatus, read_max_user_watches};
+use crate::services::index::{IndexError, IndexService, LocalIndexService};
+use crate::services::watch_status::{WatchMode, WatchStatus, read_max_user_watches};
 use crate::services::watcher::{FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer};
 
 /// The slice of the indexer the background tasks actually use.
@@ -36,6 +36,11 @@ use crate::services::watcher::{FsEventKind, FsWatcher, NotifyFsWatcher, PathDebo
 pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
     /// Scan every library, returning the number of files added.
     async fn scan_all_libraries(&self) -> Result<u32, IndexError>;
+
+    /// Scan one library, returning the number of files added. Used when a
+    /// library starts being polled: the poller only reports changes made
+    /// after it took its snapshot.
+    async fn scan_library(&self, library_id: Uuid) -> Result<u32, IndexError>;
 
     /// Reconcile one path in response to a filesystem event.
     async fn reconcile_path(
@@ -53,6 +58,10 @@ pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
 impl BackgroundIndexer for LocalIndexService {
     async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
         LocalIndexService::scan_all_libraries(self).await
+    }
+
+    async fn scan_library(&self, library_id: Uuid) -> Result<u32, IndexError> {
+        IndexService::scan_library(self, library_id.to_string()).await
     }
 
     async fn reconcile_path(
@@ -190,6 +199,7 @@ pub fn spawn_background_indexing_with(
     let watch_poller = watcher.clone().map(|watcher| {
         tokio::spawn(run_watch_poller(
             watcher,
+            indexer.clone(),
             clock.clone(),
             Duration::from_secs(config.watch_poll_interval_secs),
         ))
@@ -253,15 +263,46 @@ async fn run_watch_consumer(
     }
 }
 
-/// Poll the watcher's polled libraries once per `interval`.
+/// Poll the watcher's polled libraries once per `interval`, and reconcile
+/// every library the poll moved off its native watch.
 ///
-/// Called directly rather than on a blocking thread: a poll is a message to
-/// the poll watcher's own thread, and only a watch-limit demotion walks a
-/// tree here -- once per library, for the life of the process.
-async fn run_watch_poller(watcher: Arc<dyn FsWatcher>, clock: Arc<dyn Clock>, interval: Duration) {
+/// The poll runs on the blocking pool: a watch-limit demotion walks the
+/// library's tree to take the poller's snapshot, and the watcher's calls into
+/// `notify` wait on its threads.
+async fn run_watch_poller(
+    watcher: Arc<dyn FsWatcher>,
+    indexer: Arc<dyn BackgroundIndexer>,
+    clock: Arc<dyn Clock>,
+    interval: Duration,
+) {
     loop {
         clock.sleep(interval).await;
-        watcher.poll_once();
+        let demoted = {
+            let watcher = watcher.clone();
+            match tokio::task::spawn_blocking(move || watcher.poll_once()).await {
+                Ok(demoted) => demoted,
+                Err(e) => {
+                    error!("Filesystem poll failed: {e}");
+                    continue;
+                }
+            }
+        };
+        for library_id in demoted {
+            reconcile_newly_polled(indexer.as_ref(), library_id).await;
+        }
+    }
+}
+
+/// Scan a library that has just started being polled.
+///
+/// The poller reports only changes made after its snapshot, and the snapshot
+/// is taken when the library is handed to it. Whatever changed before --
+/// for a demoted library, the very directory whose watch hit the limit --
+/// would otherwise wait for the next periodic rescan.
+async fn reconcile_newly_polled(indexer: &dyn BackgroundIndexer, library_id: Uuid) {
+    match indexer.scan_library(library_id).await {
+        Ok(n) => info!(%library_id, "Scanned a newly polled library: {n} file(s) added"),
+        Err(e) => warn!(%library_id, "Failed to scan a newly polled library: {e}"),
     }
 }
 
@@ -276,12 +317,7 @@ async fn run_periodic_maintenance(
     let mut watched: HashSet<Uuid> = HashSet::new();
     loop {
         if let Some(watcher) = &watcher {
-            refresh_watches(
-                watcher.as_ref(),
-                indexer.library_repo().as_ref(),
-                &mut watched,
-            )
-            .await;
+            refresh_watches(watcher, indexer.as_ref(), &mut watched).await;
         }
 
         clock.sleep(interval).await;
@@ -293,33 +329,70 @@ async fn run_periodic_maintenance(
     }
 }
 
-/// Register a recursive watch for every library not already watched.
+/// Bring the watches in line with the libraries that exist: stop watching
+/// every library that has been deleted, then register a recursive watch for
+/// every library not already watched.
+///
+/// This is the backstop for library creation and deletion -- it runs once per
+/// maintenance cycle. Deleted libraries are unwatched first, so a library
+/// re-created at a deleted one's root is registered after the old watch is
+/// gone. A library that comes back polled is scanned once (see
+/// [`reconcile_newly_polled`]).
+///
+/// The watcher calls run on the blocking pool: registering a library walks
+/// its tree, natively or to take the poller's snapshot.
 async fn refresh_watches(
-    watcher: &dyn FsWatcher,
-    library_repo: &dyn LibraryRepository,
+    watcher: &Arc<dyn FsWatcher>,
+    indexer: &dyn BackgroundIndexer,
     watched: &mut HashSet<Uuid>,
 ) {
-    let libraries = match library_repo.find_all().await {
+    let libraries = match indexer.library_repo().find_all().await {
         Ok(libraries) => libraries,
         Err(e) => {
             warn!("Watch refresh failed to list libraries: {e}");
             return;
         }
     };
+
+    let live: HashSet<Uuid> = libraries.iter().map(|library| library.id).collect();
+    let deleted: Vec<Uuid> = watched.difference(&live).copied().collect();
+    for library_id in deleted {
+        // Forgotten whatever the outcome: the watcher drops its registration
+        // before it calls into the backend, so there is nothing to retry.
+        watched.remove(&library_id);
+        let watcher = watcher.clone();
+        match tokio::task::spawn_blocking(move || watcher.unwatch_library(library_id)).await {
+            Ok(Ok(())) => info!(%library_id, "Stopped watching a deleted library"),
+            Ok(Err(e)) => warn!(%library_id, "Failed to unwatch a deleted library: {e}"),
+            Err(e) => error!(%library_id, "Unwatching a deleted library failed: {e}"),
+        }
+    }
+
     for library in libraries {
-        if watched.insert(library.id) {
-            match watcher.watch_library(library.id, &library.root_path) {
-                Ok(()) => info!(
-                    "Watching library '{}' at {}",
+        if watched.contains(&library.id) {
+            continue;
+        }
+        let registration = {
+            let watcher = watcher.clone();
+            let library_id = library.id;
+            let root = library.root_path.clone();
+            tokio::task::spawn_blocking(move || watcher.watch_library(library_id, &root)).await
+        };
+        match registration {
+            Ok(Ok(mode)) => {
+                watched.insert(library.id);
+                info!(
+                    "Watching library '{}' at {} ({mode:?})",
                     library.name,
                     library.root_path.display()
-                ),
-                Err(e) => {
-                    warn!("Failed to watch library '{}': {e}", library.name);
-                    // Allow a retry on the next maintenance cycle.
-                    watched.remove(&library.id);
+                );
+                if matches!(mode, WatchMode::Polling(_)) {
+                    reconcile_newly_polled(indexer, library.id).await;
                 }
             }
+            // Not recorded as watched, so the next maintenance cycle retries.
+            Ok(Err(e)) => warn!("Failed to watch library '{}': {e}", library.name),
+            Err(e) => error!("Watching library '{}' failed: {e}", library.name),
         }
     }
 }

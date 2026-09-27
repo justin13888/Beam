@@ -23,6 +23,8 @@ use crate::services::watcher::{FsEvent, InMemoryFsWatcher};
 #[derive(Debug, Default)]
 struct RecordingIndexer {
     scans: AtomicU32,
+    /// Every single-library scan, in order.
+    library_scans: std::sync::Mutex<Vec<Uuid>>,
     reconciled: std::sync::Mutex<Vec<(Uuid, PathBuf, FsEventKind)>>,
     library_repo: Arc<InMemoryLibraryRepository>,
     /// When set, `scan_all_libraries` fails -- the loop must survive it.
@@ -37,6 +39,26 @@ impl RecordingIndexer {
     fn reconciled(&self) -> Vec<(Uuid, PathBuf, FsEventKind)> {
         self.reconciled.lock().unwrap().clone()
     }
+
+    fn library_scans(&self) -> Vec<Uuid> {
+        self.library_scans.lock().unwrap().clone()
+    }
+
+    fn store(&self, library: &Library) {
+        self.library_repo
+            .libraries
+            .lock()
+            .unwrap()
+            .insert(library.id, library.clone());
+    }
+
+    fn delete(&self, library_id: Uuid) {
+        self.library_repo
+            .libraries
+            .lock()
+            .unwrap()
+            .remove(&library_id);
+    }
 }
 
 #[async_trait::async_trait]
@@ -46,6 +68,11 @@ impl BackgroundIndexer for RecordingIndexer {
         if self.fail_scans {
             return Err(IndexError::LibraryNotFound);
         }
+        Ok(0)
+    }
+
+    async fn scan_library(&self, library_id: Uuid) -> Result<u32, IndexError> {
+        self.library_scans.lock().unwrap().push(library_id);
         Ok(0)
     }
 
@@ -76,10 +103,15 @@ fn config(scan_interval_secs: u64, watch_debounce_ms: u64) -> BackgroundIndexing
     }
 }
 
-/// Yield until `condition` holds, or fail. Cooperative only -- the clock never
+/// Yield until `condition` holds, or fail after a generous deadline.
+///
+/// The watcher calls run on the blocking pool, on another thread, so a fixed
+/// number of yields is not enough to be sure one has finished; the deadline
+/// only bounds a hang and never orders anything. The `TestClock` never
 /// advances on its own, so this cannot mask a missing `advance`.
 async fn until(label: &str, mut condition: impl FnMut() -> bool) {
-    for _ in 0..10_000 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
         if condition() {
             return;
         }
@@ -200,8 +232,8 @@ async fn libraries_are_watched_once_each_and_new_ones_picked_up_next_cycle() {
         .lock()
         .unwrap()
         .insert(second.id, second.clone());
-    until("the maintenance loop to sleep", || {
-        clock.waiter_count() >= 1
+    until("the maintenance loop and the poller to sleep", || {
+        clock.waiter_count() == 2
     })
     .await;
     clock.advance(Duration::from_secs(60));
@@ -302,6 +334,170 @@ async fn events_for_different_paths_in_one_burst_each_reconcile() {
         ],
         "coalescing is per path, not per burst"
     );
+
+    tasks.abort();
+}
+
+// ── Watch lifecycle and newly polled libraries (issue #186) ─────────────────
+
+#[tokio::test]
+async fn deleted_libraries_are_unwatched_on_the_next_cycle() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let kept = library("kept", "/videos/kept");
+    let deleted = library("deleted", "/videos/deleted");
+    indexer.store(&kept);
+    indexer.store(&deleted);
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(60, 2000),
+    );
+    until("both libraries to be watched", || {
+        let mut watched = watcher.watched_libraries();
+        watched.sort();
+        let mut expected = vec![kept.id, deleted.id];
+        expected.sort();
+        watched == expected
+    })
+    .await;
+
+    indexer.delete(deleted.id);
+    until("the maintenance loop and the poller to sleep", || {
+        clock.waiter_count() == 2
+    })
+    .await;
+    clock.advance(Duration::from_secs(60));
+
+    until("the deleted library to be unwatched", || {
+        watcher.watched_libraries() == vec![kept.id]
+    })
+    .await;
+
+    tasks.abort();
+}
+
+#[tokio::test]
+async fn a_library_recreated_at_a_deleted_ones_root_is_watched_under_its_new_id() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let original = library("Movies", "/videos/movies");
+    indexer.store(&original);
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(60, 2000),
+    );
+    until("the original to be watched", || {
+        watcher.watched_libraries() == vec![original.id]
+    })
+    .await;
+
+    // Deleted and registered again at the same path between two cycles.
+    indexer.delete(original.id);
+    let recreated = library("Movies", "/videos/movies");
+    indexer.store(&recreated);
+    until("the maintenance loop and the poller to sleep", || {
+        clock.waiter_count() == 2
+    })
+    .await;
+    clock.advance(Duration::from_secs(60));
+
+    until("only the re-created library to be watched", || {
+        watcher.watched_libraries() == vec![recreated.id]
+    })
+    .await;
+
+    tasks.abort();
+}
+
+#[tokio::test]
+async fn a_library_first_registered_as_polled_is_scanned_once() {
+    use crate::services::watch_status::PollReason;
+
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let native = library("local", "/videos/local");
+    let polled = library("share", "/mnt/share");
+    indexer.store(&native);
+    indexer.store(&polled);
+    watcher.register_as(polled.id, WatchMode::Polling(PollReason::NetworkFilesystem));
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(60, 2000),
+    );
+    until("the polled library's scan", || {
+        indexer.library_scans() == vec![polled.id]
+    })
+    .await;
+    until("the maintenance loop and the poller to sleep", || {
+        clock.waiter_count() == 2
+    })
+    .await;
+
+    // A later cycle registers nothing new, so nothing is scanned again.
+    clock.advance(Duration::from_secs(60));
+    until("the periodic rescan", || indexer.scan_count() == 2).await;
+    until("the maintenance loop to re-park", || {
+        clock.waiter_count() == 2
+    })
+    .await;
+    assert_eq!(
+        indexer.library_scans(),
+        vec![polled.id],
+        "only the polled library, and only once"
+    );
+
+    tasks.abort();
+}
+
+#[tokio::test]
+async fn a_library_the_poll_moves_to_polling_is_scanned_once() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let demoted = library("big", "/videos/big");
+    indexer.store(&demoted);
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    until("the library to be watched", || {
+        watcher.watched_libraries() == vec![demoted.id]
+    })
+    .await;
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    assert!(
+        indexer.library_scans().is_empty(),
+        "a native watch is not scanned"
+    );
+
+    watcher.demote_on_next_poll(demoted.id);
+    clock.advance(Duration::from_secs(300));
+    until("the demoted library's scan", || {
+        indexer.library_scans() == vec![demoted.id]
+    })
+    .await;
+
+    // The next poll demotes nothing, and scans nothing.
+    until("the poller to re-park", || clock.waiter_count() == 2).await;
+    clock.advance(Duration::from_secs(300));
+    until("the second poll", || watcher.poll_count() == 2).await;
+    until("the poller to re-park", || clock.waiter_count() == 2).await;
+    assert_eq!(indexer.library_scans(), vec![demoted.id]);
 
     tasks.abort();
 }
@@ -427,6 +623,82 @@ mod local_index_service_adapter {
             )
             .await
             .expect("an event for a deleted library is ignored, not an error");
+    }
+
+    /// Files that appeared while a library's native watch was already past
+    /// the watch limit -- the new season whose directory could not get a
+    /// watch -- are in the poller's first snapshot, so no poll will ever
+    /// report them. The demotion itself must bring them into the index.
+    #[tokio::test]
+    async fn files_created_before_a_demotion_are_indexed_after_it() {
+        use beam_domain::repositories::FileRepository;
+
+        let temp = tempfile::tempdir().unwrap();
+        let library_repo = Arc::new(InMemoryLibraryRepository::default());
+        let library = library_repo
+            .create(CreateLibrary {
+                name: "Shows".to_string(),
+                description: None,
+                root_path: temp.path().to_path_buf(),
+            })
+            .await
+            .unwrap();
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(LocalIndexService::new(
+            library_repo,
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(LocalHashService::new(HashConfig::default())),
+            Arc::new(LocalMediaInfoService::default()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        ));
+        let watcher = Arc::new(InMemoryFsWatcher::new());
+        let clock = Arc::new(TestClock::new());
+
+        let tasks = spawn_background_indexing_with(
+            indexer,
+            Some(watcher.clone()),
+            clock.clone(),
+            config(3600, 2000),
+        );
+        tasks.startup_scan.await.unwrap();
+        until("the library to be watched", || {
+            watcher.watched_libraries() == vec![library.id]
+        })
+        .await;
+        until("both loops to sleep", || clock.waiter_count() == 2).await;
+
+        // Created while the native watch could not see it.
+        let season = temp.path().join("Show").join("Season 2");
+        std::fs::create_dir_all(&season).unwrap();
+        let episode = season.join("Show.S02E01.mkv");
+        std::fs::write(&episode, b"not really an episode").unwrap();
+
+        watcher.demote_on_next_poll(library.id);
+        clock.advance(Duration::from_secs(300));
+
+        let path = episode.to_string_lossy().to_string();
+        // Bounded like `until`; the scan runs on the poller task.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut indexed = false;
+        while std::time::Instant::now() < deadline {
+            if file_repo.find_by_path(&path).await.unwrap().is_some() {
+                indexed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(indexed, "the file created before the demotion was indexed");
+        tasks.periodic_maintenance.abort();
+        if let Some(handle) = &tasks.watch_poller {
+            handle.abort();
+        }
+        if let Some(handle) = &tasks.watch_consumer {
+            handle.abort();
+        }
     }
 
     #[tokio::test]
