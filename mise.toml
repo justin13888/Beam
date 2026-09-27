@@ -73,6 +73,11 @@ ktlint = "1.8.0"
 # which is every Linux CI job and every Linux contributor, not just the Apple
 # ones.
 "aqua:yonaskolb/XcodeGen" = { version = "2.46.0", os = ["macos"] }
+# The Helm chart's gates (`helm:lint`, `helm:template`,
+# `check:chart-invariants`). Both publish static binaries for linux and macOS
+# on amd64 and arm64, so neither needs an `os` filter.
+"aqua:helm/helm" = "4.3.0"
+"aqua:yannh/kubeconform" = "0.8.0"
 
 [env]
 # Wrap the git hooks in `mise x` so contributors who have not activated mise in
@@ -1343,6 +1348,194 @@ process.exit(status);
 '''
 
 # ---------------------------------------------------------------------------
+# Helm chart (charts/beam)
+# ---------------------------------------------------------------------------
+#
+# Every task renders the chart once per scenario in charts/beam/ci/, so a
+# scenario added there is under all three gates from the moment it exists.
+
+[tasks."helm:lint"]
+description = "Lint the Helm chart strictly against every CI scenario"
+# `--strict` turns lint warnings into failures, and values.schema.json is
+# checked as part of it, so a scenario the schema rejects fails here.
+run = '''
+set -eu
+for values in charts/beam/ci/*-values.yaml; do
+  echo "helm lint --strict charts/beam -f $values"
+  helm lint --strict charts/beam -f "$values"
+done
+'''
+
+[tasks."helm:template"]
+description = "Render the Helm chart for every CI scenario and validate the manifests against the Kubernetes API schemas"
+# Validated against the oldest Kubernetes the chart declares (Chart.yaml
+# kubeVersion) and a current release, so neither a removed nor a
+# not-yet-available field slips through. `-strict` rejects unknown fields,
+# which is what catches a mis-indented block that helm renders without
+# complaint.
+#
+# kubeconform fetches each schema once from its default registry and caches it
+# under the XDG cache, so only a cold cache needs the network.
+run = '''
+set -eu
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/beam/kubeconform"
+mkdir -p "$cache"
+for kube in 1.29.0 1.37.0; do
+  for values in charts/beam/ci/*-values.yaml; do
+    echo "== $values against Kubernetes $kube"
+    helm template beam charts/beam -f "$values" --kube-version "$kube" \
+      | kubeconform -strict -summary -kubernetes-version "$kube" -cache "$cache"
+  done
+done
+'''
+
+[tasks."check:chart-invariants"]
+description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, and an ingress that exposes only the API"
+# The properties Beam's design depends on that neither the schema nor
+# kubeconform can see, asserted over what the chart actually renders for every
+# scenario in ci/ -- never over the templates' text:
+#
+#   1. The server Deployment has exactly one replica and the Recreate
+#      strategy. The indexer and enrichment worker are not leader-elected, and
+#      rate limits and the admin event stream are in memory (ADR-0018).
+#   2. Every mount under /videos is readOnly, every library the scenario lists
+#      is mounted there, and a persistentVolumeClaim or nfs source behind one
+#      is readOnly too (FR-202) -- the same promise check:compose-invariants
+#      keeps for compose.
+#   3. The /data volume is not also mounted under /videos, and BEAM_VIDEO_DIR
+#      and BEAM_DATA_DIR are the paths the mounts use.
+#   4. Every container has a read-only root filesystem and no privilege
+#      escalation; the server pod runs as non-root.
+#   5. The server's liveness probe is not /v1/health. That route answers 503
+#      while the database is down, so a liveness probe on it turns a database
+#      outage into a restart loop that fixes nothing.
+#   6. An Ingress routes the server only under /v1: never `/` or `/metrics`.
+#   7. The chart refuses to render with its defaults (no database, no
+#      public URL) rather than rendering a server that cannot start.
+#
+# The directory argument points the gate at a copy of the chart; that is how
+# its negative cases are exercised without editing the tracked one.
+usage = 'arg "[dir]" help="Chart directory, holding ci/*-values.yaml" default="charts/beam"'
+run = '''
+set -eu
+chart="$usage_dir"
+out="$(mktemp -d)"
+trap 'rm -rf "$out"' EXIT
+
+status=0
+if helm template beam "$chart" > /dev/null 2>&1; then
+  echo "FAIL  the chart renders with its default values; it must require a database and server.publicUrl"
+  status=1
+else
+  echo "ok    the chart refuses to render with its default values"
+fi
+
+for values in "$chart"/ci/*-values.yaml; do
+  name="$(basename "$values" .yaml)"
+  helm template beam "$chart" -f "$values" > "$out/$name.rendered.yaml"
+  cp "$values" "$out/$name.values.yaml"
+done
+
+bun -e '
+const dir = process.argv[1];
+const scenarios = [...new Bun.Glob("*.rendered.yaml").scanSync(dir)].map((f) => f.replace(/\.rendered\.yaml$/, ""));
+
+let status = 0;
+const check = (ok, what) => {
+  console.log(`${ok ? "ok   " : "FAIL "} ${what}`);
+  if (!ok) status = 1;
+};
+
+check(scenarios.length > 0, "at least one scenario in ci/");
+for (const scenario of scenarios.sort()) {
+  const values = Bun.YAML.parse(await Bun.file(`${dir}/${scenario}.values.yaml`).text()) ?? {};
+  const rendered = [Bun.YAML.parse(await Bun.file(`${dir}/${scenario}.rendered.yaml`).text())]
+    .flat()
+    .filter((doc) => doc && typeof doc === "object");
+  const tag = `[${scenario}]`;
+  const component = (doc) => doc.metadata?.labels?.["app.kubernetes.io/component"];
+
+  // 1.
+  const servers = rendered.filter((d) => d.kind === "Deployment" && component(d) === "server");
+  check(servers.length === 1, `${tag} exactly one server Deployment (found ${servers.length})`);
+  const server = servers[0];
+  if (!server) continue;
+  check(server.spec?.replicas === 1, `${tag} server replicas is 1 (got ${JSON.stringify(server.spec?.replicas)})`);
+  check(server.spec?.strategy?.type === "Recreate", `${tag} server strategy is Recreate (got ${JSON.stringify(server.spec?.strategy?.type)})`);
+  const statefulSets = rendered.filter((d) => d.kind === "StatefulSet" || d.kind === "HorizontalPodAutoscaler");
+  check(statefulSets.length === 0, `${tag} no StatefulSet or HorizontalPodAutoscaler scales the server`);
+
+  const pod = server.spec?.template?.spec ?? {};
+  const volumes = new Map((pod.volumes ?? []).map((v) => [v.name, v]));
+  const main = (pod.containers ?? []).find((c) => c.name === "server");
+  check(main !== undefined, `${tag} the server Deployment has a container named server`);
+  if (!main) continue;
+
+  // 2.
+  const mounts = main.volumeMounts ?? [];
+  const libraryMounts = mounts.filter((m) => m.mountPath === "/videos" || m.mountPath.startsWith("/videos/"));
+  for (const m of libraryMounts) {
+    check(m.readOnly === true, `${tag} ${m.mountPath} is mounted readOnly`);
+    const source = volumes.get(m.name) ?? {};
+    for (const kind of ["persistentVolumeClaim", "nfs"])
+      if (source[kind] !== undefined)
+        check(source[kind].readOnly === true, `${tag} ${kind} volume ${m.name} behind ${m.mountPath} is readOnly`);
+  }
+  for (const library of values.libraries ?? [])
+    check(
+      libraryMounts.some((m) => m.mountPath === `/videos/${library.name}`),
+      `${tag} library ${library.name} is mounted at /videos/${library.name}`,
+    );
+
+  // 3.
+  const env = new Map((main.env ?? []).map((e) => [e.name, e.value]));
+  check(env.get("BEAM_VIDEO_DIR") === "/videos", `${tag} BEAM_VIDEO_DIR is /videos`);
+  check(env.get("BEAM_DATA_DIR") === "/data", `${tag} BEAM_DATA_DIR is /data`);
+  const dataMount = mounts.find((m) => m.mountPath === "/data");
+  check(dataMount !== undefined, `${tag} a volume is mounted at /data`);
+  if (dataMount)
+    check(
+      !libraryMounts.some((m) => m.name === dataMount.name),
+      `${tag} the /data volume (${dataMount.name}) is not also mounted under /videos`,
+    );
+
+  // 4.
+  check(pod.securityContext?.runAsNonRoot === true, `${tag} the server pod runs as non-root`);
+  for (const d of rendered.filter((d) => d.kind === "Deployment"))
+    for (const c of d.spec?.template?.spec?.containers ?? []) {
+      check(c.securityContext?.readOnlyRootFilesystem === true, `${tag} ${d.metadata.name}/${c.name} has a read-only root filesystem`);
+      check(c.securityContext?.allowPrivilegeEscalation === false, `${tag} ${d.metadata.name}/${c.name} cannot escalate privileges`);
+    }
+
+  // 5.
+  const liveness = main.livenessProbe;
+  check(liveness !== undefined, `${tag} the server has a liveness probe`);
+  check(
+    !String(liveness?.httpGet?.path ?? "").includes("/health"),
+    `${tag} the server liveness probe does not depend on the database (${JSON.stringify(liveness?.httpGet?.path ?? "tcpSocket")})`,
+  );
+
+  // 6.
+  const serverServices = new Set(
+    rendered.filter((d) => d.kind === "Service" && component(d) === "server").map((d) => d.metadata.name),
+  );
+  for (const ingress of rendered.filter((d) => d.kind === "Ingress"))
+    for (const rule of ingress.spec?.rules ?? [])
+      for (const p of rule.http?.paths ?? []) {
+        if (!serverServices.has(p.backend?.service?.name)) continue;
+        check(
+          p.path === "/v1" || p.path?.startsWith("/v1/"),
+          `${tag} ingress ${ingress.metadata.name} routes the server only under /v1 (path ${JSON.stringify(p.path)})`,
+        );
+      }
+}
+process.exit(status);
+' "$out" || status=1
+
+exit "$status"
+'''
+
+# ---------------------------------------------------------------------------
 # Aggregate
 # ---------------------------------------------------------------------------
 
@@ -1813,6 +2006,9 @@ depends = [
     "check:ffmpeg-version",
     "check:mutants-skip-fakes",
     "check:compose-invariants",
+    "helm:lint",
+    "helm:template",
+    "check:chart-invariants",
     "check:hook-git-env",
     "codegen:openapi:check",
     "ts:check",
