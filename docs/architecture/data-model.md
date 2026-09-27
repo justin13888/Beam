@@ -160,8 +160,8 @@ reclassifies those files onto the correctly keyed show (see `classifier_version`
 the emptied husk is retired below. The identity backfill never keys such a husk — a show every one
 of whose files the old parent-folder rule names after a season folder (with no file row, one whose
 stored title keys to a season-folder name) — since holding its files' key, the husk would capture
-the series' files instead. Husks are recognised by their files or stored key, never by the display
-title, which enrichment may have replaced. The year is part of the key, so a remake is a separate title.
+the series' files instead. A husk with a file row or a stored key is recognised by those, never by
+the display title, which enrichment may have replaced. The year is part of the key, so a remake is a separate title.
 
 **Find-or-create** is one `INSERT ... ON CONFLICT (identity_key) DO NOTHING` followed by a read by
 key, against the unique index `idx_movies_identity_key` / `idx_shows_identity_key`. There is no
