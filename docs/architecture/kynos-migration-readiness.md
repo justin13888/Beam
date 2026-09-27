@@ -54,12 +54,10 @@ listener and no initialized service. Authentication is declared by taking `Sessi
 `AdminAuth` in a handler signature, so enforcing it and documenting it are one act. The `openapi32`,
 `server`, `docs` and `test-util` features are selected individually in `Cargo.toml`.
 
-One deviation, and it is Kynos's: `Router::describe` unions the router's and the group's tag scopes
-and never reads an endpoint's own tag, so a route-level `tag = ...` is accepted by the macro and
-silently dropped — every tag vanished from the document the first time the port ran. The tags are
-declared on group scopes, where Kynos does read them, and the bug is filed upstream (getkono/kynos#94). The route
-attributes keep theirs as the statement of intent. Per AGENTS.md this is not a workaround: it is a
-different supported API, not a post-processed document.
+Kynos 0.1 accepted a route-level `tag = ...` and silently dropped it (getkono/kynos#94), so the
+port first declared every tag on a group scope instead. Kynos 0.2 applies the route's own tag and
+registers its metadata, so `/v1` is now mounted flat and a `Group` exists only where operations
+share an interceptor.
 
 The one thing that did *not* survive byte-for-byte is naming. Operation IDs are now camelCase
 (`getAdminEvents`, not `beam_server.routes.admin.get_admin_events`) and schema keys are bare type
