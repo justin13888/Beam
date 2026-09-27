@@ -121,6 +121,27 @@ again. If you really did remove every video on purpose, delete the library inste
 symlinks and `..` before deciding, so a path that *looks* contained can still fail this — which is
 the point.
 
+### library-path-overlaps-library
+
+**409.** The root is the same directory as an existing library's root, lies inside one, or contains
+one. Registering it would index the same files twice, as two libraries with two sets of rows, so the
+request conflicts with a library that already exists. The comparison is by whole path components
+after symlinks and `..` are resolved: `/videos/movies` overlaps `/videos/movies/4k` but not
+`/videos/movies2`. The `detail` names neither path; the server log does.
+
+**What to do.** Register a directory that is disjoint from every existing library, or delete the
+library it overlaps first — for example, replace `/videos/movies` and `/videos/movies/4k` with one
+library at `/videos/movies`.
+
+### library-path-overlaps-data-dir
+
+**400.** The root is the server's data directory (`BEAM_DATA_DIR`), lies inside it, or contains it.
+The data directory holds Beam's own state, which it writes to — a library must be read-only to Beam,
+and indexing Beam's artwork cache as media is never what was meant. The `detail` names neither path.
+
+**What to do.** Keep `BEAM_DATA_DIR` outside every library root. With the Compose file, `/data` and
+`/videos` are separate mounts, so this only arises when one is configured inside the other.
+
 ### user-not-found
 
 **404.** No user has this id.

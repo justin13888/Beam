@@ -1210,11 +1210,11 @@ git clone -q "$tmp/src" "$tmp/clone"
 '''
 
 [tasks."check:compose-invariants"]
-description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, and lets dev admin work"
-# Four properties the dev stack depends on, none of which any other gate sees.
+description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, and mounts libraries read-only"
+# Five properties the dev stack depends on, none of which any other gate sees.
 # `dev:verify-oidc` asserts the first two, but it needs a container runtime and
 # so sits outside `ci` (NFR-201) -- which means nothing runs them automatically.
-# These four are pure configuration, hermetic, and belong here:
+# These five are pure configuration, hermetic, and belong here:
 #
 #   1. `dex` stays behind the `dev-idp` profile, so a bare `compose up` is the
 #      production shape and starts no IdP (FR-110, NFR-406).
@@ -1233,6 +1233,12 @@ description = "Assert the compose topology keeps the dev IdP opt-in, declares it
 #      variable. Dex puts `groups` in the ID token only when the scope is asked
 #      for, so dropping it leaves every dev user a silent non-admin (#195) --
 #      and `dev:up` runs nowhere automatically, so only this gate would notice.
+#   5. Every volume that mounts the media library (its source or target names
+#      HOST_VIDEO_DIR or BEAM_VIDEO_DIR) is read-only, and at least one exists.
+#      FR-202 promises Beam never writes under a library root; `:ro` makes that
+#      a property of the container, and the docs say the Compose file ships it.
+#      The short form is matched on its trailing `:ro` option rather than split
+#      on `:`, because `${VAR:-default}` puts colons inside the source itself.
 #
 # The files are the ones compose.yaml `include`s, read from there rather than
 # restated, so a compose file is under these checks from the moment it is
@@ -1313,6 +1319,24 @@ if (devUp.BEAM_OIDC_ADMIN_CLAIM === "groups") {
   );
   check(forwards, "a compose service forwards BEAM_OIDC_SCOPES");
 }
+
+// Property 5. A volume is a short-form string or a long-form map.
+const libraryVar = /\b(HOST_VIDEO_DIR|BEAM_VIDEO_DIR)\b/;
+let libraryMounts = 0;
+for (const [f, doc] of docs)
+  for (const [name, svc] of Object.entries(doc.services ?? {}))
+    for (const vol of svc?.volumes ?? []) {
+      if (typeof vol === "string") {
+        if (!libraryVar.test(vol)) continue;
+        libraryMounts += 1;
+        check(/:ro(,[^:]*)?$/.test(vol), `${f}: service ${name} mounts the library read-only (${vol})`);
+      } else {
+        if (!libraryVar.test(`${vol?.source ?? ""} ${vol?.target ?? ""}`)) continue;
+        libraryMounts += 1;
+        check(vol.read_only === true, `${f}: service ${name} mounts the library read-only (long form, target ${vol.target})`);
+      }
+    }
+check(libraryMounts > 0, "some compose service mounts the media library (HOST_VIDEO_DIR/BEAM_VIDEO_DIR)");
 
 process.exit(status);
 '

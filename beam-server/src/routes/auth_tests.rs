@@ -190,6 +190,7 @@ mod tests {
             pending_auth_store,
             device_auth_store: base.services.device_auth_store.clone(),
             oidc_config: config,
+            watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         };
 
         let state = AppState::new(

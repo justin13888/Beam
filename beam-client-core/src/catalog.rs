@@ -883,6 +883,9 @@ impl AdminStatus {
             recent_scans,
             uptime_secs,
             version,
+            // The watcher block (issue #186) is an operator diagnostic served
+            // through the API; the native apps do not surface it.
+            watcher: _,
         } = status;
         Self {
             version,

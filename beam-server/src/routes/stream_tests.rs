@@ -257,6 +257,7 @@ fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
             session_idle_days: 14,
             session_max_days: 60,
         },
+        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
     };
 
     let config = crate::config::ServerConfig {

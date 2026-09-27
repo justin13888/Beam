@@ -3981,7 +3981,7 @@
             }
           },
           "400": {
-            "description": "Bad Request; Library path not found; Library path is outside the permitted root",
+            "description": "Bad Request; Library path not found; Library path is outside the permitted root; Library path overlaps the data directory",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4032,6 +4032,22 @@
                         }
                       ],
                       "title": "Library path is outside the permitted root"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#library-path-overlaps-data-dir"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Library path overlaps the data directory"
                     }
                   ]
                 }
@@ -4088,6 +4104,28 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Library"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Library path overlaps an existing library",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#library-path-overlaps-library"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -6128,7 +6166,7 @@
         "tags": [
           "admin"
         ],
-        "summary": "Operational snapshot for the admin system-status tab: process uptime and version, entity counts, the metadata-enrichment queue state, and recent library-scan history.",
+        "summary": "Operational snapshot for the admin system-status tab: process uptime and version, entity counts, the metadata-enrichment queue state, recent library-scan history, and how the filesystem watcher observes each library.",
         "operationId": "getAdminStatus",
         "parameters": [
           {
@@ -9904,6 +9942,87 @@
         ],
         "description": "One recent library-scan admin log entry, slimmed to what the system\nstatus tab renders."
       },
+      "LibraryWatchMode": {
+        "type": "string",
+        "enum": [
+          "native",
+          "polling",
+          "unwatched"
+        ],
+        "description": "How a library's changes reach the index between full rescans."
+      },
+      "LibraryPollReason": {
+        "type": "string",
+        "enum": [
+          "network_filesystem",
+          "watch_limit_reached",
+          "native_unavailable"
+        ],
+        "description": "Why a library is polled rather than natively watched."
+      },
+      "LibraryWatch": {
+        "properties": {
+          "library_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/LibraryWatchMode"
+          },
+          "poll_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LibraryPollReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set exactly when `mode` is `polling`."
+          }
+        },
+        "type": "object",
+        "required": [
+          "library_id",
+          "mode"
+        ],
+        "description": "One library's watch state."
+      },
+      "WatcherStatus": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the filesystem watcher runs (`BEAM_WATCH_ENABLED`)."
+          },
+          "watch_limit_reached": {
+            "type": "boolean",
+            "description": "Whether a native watch has hit the OS watch limit since the server\nstarted. The libraries affected are polled; raising the limit\n(`fs.inotify.max_user_watches` on Linux) and restarting watches them\nnatively again."
+          },
+          "watch_limit_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "The Linux per-user inotify watch limit (`fs.inotify.max_user_watches`),\n`null` where it cannot be read."
+          },
+          "libraries": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryWatch"
+            },
+            "type": "array",
+            "description": "Every library, in the order the library list returns them."
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled",
+          "watch_limit_reached",
+          "libraries"
+        ],
+        "description": "The filesystem watcher's state, for the admin system-status tab."
+      },
       "AdminStatusResponse": {
         "properties": {
           "uptime_secs": {
@@ -9928,6 +10047,10 @@
             },
             "type": "array",
             "description": "Most recent `library_scan` admin log entries, newest first."
+          },
+          "watcher": {
+            "$ref": "#/components/schemas/WatcherStatus",
+            "description": "How the filesystem watcher observes each library."
           }
         },
         "type": "object",
@@ -9936,7 +10059,8 @@
           "version",
           "counts",
           "enrichment",
-          "recent_scans"
+          "recent_scans",
+          "watcher"
         ]
       },
       "MeResponse": {

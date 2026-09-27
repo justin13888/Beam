@@ -1,9 +1,11 @@
 pub mod admin_log;
 pub mod enrichment;
+pub mod filesystem_probe;
 pub mod hash;
 pub mod index;
 pub mod media_info;
 pub mod notification;
+pub mod watch_status;
 pub mod watcher;
 
 // The clock seam lives in `beam-domain` (one canonical `Clock` for the whole

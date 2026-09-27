@@ -99,8 +99,8 @@ pub struct ServerConfig {
     #[config(env = "BEAM_MISSING_FILE_GRACE_DAYS", default = 30)]
     pub missing_file_grace_days: u32,
 
-    /// Whether to run the inotify-based filesystem watcher for near-real-time
-    /// index updates. When false, only the startup scan and periodic rescans run.
+    /// Whether to run the filesystem watcher for near-real-time index
+    /// updates. When false, only the startup scan and periodic rescans run.
     #[config(env = "BEAM_WATCH_ENABLED", default = true)]
     pub watch_enabled: bool,
 
@@ -108,6 +108,13 @@ pub struct ServerConfig {
     /// of events for the same path within this window collapse into one.
     #[config(env = "BEAM_WATCH_DEBOUNCE_MS", default = 2000)]
     pub watch_debounce_ms: u64,
+
+    /// Interval between walks of the libraries the watcher polls instead of
+    /// watching natively -- roots on a network filesystem, and libraries past
+    /// the OS watch limit -- in seconds. Each poll walks every such library,
+    /// so lower means fresher and more I/O. Must be at least 1.
+    #[config(env = "BEAM_WATCH_POLL_INTERVAL_SECS", default = 300)]
+    pub watch_poll_interval_secs: u64,
 
     /// Interval between metadata-enrichment sweeps, in seconds. New titles
     /// are also swept immediately when queued by a scan; this is the backstop
@@ -290,6 +297,7 @@ impl fmt::Debug for ServerConfig {
             missing_file_grace_days,
             watch_enabled,
             watch_debounce_ms,
+            watch_poll_interval_secs,
             enrich_interval_secs,
             enrich_batch_size,
             enrich_min_confidence,
@@ -333,6 +341,7 @@ impl fmt::Debug for ServerConfig {
             .field("missing_file_grace_days", missing_file_grace_days)
             .field("watch_enabled", watch_enabled)
             .field("watch_debounce_ms", watch_debounce_ms)
+            .field("watch_poll_interval_secs", watch_poll_interval_secs)
             .field("enrich_interval_secs", enrich_interval_secs)
             .field("enrich_batch_size", enrich_batch_size)
             .field("enrich_min_confidence", enrich_min_confidence)
@@ -573,6 +582,15 @@ impl ServerConfig {
         if self.rate_limit_device_poll_per_minute == 0 {
             return Err(ConfigError::InvalidValue(
                 "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+
+        // Zero would poll in a tight loop, walking every polled library
+        // back to back.
+        if self.watch_poll_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_WATCH_POLL_INTERVAL_SECS".to_string(),
                 "must be at least 1".to_string(),
             ));
         }
@@ -973,6 +991,21 @@ mod tests {
         assert!(
             config.validate_values().is_ok(),
             "1.0 is a valid upper bound"
+        );
+    }
+
+    #[test]
+    fn zero_watch_poll_interval_is_rejected() {
+        let config = ServerConfig {
+            watch_poll_interval_secs: 0,
+            ..config_with_secrets()
+        };
+        let err = config
+            .validate_values()
+            .expect_err("a zero poll interval must be rejected");
+        assert!(
+            matches!(&err, ConfigError::InvalidValue(f, _) if f == "BEAM_WATCH_POLL_INTERVAL_SECS"),
+            "unexpected error: {err}"
         );
     }
 

@@ -18,6 +18,7 @@ use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
+use beam_index::services::watch_status::WatchStatus;
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::{
@@ -27,7 +28,7 @@ use crate::{
         artwork::{ArtworkCache, ArtworkCacheConfig},
         hash::{HashConfig, HashService, LocalHashService},
         health::DependencyProbe,
-        library::{LibraryService, LocalLibraryService, OsPathValidator},
+        library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
         playback::{DbPlaybackService, PlaybackService},
@@ -158,6 +159,10 @@ pub struct AppServices {
     /// In-flight device logins for clients with no browser (ADR-0017).
     pub device_auth_store: Arc<dyn DeviceAuthStore>,
     pub oidc_config: OidcRuntimeConfig,
+    /// How the filesystem watcher observes each library. Written by the
+    /// background indexing runtime (`main` hands it this instance), read by
+    /// the admin status endpoint.
+    pub watch_status: Arc<WatchStatus>,
 }
 
 impl AppServices {
@@ -187,6 +192,20 @@ impl AppServices {
         ));
         let file_repo: Arc<dyn beam_domain::repositories::FileRepository> =
             Arc::new(beam_index::repositories::SqlFileRepository::new(db.clone()));
+
+        // Canonical, because library roots are compared against it component
+        // by component. `main` has already created it, so failing to resolve
+        // it is fatal rather than a check silently skipped.
+        let data_dir = config.data_dir.canonicalize().map_err(|e| {
+            eyre::eyre!(
+                "failed to resolve BEAM_DATA_DIR {}: {e}",
+                config.data_dir.display()
+            )
+        })?;
+        // Before anything writes under the data directory (the artwork cache
+        // below): a data directory inside a library is refused here, because
+        // registration can only refuse the library side of that overlap.
+        audit_existing_roots(library_repo.as_ref(), &data_dir).await?;
         let movie_repo: Arc<dyn beam_domain::repositories::MovieRepository> = Arc::new(
             beam_index::repositories::SqlMovieRepository::new(db.clone()),
         );
@@ -339,6 +358,7 @@ impl AppServices {
                 library_repo.clone(),
                 file_repo.clone(),
                 config.video_dir.clone(),
+                data_dir,
                 notification_service.clone(),
                 index_service.clone() as Arc<dyn IndexService>,
                 Arc::new(OsPathValidator),
@@ -368,6 +388,7 @@ impl AppServices {
             pending_auth_store,
             device_auth_store,
             oidc_config,
+            watch_status: Arc::new(WatchStatus::new()),
         };
 
         Ok((services, index_service, enrichment_service))

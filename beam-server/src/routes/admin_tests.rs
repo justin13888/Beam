@@ -217,6 +217,16 @@ fn make_test_state_with(
     notification: Arc<dyn NotificationService>,
     mock_index: MockIndexService,
 ) -> TestFixture {
+    make_test_state_with_data_dir(notification, mock_index, PathBuf::from("/beam-data"))
+}
+
+/// Like [`make_test_state_with`], with the library service's data directory
+/// chosen by the test.
+fn make_test_state_with_data_dir(
+    notification: Arc<dyn NotificationService>,
+    mock_index: MockIndexService,
+    data_dir: PathBuf,
+) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
 
@@ -235,6 +245,7 @@ fn make_test_state_with(
         library_repo.clone(),
         file_repo.clone(),
         PathBuf::from("/videos"),
+        data_dir,
         notification.clone(),
         Arc::new(mock_index),
         Arc::new(InMemoryPathValidator::success(PathBuf::from(
@@ -277,6 +288,7 @@ fn make_test_state_with(
             session_idle_days: 14,
             session_max_days: 60,
         },
+        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
     };
 
     let config = crate::config::ServerConfig {
@@ -1300,5 +1312,151 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
     assert!(
         !messages.contains(&"server started"),
         "non-scan categories must be filtered out"
+    );
+}
+
+// ── Library root conflicts (issue #186) ─────────────────────────────────────
+
+#[tokio::test]
+async fn registering_a_root_that_overlaps_an_existing_library_is_409_and_changes_nothing() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let create = || {
+        client
+            .post("/v1/admin/libraries")
+            .cookie("beam_session", &token)
+            .json(&CreateLibraryRequest {
+                name: "Movies".to_string(),
+                root_path: "movies".to_string(),
+            })
+            .send()
+    };
+    assert_eq!(create().await.status(), StatusCode::OK);
+
+    // The fixture's validator resolves every request to the same root.
+    let response = create().await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let problem: serde_json::Value = response.json();
+    assert_eq!(
+        problem["type"],
+        "https://beam.justinchung.net/reference/errors/#library-path-overlaps-library"
+    );
+    let detail = problem["detail"].as_str().unwrap_or_default();
+    assert!(
+        !detail.contains('/'),
+        "the detail names no path (NFR-108): {detail:?}"
+    );
+    let listed = client
+        .get("/v1/libraries")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json::<Vec<Library>>();
+    assert_eq!(listed.len(), 1, "the rejected library was not stored");
+}
+
+#[tokio::test]
+async fn registering_a_root_that_holds_the_data_directory_is_400_and_changes_nothing() {
+    let mut mock_index = MockIndexService::new();
+    mock_index.expect_scan_library().never();
+    // The fixture's validator resolves every request to /videos/movies.
+    let fixture = make_test_state_with_data_dir(
+        Arc::new(InMemoryNotificationService::new()),
+        mock_index,
+        PathBuf::from("/videos/movies/.beam"),
+    );
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    let response = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let problem: serde_json::Value = response.json();
+    assert_eq!(
+        problem["type"],
+        "https://beam.justinchung.net/reference/errors/#library-path-overlaps-data-dir"
+    );
+    let detail = problem["detail"].as_str().unwrap_or_default();
+    assert!(
+        !detail.contains('/'),
+        "the detail names no path (NFR-108): {detail:?}"
+    );
+    let listed = client
+        .get("/v1/libraries")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json::<Vec<Library>>();
+    assert!(listed.is_empty(), "the rejected library was not stored");
+}
+
+// ── Watcher status (issue #186) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn the_status_endpoint_reports_how_each_library_is_watched() {
+    use crate::models::{LibraryPollReason, LibraryWatchMode};
+    use beam_index::services::watch_status::{PollReason, WatchMode};
+
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let library: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+    let library_id = uuid::Uuid::parse_str(&library.id).unwrap();
+
+    let get_watcher = || async {
+        client
+            .get("/v1/admin/status")
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .json::<AdminStatusResponse>()
+            .watcher
+    };
+
+    // Nothing has registered a watch yet: the library is unwatched.
+    let watcher = get_watcher().await;
+    assert!(!watcher.enabled);
+    assert_eq!(watcher.libraries.len(), 1);
+    assert_eq!(watcher.libraries[0].library_id, library_id);
+    assert_eq!(watcher.libraries[0].mode, LibraryWatchMode::Unwatched);
+    assert_eq!(watcher.libraries[0].poll_reason, None);
+
+    // What the runtime writes when the library hits the watch limit.
+    let status = &fixture.state.services.watch_status;
+    status.set_enabled(true);
+    status.set_max_user_watches(Some(8192));
+    status.mark_limit_reached();
+    status.set_mode(
+        library_id,
+        WatchMode::Polling(PollReason::WatchLimitReached),
+    );
+
+    let watcher = get_watcher().await;
+    assert!(watcher.enabled);
+    assert!(watcher.watch_limit_reached);
+    assert_eq!(watcher.watch_limit_count, Some(8192));
+    assert_eq!(watcher.libraries[0].mode, LibraryWatchMode::Polling);
+    assert_eq!(
+        watcher.libraries[0].poll_reason,
+        Some(LibraryPollReason::WatchLimitReached)
     );
 }
