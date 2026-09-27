@@ -305,7 +305,7 @@ mod tests {
             .expect("season is created");
         let episode = fixture
             .shows
-            .create_episode(beam_domain::models::CreateEpisode {
+            .find_or_create_episode(beam_domain::models::CreateEpisode {
                 season_id: season.id,
                 episode_number: 1,
                 title: "Good News About Hell".to_string(),

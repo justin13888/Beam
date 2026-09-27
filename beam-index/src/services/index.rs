@@ -369,7 +369,11 @@ impl LocalIndexService {
                 .find_or_create_season(show.id, season_num)
                 .await?;
 
-            // Create episode
+            // Find or create the episode. A second file for the same
+            // (season, episode) -- another resolution, another encode --
+            // attaches to the existing episode as another source rather than
+            // colliding with it; the episode's title and runtime stay those
+            // the first file (or enrichment since) established.
             let episode_title = if parsed.title.is_empty() {
                 file_stem.to_string()
             } else {
@@ -381,7 +385,10 @@ impl LocalIndexService {
                 title: episode_title,
                 runtime: Some(duration),
             };
-            let episode = self.show_repo.create_episode(create_episode).await?;
+            let episode = self
+                .show_repo
+                .find_or_create_episode(create_episode)
+                .await?;
 
             Ok(MediaFileContent::Episode {
                 episode_id: episode.id,
@@ -2030,6 +2037,142 @@ mod tests {
         assert_eq!(season_nums, vec![1, 2]);
     }
 
+    // ─── several files for one episode (#142) ─────────────────────────────────
+
+    /// A scan service over in-memory stores, with every probe succeeding and a
+    /// distinct hash per file so no two files look like duplicate content.
+    fn make_multi_source_scan_service(
+        lib_repo: Arc<InMemoryLibraryRepository>,
+        file_repo: Arc<InMemoryFileRepository>,
+        show_repo: Arc<InMemoryShowRepository>,
+    ) -> LocalIndexService {
+        let next_hash = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .returning(move |_| Ok(next_hash.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .returning(|_| Ok(make_video_metadata()));
+        LocalIndexService::new(
+            lib_repo,
+            file_repo,
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        )
+    }
+
+    fn episode_id_of(file: &MediaFile) -> Uuid {
+        match file.content {
+            Some(MediaFileContent::Episode { episode_id }) => episode_id,
+            ref other => panic!("expected an episode file, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn two_rips_of_one_episode_become_two_sources_of_one_episode() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+        let show_dir = dir.path().join("The Show");
+        std::fs::create_dir_all(&show_dir).unwrap();
+        std::fs::write(show_dir.join("The.Show.S01E01.1080p.mkv"), b"1080p rip").unwrap();
+        std::fs::write(show_dir.join("The.Show.S01E01.720p.mkv"), b"720p rip").unwrap();
+
+        let service =
+            make_multi_source_scan_service(lib_repo, file_repo.clone(), show_repo.clone());
+        let indexed = service.scan_library(library.id.to_string()).await.unwrap();
+
+        assert_eq!(indexed, 2, "neither file is rejected by the scan");
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 2);
+        let episode_id = episode_id_of(&files[0]);
+        assert_eq!(
+            episode_id_of(&files[1]),
+            episode_id,
+            "both files attach to the one S01E01"
+        );
+        assert_eq!(
+            file_repo
+                .find_by_episode_id(episode_id)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "the episode has two sources"
+        );
+        assert_eq!(show_repo.episodes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_new_file_for_an_existing_episode_attaches_without_rewriting_it() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        // An episode that already exists with no file behind it -- its old
+        // file was replaced -- carrying a title enrichment established.
+        let show = show_repo
+            .create(beam_domain::models::CreateShow {
+                title: "Severance".to_string(),
+                year: None,
+            })
+            .await
+            .unwrap();
+        let season = show_repo.find_or_create_season(show.id, 1).await.unwrap();
+        let existing = show_repo
+            .find_or_create_episode(beam_domain::models::CreateEpisode {
+                season_id: season.id,
+                episode_number: 1,
+                title: "Good News About Hell".to_string(),
+                runtime: Some(Duration::from_secs(57 * 60)),
+            })
+            .await
+            .unwrap();
+
+        let show_dir = dir.path().join("Severance");
+        std::fs::create_dir_all(&show_dir).unwrap();
+        std::fs::write(
+            show_dir.join("Severance.S01E01.REPACK.2160p.mkv"),
+            b"new rip",
+        )
+        .unwrap();
+
+        let service =
+            make_multi_source_scan_service(lib_repo, file_repo.clone(), show_repo.clone());
+        let indexed = service.scan_library(library.id.to_string()).await.unwrap();
+
+        assert_eq!(indexed, 1);
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            episode_id_of(&files[0]),
+            existing.id,
+            "the differently named file attaches to the existing episode"
+        );
+        let stored = show_repo
+            .find_episode_by_id(existing.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.title, "Good News About Hell",
+            "the new file's filename does not overwrite the established title"
+        );
+        assert_eq!(stored.runtime, Some(Duration::from_secs(57 * 60)));
+        assert_eq!(show_repo.episodes.lock().unwrap().len(), 1);
+    }
+
     // ─── classify_media_content: movie tests ──────────────────────────────────
 
     #[tokio::test]
@@ -2435,7 +2578,7 @@ mod tests {
 
         let episode_id = Uuid::new_v4();
         mock_show_repo
-            .expect_create_episode()
+            .expect_find_or_create_episode()
             .times(1)
             .returning(move |_| {
                 Ok(beam_domain::models::Episode {
