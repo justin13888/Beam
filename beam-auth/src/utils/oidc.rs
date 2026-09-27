@@ -92,6 +92,7 @@ mod discovered {
     };
     use std::future::Future;
     use std::pin::Pin;
+    use std::time::Duration;
 
     /// The HTTP client `openidconnect` makes discovery, JWKS, and token
     /// requests through.
@@ -102,13 +103,33 @@ mod discovered {
     #[derive(Debug, Clone)]
     pub(crate) struct OidcHttpClient(reqwest::Client);
 
+    /// How long establishing a connection to the IdP may take.
+    ///
+    /// Fixed rather than configurable: discovery runs once at startup and the
+    /// exchange runs inside a user's login request, and neither has a caller
+    /// that would pick a different bound. Without one, an IdP that accepts a
+    /// connection and never answers stalls startup, or the login, forever.
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long a whole request -- connect, send, and reading the full
+    /// response -- may take. Covers the IdP that connects but never responds.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
     impl OidcHttpClient {
         pub(crate) fn new() -> Result<Self, reqwest::Error> {
+            Self::with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+        }
+
+        /// [`Self::new`] with explicit bounds, so a test can prove the bound
+        /// is enforced without waiting out the production one.
+        fn with_timeouts(connect: Duration, request: Duration) -> Result<Self, reqwest::Error> {
             // Redirects are never followed: an IdP endpoint that answers with
             // a redirect is surfaced as that response, not chased to wherever
             // it points (the SSRF guidance of the OIDC/OAuth 2.0 specs).
             let client = reqwest::ClientBuilder::new()
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(connect)
+                .timeout(request)
                 .build()?;
             Ok(Self(client))
         }
@@ -303,6 +324,7 @@ mod discovered {
         use super::{OidcHttpClient, into_http_response};
         use openidconnect::http::{self, Method, StatusCode, Version, header::LOCATION};
         use openidconnect::{AsyncHttpClient, HttpClientError};
+        use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::{TcpListener, TcpStream};
 
@@ -414,6 +436,37 @@ mod discovered {
             match result {
                 Err(HttpClientError::Reqwest(error)) => assert!(error.is_connect(), "{error}"),
                 other => panic!("expected a reqwest connect error, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn an_idp_that_never_answers_times_out() {
+            // An IdP that accepts the connection and then goes silent must not
+            // hold discovery (startup) or a code exchange (a login) forever.
+            let idp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", idp.local_addr().unwrap());
+            let _server = tokio::spawn(async move {
+                let (mut stream, _) = idp.accept().await.unwrap();
+                // Read until the client gives up and closes; never reply.
+                let mut sink = Vec::new();
+                let _ = stream.read_to_end(&mut sink).await;
+            });
+            let request = http::Request::builder().uri(url).body(Vec::new()).unwrap();
+            let client = OidcHttpClient::with_timeouts(
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            )
+            .unwrap();
+
+            // The outer bound only turns a missing timeout into a failure
+            // instead of a hung test run.
+            let result = tokio::time::timeout(Duration::from_secs(10), client.call(request))
+                .await
+                .expect("the request was not bounded by the client's timeout");
+
+            match result {
+                Err(HttpClientError::Reqwest(error)) => assert!(error.is_timeout(), "{error}"),
+                other => panic!("expected a reqwest timeout error, got {other:?}"),
             }
         }
 
