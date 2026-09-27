@@ -10,6 +10,9 @@ use std::path::{Component, Path};
 
 use thiserror::Error;
 
+use crate::utils::filename::parse_media_filename;
+use crate::utils::media_path::season_folder_number;
+
 /// Extensions of the video files Beam indexes, lowercase.
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "m2ts", "mts", "flv", "wmv", "3gp", "ogv",
@@ -35,9 +38,10 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
 ];
 
 /// Folders that hold a title's extras rather than the title (the Plex and
-/// Jellyfin conventions). Matched case-insensitively, and only below the top
-/// level: `Movie/Trailers/` holds trailers, but a top-level `Shorts/` folder
-/// is a collection of short films.
+/// Jellyfin conventions). Matched case-insensitively, and only inside a title
+/// folder: `Movie (2019)/Trailers/` holds trailers, but a top-level `Shorts/`
+/// folder is a collection of short films, and `Movies/Trailers/` -- directly
+/// under a category folder -- a collection of trailers.
 const EXTRAS_DIRECTORIES: &[&str] = &[
     "extras",
     "featurettes",
@@ -111,8 +115,11 @@ pub struct PathPolicy {
     ignore: Vec<glob::Pattern>,
 }
 
-/// Case-insensitive, and `*` never crosses a `/`: `Downloads/*` ignores the
-/// files in `Downloads`, `Downloads/**` everything beneath it.
+/// Case-insensitive, and `*` never crosses a `/`, so `*.partial.mkv` matches
+/// only at the root and `**/*.partial.mkv` at any depth. A pattern that
+/// matches a directory excludes everything beneath it: `Downloads`,
+/// `Downloads/*` and `Downloads/**` all ignore everything under `Downloads`
+/// (the middle one by matching each of its subdirectories).
 const GLOB_OPTIONS: glob::MatchOptions = glob::MatchOptions {
     case_sensitive: false,
     require_literal_separator: true,
@@ -186,7 +193,10 @@ impl PathPolicy {
             if SYSTEM_DIRECTORIES.contains(&lower.as_str()) {
                 return Some(ExclusionReason::SystemDirectory);
             }
-            if depth >= 1 && EXTRAS_DIRECTORIES.contains(&lower.as_str()) {
+            if depth >= 1
+                && EXTRAS_DIRECTORIES.contains(&lower.as_str())
+                && is_title_folder(dirs, depth - 1)
+            {
                 return Some(ExclusionReason::ExtrasDirectory);
             }
             prefix.push(dir);
@@ -210,6 +220,15 @@ pub fn is_video_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| lowercase_extension(&name.to_string_lossy()))
         .is_some_and(|ext| VIDEO_EXTENSIONS.contains(&ext.as_str()))
+}
+
+/// Whether `dirs[at]` is a title's folder rather than a category holding
+/// titles: a folder naming a title and its year (`Movie (2019)`), a season
+/// folder (and so a show's), or any folder below the top level -- a top-level
+/// folder without a year (`Movies`, `TV`) is taken for a category.
+fn is_title_folder(dirs: &[String], at: usize) -> bool {
+    let dir = &dirs[at];
+    at >= 1 || season_folder_number(dir).is_some() || parse_media_filename(dir).year.is_some()
 }
 
 fn normal_components(path: &Path) -> Vec<String> {
@@ -291,9 +310,14 @@ mod tests {
             ),
             ("Movie (2019)/Sample/movie.mkv", Excluded(ExtrasDirectory)),
             ("Movie (2019)/Trailers/t.mkv", Excluded(ExtrasDirectory)),
-            // ... but a top-level folder of that name is a collection.
+            ("TV/Show/Extras/Making Of.mkv", Excluded(ExtrasDirectory)),
+            ("Season 1/Featurettes/x.mkv", Excluded(ExtrasDirectory)),
+            // ... but a top-level folder of that name is a collection, and
+            // so is one directly under a category folder.
             ("Shorts/Short Film (2019).mkv", Media),
             ("Trailers/x.mkv", Media),
+            ("Movies/Trailers/Teaser (2019).mkv", Media),
+            ("Movies/Shorts/Short Film (2019).mkv", Media),
             // Extras by name.
             ("Movie (2019)/Movie-trailer.mkv", Excluded(ExtraFile)),
             ("Movie (2019)/movie-sample.mkv", Excluded(ExtraFile)),
@@ -338,6 +362,23 @@ mod tests {
         );
     }
 
+    /// `Dir/*` matches each subdirectory of `Dir` too, and a matched
+    /// directory excludes everything beneath it: the pattern reaches the
+    /// whole tree, not only the files directly in `Dir`.
+    #[test]
+    fn a_single_star_under_a_directory_reaches_its_whole_tree() {
+        let policy = PathPolicy::new(["Stash/*"]).unwrap();
+        let excluded = PathDisposition::Excluded(ExclusionReason::IgnorePattern);
+
+        assert_eq!(disposition(&policy, "Stash/x.mkv"), excluded);
+        assert_eq!(disposition(&policy, "Stash/deep/er/x.mkv"), excluded);
+        assert!(policy.excludes_directory(Path::new("Stash/deep")));
+        assert_eq!(
+            disposition(&policy, "Movies/Stash.mkv"),
+            PathDisposition::Media
+        );
+    }
+
     #[test]
     fn an_invalid_ignore_pattern_is_refused_and_named() {
         let err = PathPolicy::new(["ok/*", "bad[pattern"]).unwrap_err();
@@ -350,7 +391,13 @@ mod tests {
         for dir in [".git", "@eaDir", "Movie (2019)/Extras", "Show/.snapshots"] {
             assert!(policy.excludes_directory(Path::new(dir)), "{dir}");
         }
-        for dir in ["Movie (2019)", "Extras", "Show/Season 01", "Shorts"] {
+        for dir in [
+            "Movie (2019)",
+            "Extras",
+            "Show/Season 01",
+            "Shorts",
+            "Movies/Trailers",
+        ] {
             assert!(!policy.excludes_directory(Path::new(dir)), "{dir}");
         }
     }
