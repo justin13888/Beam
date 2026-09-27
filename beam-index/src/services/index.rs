@@ -32,8 +32,8 @@ use beam_domain::models::file::{
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode};
 use beam_domain::repositories::{
-    EnrichmentStateRepository, FileRepository, LibraryRepository, MediaStreamRepository,
-    MovieRepository, ShowRepository, SidecarSubtitleRepository,
+    AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
+    MediaStreamRepository, MovieRepository, ShowRepository, SidecarSubtitleRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_domain::utils::classification::{Classification, ContainerTags, Hints, classify};
@@ -92,7 +92,7 @@ struct WalkOutcome {
     /// Every text subtitle beside the media (issue #184).
     subtitles: Vec<sidecars::WalkedSidecar>,
     /// Every NFO beside the media (issue #184).
-    nfos: Vec<sidecars::WalkedSidecar>,
+    nfos: Vec<hints::WalkedNfo>,
 }
 
 /// Walks a library root and collects every regular file beneath it.
@@ -119,7 +119,7 @@ fn walk_library_root(root: &Path, policy: &PathPolicy) -> WalkOutcome {
     let mut failed_subtrees: Vec<PathBuf> = Vec::new();
     let mut unscoped_failure = false;
     let mut subtitles: Vec<sidecars::WalkedSidecar> = Vec::new();
-    let mut nfos: Vec<sidecars::WalkedSidecar> = Vec::new();
+    let mut nfos: Vec<hints::WalkedNfo> = Vec::new();
     let walk = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -158,15 +158,17 @@ fn walk_library_root(root: &Path, policy: &PathPolicy) -> WalkOutcome {
                             PathDisposition::Media => files.push(path),
                             PathDisposition::Excluded(_) => excluded += 1,
                             PathDisposition::Sidecar => {
-                                let walked = || sidecars::WalkedSidecar {
-                                    path: path.clone(),
-                                    size: meta.len(),
-                                    mtime: meta.modified().ok().map(Into::into),
-                                };
                                 if sidecars::is_text_subtitle(&path) {
-                                    subtitles.push(walked());
+                                    subtitles.push(sidecars::WalkedSidecar {
+                                        path,
+                                        size: meta.len(),
+                                        mtime: meta.modified().ok().map(Into::into),
+                                    });
                                 } else if hints::is_nfo(&path) {
-                                    nfos.push(walked());
+                                    nfos.push(hints::WalkedNfo {
+                                        stamp: hints::change_stamp(&meta),
+                                        path,
+                                    });
                                 }
                             }
                             PathDisposition::Ignored => {}
@@ -584,6 +586,7 @@ pub struct LocalIndexService {
     path_policy: PathPolicy,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
     sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
+    applied_nfo_repo: Option<Arc<dyn AppliedNfoRepository>>,
     divergence_policy: DivergencePolicy,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,
@@ -628,6 +631,7 @@ impl LocalIndexService {
             path_policy: PathPolicy::default(),
             enrichment_repo: None,
             sidecar_repo: None,
+            applied_nfo_repo: None,
             divergence_policy: DivergencePolicy::default(),
             clock: Arc::new(RealClock),
             id_generator: Arc::new(UuidGenerator),
@@ -703,6 +707,17 @@ impl LocalIndexService {
     /// Defaults to `None`, which indexes no sidecar subtitles.
     pub fn with_sidecar_repo(mut self, repo: Arc<dyn SidecarSubtitleRepository>) -> Self {
         self.sidecar_repo = Some(repo);
+        self
+    }
+
+    /// Wire up what each NFO held when it was last applied (issue #184): when
+    /// set, a scan re-applies exactly the NFOs whose content changed since,
+    /// and an NFO a watcher event reports unchanged is not applied again.
+    /// Defaults to `None`, which leaves re-applying NFOs to watcher events
+    /// alone: without a record, a scan cannot tell an edited NFO from one it
+    /// already applied.
+    pub fn with_applied_nfo_repo(mut self, repo: Arc<dyn AppliedNfoRepository>) -> Self {
+        self.applied_nfo_repo = Some(repo);
         self
     }
 
@@ -827,11 +842,18 @@ impl LocalIndexService {
         } = classify(
             relative_to(&library.root_path, path),
             &Hints {
-                file_nfo: file_nfo.as_ref(),
-                show_nfo: show_nfo.as_ref(),
+                file_nfo: file_nfo.as_ref().map(|located| &located.nfo),
+                show_nfo: show_nfo.as_ref().map(|located| &located.nfo),
                 tags,
             },
         );
+        // What classification read is applied by it (FR-219): a movie by its
+        // own NFO, an episode by its show's and its own.
+        let consumed: Vec<&hints::LocatedNfo> = match &inference {
+            MediaInference::Movie(_) => file_nfo.iter().collect(),
+            MediaInference::Episode(_) => show_nfo.iter().chain(file_nfo.iter()).collect(),
+            MediaInference::Unclassifiable(_) => Vec::new(),
+        };
         match inference {
             MediaInference::Episode(EpisodeInference {
                 series,
@@ -862,6 +884,7 @@ impl LocalIndexService {
                     create.year = year;
                 }
                 let show = self.show_for(create, pin.as_ref(), path).await?;
+                self.record_consumed_nfos(library, &consumed).await?;
 
                 // Ensure library-show association exists
                 self.show_repo
@@ -907,6 +930,7 @@ impl LocalIndexService {
                     create.year = year;
                 }
                 let movie = self.movie_for(create, pin.as_ref(), path).await?;
+                self.record_consumed_nfos(library, &consumed).await?;
 
                 // Ensure library-movie association exists
                 self.movie_repo
@@ -2527,10 +2551,7 @@ impl LocalIndexService {
             .disposition(relative_to(&library.root_path, &path));
         if disposition == PathDisposition::Sidecar {
             if hints::is_nfo(&path) {
-                if is_file {
-                    let files = self.file_repo.find_all_by_library(library.id).await?;
-                    self.repin_from_nfo(&path, &files).await?;
-                }
+                self.reconcile_nfo_event(&library, &path, is_file).await?;
             } else {
                 self.reconcile_sidecar_event(&library, &path, is_file)
                     .await?;
@@ -3030,12 +3051,15 @@ impl LocalIndexService {
             return Err(IndexError::Cancelled);
         }
 
-        // Phase 3b: What sits beside the media (issue #184). The NFOs edited
-        // since the last scan re-pin their titles, and every subtitle is
-        // recorded against the video that owns it. A failure here is the
-        // scan's, like a failure to record a file: it is reported and the
-        // scan goes on.
-        if let Err(e) = self.repin_changed_nfos(library, &walked_nfos).await {
+        // Phase 3b: What sits beside the media (issue #184). The NFOs whose
+        // content changed since they were last applied re-pin their titles,
+        // and every subtitle is recorded against the video that owns it. A
+        // failure here is the scan's, like a failure to record a file: it is
+        // reported and the scan goes on.
+        if let Err(e) = self
+            .reapply_changed_nfos(library, &walked_nfos, &failed_subtrees, unscoped_failure)
+            .await
+        {
             error!(library_id = %lib_uuid, error = %e, "re-applying changed NFOs failed");
         }
         if let Err(e) = self

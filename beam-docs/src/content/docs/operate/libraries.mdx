@@ -361,7 +361,10 @@ XML followed by a URL.
   When two NFOs pin one title to different ids, the first pin is kept and the admin log says so.
 
 An NFO added or edited after its video was indexed re-pins the title at the next scan, or as soon
-as the watcher sees it. An NFO larger than 1 MiB, one that is not UTF-8, one declaring a document
+as the watcher sees it — whatever modification time it carries, so one copied in with `cp -p` or
+`rsync -a` counts too. Only the files an NFO actually describes are re-pinned: a `movie.nfo`
+leaves alone a video that has its own `<file name>.nfo`, and an NFO at the top of the library, or
+more than one folder above an episode, pins nothing. An NFO larger than 1 MiB, one that is not UTF-8, one declaring a document
 type, and one that is a symbolic link are ignored, and the file is classified by its path.
 
 **Container tags.** The tags inside a file fill only what its path leaves open. An MP4 tagged with

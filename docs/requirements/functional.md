@@ -210,9 +210,16 @@ strength. Each requirement is independently testable. See `product.md` for narra
   IMDb, then TheTVDB) MUST pin the title: a file whose NFO names a pin MUST join the title pinned
   to it, or enriched with that id, before its key is consulted; one id pins at most one title; a
   second NFO naming another id for a pinned title MUST be reported through the admin log and not
-  applied; an NFO added or edited after indexing MUST re-pin its titles at the next scan (by
-  modification time) or watcher event. Every NFO MUST be read with a read-only open of a regular
-  file (never through a symbolic link, FR-212) and at most 1 MiB of it; an NFO larger than that, not
+  applied, then or at any later scan. An NFO added or edited after indexing MUST re-pin, at the
+  next scan or watcher event, exactly the titles of the files it is *the* NFO of -- located as
+  above, so never through a root NFO, one further above a file, or a `movie.nfo` beside a file
+  with its own `<stem>.nfo` -- but never an administrator's pin (FR-312). Whether an NFO is
+  re-applied MUST turn on its content alone: the size and content hash last applied are recorded
+  per NFO (`applied_nfos`), so an NFO whose modification time is old (`cp -p`), skewed by another
+  host's clock, or older than a scan that died is still applied, and one whose content did not
+  change is never applied again. A watcher event MUST read only the files beneath the NFO's
+  folder. Every NFO MUST be read with a read-only open of a regular file (never through a
+  symbolic link, FR-212) and at most 1 MiB of it; an NFO larger than that, not
   UTF-8, declaring a document type, or over 10 000 XML nodes MUST be ignored and the file
   classified by its path. Reading these MUST NOT write anything under a library root (FR-202).
 - **FR-220**: A text subtitle file (`.srt`, `.vtt`, `.ass`, `.ssa`) beside an indexed video, named

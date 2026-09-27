@@ -6,18 +6,21 @@
 //! below the repository traits.
 
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use super::*;
 use crate::probe::metadata::MetadataError;
 use crate::services::admin_log::LocalAdminLogService;
-use crate::services::hash::MockHashService;
-use crate::services::media_info::MockMediaInfoService;
+use crate::services::hash::{HashService, LocalHashService, MockHashService};
+use crate::services::media_info::{LocalMediaInfoService, MockMediaInfoService};
 use crate::services::notification::InMemoryNotificationService;
+use beam_domain::models::applied_nfo::AppliedNfo;
 use beam_domain::models::enrichment::{EnrichmentState, EnrichmentTargetId};
+use beam_domain::models::file::{CreateMediaFile, FileClassification, UpdateMediaFile};
 use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat};
 use beam_domain::models::{CreateLibrary, Movie, Show};
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
+use beam_domain::repositories::applied_nfo::in_memory::InMemoryAppliedNfoRepository;
 use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
@@ -25,11 +28,94 @@ use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
-use beam_domain::repositories::{AdminLogRepository, EnrichmentStateRepository};
+use beam_domain::repositories::{
+    AdminLogRepository, AppliedNfoRepository, EnrichmentStateRepository, FileRepository,
+};
 use tempfile::TempDir;
 
 /// Container tags the prober reports, by path.
 type Tags = Arc<Mutex<HashMap<PathBuf, HashMap<String, String>>>>;
+
+/// The in-memory file repository, counting the reads that list files: how
+/// many read a whole library, and how many only the files beneath a folder.
+#[derive(Debug)]
+struct CountingFileRepository {
+    inner: Arc<InMemoryFileRepository>,
+    whole_library_reads: AtomicUsize,
+    folder_reads: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl FileRepository for CountingFileRepository {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr> {
+        self.inner.find_by_id(id).await
+    }
+    async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr> {
+        self.inner.find_by_path(path).await
+    }
+    async fn find_by_hash(&self, hash: u64) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner.find_by_hash(hash).await
+    }
+    async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.whole_library_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.find_all_by_library(library_id).await
+    }
+    async fn find_all_by_library_including_missing(
+        &self,
+        library_id: Uuid,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.whole_library_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .find_all_by_library_including_missing(library_id)
+            .await
+    }
+    async fn find_all_under(&self, library_id: Uuid, dir: &Path) -> Result<Vec<MediaFile>, DbErr> {
+        self.folder_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.find_all_under(library_id, dir).await
+    }
+    async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner.find_by_movie_entry_id(movie_entry_id).await
+    }
+    async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner.find_by_episode_id(episode_id).await
+    }
+    async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr> {
+        self.inner.create(create).await
+    }
+    async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr> {
+        self.inner.update(update).await
+    }
+    async fn set_classification(
+        &self,
+        id: Uuid,
+        classification: FileClassification,
+    ) -> Result<MediaFile, DbErr> {
+        self.inner.set_classification(id, classification).await
+    }
+    async fn mark_missing(&self, ids: Vec<Uuid>, at: DateTime<Utc>) -> Result<u64, DbErr> {
+        self.inner.mark_missing(ids, at).await
+    }
+    async fn restore(&self, id: Uuid) -> Result<(), DbErr> {
+        self.inner.restore(id).await
+    }
+    async fn purge_missing(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {
+        self.inner.purge_missing(ids).await
+    }
+    async fn count_all(&self) -> Result<u64, DbErr> {
+        self.inner.count_all().await
+    }
+}
+
+/// What probes and hashes the harness's files.
+enum Probe {
+    /// A double reporting the tags [`Harness::tag`] sets.
+    Double,
+    /// The real FFmpeg prober and hasher, over real containers.
+    Real,
+}
 
 struct Harness {
     _dir: TempDir,
@@ -40,7 +126,9 @@ struct Harness {
     show_repo: Arc<InMemoryShowRepository>,
     enrichment_repo: Arc<InMemoryEnrichmentStateRepository>,
     sidecar_repo: Arc<InMemorySidecarSubtitleRepository>,
+    applied_nfo_repo: Arc<InMemoryAppliedNfoRepository>,
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
+    file_reads: Arc<CountingFileRepository>,
     tags: Tags,
     /// While set, every probe fails, as one of a file still being muxed.
     probe_fails: Arc<AtomicBool>,
@@ -49,6 +137,15 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
+        Self::build(Probe::Double).await
+    }
+
+    async fn with_real_prober() -> Self {
+        let _ = crate::probe::init();
+        Self::build(Probe::Real).await
+    }
+
+    async fn build(probe: Probe) -> Self {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("library");
         std::fs::create_dir_all(&root).unwrap();
@@ -59,6 +156,12 @@ impl Harness {
         let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
         let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
         let sidecar_repo = Arc::new(InMemorySidecarSubtitleRepository::default());
+        let applied_nfo_repo = Arc::new(InMemoryAppliedNfoRepository::default());
+        let file_reads = Arc::new(CountingFileRepository {
+            inner: file_repo.clone(),
+            whole_library_reads: AtomicUsize::new(0),
+            folder_reads: AtomicUsize::new(0),
+        });
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
         let library = library_repo
             .create(CreateLibrary {
@@ -104,21 +207,29 @@ impl Harness {
             })
         });
 
+        let (hasher, prober): (Arc<dyn HashService>, Arc<dyn MediaInfoService>) = match probe {
+            Probe::Double => (Arc::new(hasher), Arc::new(prober)),
+            Probe::Real => (
+                Arc::new(LocalHashService::default()),
+                Arc::new(LocalMediaInfoService::default()),
+            ),
+        };
         let service = LocalIndexService::new(
             library_repo,
-            file_repo.clone(),
+            file_reads.clone(),
             movie_repo.clone(),
             show_repo.clone(),
             Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(hasher),
-            Arc::new(prober),
+            hasher,
+            prober,
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(LocalAdminLogService::new(
                 admin_log_repo.clone() as Arc<dyn AdminLogRepository>
             )),
         )
         .with_enrichment_repo(enrichment_repo.clone())
-        .with_sidecar_repo(sidecar_repo.clone());
+        .with_sidecar_repo(sidecar_repo.clone())
+        .with_applied_nfo_repo(applied_nfo_repo.clone());
 
         Self {
             _dir: dir,
@@ -129,7 +240,9 @@ impl Harness {
             show_repo,
             enrichment_repo,
             sidecar_repo,
+            applied_nfo_repo,
             admin_log_repo,
+            file_reads,
             tags,
             probe_fails,
             service,
@@ -225,6 +338,52 @@ impl Harness {
             .unwrap()
     }
 
+    /// The pin of every movie, sorted.
+    fn movie_pins(&self) -> Vec<Option<String>> {
+        let mut pins: Vec<Option<String>> = self
+            .movie_repo
+            .movies
+            .lock()
+            .unwrap()
+            .values()
+            .map(|m| m.pinned_ref.clone())
+            .collect();
+        pins.sort();
+        pins
+    }
+
+    /// The pin of every show, sorted.
+    fn show_pins(&self) -> Vec<Option<String>> {
+        let mut pins: Vec<Option<String>> = self
+            .show_repo
+            .shows
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.pinned_ref.clone())
+            .collect();
+        pins.sort();
+        pins
+    }
+
+    async fn applied(&self, rel: &str) -> Option<AppliedNfo> {
+        self.applied_nfo_repo
+            .find_by_path(&self.root.join(rel))
+            .await
+            .unwrap()
+    }
+
+    /// Set the modification time of the file at `rel`, as `cp -p`, `rsync
+    /// -a` or `touch -d` would.
+    fn set_mtime(&self, rel: &str, mtime: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(self.root.join(rel))
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
     async fn warnings(&self) -> Vec<String> {
         self.admin_log_repo
             .list(1000, 0)
@@ -301,14 +460,7 @@ async fn a_title_keeps_its_pin_when_another_nfo_names_another_id() {
 
     h.scan().await;
 
-    let pins: Vec<Option<String>> = h
-        .movie_repo
-        .movies
-        .lock()
-        .unwrap()
-        .values()
-        .map(|m| m.pinned_ref.clone())
-        .collect();
+    let pins = h.movie_pins();
     assert_eq!(pins.len(), 1, "one key, one movie: {pins:?}");
     assert!(pins[0].is_some());
     assert!(
@@ -432,6 +584,11 @@ async fn an_nfo_that_is_a_symlink_is_not_read() {
     assert_eq!(h.movie_of("Matrix/matrix.mkv").pinned_ref, None);
 }
 
+/// An NFO added after its video was indexed pins the title at the next scan
+/// -- even one copied in with its old modification time kept (`cp -p`,
+/// `rsync -a`), or from a NAS whose clock runs behind the server's: whether
+/// it is applied turns on what it holds, never on when it says it was
+/// written.
 #[tokio::test]
 async fn an_nfo_added_after_indexing_pins_the_movie_on_the_next_scan() {
     let h = Harness::new().await;
@@ -439,13 +596,11 @@ async fn an_nfo_added_after_indexing_pins_the_movie_on_the_next_scan() {
     h.scan().await;
     assert_eq!(h.movie_of("Matrix/matrix.mkv").pinned_ref, None);
 
-    let nfo = h.write("Matrix/movie.nfo", MATRIX_NFO);
-    std::fs::File::options()
-        .write(true)
-        .open(&nfo)
-        .unwrap()
-        .set_modified(std::time::SystemTime::now() + Duration::from_secs(3600))
-        .unwrap();
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.set_mtime(
+        "Matrix/movie.nfo",
+        std::time::SystemTime::now() - Duration::from_secs(365 * 24 * 3600),
+    );
     h.scan().await;
 
     let movie = h.movie_of("Matrix/matrix.mkv");
@@ -785,67 +940,21 @@ fn furnished(h: &Harness) {
     h.write("GoT/Season 01/GoT.S01E01.eng.forced.ass", "3");
 }
 
-#[tokio::test]
-async fn a_scan_never_writes_into_the_library_root() {
-    let h = Harness::new().await;
-    furnished(&h);
-    let before = snapshot(&h.root);
-
+/// Everything the indexer does with a furnished library: the watcher
+/// indexes a new video -- attaching the subtitles beside it and in its
+/// `Subs/` folder -- then two scans, and watcher events for an NFO and a
+/// subtitle.
+async fn index_furnished(h: &Harness) {
+    h.event("Matrix/matrix.1080p.mkv", FsEventKind::Created)
+        .await;
     h.scan().await;
     h.scan().await;
     h.event("Matrix/movie.nfo", FsEventKind::Modified).await;
     h.event("Matrix/matrix.1080p.en.srt", FsEventKind::Modified)
         .await;
-
-    assert!(
-        h.movie_of("Matrix/matrix.1080p.mkv").pinned_ref.is_some()
-            && !h.subtitles_of("Matrix/matrix.1080p.mkv").await.is_empty(),
-        "the scan did read what is beside the media"
-    );
-    assert_eq!(
-        snapshot(&h.root),
-        before,
-        "the library tree is byte-for-byte unchanged"
-    );
 }
 
-/// A read-only library -- a `:ro` mount, a share the server may not write --
-/// indexes exactly as a writable one: nothing the scan does needs a write.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_read_only_library_is_indexed_in_full() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let h = Harness::new().await;
-    furnished(&h);
-    let dirs: Vec<PathBuf> = walkdir::WalkDir::new(&h.root)
-        .into_iter()
-        .map(|e| e.unwrap())
-        .filter(|e| e.file_type().is_dir())
-        .map(|e| e.into_path())
-        .collect();
-    let set_mode = |mode: u32| {
-        for entry in walkdir::WalkDir::new(&h.root).contents_first(true) {
-            let entry = entry.unwrap();
-            let mode = if entry.file_type().is_dir() {
-                mode | 0o111
-            } else {
-                mode
-            };
-            std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(mode)).unwrap();
-        }
-    };
-    set_mode(0o444);
-    // Root ignores permissions; the premise of the test does not hold there.
-    let root_user = std::fs::File::create(dirs[0].join("probe")).is_ok();
-    if !root_user {
-        h.scan().await;
-    }
-    set_mode(0o755);
-    if root_user {
-        return;
-    }
-
+async fn assert_furnished_indexed(h: &Harness) {
     assert_eq!(
         h.movie_of("Matrix/matrix.1080p.mkv").pinned_ref.as_deref(),
         Some("tmdb:603")
@@ -858,5 +967,473 @@ async fn a_read_only_library_is_indexed_in_full() {
     assert_eq!(
         h.show_of("GoT/Season 01/GoT.S01E01.mkv").0.title,
         "Game of Thrones"
+    );
+}
+
+/// A library holding a real container -- opened by the real FFmpeg prober,
+/// tags and all, and hashed by the real hasher -- with an NFO and a subtitle
+/// in a `Subs/` folder beside it.
+fn furnished_with_a_real_container(h: &Harness) {
+    let clip = h.root.join("Clip (2020)/Clip (2020).mkv");
+    std::fs::create_dir_all(clip.parent().unwrap()).unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264.mkv"),
+        &clip,
+    )
+    .unwrap();
+    h.write(
+        "Clip (2020)/Clip (2020).nfo",
+        r#"<movie><uniqueid type="tmdb">949</uniqueid></movie>"#,
+    );
+    h.write("Clip (2020)/Subs/English.srt", "1");
+}
+
+async fn index_the_real_container(h: &Harness) {
+    h.event("Clip (2020)/Clip (2020).mkv", FsEventKind::Created)
+        .await;
+    h.scan().await;
+    h.scan().await;
+    h.event("Clip (2020)/Clip (2020).nfo", FsEventKind::Modified)
+        .await;
+}
+
+async fn assert_the_real_container_indexed(h: &Harness) {
+    let file = h.file("Clip (2020)/Clip (2020).mkv");
+    assert_eq!(file.status, FileStatus::Known, "probed by the real prober");
+    assert!(file.duration.is_some());
+    assert_eq!(
+        h.movie_of("Clip (2020)/Clip (2020).mkv")
+            .pinned_ref
+            .as_deref(),
+        Some("tmdb:949")
+    );
+    assert_eq!(h.subtitles_of("Clip (2020)/Clip (2020).mkv").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_scan_never_writes_into_the_library_root() {
+    let h = Harness::new().await;
+    furnished(&h);
+    let before = snapshot(&h.root);
+
+    index_furnished(&h).await;
+
+    assert_furnished_indexed(&h).await;
+    assert_eq!(
+        snapshot(&h.root),
+        before,
+        "the library tree is byte-for-byte unchanged"
+    );
+}
+
+/// The real prober opens the container to read its streams and tags, and
+/// the real hasher reads it whole: neither writes a byte either.
+#[tokio::test]
+async fn probing_and_hashing_a_real_container_never_write_into_the_library_root() {
+    let h = Harness::with_real_prober().await;
+    furnished_with_a_real_container(&h);
+    let before = snapshot(&h.root);
+
+    index_the_real_container(&h).await;
+
+    assert_the_real_container_indexed(&h).await;
+    assert_eq!(
+        snapshot(&h.root),
+        before,
+        "the library tree is byte-for-byte unchanged"
+    );
+}
+
+/// Run `indexing` with every write permission under `h`'s library removed,
+/// restoring them after. `false` -- having run nothing, and said why -- when
+/// the test runs as root, which ignores permissions, so the premise of a
+/// read-only library does not hold.
+#[cfg(unix)]
+async fn with_the_library_read_only(h: &Harness, indexing: impl Future<Output = ()>) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let set_mode = |mode: u32| {
+        for entry in walkdir::WalkDir::new(&h.root).contents_first(true) {
+            let entry = entry.unwrap();
+            let mode = if entry.file_type().is_dir() {
+                mode | 0o111
+            } else {
+                mode
+            };
+            std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    set_mode(0o444);
+    let root_user = std::fs::File::create(h.root.join("probe")).is_ok();
+    if root_user {
+        set_mode(0o755);
+        eprintln!(
+            "skipped: running as root, which ignores file permissions, so a read-only \
+             library cannot be made"
+        );
+        return false;
+    }
+    indexing.await;
+    set_mode(0o755);
+    true
+}
+
+/// A read-only library -- a `:ro` mount, a share the server may not write --
+/// indexes exactly as a writable one: nothing the scan does needs a write.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_only_library_is_indexed_in_full() {
+    let h = Harness::new().await;
+    furnished(&h);
+    if with_the_library_read_only(&h, index_furnished(&h)).await {
+        assert_furnished_indexed(&h).await;
+    }
+}
+
+/// The same, with the real prober and hasher opening a real container.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_real_container_in_a_read_only_library_is_indexed_in_full() {
+    let h = Harness::with_real_prober().await;
+    furnished_with_a_real_container(&h);
+    if with_the_library_read_only(&h, index_the_real_container(&h)).await {
+        assert_the_real_container_indexed(&h).await;
+    }
+}
+
+/// A video the watcher indexes picks up the subtitles already beside it --
+/// in its folder and in a `Subs/` folder beside it.
+#[tokio::test]
+async fn a_video_the_watcher_indexes_picks_up_its_subtitles_and_its_subs_folder() {
+    let h = Harness::new().await;
+    h.write("Movie (2000)/Movie (2000).en.srt", "1");
+    h.write("Movie (2000)/Subs/French.srt", "2");
+    h.video("Movie (2000)/Movie (2000).mkv");
+
+    h.event("Movie (2000)/Movie (2000).mkv", FsEventKind::Created)
+        .await;
+
+    let languages: Vec<Option<String>> = h
+        .subtitles_of("Movie (2000)/Movie (2000).mkv")
+        .await
+        .into_iter()
+        .map(|s| s.info.language)
+        .collect();
+    assert_eq!(
+        languages,
+        vec![Some("eng".to_string()), Some("fre".to_string())]
+    );
+}
+
+fn tmdb_movie(id: u32) -> String {
+    format!(r#"<movie><uniqueid type="tmdb">{id}</uniqueid></movie>"#)
+}
+
+fn tmdb_show(id: u32) -> String {
+    format!(r#"<tvshow><uniqueid type="tmdb">{id}</uniqueid></tvshow>"#)
+}
+
+/// A second scan finds a new file whose own NFO names another id than the
+/// title's pin. Classification keeps the pin and tells the administrator,
+/// and records the NFO as applied, so the same scan's re-apply -- and every
+/// later one, however the NFO's mtime moves -- does not then replace the
+/// pin with it (FR-219).
+#[tokio::test]
+async fn a_new_file_whose_nfo_names_another_id_never_replaces_the_titles_pin() {
+    let h = Harness::new().await;
+    h.video("Heat (1995)/Heat (1995).mkv");
+    h.write("Heat (1995)/Heat (1995).nfo", &tmdb_movie(949));
+    h.scan().await;
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+
+    h.video("Heat (1995)/Heat (1995) - Remux.mkv");
+    h.write("Heat (1995)/Heat (1995) - Remux.nfo", &tmdb_movie(1));
+    h.scan().await;
+
+    assert_eq!(
+        h.movie_of("Heat (1995)/Heat (1995) - Remux.mkv").id,
+        h.movie_of("Heat (1995)/Heat (1995).mkv").id,
+        "one key, one movie"
+    );
+    assert_eq!(
+        h.movie_pins(),
+        vec![Some("tmdb:949".to_string())],
+        "the title keeps the pin it had"
+    );
+    assert!(
+        h.warnings()
+            .await
+            .iter()
+            .any(|w| w.contains("tmdb:1,") && w.contains("already pinned to tmdb:949")),
+        "the administrator is told which pin was kept: {:?}",
+        h.warnings().await
+    );
+
+    h.set_mtime(
+        "Heat (1995)/Heat (1995) - Remux.nfo",
+        std::time::SystemTime::now() + Duration::from_secs(3600),
+    );
+    h.scan().await;
+    assert_eq!(
+        h.movie_pins(),
+        vec![Some("tmdb:949".to_string())],
+        "a newer mtime on unchanged content applies nothing"
+    );
+}
+
+/// A `tvshow.nfo` at the library root describes no show -- not even one
+/// whose episodes sit directly in a series folder below the root, as a
+/// season folder's do below a series folder: neither a scan nor its watcher
+/// event pins anything with it (FR-219).
+#[tokio::test]
+async fn a_tvshow_nfo_at_the_library_root_pins_no_show() {
+    let h = Harness::new().await;
+    h.video("Breaking Bad/Season 01/Breaking.Bad.S01E01.mkv");
+    h.video("The Wire/The.Wire.S01E01.mkv");
+    h.scan().await;
+
+    h.write("tvshow.nfo", &tmdb_show(1396));
+    h.scan().await;
+    h.event("tvshow.nfo", FsEventKind::Modified).await;
+
+    assert_eq!(h.show_pins(), vec![None, None]);
+}
+
+/// A `tvshow.nfo` describes the episodes in its folder and in the folders
+/// one level below it -- a series folder's season folders -- and no deeper:
+/// one in a category folder above the series folders pins nothing.
+#[tokio::test]
+async fn a_tvshow_nfo_two_levels_above_an_episode_pins_no_show() {
+    let h = Harness::new().await;
+    h.video("TV/Breaking Bad/Season 01/Breaking.Bad.S01E01.mkv");
+    h.scan().await;
+
+    h.write("TV/tvshow.nfo", &tmdb_show(1438));
+    h.event("TV/tvshow.nfo", FsEventKind::Created).await;
+    h.scan().await;
+
+    assert_eq!(h.show_pins(), vec![None]);
+}
+
+/// `<stem>.nfo` wins over `movie.nfo` for the video it is named after, so a
+/// `movie.nfo` added beside it later re-pins nothing -- by scan or watcher.
+#[tokio::test]
+async fn a_movie_nfo_never_overrides_a_videos_own_stem_nfo() {
+    let h = Harness::new().await;
+    h.video("Heat/Heat (1995).mkv");
+    h.write("Heat/Heat (1995).nfo", &tmdb_movie(949));
+    h.scan().await;
+
+    h.write("Heat/movie.nfo", &tmdb_movie(2));
+    h.scan().await;
+    h.event("Heat/movie.nfo", FsEventKind::Modified).await;
+
+    assert_eq!(
+        h.movie_of("Heat/Heat (1995).mkv").pinned_ref.as_deref(),
+        Some("tmdb:949")
+    );
+}
+
+/// An edited `<stem>.nfo` re-pins the movie of its own video at the next
+/// scan.
+#[tokio::test]
+async fn an_edited_stem_nfo_repins_its_movie_at_the_next_scan() {
+    let h = Harness::new().await;
+    h.video("Heat/Heat (1995).mkv");
+    h.write("Heat/Heat (1995).nfo", &tmdb_movie(949));
+    h.scan().await;
+
+    h.write("Heat/Heat (1995).nfo", &tmdb_movie(1));
+    h.scan().await;
+
+    let movie = h.movie_of("Heat/Heat (1995).mkv");
+    assert_eq!(movie.pinned_ref.as_deref(), Some("tmdb:1"));
+    let row = h.enrichment_of(EnrichmentTargetId::Movie(movie.id)).await;
+    assert!(row.force_refresh, "re-pinned, so fetched afresh");
+    assert_eq!(row.matched_ref, None);
+}
+
+/// A `tvshow.nfo` added to a series folder after its episodes were indexed
+/// pins their show at the next scan -- episodes in every season folder
+/// below it -- and an edit of it the watcher sees re-pins the show.
+#[tokio::test]
+async fn a_tvshow_nfo_added_later_pins_its_show_and_an_edit_repins_it() {
+    let h = Harness::new().await;
+    h.video("GoT/Season 01/GoT.S01E01.mkv");
+    h.video("GoT/Season 02/GoT.S02E01.mkv");
+    h.scan().await;
+    assert_eq!(h.show_pins(), vec![None]);
+
+    h.write("GoT/tvshow.nfo", &tmdb_show(1399));
+    h.scan().await;
+    let (show, _, _) = h.show_of("GoT/Season 02/GoT.S02E01.mkv");
+    assert_eq!(show.pinned_ref.as_deref(), Some("tmdb:1399"));
+    assert!(
+        h.enrichment_of(EnrichmentTargetId::Show(show.id))
+            .await
+            .force_refresh
+    );
+
+    h.write("GoT/tvshow.nfo", &tmdb_show(1400));
+    h.event("GoT/tvshow.nfo", FsEventKind::Modified).await;
+    assert_eq!(h.show_pins(), vec![Some("tmdb:1400".to_string())]);
+}
+
+/// An NFO edited before a scan that stamped its start and then died -- or
+/// any scan whose start post-dates the edit -- is still applied by the next
+/// scan: nothing turns on scan times.
+#[tokio::test]
+async fn an_nfo_edited_before_a_scan_that_died_is_applied_by_the_next() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.scan().await;
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    // As a scan that started after the edit and was killed would leave it.
+    h.service
+        .library_repo()
+        .update_scan_progress(
+            h.library.id,
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    h.scan().await;
+
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:603")
+    );
+}
+
+/// An NFO whose stat stamp is the one recorded was not written since, and is
+/// not read again; one with no recorded stamp is.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_nfo_whose_stat_stamp_is_unchanged_is_not_read_again() {
+    use beam_domain::models::{PinSource, ProviderPin};
+    use beam_domain::repositories::MovieRepository;
+
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.scan().await;
+    let movie = h.movie_of("Matrix/matrix.mkv");
+    assert!(
+        h.movie_repo
+            .set_pinned_ref(movie.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
+            .await
+            .unwrap()
+    );
+    // A record whose content no longer matches the NFO, but whose stamp
+    // does: only a read would find the difference.
+    let nfo = h.root.join("Matrix/movie.nfo");
+    let stamp = hints::change_stamp(&std::fs::symlink_metadata(&nfo).unwrap());
+    let stale = |stamp: Option<String>| {
+        let mut rows = h.applied_nfo_repo.rows.lock().unwrap();
+        let row = rows.get_mut(&nfo).unwrap();
+        row.content_hash = "stale".to_string();
+        row.change_stamp = stamp;
+    };
+
+    stale(stamp);
+    h.scan().await;
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:1"),
+        "not read, so not re-applied"
+    );
+
+    stale(None);
+    h.scan().await;
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:603"),
+        "read, found changed, re-applied"
+    );
+}
+
+/// An NFO written moments before it was read is recorded without its stat
+/// stamp: a write within the same timestamp tick would not move the stamp,
+/// so the next scan reads it again rather than trust it.
+#[tokio::test]
+async fn an_nfo_written_just_before_it_is_read_is_recorded_without_a_stamp() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+
+    h.scan().await;
+
+    let record = h
+        .applied("Matrix/movie.nfo")
+        .await
+        .expect("classification recorded the NFO it read");
+    assert_eq!(record.change_stamp, None);
+    assert_eq!(record.size_bytes, MATRIX_NFO.len() as u64);
+}
+
+/// The record of an NFO that is deleted goes with it -- by the watcher, and
+/// by the next scan -- so a record is kept only for an NFO on disk.
+#[tokio::test]
+async fn a_deleted_nfos_record_is_forgotten() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.video("Heat/Heat.mkv");
+    h.write("Heat/Heat.nfo", &tmdb_movie(949));
+    h.scan().await;
+    assert!(h.applied("Matrix/movie.nfo").await.is_some());
+    assert!(h.applied("Heat/Heat.nfo").await.is_some());
+
+    std::fs::remove_file(h.root.join("Matrix/movie.nfo")).unwrap();
+    h.event("Matrix/movie.nfo", FsEventKind::Removed).await;
+    assert!(h.applied("Matrix/movie.nfo").await.is_none());
+
+    std::fs::remove_file(h.root.join("Heat/Heat.nfo")).unwrap();
+    h.scan().await;
+    assert!(h.applied("Heat/Heat.nfo").await.is_none());
+    assert_eq!(
+        h.movie_of("Heat/Heat.mkv").pinned_ref.as_deref(),
+        Some("tmdb:949"),
+        "deleting an NFO leaves its pin"
+    );
+}
+
+/// An NFO watcher event reads only the files beneath the NFO's folder -- one
+/// query -- never the whole library's file list.
+#[tokio::test]
+async fn an_nfo_event_reads_only_the_files_beneath_its_folder() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.video("Heat/Heat.mkv");
+    h.scan().await;
+    h.file_reads
+        .whole_library_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    h.file_reads
+        .folder_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+
+    h.write("Matrix/movie.nfo", &tmdb_movie(604));
+    h.event("Matrix/movie.nfo", FsEventKind::Modified).await;
+
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:604")
+    );
+    assert_eq!(
+        (
+            h.file_reads
+                .whole_library_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            h.file_reads
+                .folder_reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+        ),
+        (0, 1),
+        "(whole-library reads, folder reads)"
     );
 }

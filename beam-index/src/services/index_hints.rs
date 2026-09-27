@@ -4,9 +4,14 @@
 //! Beam never writes into a library root. Every NFO is read with a read-only
 //! open, at most [`MAX_NFO_BYTES`] of it, and only when it is a regular file:
 //! a symbolic link is not part of the library (issue #186).
+//!
+//! An NFO is applied when classification first reads it, and re-applied --
+//! by a scan or a watcher event -- exactly when what it holds differs from
+//! what was last applied (FR-219), recorded per NFO in `applied_nfos`.
 
 use std::io::Read;
 
+use beam_domain::models::applied_nfo::{AppliedNfo, RecordAppliedNfo};
 use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::models::movie::Movie;
 use beam_domain::models::show::Show;
@@ -20,6 +25,13 @@ pub(super) const TVSHOW_NFO: &str = "tvshow.nfo";
 /// The NFO a Kodi-style library keeps in a movie's folder.
 pub(super) const MOVIE_NFO: &str = "movie.nfo";
 
+/// An NFO the walk found beside the media, with its stat stamp.
+#[derive(Debug, Clone)]
+pub(super) struct WalkedNfo {
+    pub(super) path: PathBuf,
+    pub(super) stamp: Option<String>,
+}
+
 /// Whether `path` names an NFO file.
 pub(super) fn is_nfo(path: &Path) -> bool {
     path.extension()
@@ -27,11 +39,106 @@ pub(super) fn is_nfo(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("nfo"))
 }
 
+/// How long after its last write an NFO's stat stamp is trusted. A write
+/// within the same tick of a coarse timestamp as the read that recorded the
+/// stamp would leave the stamp unchanged, so a stamp is only recorded once
+/// the NFO has not been written for this long; until then the NFO is read
+/// again every time (as Git treats a "racily clean" index entry).
+const STAMP_SETTLE: chrono::Duration = chrono::Duration::seconds(2);
+
+/// What a stat says about a file, cheaply: its size and its modification and
+/// change times. The change time cannot be set by `touch` or `cp -p`, and
+/// moves on every write, so an unchanged stamp means an unwritten file.
+/// `None` where the platform has no change time: the file is then read every
+/// time.
+pub(super) fn change_stamp(meta: &std::fs::Metadata) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(format!(
+            "{}:{}.{:09}:{}.{:09}",
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// When a file was last written, by its modification or change time,
+/// whichever is later.
+fn last_write(meta: &std::fs::Metadata) -> Option<DateTime<Utc>> {
+    let modified: Option<DateTime<Utc>> = meta.modified().ok().map(Into::into);
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt;
+        DateTime::from_timestamp(meta.ctime(), meta.ctime_nsec().clamp(0, 999_999_999) as u32)
+    };
+    #[cfg(not(unix))]
+    let changed: Option<DateTime<Utc>> = None;
+    modified.max(changed)
+}
+
+/// What an NFO held when it was read: enough to tell, next time, whether it
+/// changed (FR-219).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NfoContent {
+    pub(super) size_bytes: u64,
+    /// XXH3-128 of the bytes, as 32 hex digits. Not a security boundary: it
+    /// only tells one version of a file from the next.
+    pub(super) content_hash: String,
+    change_stamp: Option<String>,
+    last_write: Option<DateTime<Utc>>,
+}
+
+impl NfoContent {
+    /// The record of this NFO at `path` in `library_id`, as read at `now`.
+    /// The stat stamp is kept only once the NFO has settled
+    /// ([`STAMP_SETTLE`]).
+    pub(super) fn record(
+        &self,
+        library_id: Uuid,
+        path: &Path,
+        now: DateTime<Utc>,
+    ) -> RecordAppliedNfo {
+        let settled = self
+            .last_write
+            .is_some_and(|written| written + STAMP_SETTLE <= now);
+        RecordAppliedNfo {
+            library_id,
+            path: path.to_path_buf(),
+            size_bytes: self.size_bytes,
+            content_hash: self.content_hash.clone(),
+            change_stamp: self.change_stamp.clone().filter(|_| settled),
+        }
+    }
+
+    /// Whether `stored` recorded this same content.
+    pub(super) fn same_as(&self, stored: &AppliedNfo) -> bool {
+        stored.size_bytes == self.size_bytes && stored.content_hash == self.content_hash
+    }
+}
+
+/// What reading an NFO found: what it held, and what it says when Beam
+/// trusts it (`None` for one that is not UTF-8, declares a document type, or
+/// does not parse).
+#[derive(Debug)]
+pub(super) struct NfoRead {
+    pub(super) content: NfoContent,
+    pub(super) nfo: Option<Nfo>,
+}
+
 /// Read the NFO at `path`: `None` when there is no regular file there, or it
-/// is larger than [`MAX_NFO_BYTES`], cannot be read, or is not an NFO Beam
-/// trusts. Opened read-only; a failure is logged, never raised -- a broken
-/// NFO leaves the file classified by its path.
-pub(super) fn read_nfo(path: &Path) -> Option<Nfo> {
+/// is larger than [`MAX_NFO_BYTES`], or cannot be read. Opened read-only; a
+/// failure is logged, never raised -- a broken NFO
+/// leaves the file classified by its path.
+pub(super) fn read_nfo_file(path: &Path) -> Option<NfoRead> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return None;
@@ -40,10 +147,26 @@ pub(super) fn read_nfo(path: &Path) -> Option<Nfo> {
         warn!(path = %path.display(), bytes = meta.len(), "NFO is larger than Beam reads; ignored");
         return None;
     }
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            warn!(path = %path.display(), error = %err, "could not open an NFO; ignored");
+            return None;
+        }
+    };
+    // Stat the open file before reading it: a write after this stat moves the
+    // stamp, so the next read sees it, whereas a stamp taken after the read
+    // could vouch for content the read never saw.
+    let meta = match file.metadata() {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => return None,
+        Err(err) => {
+            warn!(path = %path.display(), error = %err, "could not stat an NFO; ignored");
+            return None;
+        }
+    };
     let mut bytes = Vec::new();
-    let read = std::fs::File::open(path)
-        .and_then(|file| file.take(MAX_NFO_BYTES + 1).read_to_end(&mut bytes));
-    if let Err(err) = read {
+    if let Err(err) = file.take(MAX_NFO_BYTES + 1).read_to_end(&mut bytes) {
         warn!(path = %path.display(), error = %err, "could not read an NFO; ignored");
         return None;
     }
@@ -51,48 +174,106 @@ pub(super) fn read_nfo(path: &Path) -> Option<Nfo> {
         warn!(path = %path.display(), "NFO grew past the size Beam reads; ignored");
         return None;
     }
-    match parse_nfo(&bytes) {
+    let content = NfoContent {
+        size_bytes: bytes.len() as u64,
+        content_hash: format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes)),
+        change_stamp: change_stamp(&meta),
+        last_write: last_write(&meta),
+    };
+    let nfo = match parse_nfo(&bytes) {
         Ok(nfo) => Some(nfo),
         Err(err) => {
             warn!(path = %path.display(), error = %err, "NFO is not readable; ignored");
             None
         }
-    }
+    };
+    Some(NfoRead { content, nfo })
+}
+
+/// An NFO found describing a video: where it is, what it says, and what it
+/// held.
+#[derive(Debug)]
+pub(super) struct LocatedNfo {
+    pub(super) path: PathBuf,
+    pub(super) nfo: Nfo,
+    pub(super) content: NfoContent,
+}
+
+/// Read the NFO at `path` as a located one: `None` unless Beam trusts it.
+fn located(path: PathBuf) -> Option<LocatedNfo> {
+    let NfoRead { content, nfo } = read_nfo_file(&path)?;
+    Some(LocatedNfo {
+        path,
+        nfo: nfo?,
+        content,
+    })
 }
 
 /// The NFOs describing the video at `path` in a library rooted at `root`.
 #[derive(Debug, Default)]
 pub(super) struct NfoFiles {
     /// `<stem>.nfo` beside the video, else `movie.nfo` in its folder.
-    pub(super) file: Option<Nfo>,
+    pub(super) file: Option<LocatedNfo>,
     /// `tvshow.nfo` in its folder or the folder above -- the series folder
     /// of a file in a season folder.
-    pub(super) show: Option<Nfo>,
+    pub(super) show: Option<LocatedNfo>,
 }
 
-/// Find and read the NFOs describing the video at `path`. A folder is never
-/// the library root itself: a `movie.nfo` or `tvshow.nfo` at the root would
-/// describe every file in the library.
-pub(super) fn locate_nfos(root: &Path, path: &Path) -> NfoFiles {
-    let Some(dir) = path.parent() else {
-        return NfoFiles::default();
-    };
-    let below_root = |folder: &Path| folder != root && folder.starts_with(root);
-    let file = path
-        .file_stem()
+/// Whether `folder` may hold an NFO describing media: beneath `root`, never
+/// the root itself -- a `movie.nfo` or `tvshow.nfo` there would describe
+/// every file in the library.
+fn below_root(root: &Path, folder: &Path) -> bool {
+    folder != root && folder.starts_with(root)
+}
+
+/// The NFO describing the video at `path` itself: `<stem>.nfo` beside it,
+/// else `movie.nfo` in its folder.
+pub(super) fn locate_file_nfo(root: &Path, path: &Path) -> Option<LocatedNfo> {
+    let dir = path.parent()?;
+    path.file_stem()
         .map(|stem| dir.join(format!("{}.nfo", stem.to_string_lossy())))
-        .and_then(|own| read_nfo(&own))
+        .and_then(located)
         .or_else(|| {
-            below_root(dir)
-                .then(|| read_nfo(&dir.join(MOVIE_NFO)))
+            below_root(root, dir)
+                .then(|| located(dir.join(MOVIE_NFO)))
                 .flatten()
-        });
-    let show = [Some(dir), dir.parent()]
+        })
+}
+
+/// The `tvshow.nfo` describing the episodes in `dir`: in `dir`, else in the
+/// folder above.
+pub(super) fn locate_show_nfo(root: &Path, dir: &Path) -> Option<LocatedNfo> {
+    [Some(dir), dir.parent()]
         .into_iter()
         .flatten()
-        .filter(|folder| below_root(folder))
-        .find_map(|folder| read_nfo(&folder.join(TVSHOW_NFO)));
-    NfoFiles { file, show }
+        .filter(|folder| below_root(root, folder))
+        .find_map(|folder| located(folder.join(TVSHOW_NFO)))
+}
+
+/// Find and read the NFOs describing the video at `path`.
+pub(super) fn locate_nfos(root: &Path, path: &Path) -> NfoFiles {
+    NfoFiles {
+        file: locate_file_nfo(root, path),
+        show: path.parent().and_then(|dir| locate_show_nfo(root, dir)),
+    }
+}
+
+/// Whether the NFO at `nfo_path` could describe the video at `video`, by
+/// where the two are: a `tvshow.nfo` the videos in its folder and in the
+/// folders one level below it, any other NFO the videos in its own folder.
+/// Whether it *does* is [`locate_nfos`]'s to say.
+pub(super) fn may_describe(nfo_path: &Path, video: &Path) -> bool {
+    let (Some(dir), Some(video_dir)) = (nfo_path.parent(), video.parent()) else {
+        return false;
+    };
+    video_dir == dir || (is_tvshow_nfo(nfo_path) && video_dir.parent() == Some(dir))
+}
+
+/// Whether `path` names a `tvshow.nfo`, in any case.
+pub(super) fn is_tvshow_nfo(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case(TVSHOW_NFO))
 }
 
 /// Whether a title enrichment already matched to `pin`'s id needs no refresh
@@ -296,39 +477,51 @@ impl LocalIndexService {
         Ok(show)
     }
 
-    /// Re-apply the pin of the NFO at `nfo_path`, which changed since it was
-    /// last read, to the titles of the indexed `files` it describes: a
-    /// `tvshow.nfo` the shows of the episodes under its folder, a `movie.nfo`
-    /// the movies in its folder, a `<stem>.nfo` the movie of the video of that
-    /// stem. The NFO's pin replaces the one it set before. An NFO that no
-    /// longer pins anything leaves the pin as it is: the title stays fetched
-    /// by the id it was last given.
+    /// Re-apply the pin of the NFO at `nfo_path`, which says `nfo` and changed
+    /// since it was last applied, to the titles of the indexed `files` it is
+    /// *the* NFO of: those whose own NFO, located exactly as classification
+    /// locates it ([`locate_nfos`]), is this one. So a `tvshow.nfo` re-pins
+    /// the shows of the episodes whose `tvshow.nfo` it is, a `movie.nfo` the
+    /// movies in its folder with no `<stem>.nfo` of their own, and a
+    /// `<stem>.nfo` the movie of its video; an NFO at the library root, or
+    /// further above a video than classification looks, re-pins nothing. The
+    /// NFO's pin replaces the one it set before, but never an
+    /// administrator's (FR-312). An NFO that pins nothing leaves the pin as
+    /// it is: the title stays fetched by the id it was last given.
     pub(super) async fn repin_from_nfo(
         &self,
+        library: &Library,
         nfo_path: &Path,
-        files: &[MediaFile],
+        nfo: &Nfo,
+        files: &[&MediaFile],
     ) -> Result<(), IndexError> {
-        let (Some(dir), Some(name)) = (nfo_path.parent(), nfo_path.file_name()) else {
-            return Ok(());
-        };
-        let name = name.to_string_lossy().to_lowercase();
-        let Some(nfo) = read_nfo(nfo_path) else {
-            return Ok(());
-        };
         let Some(pin) = nfo.ids.pin() else {
             return Ok(());
         };
         let describes = |wanted: NfoKind| nfo.kind.is_none_or(|kind| kind == wanted);
+        let root = library.root_path.as_path();
+        let is_this = |located: Option<LocatedNfo>| located.is_some_and(|l| l.path == nfo_path);
 
         let mut targets: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
-        if name == TVSHOW_NFO {
+        if is_tvshow_nfo(nfo_path) {
             if !describes(NfoKind::TvShow) {
                 return Ok(());
             }
-            for file in files.iter().filter(|f| f.path.starts_with(dir)) {
+            // Every episode in one folder locates the same `tvshow.nfo`.
+            let mut located_here: HashMap<&Path, bool> = HashMap::new();
+            for file in files {
                 let Some(MediaFileContent::Episode { episode_id, .. }) = file.content else {
                     continue;
                 };
+                let Some(dir) = file.path.parent() else {
+                    continue;
+                };
+                if !*located_here
+                    .entry(dir)
+                    .or_insert_with(|| is_this(locate_show_nfo(root, dir)))
+                {
+                    continue;
+                }
                 let Some(episode) = self.show_repo.find_episode_by_id(episode_id).await? else {
                     continue;
                 };
@@ -364,14 +557,13 @@ impl LocalIndexService {
         if !describes(NfoKind::Movie) {
             return Ok(());
         }
-        let own_stem = (name != MOVIE_NFO).then(|| nfo_path.file_stem()).flatten();
-        for file in files.iter().filter(|f| f.path.parent() == Some(dir)) {
-            if own_stem.is_some_and(|stem| file.path.file_stem() != Some(stem)) {
-                continue;
-            }
+        for file in files {
             let Some(MediaFileContent::Movie { movie_entry_id }) = file.content else {
                 continue;
             };
+            if !is_this(locate_file_nfo(root, &file.path)) {
+                continue;
+            }
             if let Some(entry) = self.movie_repo.find_entry_by_id(movie_entry_id).await? {
                 targets.insert(entry.movie_id);
             }
@@ -397,6 +589,71 @@ impl LocalIndexService {
                 nfo_path,
             )
             .await?;
+        }
+        Ok(())
+    }
+
+    /// Record, as applied, the NFOs classification just read for a file
+    /// (FR-219). An NFO seen for the first time is recorded as it is: what
+    /// classification did with it -- pinning a new title, or keeping a
+    /// title's pin against it and telling the administrator -- is its
+    /// application, and a later scan must not apply it again with
+    /// [`PinConflict::Replace`]. An NFO already recorded with other content
+    /// was edited since it was applied, and is left for the scan's or the
+    /// watcher's re-apply to replace the pin with.
+    pub(super) async fn record_consumed_nfos(
+        &self,
+        library: &Library,
+        consumed: &[&LocatedNfo],
+    ) -> Result<(), IndexError> {
+        let Some(repo) = &self.applied_nfo_repo else {
+            return Ok(());
+        };
+        for located in consumed {
+            let LocatedNfo {
+                path,
+                nfo: _,
+                content,
+            } = located;
+            let stored = repo.find_by_path(path).await?;
+            if stored
+                .as_ref()
+                .is_some_and(|stored| !content.same_as(stored))
+            {
+                continue;
+            }
+            let record = content.record(library.id, path, self.clock.now());
+            if !stored.as_ref().is_some_and(|stored| record.matches(stored)) {
+                repo.record_by_path(record).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-read the NFO at `path` -- whose record is `stored` -- and, when its
+    /// content differs from what was last applied, re-apply it to those of
+    /// `files` it describes; then record what it holds. An NFO that cannot be
+    /// read is neither applied nor recorded, so it is tried again.
+    pub(super) async fn reapply_nfo(
+        &self,
+        library: &Library,
+        path: &Path,
+        stored: Option<&AppliedNfo>,
+        files: &[&MediaFile],
+    ) -> Result<(), IndexError> {
+        let Some(NfoRead { content, nfo }) = read_nfo_file(path) else {
+            return Ok(());
+        };
+        if !stored.is_some_and(|stored| content.same_as(stored))
+            && let Some(nfo) = &nfo
+        {
+            self.repin_from_nfo(library, path, nfo, files).await?;
+        }
+        if let Some(repo) = &self.applied_nfo_repo {
+            let record = content.record(library.id, path, self.clock.now());
+            if !stored.is_some_and(|stored| record.matches(stored)) {
+                repo.record_by_path(record).await?;
+            }
         }
         Ok(())
     }

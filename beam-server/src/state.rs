@@ -324,6 +324,9 @@ impl AppServices {
             // Sidecar subtitles are indexed but not yet served: issue #189.
             .with_sidecar_repo(Arc::new(
                 beam_index::repositories::SqlSidecarSubtitleRepository::new(db.clone()),
+            ))
+            .with_applied_nfo_repo(Arc::new(
+                beam_index::repositories::SqlAppliedNfoRepository::new(db.clone()),
             )),
         );
 

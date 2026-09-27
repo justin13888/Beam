@@ -391,6 +391,25 @@ Indexes on `file_id` and `library_id`. A row no scan finds any more, or whose vi
 indexed, is deleted outright: nothing references it. Purging a video's `files` row takes its
 subtitles with it.
 
+### `applied_nfos`
+What each NFO beside the media held when the indexer last applied it (issue #184, FR-219). An NFO
+is re-applied exactly when its size or content hash differs from its row, never by comparing its
+modification time with a scan's. Classification records the NFOs it reads for a new file; a scan
+and a watcher event record the ones they re-apply.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | UUID | no | PK |
+| `library_id` | UUID | no | FK → `libraries.id`, cascade |
+| `path` | TEXT | no | unique (`applied_nfos_path_unique`) — the NFO; recorded by it |
+| `size_bytes` | BIGINT | no | `CHECK (size_bytes >= 0)` |
+| `content_hash` | TEXT | no | XXH3-128 of the NFO's bytes, as hex — tells one version of the file from the next |
+| `change_stamp` | TEXT | yes | the NFO's size, modification and change times as a stat reported them; a scan that finds the same stamp does not read the NFO again. NULL where the platform has no change time, or when the NFO was written within two seconds of being read |
+| `created_at` / `updated_at` | TIMESTAMPTZ | no | |
+
+Index on `library_id`. The row of an NFO no scan finds any more, or that the watcher reports
+removed, is deleted outright.
+
 ### `playback_progress`
 Resume/continue-watching state, one row per (user, file) the user has started.
 
@@ -501,6 +520,7 @@ Indexes: `created_at DESC` (recent-first admin log view), `level`.
 - **One title per pin:** `movies.pinned_ref` and `shows.pinned_ref` are unique, so a provider id an
   NFO names pins at most one movie and one show.
 - **One sidecar subtitle per path:** `sidecar_subtitles.path` is unique.
+- **One applied-NFO record per path:** `applied_nfos.path` is unique.
 - **One season per `(show_id, season_number)`, one episode per `(season_id, episode_number)`:**
   prevents duplicate rows on rescans.
 - **`users` identity is `(oidc_issuer, oidc_subject)`, not a password:** no end-user credential is

@@ -1,5 +1,5 @@
 //! Subtitle files beside a video, indexed as subtitles of that video (issue
-//! #184), and the NFOs a scan finds changed.
+//! #184), and the NFOs a scan or the watcher finds changed.
 //!
 //! Nothing here writes to a library root: a subtitle is only ever stat-ed and
 //! its directory listed. What a subtitle's name says is read by
@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use beam_domain::models::applied_nfo::AppliedNfo;
 use beam_domain::models::sidecar::{SubtitleFormat, UpsertSidecarSubtitle};
 use beam_domain::utils::sidecar::{is_subtitle_folder, match_sidecar};
 
@@ -285,29 +286,120 @@ impl LocalIndexService {
         Ok(())
     }
 
-    /// Re-apply the pins of the NFOs a scan found modified since the previous
-    /// scan started. A new video's NFO is read when the video is classified,
-    /// so only an NFO added or edited beside an indexed video needs this. A
-    /// library never scanned before has nothing indexed to re-pin.
-    pub(super) async fn repin_changed_nfos(
+    /// Re-apply the NFOs a scan's walk found whose content changed since they
+    /// were last applied (FR-219) -- whatever their modification times say,
+    /// so an NFO copied in with an old mtime (`cp -p`, `rsync -a`), one on a
+    /// NAS whose clock disagrees with the server's, and one a previous scan
+    /// died before reaching are all applied. An NFO whose stat stamp matches
+    /// its record was not written since and is not read. Classification has
+    /// already recorded the NFOs it read for new files, so those are not
+    /// applied a second time. The record of an NFO the walk no longer finds is
+    /// deleted, unless the walk failed where it lives.
+    ///
+    /// Without an [`AppliedNfoRepository`] there is no record to compare
+    /// against, so nothing is re-applied here.
+    pub(super) async fn reapply_changed_nfos(
         &self,
         library: &Library,
-        nfos: &[WalkedSidecar],
+        nfos: &[hints::WalkedNfo],
+        failed_subtrees: &[PathBuf],
+        unscoped_failure: bool,
     ) -> Result<(), IndexError> {
-        let Some(since) = library.last_scan_started_at else {
+        let Some(repo) = &self.applied_nfo_repo else {
             return Ok(());
         };
-        let changed: Vec<&WalkedSidecar> = nfos
-            .iter()
-            .filter(|nfo| nfo.mtime.is_some_and(|mtime| mtime > since))
+        let stored: HashMap<PathBuf, AppliedNfo> = repo
+            .find_all_by_library(library.id)
+            .await?
+            .into_iter()
+            .map(|record| (record.path.clone(), record))
             .collect();
-        if changed.is_empty() {
+
+        // The library's files are read once, and only if some NFO changed,
+        // then indexed by folder and by the folder above that.
+        let mut files: Option<Vec<MediaFile>> = None;
+        let mut by_parent: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        let mut by_grandparent: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        for walked in nfos {
+            let record = stored.get(&walked.path);
+            if let (Some(stamp), Some(record)) = (&walked.stamp, record)
+                && record.change_stamp.as_ref() == Some(stamp)
+            {
+                continue;
+            }
+            if files.is_none() {
+                let all = self.file_repo.find_all_by_library(library.id).await?;
+                for (i, file) in all.iter().enumerate() {
+                    let parent = file.path.parent();
+                    if let Some(parent) = parent {
+                        by_parent.entry(parent.to_path_buf()).or_default().push(i);
+                    }
+                    if let Some(grandparent) = parent.and_then(Path::parent) {
+                        by_grandparent
+                            .entry(grandparent.to_path_buf())
+                            .or_default()
+                            .push(i);
+                    }
+                }
+                files = Some(all);
+            }
+            let all = files.as_deref().unwrap_or_default();
+            let Some(dir) = walked.path.parent() else {
+                continue;
+            };
+            let mut indices: Vec<usize> = by_parent.get(dir).cloned().unwrap_or_default();
+            if hints::is_tvshow_nfo(&walked.path) {
+                indices.extend(by_grandparent.get(dir).into_iter().flatten().copied());
+            }
+            let candidates: Vec<&MediaFile> = indices.into_iter().map(|i| &all[i]).collect();
+            self.reapply_nfo(library, &walked.path, record, &candidates)
+                .await?;
+        }
+
+        let walked: HashSet<&Path> = nfos.iter().map(|nfo| nfo.path.as_path()).collect();
+        let gone: Vec<Uuid> = stored
+            .values()
+            .filter(|record| !walked.contains(record.path.as_path()))
+            .filter(|record| walk_saw(&record.path, failed_subtrees, unscoped_failure))
+            .map(|record| record.id)
+            .collect();
+        repo.delete_by_ids(gone).await?;
+        Ok(())
+    }
+
+    /// Reconcile the NFO at `path` after a watcher event: re-apply it when
+    /// its content changed since it was last applied, to the indexed files
+    /// it can describe -- read by one query for its folder, never the whole
+    /// library -- or forget its record when it is gone.
+    pub(super) async fn reconcile_nfo_event(
+        &self,
+        library: &Library,
+        path: &Path,
+        is_file: bool,
+    ) -> Result<(), IndexError> {
+        let stored = match &self.applied_nfo_repo {
+            Some(repo) => repo.find_by_path(path).await?,
+            None => None,
+        };
+        if !is_file {
+            // A root that is not there is a volume that went away, not an NFO
+            // that was deleted (issue #179).
+            if library.root_path.is_dir()
+                && let (Some(repo), Some(record)) = (&self.applied_nfo_repo, stored)
+            {
+                repo.delete_by_ids(vec![record.id]).await?;
+            }
             return Ok(());
         }
-        let files = self.file_repo.find_all_by_library(library.id).await?;
-        for nfo in changed {
-            self.repin_from_nfo(&nfo.path, &files).await?;
-        }
-        Ok(())
+        let Some(dir) = path.parent() else {
+            return Ok(());
+        };
+        let under = self.file_repo.find_all_under(library.id, dir).await?;
+        let candidates: Vec<&MediaFile> = under
+            .iter()
+            .filter(|file| hints::may_describe(path, &file.path))
+            .collect();
+        self.reapply_nfo(library, path, stored.as_ref(), &candidates)
+            .await
     }
 }
