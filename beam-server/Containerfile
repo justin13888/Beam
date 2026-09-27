@@ -51,7 +51,7 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz && \
 # ----------------------------------------------------
 # Chef: Setup chef image
 # ----------------------------------------------------
-FROM docker.io/rust:1.91-slim-trixie AS chef
+FROM docker.io/rust:1.94-slim-trixie AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 

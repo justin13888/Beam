@@ -36,7 +36,7 @@ hk = "1.57.0"
 # requirement of `cargo mutants` here, not an optional speedup. nextest tags its
 # releases as `cargo-nextest-<semver>`, which is the version string mise wants.
 "github:nextest-rs/nextest" = "cargo-nextest-0.9.143"
-# Rust is deliberately absent: rust-toolchain.toml pins 1.91.0 and is honored by
+# Rust is deliberately absent: rust-toolchain.toml pins 1.94.0 and is honored by
 # rustup, rust-analyzer, and CI's setup-rust-toolchain action. Duplicating the
 # pin here would create a second source of truth for the same thing.
 #
@@ -155,7 +155,7 @@ run = 'cargo test --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEA
 description = "Run Rust tests with coverage and enforce the line/region/function thresholds"
 # --fail-under-regions is this project's branch-coverage gate. cargo-llvm-cov's
 # --branch is nightly-only (it needs -Z coverage-options=branch) and
-# rust-toolchain.toml pins stable 1.91.0, so it is simply unavailable. LLVM
+# rust-toolchain.toml pins stable 1.94.0, so it is simply unavailable. LLVM
 # regions are a superset of branches -- every match arm and every && / ||
 # short-circuit gets its own counter -- which makes region coverage the honest
 # stable-toolchain proxy, and the number that correlates with mutation score.

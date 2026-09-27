@@ -376,7 +376,7 @@ behaves the way our fakes assume."
 
 **Regions, not branches.** `cargo-llvm-cov`'s `--branch` requires
 `-Z coverage-options=branch` and therefore a nightly toolchain, and
-`rust-toolchain.toml` pins stable 1.91.0. LLVM *regions* are a superset of branches -- every match
+`rust-toolchain.toml` pins stable 1.94.0. LLVM *regions* are a superset of branches -- every match
 arm and every `&&` / `||` short-circuit carries its own counter -- so `--fail-under-regions` is the
 honest stable-toolchain branch gate, and it is the number that tracks mutation score. Measure with
 `mise run rust:coverage:report`, which prints the per-file Regions / Functions / Lines table without
