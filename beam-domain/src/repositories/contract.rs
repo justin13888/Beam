@@ -1105,6 +1105,161 @@ macro_rules! file_repository_contract {
             );
         }
 
+        /// A file of a new title under `library_id` whose content hash is
+        /// `hash`, at a fresh path.
+        async fn file_with_hash(
+            fixture: &impl FileRepositoryFixture,
+            library_id: Uuid,
+            hash: u64,
+        ) -> MediaFile {
+            let movie_entry_id = fixture.new_movie_entry(library_id).await;
+            fixture
+                .repo()
+                .create(CreateMediaFile {
+                    library_id,
+                    path: PathBuf::from(format!("/videos/{library_id}/{}.mkv", Uuid::new_v4())),
+                    hash,
+                    size_bytes: 1024,
+                    mtime: None,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: Some(MediaFileContent::Movie { movie_entry_id }),
+                    status: FileStatus::Known,
+                    classifier_version: 0,
+                })
+                .await
+                .expect("create a file")
+        }
+
+        /// A moved file keeps its row (issue #180): the relink points it at
+        /// the new path, records what was found there, and brings it back if
+        /// it had been marked missing -- keeping its id, hash and title.
+        #[tokio::test]
+        async fn relink_moves_a_row_to_a_new_path_keeping_its_id_and_title() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+            repo.mark_missing(vec![file.id], at(0)).await.unwrap();
+            let moved_to = PathBuf::from(format!("/videos/{library}/moved/{}.mkv", Uuid::new_v4()));
+
+            let relinked = repo
+                .relink(file.id, moved_to.clone(), 4096, Some(at(30)))
+                .await
+                .expect("relink the row");
+
+            assert_eq!(relinked.id, file.id);
+            let stored = repo
+                .find_by_id(file.id)
+                .await
+                .unwrap()
+                .expect("a relinked file is visible again");
+            assert_eq!(stored.path, moved_to);
+            assert_eq!(
+                (stored.size_bytes, stored.mtime, stored.missing_since),
+                (4096, Some(at(30)), None)
+            );
+            assert_eq!(
+                (stored.hash, stored.content.clone(), stored.status),
+                (file.hash, file.content.clone(), file.status),
+                "the content and its title are kept"
+            );
+            assert!(
+                repo.find_by_path(&file.path.to_string_lossy())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "nothing is left at the old path"
+            );
+            assert_eq!(
+                repo.find_by_path(&moved_to.to_string_lossy())
+                    .await
+                    .unwrap()
+                    .map(|f| f.id),
+                Some(file.id)
+            );
+        }
+
+        /// One row per path holds for a relink too: moving a row onto a path
+        /// another row holds is refused, and neither row changes.
+        #[tokio::test]
+        async fn relinking_onto_a_path_another_row_holds_is_refused() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let moving = movie_file(&fixture, library).await;
+            let holder = movie_file(&fixture, library).await;
+            repo.mark_missing(vec![moving.id], at(0)).await.unwrap();
+
+            let refused = repo
+                .relink(moving.id, holder.path.clone(), 1, Some(at(9)))
+                .await;
+
+            assert!(refused.is_err(), "the path is taken");
+            let stored = repo
+                .find_by_path(&moving.path.to_string_lossy())
+                .await
+                .unwrap()
+                .expect("the moving row is where it was");
+            assert_eq!(stored.id, moving.id);
+            assert_eq!(stored.missing_since, Some(at(0)), "and still missing");
+            assert_eq!(
+                repo.find_by_path(&holder.path.to_string_lossy())
+                    .await
+                    .unwrap()
+                    .map(|f| f.id),
+                Some(holder.id)
+            );
+        }
+
+        #[tokio::test]
+        async fn relinking_a_row_that_does_not_exist_fails_and_creates_nothing() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let path = PathBuf::from(format!("/videos/{library}/{}.mkv", Uuid::new_v4()));
+
+            assert!(
+                repo.relink(Uuid::new_v4(), path.clone(), 1, None)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                repo.find_by_path(&path.to_string_lossy())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        /// The relink lookup sees a missing row -- the moved file's -- and
+        /// never a row of another library, whatever its hash.
+        #[tokio::test]
+        async fn the_hash_lookup_includes_missing_rows_of_one_library_only() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let other = fixture.new_library().await;
+            // Positive and unique per run: the hash is a signed BIGINT column.
+            let hash = (Uuid::new_v4().as_u128() as u64) >> 1;
+            let present = file_with_hash(&fixture, library, hash).await;
+            let missing = file_with_hash(&fixture, library, hash).await;
+            let elsewhere = file_with_hash(&fixture, other, hash).await;
+            let different = file_with_hash(&fixture, library, hash ^ 1).await;
+            repo.mark_missing(vec![missing.id, elsewhere.id], at(0))
+                .await
+                .unwrap();
+
+            let found = repo
+                .find_by_library_and_hash_including_missing(library, hash)
+                .await
+                .unwrap();
+
+            assert_eq!(ids(&found), sorted(vec![present.id, missing.id]));
+            assert!(!ids(&found).contains(&different.id));
+        }
+
         #[tokio::test]
         async fn empty_id_lists_change_nothing() {
             let fixture = $setup().await;

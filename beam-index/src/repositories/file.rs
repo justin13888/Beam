@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -103,6 +104,25 @@ impl FileRepository for SqlFileRepository {
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         let models = files::Entity::find()
+            .filter(files::Column::LibraryId.eq(library_id))
+            .all(self.db.as_ref())
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
+    /// A reconcile read: no `missing_since` filter. Served by
+    /// `idx_files_hash`.
+    async fn find_by_library_and_hash_including_missing(
+        &self,
+        library_id: Uuid,
+        hash: u64,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let models = files::Entity::find()
+            .filter(files::Column::HashXxh3.eq(hash as i64))
             .filter(files::Column::LibraryId.eq(library_id))
             .all(self.db.as_ref())
             .await?;
@@ -290,6 +310,33 @@ impl FileRepository for SqlFileRepository {
             .exec(self.db.as_ref())
             .await?;
         Ok(())
+    }
+
+    async fn relink(
+        &self,
+        id: Uuid,
+        path: PathBuf,
+        size_bytes: u64,
+        mtime: Option<DateTime<Utc>>,
+    ) -> Result<MediaFile, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{ActiveModelTrait, Set};
+
+        // One statement: `idx_files_path_unique` refuses a path another row
+        // holds, and an id with no row updates nothing, which sea-orm
+        // reports as an error. Either way the row is left as it was.
+        let result = files::ActiveModel {
+            id: Set(id),
+            file_path: Set(path.to_string_lossy().to_string()),
+            file_size: Set(size_bytes as i64),
+            mtime: Set(mtime.map(|d| d.into())),
+            missing_since: Set(None),
+            updated_at: Set(chrono::Utc::now().into()),
+            ..Default::default()
+        }
+        .update(self.db.as_ref())
+        .await?;
+        Ok(MediaFile::from(result))
     }
 
     async fn purge_missing(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
@@ -38,6 +40,15 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
         &self,
         library_id: Uuid,
     ) -> Result<Vec<MediaFile>, DbErr>;
+    /// Reconcile read: every file in the library whose content hash is
+    /// `hash`, missing ones included. The indexer asks it for the row a new
+    /// path might be a moved or renamed file of (issue #180); a file in
+    /// another library is never one.
+    async fn find_by_library_and_hash_including_missing(
+        &self,
+        library_id: Uuid,
+        hash: u64,
+    ) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read.
     async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read.
@@ -71,6 +82,21 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     /// Clear `missing_since` on `id`: the file is back on disk. The row keeps
     /// its id, so everything keyed on it (playback progress) is still there.
     async fn restore(&self, id: Uuid) -> Result<(), DbErr>;
+    /// Point `id` at `path`, where its file now is -- it was moved or renamed
+    /// (issue #180) -- recording the size and modification time found there
+    /// and clearing `missing_since`. Everything else about the row, its id
+    /// above all, is kept, so what is keyed on it (playback progress, its
+    /// movie or episode, its streams) follows the file to its new path.
+    ///
+    /// Fails, changing nothing, when `id` has no row, or when another row is
+    /// already stored at `path` (one row per path, issue #181).
+    async fn relink(
+        &self,
+        id: Uuid,
+        path: PathBuf,
+        size_bytes: u64,
+        mtime: Option<DateTime<Utc>>,
+    ) -> Result<MediaFile, DbErr>;
     /// Hard-delete every listed row that is missing, returning how many went.
     /// A listed row that is present is left alone, so a caller racing a
     /// restore cannot purge a file that came back. An empty list touches
@@ -162,6 +188,21 @@ pub mod in_memory {
                 .unwrap()
                 .values()
                 .filter(|f| f.library_id == library_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn find_by_library_and_hash_including_missing(
+            &self,
+            library_id: Uuid,
+            hash: u64,
+        ) -> Result<Vec<MediaFile>, DbErr> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|f| f.library_id == library_id && f.hash == hash)
                 .cloned()
                 .collect())
         }
@@ -319,6 +360,34 @@ pub mod in_memory {
                 file.missing_since = None;
             }
             Ok(())
+        }
+
+        async fn relink(
+            &self,
+            id: Uuid,
+            path: PathBuf,
+            size_bytes: u64,
+            mtime: Option<DateTime<Utc>>,
+        ) -> Result<MediaFile, DbErr> {
+            let mut files = self.files.lock().unwrap();
+            if files
+                .values()
+                .any(|stored| stored.id != id && stored.path == path)
+            {
+                return Err(DbErr::Custom(format!(
+                    "idx_files_path_unique: a file is already stored at {}",
+                    path.display()
+                )));
+            }
+            let stored = files
+                .get_mut(&id)
+                .ok_or(DbErr::RecordNotFound(format!("File {id} not found")))?;
+            stored.path = path;
+            stored.size_bytes = size_bytes;
+            stored.mtime = mtime;
+            stored.missing_since = None;
+            stored.updated_at = chrono::Utc::now();
+            Ok(stored.clone())
         }
 
         async fn purge_missing(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {

@@ -173,6 +173,32 @@ async fn purging_a_missing_file_cascades_to_its_playback_progress() {
     assert_eq!(progress_rows(db.as_ref(), file).await, 0);
 }
 
+/// A relinked file keeps its playback progress (issue #180): the relink is
+/// an update of the row the `playback_progress.file_id` foreign key points
+/// at, never a delete and re-insert that would cascade the progress away.
+#[tokio::test]
+async fn relinking_a_missing_file_keeps_its_playback_progress() {
+    let db = postgres::connection().await;
+    let user = seed::user(db.as_ref()).await.unwrap();
+    let file = seed::file(db.as_ref()).await.unwrap();
+    insert_progress(db.as_ref(), user, file).await;
+
+    let repo = SqlFileRepository::new(db.clone());
+    repo.mark_missing(vec![file], chrono::Utc::now())
+        .await
+        .unwrap();
+    let moved_to = PathBuf::from(format!("/videos/{}/moved.mkv", uuid::Uuid::new_v4()));
+    let relinked = repo
+        .relink(file, moved_to.clone(), 2048, None)
+        .await
+        .expect("relink against the real schema");
+
+    assert_eq!(relinked.id, file);
+    assert_eq!(relinked.path, moved_to);
+    assert_eq!(relinked.missing_since, None);
+    assert_eq!(progress_rows(db.as_ref(), file).await, 1);
+}
+
 async fn insert_progress(db: &sea_orm::DatabaseConnection, user: uuid::Uuid, file: uuid::Uuid) {
     use sea_orm::{ConnectionTrait, Statement};
 
