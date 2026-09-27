@@ -1,7 +1,10 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use beam_domain::models::library_shape::LibraryShape;
 use beam_domain::providers::telemetry::{RecordingTelemetrySink, TelemetrySendError};
+use beam_domain::repositories::library_shape::MockLibraryShapeRepository;
 use beam_domain::repositories::library_shape::in_memory::InMemoryLibraryShapeRepository;
 use beam_domain::services::TestClock;
 use chrono::{DateTime, TimeZone, Utc};
@@ -24,6 +27,19 @@ struct Harness {
 }
 
 fn harness(destination: Option<&str>, sink: RecordingTelemetrySink) -> Harness {
+    harness_over(
+        destination,
+        sink,
+        Arc::new(InMemoryLibraryShapeRepository::default()),
+    )
+}
+
+/// A harness whose report reads `shape_repo`.
+fn harness_over(
+    destination: Option<&str>,
+    sink: RecordingTelemetrySink,
+    shape_repo: Arc<dyn LibraryShapeRepository>,
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir.path().join("telemetry").join("library-report.json");
     let sink = Arc::new(sink);
@@ -35,7 +51,7 @@ fn harness(destination: Option<&str>, sink: RecordingTelemetrySink) -> Harness {
             state_path: state_path.clone(),
             server_version: "1.2.3".to_string(),
         },
-        Arc::new(InMemoryLibraryShapeRepository::default()),
+        shape_repo,
         sink.clone(),
         clock.clone(),
     ));
@@ -187,6 +203,47 @@ async fn a_failed_delivery_is_retried_after_an_hour_and_not_recorded() {
 
     h.clock.advance(INITIAL_RETRY_DELAY);
     until("the retry", || h.sink.sent_count() == 2).await;
+    parked(&h).await;
+    assert_eq!(
+        h.service.last_sent_at().await,
+        Some(start() + chrono::Duration::hours(2))
+    );
+}
+
+/// NFR-205: a report that cannot be built is a failed delivery like any
+/// other -- nothing sent, nothing recorded, retried on the same backoff.
+#[tokio::test]
+async fn a_store_failure_is_a_failed_delivery_and_is_retried() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut store = MockLibraryShapeRepository::new();
+    let counted = reads.clone();
+    store.expect_shape().returning(move || {
+        if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(DbErr::Custom("connection reset".to_string()))
+        } else {
+            Ok(LibraryShape::default())
+        }
+    });
+    let h = harness_over(Some(URL), RecordingTelemetrySink::new(), Arc::new(store));
+    spawn(&h);
+    parked(&h).await;
+
+    h.clock.advance(FIRST_SEND_DELAY);
+    until("the failing read", || reads.load(Ordering::SeqCst) == 1).await;
+    parked(&h).await;
+    assert_eq!(h.sink.sent_count(), 0, "nothing to send");
+    assert!(
+        !h.state_path.exists(),
+        "a report that was never built is not recorded as sent"
+    );
+
+    h.clock
+        .advance(INITIAL_RETRY_DELAY - Duration::from_secs(1));
+    parked(&h).await;
+    assert_eq!(h.sink.sent_count(), 0, "one second short of the retry");
+
+    h.clock.advance(Duration::from_secs(1));
+    until("the retry", || h.sink.sent_count() == 1).await;
     parked(&h).await;
     assert_eq!(
         h.service.last_sent_at().await,

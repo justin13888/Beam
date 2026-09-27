@@ -1,5 +1,5 @@
-//! `GET /v1/admin/telemetry/library` (issue #93) through the real router and
-//! handler, over the real report service, with a recording sink and an
+//! `GET /v1/admin/telemetry/library` (issue #93) through the served router
+//! and handler, over the real report service, with a recording sink and an
 //! in-memory store below the trait line.
 
 use std::path::PathBuf;
@@ -15,20 +15,21 @@ use beam_domain::models::stream::{
     CreateMediaStream, StreamMetadata, StreamType, VideoStreamMetadata,
 };
 use beam_domain::providers::telemetry::RecordingTelemetrySink;
+use beam_domain::repositories::library_shape::MockLibraryShapeRepository;
 use beam_domain::repositories::library_shape::in_memory::InMemoryLibraryShapeRepository;
 use beam_domain::repositories::{
-    FileRepository, LibraryRepository, MediaStreamRepository, MovieRepository,
+    FileRepository, LibraryRepository, LibraryShapeRepository, MediaStreamRepository,
+    MovieRepository,
 };
 use beam_domain::services::TestClock;
 use beam_domain::utils::telemetry::{CountBucket, GIB};
 use chrono::{TimeZone, Utc};
 use kynos::http::StatusCode;
-use kynos::prelude::*;
 use kynos::test::TestClient;
+use sea_orm::DbErr;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use crate::routes::admin::preview_library_telemetry;
 use crate::services::telemetry::LibraryReportService;
 use crate::services::telemetry::scheduler::FIRST_SEND_DELAY;
 use crate::state::AppState;
@@ -113,6 +114,11 @@ async fn seeded_store() -> InMemoryLibraryShapeRepository {
 }
 
 async fn fixture(destination: Option<&str>) -> Fixture {
+    fixture_over(destination, Arc::new(seeded_store().await))
+}
+
+/// A fixture whose report reads `shape_repo`.
+fn fixture_over(destination: Option<&str>, shape_repo: Arc<dyn LibraryShapeRepository>) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let clock = Arc::new(TestClock::starting_at(
         Utc.with_ymd_and_hms(2026, 9, 27, 10, 0, 0).unwrap(),
@@ -125,7 +131,7 @@ async fn fixture(destination: Option<&str>) -> Fixture {
     };
     let service = Arc::new(LibraryReportService::new(
         config.library_report_config(),
-        Arc::new(seeded_store().await),
+        shape_repo,
         sink.clone(),
         clock.clone(),
     ));
@@ -138,13 +144,9 @@ async fn fixture(destination: Option<&str>) -> Fixture {
         None,
         service.clone(),
     );
-    let router = Router::new()
-        .nest(
-            "/v1",
-            Router::new().mount(kynos::routes![preview_library_telemetry]),
-        )
+    let router = crate::routes::create_router()
         .build(state.clone())
-        .expect("the telemetry route describes itself");
+        .expect("the served router describes itself");
     Fixture {
         client: TestClient::new(router),
         state,
@@ -302,6 +304,29 @@ async fn the_previewed_payload_is_the_delivered_body() {
     assert_eq!(body["payload"].as_str().unwrap().as_bytes(), sent.body);
     assert_eq!(body["last_sent_at"], "2026-09-27T11:00:00Z");
     assert_eq!(body["next_send_at"], "2026-10-04T11:00:00Z");
+}
+
+/// NFR-205: the store failing is a 500 problem, not a panic or a partial
+/// report, and nothing is sent.
+#[tokio::test]
+async fn a_store_failure_is_an_internal_error_problem() {
+    let mut store = MockLibraryShapeRepository::new();
+    store
+        .expect_shape()
+        .times(1)
+        .returning(|| Err(DbErr::Custom("connection reset".to_string())));
+    let fixture = fixture_over(Some(COLLECTOR), Arc::new(store));
+    let token = session(&fixture.state, true).await;
+
+    fixture
+        .client
+        .get("/v1/admin/telemetry/library")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+    assert_eq!(fixture.sink.sent_count(), 0);
 }
 
 #[tokio::test]
