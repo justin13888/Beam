@@ -111,8 +111,8 @@ implementation. Transport-independent: the HTTP adapter for the flow lives in `b
 [ADR-0005](decisions/ADR-0005-sessions-in-postgres.md).
 
 **beam-index** (library crate)
-Owns library scanning, change detection (size/mtime/XXH3 hash), scene-filename parsing (title/year
-extraction), and the async metadata enrichment pipeline built on the `cameo` crate (TMDB + AniList).
+Owns library scanning, change detection (size/mtime/XXH3 hash), classification of each file from its
+path (the pure rules live in `beam-domain`'s `utils::media_path` and `utils::path_policy`), and the async metadata enrichment pipeline built on the `cameo` crate (TMDB + AniList).
 The only crate in the workspace that links `ffmpeg-next`, and only for reading technical stream
 metadata at index time — never at stream time. See
 [ADR-0006](decisions/ADR-0006-cameo-enrichment.md) and

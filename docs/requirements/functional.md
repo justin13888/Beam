@@ -48,6 +48,25 @@ strength. Each requirement is independently testable. See `product.md` for narra
   distinct from any library root, used for its own state (e.g., the enrichment metadata cache).
 - **FR-204**: The server MUST classify indexed filesystem entries into movies and TV
   shows/seasons/episodes, persisting them as `movie_entries` and `episode`-family rows respectively.
+  Classification MUST read the file's path relative to its library root, folders included:
+  - a show is named by its series folder -- the parent of a season folder (`Season 01`, `Series 2`,
+    `Saison`, `Staffel`, `Temporada`, `S01`, or `Specials`, which is season 0), else the file's
+    parent folder, else the filename;
+  - an episode is numbered by an `SxxEyy` or `1x02` marker (of several, the last one before the
+    first release-noise token), by an air date (`2024-03-01`: season = year, episode = `MMDD`), or
+    by an absolute number (`Show - 012`, `E12`) only where the layout is unambiguous (a season
+    folder, or a folder naming the same title); a marker contradicting its season folder wins;
+  - an episode's title is the text after its marker, else `Episode N`; a multi-episode file
+    (`S01E01E02`, `S01E01-E03`) MUST attach to its first episode and record the last;
+  - a movie is identified by title and year, and each edition (a `{edition-...}` tag, or edition
+    words such as `Director's Cut` or `Extended` after the title) of it in a library MUST be one
+    `movie_entries` row however many copies exist;
+  - a file in a season folder with no episode number MUST be indexed without a title (status
+    `unknown`) and reported through the admin log, never guessed into a movie.
+
+  Every row MUST record the version of these rules that classified it, and a scan MUST reclassify a
+  row classified by an older version from its path -- keeping its id, hash and probe results -- so a
+  change to the rules reaches files indexed before it.
 - **FR-205**: The server MUST support multiple indexed file versions (distinct `files` rows) under a
   single logical movie or episode entry, to support the source-selection delivery scenario.
 - **FR-206**: The server MUST detect and de-duplicate files that have already been indexed, based on
@@ -101,6 +120,19 @@ strength. Each requirement is independently testable. See `product.md` for narra
   its last file is soft-deleted (FR-211), while remaining resolvable by id; it MUST be deleted,
   with its enrichment state, only by a scan whose walk read the whole library and only once no file
   row -- present or soft-deleted -- is left for it.
+- **FR-216**: The indexer MUST index only video files. It MUST NOT index, hash or probe hidden files
+  or anything under a hidden folder; NAS and operating-system housekeeping folders (`@eaDir`,
+  `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); extras folders below the
+  top level of a library (`Extras`, `Featurettes`, `Behind The Scenes`, `Deleted Scenes`,
+  `Interviews`, `Scenes`, `Shorts`, `Trailers`, `Other`, `Sample(s)`, `Bonus`); files named as extras
+  (`-trailer`, `-sample`, `.sample`, `_sample`, `-featurette`, `-behindthescenes`, `-deleted`,
+  `-interview`, or exactly `sample`/`trailer`); or paths matching an administrator's
+  `BEAM_SCAN_IGNORE` glob patterns, which live in server configuration, never in files written into
+  a library (FR-202). An invalid pattern MUST fail startup. The full scan and the watcher MUST
+  decide identically; a row for a path that is no longer indexed MUST be soft-deleted (FR-211).
+- **FR-217**: A library root whose walk found video files -- including ones FR-216 excludes -- MUST
+  NOT be refused as unmounted by the empty-root guard; only a root with no video files at all, under
+  a library with indexed video files, is refused.
 
 ## FR-3xx — Metadata Enrichment
 

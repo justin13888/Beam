@@ -127,11 +127,13 @@ is part of its letter, so `かぎ` and `かき`, or `दिल` and `दल`, st
 not by language, so it also merges letters some languages treat as distinct — Cyrillic `й`/`и`,
 `ї`/`і`, `ў`/`у`, Latin `ñ`/`n`, `ä`/`a` — and `Мой` and `Мои` of one year are one title. That is
 the accepted cost of `Amélie` and `Amelie` being one (decision D183-6 on
-[#214](https://github.com/justin13888/beam/pull/214)). A movie is keyed by its filename, a show by its series folder (the episode
-file's immediate parent directory, so a `Show/Season 01/` layout keys the show as `season 01|`
-until [#182](https://github.com/justin13888/beam/issues/182) improves the inference; files then
-re-classify to the correctly keyed show and the husk is retired below). The year is part of the
-key, so a remake is a separate title.
+[#214](https://github.com/justin13888/beam/pull/214)). A movie is keyed by its filename, a show by its series folder: the
+parent of a season folder, else the episode file's parent folder, else the filename
+(`beam_domain::utils::media_path::infer_media`, FR-204). Builds before
+[#182](https://github.com/justin13888/beam/issues/182) took the immediate parent, so a
+`Show/Season 01/` layout keyed a show as `season 01|`; the first scan under the current rules
+reclassifies those files onto the correctly keyed show (see `classifier_version` under `files`) and
+the emptied husk is retired below. The year is part of the key, so a remake is a separate title.
 
 **Find-or-create** is one `INSERT ... ON CONFLICT (identity_key) DO NOTHING` followed by a read by
 key, against the unique index `idx_movies_identity_key` / `idx_shows_identity_key`. There is no
@@ -193,8 +195,15 @@ potentially backed by its own file(s).
 | `is_primary` | BOOLEAN | no | default `false` |
 | `created_at` | TIMESTAMPTZ | no | |
 
-Unique index on `(library_id, movie_id, edition)` — at most one entry per edition label per library,
-per movie. Indexes on `library_id` and `movie_id` individually.
+Unique index `idx_movie_entries_unique` on `(library_id, movie_id, edition)` `NULLS NOT DISTINCT` —
+at most one entry per edition per library, per movie, the default (NULL) edition included. Every
+copy of one edition is another `files` row of its one entry. The indexer finds or creates an entry
+with one `INSERT ... ON CONFLICT (library_id, movie_id, edition) DO NOTHING` and a read-back
+(`MovieRepository::find_or_create_entry`). Before
+[#182](https://github.com/justin13888/beam/issues/182) the index let any number of NULL-edition
+entries coexist and the indexer created one per file; migration `m20260929_000001_classifier_v2`
+merged those into the oldest of each group, repointing their files. Indexes on `library_id` and
+`movie_id` individually.
 
 ### `seasons` / `episodes`
 Standard show hierarchy.
@@ -204,8 +213,9 @@ Standard show hierarchy.
 index on `(show_id, season_number)`; index on `show_id`.
 
 `episodes`: `id` (PK), `season_id` (FK → `seasons.id`, cascade), `episode_number` (INTEGER, not
-null), `title` (TEXT, not null — filled from the scene-filename parser at index time, refined by
-enrichment), `description` (TEXT, nullable), `air_date` (DATE, nullable), `runtime_mins` (INTEGER,
+null), `title` (TEXT, not null — the text after the episode marker at index time, else
+`Episode N`; refined by enrichment), `description` (TEXT, nullable), `air_date` (DATE, nullable —
+set at index time for a date-based episode), `runtime_mins` (INTEGER,
 nullable), `thumbnail_url` (TEXT, nullable), `created_at` (TIMESTAMPTZ, not null). Unique index on
 `(season_id, episode_number)`; index on `season_id`.
 
@@ -237,6 +247,8 @@ quality/edition/language rip.
 | `file_status` | ENUM (`file_status`) | no | `known` \| `changed` \| `unknown`; default `known` |
 | `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash; NULL rows are treated as "suspected changed" |
 | `missing_since` | TIMESTAMPTZ | yes | soft-delete stamp: NULL while the file is on disk; the instant the indexer first found it gone otherwise (FR-211) |
+| `last_episode_number` | INTEGER | yes | the last episode of a multi-episode file (`S01E01E02`); the file's `episode_id` is its first. A `CHECK` (`files_last_episode_requires_episode`) allows it only alongside `episode_id` |
+| `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |
 
 **CHECK constraint** (table-level): exactly one of `movie_entry_id` / `episode_id` is set — *unless*
 `file_status = 'unknown'`, in which case both must be NULL (a file the indexer found but could not

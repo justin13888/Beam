@@ -154,8 +154,12 @@ This crate is what lets services be tested purely against in-memory fakes.
 - `providers/` — `EnrichmentProvider`: search/get movie and show metadata by external ID, resolve
   image URLs. Ships `InMemoryEnrichmentProvider` (test-utils) and `NoopEnrichmentProvider` (a
   production-safe "not found" default). Concrete provider SDKs live in `beam-index`, never here.
-- `utils/` — pure helpers: `hash.rs` (XXH3), `file.rs` (`FileType`), `filename.rs` (scene-filename
-  title/year/episode parsing used by the indexer's scan pipeline).
+- `utils/` — pure helpers: `hash.rs` (XXH3), `file.rs` (`FileType`), `identity.rs` (title identity
+  keys), `filename.rs` (scene-filename title/year/episode/edition parsing of one stem),
+  `media_path.rs` (`infer_media`: what a path relative to a library root is, folders included --
+  season folders, absolute numbering -- versioned by `CLASSIFIER_VERSION`), and `path_policy.rs`
+  (`PathPolicy`: which paths are media, sidecars, excluded or ignored, including the
+  `BEAM_SCAN_IGNORE` globs). The scan and the watcher both decide through these (FR-204, FR-216).
 
 **Testing:** every trait is usable without a database or network; all fakes are gated
 `#[cfg(any(test, feature = "test-utils"))]` so release builds never include test-only code.

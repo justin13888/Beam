@@ -115,9 +115,9 @@ Two things never count as a file going missing:
   left exactly as they were, and the scan writes a warning to the admin log naming it. The rest of
   the library is scanned as normal, so files elsewhere can still be marked missing or removed.
 - **The whole library went away.** A watcher event while the library root is unavailable changes
-  nothing, and a root that holds **no video files Beam can index** — none with an extension listed
-  [below](#which-files-get-indexed) — while the library still has video files indexed is refused
-  outright. That is what an unmounted volume looks like, whether its mount point is left empty or
+  nothing, and a root that holds **no video files at all** — none with an extension listed
+  [below](#which-files-get-indexed), counting the samples and extras Beam skips — while the library
+  still has video files indexed is refused outright. That is what an unmounted volume looks like, whether its mount point is left empty or
   holds only a sentinel or hidden file such as `.not_mounted` or `.DS_Store` — see
   [Scan refused: library root is empty](/help/troubleshooting/#scan-refused-library-root-is-empty).
 
@@ -133,98 +133,148 @@ To remove every video from a library on purpose, delete the library.
 
 ## Which files get indexed
 
-Beam indexes these extensions, case-insensitively:
+Beam indexes video files with these extensions, case-insensitively, and nothing else:
 
 ```
-mp4  mkv  avi  mov  webm  m4v  ts
-m2ts flv  wmv  3gp  ogv   mpg  mpeg
+mp4  mkv  avi  mov   webm  m4v  ts   m2ts  mts
+flv  wmv  3gp  ogv   mpg   mpeg vob  divx  asf  f4v
 ```
 
-Anything else — including `.iso`, `.vob`, `.mts`, and `.divx` — is not playable through Beam.
+Subtitles, `.nfo` files, artwork and anything else beside your videos are left alone: they are not
+hashed, probed or given a record. (A Beam version before this recorded every file under a library
+root; the first scan after upgrading marks those records [missing](#when-files-go-missing), so the
+scan's "marked missing" count is large once, and they are removed when the grace period ends.)
 
-<Aside type="note">
-Beam records a row for **every** file under a library root, not just video. A `.srt`, `.nfo` or
-`.jpg` is stored as an unknown file so that duplicate detection still covers it. Unknown files
-never appear as playable titles, so this is harmless — just don't be surprised by the file counts.
-</Aside>
+Some video files are skipped too, because they are not what a library is for:
+
+- **Hidden files and folders** — any name starting with `.`, at any depth.
+- **NAS and system housekeeping folders** — `@eaDir` (Synology), `#recycle`, `$RECYCLE.BIN`,
+  `System Volume Information`, `lost+found`.
+- **Extras folders** inside a title's folder — `Extras`, `Featurettes`, `Behind The Scenes`,
+  `Deleted Scenes`, `Interviews`, `Scenes`, `Shorts`, `Trailers`, `Other`, `Sample`, `Samples`,
+  `Bonus`. Only below the top level: a top-level `Shorts/` folder is a collection of short films,
+  and is indexed.
+- **Files named as extras** — a name ending in `-trailer`, `-sample`, `.sample`, `_sample`,
+  `-featurette`, `-behindthescenes`, `-deleted` or `-interview`, or a file called just `sample` or
+  `trailer`.
+- **Your own ignore patterns** — set `BEAM_SCAN_IGNORE` to comma-separated glob patterns, matched
+  case-insensitively against the path relative to the library root: `Downloads,**/*.partial.mkv`.
+  `*` stops at a `/` and `**` crosses it; a pattern that matches a folder skips everything in it.
+  Patterns live in Beam's configuration, never in files written into your library. See
+  [Configuration](/reference/configuration/).
+
+A file that was indexed and is now skipped — you added a pattern, or renamed a file to
+`-sample` — is marked missing, like a deleted file.
 
 ## How Beam decides what a file is
 
-The rule is simple, and worth knowing exactly, because everything else follows from it:
+Beam reads the file's **path inside the library**, folders included, not just its name. Names are
+cleaned first: `.` and `_` become spaces, `[...]` and `{...}` groups are dropped, and a title stops
+at the first release-noise token — resolutions, sources, codecs and release tags such as `1080p`,
+`WEB-DL`, `BluRay`, `x265`, `AAC`, `Atmos`, `PROPER`, `EXTENDED`, `REMUX`.
 
-> A filename containing an **`SxxEyy`** marker is a **TV episode**. Everything else is a **movie**.
+A file is a **TV episode** when its path gives it an episode number, in any of these forms:
 
-Beam then cleans the name: `.` and `_` become spaces, `[...]` and `{...}` groups are dropped, and
-the title is truncated at the first release-noise token — resolutions, sources, codecs, and edition
-tags such as `1080p`, `WEB-DL`, `BluRay`, `x265`, `AAC`, `Atmos`, `PROPER`, `EXTENDED`, `REMUX`.
+| Form | Example | Season, episode |
+|---|---|---|
+| `SxxEyy` | `Show.S01E02.mkv`, `show s1e2.mkv` | 1, 2 |
+| `1x02` | `Show.1x02.mkv` | 1, 2 |
+| Air date | `The.Daily.Show.2024.03.01.mkv`, `Show 2024-03-01.mkv` | 2024, 301 (the year, and `MMDD`) |
+| Absolute number | `[Group] Show - 012 [1080p].mkv`, `E12.mkv` | 1 (or the season folder's), 12 |
 
-For a **movie**, a standalone `19xx`/`20xx` token becomes the year. For an **episode**, only a year
-in parentheses counts, so `Show.2019.S01E02.mkv` yields a show titled *Show 2019* with no year —
-write `Show (2019)` as the folder name instead.
+Everything else is a **movie** — with one exception: a file **in a season folder** with no episode
+number (`Show/Season 01/Behind the Scenes.mkv`) is indexed without a title, as an unknown file,
+and Beam writes a warning to the admin log naming it. It is clearly part of a show, and guessing it
+into a movie would invent a film.
 
-So `Movie.Name.2019.2160p.WEB-DL.x265-GROUP.mkv` indexes as *Movie Name* (2019).
+Absolute numbers are read only where the layout makes them unambiguous — typically anime. The file
+must be in a folder, and either that folder is a season folder, or the title before the number
+names the same show as the folder (`Show (1998)/Show - 012.mkv`). A four-digit year is never an
+episode number, and at the top of a library a `Show - 012.mkv` is a movie.
 
-### Recognised episode markers
+If a name carries more than one marker, the real one is the **last before the release noise**:
+`Show.S01E01.1080p.WEB-S00E00.mkv` is S01E01. A multi-episode file — `S01E01E02`, `S01E01-E03`,
+`S01E01-03` — belongs to its **first** episode and records the range it runs to.
 
-Only `SxxEyy`, case-insensitive, with any number of digits: `S01E02`, `s1e2`, `S2025E100`.
+### Titles and years
 
-**Not** recognised — these all classify as movies:
+- A **movie**'s title and year come from its filename: `Movie.Name.2019.2160p.WEB-DL.x265-GROUP.mkv`
+  is *Movie Name* (2019). A title that is itself a year still works: `1917.2019.mkv` is *1917*
+  (2019), and `Blade.Runner.2049.2017.mkv` is *Blade Runner 2049* (2017).
+- An **episode**'s title is the text **after** its marker: `Show.S01E02.The.Title.1080p.mkv` is
+  titled *The Title*. With nothing there it is *Episode 2* until metadata enrichment names it.
+- A **show**'s year is the one in its folder (`Doctor Who (2005)`), or a year right before the
+  marker in the filename (`Show.2019.S01E02.mkv`). A filename that is only a year keeps it as the
+  title: `1923.S01E01.mkv` is the show *1923*.
 
-- `1x02`
-- `Season 1 Episode 2`
-- `E02` on its own
-- date-based names like `2024.01.15`
-- absolute numbering like `Show - 01`
+### Movie editions
 
-A multi-episode file such as `S01E01E02` *is* recognised, but only as the first episode of the
-pair — the second number is ignored.
+A film can have several editions in one library, each listed separately. Beam reads the edition
+from a Plex/Jellyfin tag — `Movie (2019) {edition-Final Cut}.mkv` — or, failing that, from edition
+words after the title: *Director's Cut* (or `DC`), *Extended*, *Theatrical*, *Unrated*, *Uncut*,
+*IMAX*, *Remastered*, *Special Edition*, *Ultimate*, *Final Cut*, *Criterion*, *Anniversary*.
+`Movie.2019.Extended.Remastered.1080p.mkv` is the *Extended, Remastered* edition. Every copy of the
+same edition — a 1080p and a 4K file — is a version of that one edition (see
+[Multiple versions](#multiple-versions)).
 
 ### Directory layout for TV
 
-A show's title comes from the **immediate parent directory** of the episode file — and only that
-directory.
+A show is named by its **series folder**:
 
-<Aside type="danger" title="Season subfolders do not work">
-Because the show name is read from the immediate parent folder, the common
-`Show Name/Season 01/` layout makes Beam create a show called **"Season 01"**.
+- In a **season folder** — `Season 01`, `Season 1`, `Series 2`, `Saison 3`, `Staffel 4`,
+  `Temporada 5`, `S06`, or `Specials` — the show is the season folder's parent.
+  `Specials` is season 0.
+- Otherwise the show is the folder the episode is in.
+- An episode at the top of a library, or in a season folder at the top, takes its show's name from
+  its filename; with none there it belongs to a show called *Unknown Show*.
 
-Put episodes directly in a folder named after the show:
-
-```
-Breaking Bad/Breaking Bad.S01E01.mkv    ✅  show: "Breaking Bad"
-Breaking Bad/Season 01/…S01E01.mkv      ❌  show: "Season 01"
-```
-</Aside>
+Both common layouts work, and name the same show:
 
 <FileTree>
 - videos
   - movies
-    - Movie.Name.2019.1080p.BluRay.x264.mkv
+    - Movie Name (2019)
+      - Movie.Name.2019.1080p.BluRay.x264.mkv
+      - Movie.Name.2019-trailer.mkv (skipped)
     - Another.Film.2021.2160p.WEB-DL.x265.mkv
   - shows
     - Breaking Bad
-      - Breaking.Bad.S01E01.1080p.mkv
-      - Breaking.Bad.S01E02.1080p.mkv
+      - Season 01
+        - Breaking.Bad.S01E01.Pilot.1080p.mkv
+        - Breaking.Bad.S01E02.1080p.mkv
+      - Specials
+        - Breaking.Bad.S00E01.mkv
+    - Better Call Saul
+      - Better.Call.Saul.S01E01.mkv
 </FileTree>
 
-An episode file with no parent directory becomes part of a show called *Unknown Show*.
+When a filename's season disagrees with its season folder — `Season 01/Show.S02E05.mkv` — the
+filename wins, and the server log says so.
+
+### Upgrading: files are reclassified once
+
+These rules are versioned. When Beam starts with newer rules than a file was classified under, the
+next scan reclassifies the file from its path — it keeps its record, and with it everyone's
+progress; nothing is re-probed. A show a Beam version before these rules named after a season folder
+(*Season 01*) has its episodes moved to the show its series folder names, and the emptied
+*Season 01* show is removed by the same scan.
 
 ## Multiple versions
 
-Movies are grouped by their **cleaned title and year**. Index two files that clean to the same
-title and year and Beam treats them as two sources of one movie, and viewers get a picker labelled
+Movies are grouped by their **cleaned title and year** (and [edition](#movie-editions)). Index two
+files that clean to the same title and year and Beam treats them as two sources of one movie, and viewers get a picker labelled
 with each one's resolution and codec. The comparison ignores case, accents on Latin, Greek and
 Cyrillic letters, and punctuation, and reads `&` as `and`: `Amelie.2001.mkv` and
 `Amélie (2001).mkv` are one movie. That includes marks some languages count as separate letters:
 `ñ` matches `n`, `ä` matches `a` and `й` matches `и`, so `Мой (2010)` and `Мои (2010)` are one
 movie. Marks in other scripts, such as a Japanese voicing mark or a Devanagari vowel sign, still
 count: `かぎ` and `かき` are two titles. Shows are grouped
-the same way by their **folder name** (and a year in it, such as `Doctor Who (2005)`).
+the same way by their **series folder name** (and a year in it, such as `Doctor Who (2005)`).
 
 The grouping comes from the filenames and never changes afterwards. When metadata enrichment gives
 a title the provider's name, later files still join it under the name their filename parses to.
 
-Episodes are grouped by **show, season and episode number**. Two files in the same show folder that
+Episodes are grouped by **show, season and episode number**. Two files of the same show that
 both parse as, say, `S01E01` — `Show.S01E01.1080p.mkv` beside `Show.S01E01.720p.mkv` — are two
 sources of one episode, with the same picker.
 
