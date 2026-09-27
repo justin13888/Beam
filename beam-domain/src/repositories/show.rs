@@ -27,7 +27,20 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     ) -> Result<Season, DbErr>;
     async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr>;
     async fn find_episodes_by_season_id(&self, season_id: Uuid) -> Result<Vec<Episode>, DbErr>;
-    async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
+    /// The episode numbered `create.episode_number` in `create.season_id`,
+    /// inserting it only if no such episode exists yet.
+    ///
+    /// An episode is one logical row per `(season_id, episode_number)` -- the
+    /// pair carries a unique index -- however many files are indexed for it: a
+    /// 1080p and a 720p rip of the same episode are two sources of one
+    /// episode. When the episode already exists it is returned **unchanged**:
+    /// `create.title` and `create.runtime` are used only to populate a new row,
+    /// so a later file's filename parse never overwrites what the first file
+    /// (or enrichment since) established. Mirrors the movie side, where the
+    /// indexer reuses a movie found by title without touching it.
+    ///
+    /// Atomic: concurrent calls for one pair all return the same row.
+    async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
     /// Reverse lookup from a `MediaFileContent::Episode { episode_id }` back
     /// to the episode -- used together with `find_season_by_id` to resolve a
     /// file id to its show for continue-watching.
@@ -211,19 +224,34 @@ pub mod in_memory {
             Ok(episodes)
         }
 
-        async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
+        async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
+            let CreateEpisode {
+                season_id,
+                episode_number,
+                title,
+                runtime,
+            } = create;
+            // Lookup and insert under one lock, so the double is as atomic as
+            // the `ON CONFLICT` statement it stands in for.
+            let mut episodes = self.episodes.lock().unwrap();
+            if let Some(existing) = episodes
+                .values()
+                .find(|e| e.season_id == season_id && e.episode_number == episode_number)
+            {
+                return Ok(existing.clone());
+            }
             let ep = Episode {
                 id: Uuid::new_v4(),
-                season_id: create.season_id,
-                episode_number: create.episode_number,
-                title: create.title,
+                season_id,
+                episode_number,
+                title,
                 description: None,
                 air_date: None,
-                runtime: create.runtime,
+                runtime,
                 thumbnail_url: None,
                 created_at: chrono::Utc::now(),
             };
-            self.episodes.lock().unwrap().insert(ep.id, ep.clone());
+            episodes.insert(ep.id, ep.clone());
             Ok(ep)
         }
 
@@ -302,4 +330,27 @@ pub mod in_memory {
             Ok(updated)
         }
     }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    use super::in_memory::InMemoryShowRepository;
+
+    struct InMemoryFixture {
+        repo: InMemoryShowRepository,
+    }
+
+    impl crate::repositories::contract::fixture::ShowRepositoryFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn crate::repositories::ShowRepository {
+            &self.repo
+        }
+    }
+
+    async fn setup() -> InMemoryFixture {
+        InMemoryFixture {
+            repo: InMemoryShowRepository::default(),
+        }
+    }
+
+    crate::show_repository_contract!(setup);
 }

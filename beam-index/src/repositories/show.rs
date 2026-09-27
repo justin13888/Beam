@@ -199,24 +199,57 @@ impl ShowRepository for SqlShowRepository {
         Ok(models.into_iter().map(Episode::from).collect())
     }
 
-    async fn create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
+    async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
         use beam_entity::episode;
         use chrono::Utc;
-        use sea_orm::{ActiveModelTrait, Set};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
-        let now = Utc::now();
-        let new_episode = episode::ActiveModel {
+        let CreateEpisode {
+            season_id,
+            episode_number,
+            title,
+            runtime,
+        } = create;
+
+        // One `INSERT ... ON CONFLICT DO NOTHING`, not SELECT-then-INSERT:
+        // `(season_id, episode_number)` carries `idx_episodes_unique`, so two
+        // files for one episode indexed concurrently would both read "absent"
+        // and the second insert would fail. On conflict the existing row is
+        // left exactly as it is -- a later file's parse never rewrites the
+        // title or runtime -- and read back below.
+        let active = episode::ActiveModel {
             id: Set(Uuid::new_v4()),
-            season_id: Set(create.season_id),
-            episode_number: Set(create.episode_number as i32),
-            title: Set(create.title),
-            runtime_mins: Set(create.runtime.map(|d| (d.as_secs() / 60) as i32)),
-            created_at: Set(now.into()),
+            season_id: Set(season_id),
+            episode_number: Set(episode_number as i32),
+            title: Set(title),
+            runtime_mins: Set(runtime.map(|d| (d.as_secs() / 60) as i32)),
+            created_at: Set(Utc::now().into()),
             ..Default::default()
         };
 
-        let result = new_episode.insert(self.db.as_ref()).await?;
-        Ok(Episode::from(result))
+        // Inserted or conflicted, the row is read back by its pair: one code
+        // path whichever call won. `exec_with_returning` is deliberately not
+        // used -- in sea-orm 2.0 a `DO NOTHING` that returns no row surfaces
+        // from it as `RecordNotFound`, not as `TryInsertResult::Conflicted`.
+        episode::Entity::insert(active)
+            .on_conflict_do_nothing_on([episode::Column::SeasonId, episode::Column::EpisodeNumber])
+            .exec_without_returning(self.db.as_ref())
+            .await?;
+
+        // `ON CONFLICT` returns only once the conflicting row is committed, so
+        // under READ COMMITTED this fresh statement sees it.
+        let stored = episode::Entity::find()
+            .filter(episode::Column::SeasonId.eq(season_id))
+            .filter(episode::Column::EpisodeNumber.eq(episode_number as i32))
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                DbErr::RecordNotFound(format!(
+                    "episode {episode_number} of season {season_id} is not readable after \
+                     find-or-create"
+                ))
+            })?;
+        Ok(Episode::from(stored))
     }
 
     async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr> {

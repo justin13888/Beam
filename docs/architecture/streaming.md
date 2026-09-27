@@ -31,13 +31,14 @@ their own. Episode sources landed in
 [#68](https://github.com/justin13888/beam/issues/68). If an operator wants a low-bandwidth option,
 they place a second, smaller rip in the library and let it get indexed — Beam does not create it.
 
-That instruction holds for movies only. `IndexService` creates an episode row unconditionally, so a
-second file for an episode collides with `idx_episodes_unique` and fails the scan, leaving
-television with no alternate source at all — neither a smaller one nor a more compatible one. The
-schema already permits it (`files.episode_id` is a plain foreign key); the fix is
-[#142](https://github.com/justin13888/beam/issues/142), which
-[ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md) records as a condition of the
-no-adaptive-streaming decision standing.
+That instruction holds for television too. The indexer find-or-creates an episode by
+`(season_id, episode_number)` (`ShowRepository::find_or_create_episode`, an atomic
+`INSERT ... ON CONFLICT DO NOTHING` on `idx_episodes_unique`), so a second file for an episode
+attaches to the existing row as another source rather than failing the scan -- closed by
+[#142](https://github.com/justin13888/beam/issues/142), the condition
+[ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md) set for the no-adaptive-streaming
+decision. The existing episode is never written on that path: its title and runtime stay those the
+first file (or enrichment) set.
 
 Both endpoints authenticate via the session cookie like every other request; no tokens in URLs (see
 `security.md`).

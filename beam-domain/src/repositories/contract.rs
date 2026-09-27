@@ -75,6 +75,15 @@ pub mod fixture {
         /// An episode (with the show and season it needs) for `library_id`.
         async fn new_episode(&self, library_id: Uuid) -> Uuid;
     }
+
+    /// Everything the [`crate::show_repository_contract`] suite needs from a
+    /// backing store: only the repository. Every row the contract needs -- a
+    /// show, its seasons -- is created through the trait itself, so a real
+    /// Postgres sees the same foreign-key chain the indexer builds.
+    pub trait ShowRepositoryFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::ShowRepository;
+    }
 }
 
 /// Behavioural contract for [`crate::repositories::PlaybackProgressRepository`].
@@ -773,6 +782,147 @@ macro_rules! file_repository_contract {
                     .unwrap()),
                 sorted(vec![file.id, gone.id])
             );
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::ShowRepository`].
+///
+/// `$setup` names an `async fn() -> impl ShowRepositoryFixture`.
+#[macro_export]
+macro_rules! show_repository_contract {
+    ($setup:path) => {
+        use ::std::time::Duration;
+        use ::uuid::Uuid;
+        use $crate::models::show::{CreateEpisode, CreateShow};
+        use $crate::repositories::ShowRepository;
+        use $crate::repositories::contract::fixture::ShowRepositoryFixture as _;
+
+        /// A show of its own -- the title carries a fresh UUID so parallel
+        /// tests against one database never share a show -- and its seasons
+        /// `1` and `2`.
+        async fn new_seasons(repo: &dyn ShowRepository) -> (Uuid, Uuid) {
+            let show = repo
+                .create(CreateShow {
+                    title: format!("contract show {}", Uuid::new_v4()),
+                    year: None,
+                })
+                .await
+                .unwrap();
+            let one = repo.find_or_create_season(show.id, 1).await.unwrap();
+            let two = repo.find_or_create_season(show.id, 2).await.unwrap();
+            (one.id, two.id)
+        }
+
+        /// Runtimes are whole minutes: the SQL schema stores `runtime_mins`.
+        fn episode(season_id: Uuid, episode_number: u32, title: &str, mins: u64) -> CreateEpisode {
+            CreateEpisode {
+                season_id,
+                episode_number,
+                title: title.to_string(),
+                runtime: Some(Duration::from_secs(mins * 60)),
+            }
+        }
+
+        #[tokio::test]
+        async fn find_or_create_episode_returns_the_same_row_for_the_same_pair() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (season, _) = new_seasons(repo).await;
+
+            let first = repo
+                .find_or_create_episode(episode(season, 1, "Pilot", 45))
+                .await
+                .unwrap();
+            let second = repo
+                .find_or_create_episode(episode(season, 1, "Pilot", 45))
+                .await
+                .unwrap();
+
+            assert_eq!(first.id, second.id, "one logical episode per pair");
+            assert_eq!(
+                repo.find_episodes_by_season_id(season).await.unwrap().len(),
+                1,
+                "no second row was inserted"
+            );
+        }
+
+        #[tokio::test]
+        async fn find_or_create_episode_leaves_an_existing_episode_unchanged() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (season, _) = new_seasons(repo).await;
+
+            let first = repo
+                .find_or_create_episode(episode(season, 3, "The Original Title", 45))
+                .await
+                .unwrap();
+            let again = repo
+                .find_or_create_episode(episode(season, 3, "some.other.rip.720p", 52))
+                .await
+                .unwrap();
+
+            assert_eq!(again.id, first.id);
+            assert_eq!(again.title, "The Original Title");
+            assert_eq!(again.runtime, Some(Duration::from_secs(45 * 60)));
+
+            let stored = repo
+                .find_episode_by_id(first.id)
+                .await
+                .unwrap()
+                .expect("the episode is readable by id");
+            assert_eq!(
+                stored.title, "The Original Title",
+                "a later file's parse must not rewrite the stored title"
+            );
+            assert_eq!(stored.runtime, Some(Duration::from_secs(45 * 60)));
+        }
+
+        #[tokio::test]
+        async fn find_or_create_episode_keeps_distinct_episode_numbers_apart() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (season, _) = new_seasons(repo).await;
+
+            let one = repo
+                .find_or_create_episode(episode(season, 1, "One", 30))
+                .await
+                .unwrap();
+            let two = repo
+                .find_or_create_episode(episode(season, 2, "Two", 30))
+                .await
+                .unwrap();
+
+            assert_ne!(one.id, two.id);
+            let numbers: Vec<u32> = repo
+                .find_episodes_by_season_id(season)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.episode_number)
+                .collect();
+            assert_eq!(numbers, vec![1, 2]);
+        }
+
+        #[tokio::test]
+        async fn find_or_create_episode_keeps_one_number_in_different_seasons_apart() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (season_one, season_two) = new_seasons(repo).await;
+
+            let s01e01 = repo
+                .find_or_create_episode(episode(season_one, 1, "S01E01", 30))
+                .await
+                .unwrap();
+            let s02e01 = repo
+                .find_or_create_episode(episode(season_two, 1, "S02E01", 30))
+                .await
+                .unwrap();
+
+            assert_ne!(s01e01.id, s02e01.id);
+            assert_eq!(s01e01.season_id, season_one);
+            assert_eq!(s02e01.season_id, season_two);
+            assert_eq!(s02e01.title, "S02E01");
         }
     };
 }

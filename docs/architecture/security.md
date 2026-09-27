@@ -20,6 +20,10 @@ never sees an ID, access, or refresh token. The browser holds exactly one creden
    value is exchangeable at most once), exchanges code + PKCE verifier for tokens server-to-server
    (via the `openidconnect` crate), and validates the ID token's issuer, audience, signature, nonce,
    and expiry.
+   Every server-to-IdP request (discovery, JWKS, token exchange) goes through `OidcHttpClient`
+   (`beam-auth/src/utils/oidc.rs`): redirects are never followed, TLS is verified against the
+   system trust store, and requests are bounded (10 s to connect, 30 s in total) so an IdP that
+   stops answering cannot stall startup discovery or a login.
 4. **JIT provisioning.** A `users` row is looked up (or created) by `(oidc_issuer, oidc_subject)` —
    there is no separate registration step. `is_admin` is recomputed here from the allowlist (below).
 5. **Session creation.** An opaque, high-entropy token is generated; only its SHA-256 hash is stored

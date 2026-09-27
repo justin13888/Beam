@@ -3,8 +3,6 @@ title: Watching
 description: How playback works, what the player can do, and how to pick a different source file.
 ---
 
-import { Aside } from "@astrojs/starlight/components";
-
 Press play and Beam begins sending the file's bytes. Your browser does the decoding. Nothing is
 converted along the way, which is why playback starts quickly and why it depends entirely on what
 your browser can handle — see [When a file won't play](/using/playback-compatibility/).
@@ -18,9 +16,9 @@ finish.
 
 ## Choosing a source
 
-A **movie** can have more than one file indexed against it — say a high-bitrate rip and a smaller
-re-encode. When it does, the player offers a picker, and each option is labelled with its actual
-resolution and codec, read from the file itself:
+A **movie** or a **TV episode** can have more than one file indexed against it — say a
+high-bitrate rip and a smaller re-encode. When it does, the player offers a picker, and each option
+is labelled with its actual resolution and codec, read from the file itself:
 
 ```
 1080p · h264
@@ -37,15 +35,8 @@ bandwidth. It has no adaptive streaming and will never switch for you, because t
 transcoder generating alternatives on the fly. Every option in that list is a file that already
 exists on the server.
 
-<Aside type="caution" title="Movies only">
-Multiple sources work for movies. **TV episodes cannot have more than one file**: an episode is
-unique per season and episode number, so a second file for the same episode is rejected during the
-scan rather than offered as an alternative. See
-[Managing libraries](/operate/libraries/#multiple-versions).
-</Aside>
-
-If a movie shows no picker, only one file is indexed for it. Adding another version is something
-an administrator does.
+If a movie or episode shows no picker, only one file is indexed for it. Adding another version is
+something an administrator does — see [Managing libraries](/operate/libraries/#multiple-versions).
 
 ## Subtitles
 

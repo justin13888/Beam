@@ -52,10 +52,9 @@ first-class domain concepts — the domain model, API surface, and client UI are
 
 Scenario (c) depends on the library already containing multiple indexed file versions of the same
 logical title. Beam does not create those versions; it only lets the client choose among whatever
-the operator has indexed. This is how Beam supports low-bandwidth delivery without a transcoder —
-for movies. An episode cannot yet carry a second file
-([#142](https://github.com/justin13888/beam/issues/142)), so scenario (c) is unavailable for
-television until that is fixed.
+the operator has indexed. This is how Beam supports low-bandwidth delivery without a transcoder,
+for movies and episodes alike: a second file for an episode attaches to the existing episode as
+another source ([#142](https://github.com/justin13888/beam/issues/142)).
 
 ## What Beam delivers
 

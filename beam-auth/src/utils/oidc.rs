@@ -84,11 +84,86 @@ mod discovered {
     use super::{BeginAuth, OidcClient, OidcError, OidcIdentity};
     use async_trait::async_trait;
     use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
+    use openidconnect::{AsyncHttpClient, HttpClientError, HttpRequest, HttpResponse};
     use openidconnect::{
         AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet,
         EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
         TokenResponse,
     };
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::time::Duration;
+
+    /// The HTTP client `openidconnect` makes discovery, JWKS, and token
+    /// requests through.
+    ///
+    /// oauth2 5.0.0 implements [`AsyncHttpClient`] only for reqwest 0.12; this
+    /// is the same adapter (ported from its `reqwest_client.rs`) over the
+    /// workspace's reqwest 0.13, so the server links one reqwest (issue #132).
+    #[derive(Debug, Clone)]
+    pub(crate) struct OidcHttpClient(reqwest::Client);
+
+    /// How long establishing a connection to the IdP may take.
+    ///
+    /// Fixed rather than configurable: discovery runs once at startup and the
+    /// exchange runs inside a user's login request, and neither has a caller
+    /// that would pick a different bound. Without one, an IdP that accepts a
+    /// connection and never answers stalls startup, or the login, forever.
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long a whole request -- connect, send, and reading the full
+    /// response -- may take. Covers the IdP that connects but never responds.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    impl OidcHttpClient {
+        pub(crate) fn new() -> Result<Self, reqwest::Error> {
+            Self::with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+        }
+
+        /// [`Self::new`] with explicit bounds, so a test can prove the bound
+        /// is enforced without waiting out the production one.
+        fn with_timeouts(connect: Duration, request: Duration) -> Result<Self, reqwest::Error> {
+            // Redirects are never followed: an IdP endpoint that answers with
+            // a redirect is surfaced as that response, not chased to wherever
+            // it points (the SSRF guidance of the OIDC/OAuth 2.0 specs).
+            let client = reqwest::ClientBuilder::new()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(connect)
+                .timeout(request)
+                .build()?;
+            Ok(Self(client))
+        }
+    }
+
+    impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
+        type Error = HttpClientError<reqwest::Error>;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<HttpResponse, Self::Error>> + Send + Sync + 'c>>;
+
+        fn call(&'c self, request: HttpRequest) -> Self::Future {
+            Box::pin(async move {
+                let request = reqwest::Request::try_from(request).map_err(Box::new)?;
+                let response = self.0.execute(request).await.map_err(Box::new)?;
+                into_http_response(response).await
+            })
+        }
+    }
+
+    /// Copies a reqwest response into the `http::Response` `openidconnect`
+    /// parses: status, version, every header (repeated ones included), and
+    /// the full body.
+    async fn into_http_response(
+        response: reqwest::Response,
+    ) -> Result<HttpResponse, HttpClientError<reqwest::Error>> {
+        let mut builder = openidconnect::http::Response::builder()
+            .status(response.status())
+            .version(response.version());
+        for (name, value) in response.headers() {
+            builder = builder.header(name, value);
+        }
+        let body = response.bytes().await.map_err(Box::new)?;
+        builder.body(body.to_vec()).map_err(HttpClientError::Http)
+    }
 
     /// The exact endpoint typestate `CoreClient::from_provider_metadata(...)`
     /// produces: the authorization endpoint is always present after
@@ -112,7 +187,7 @@ mod discovered {
     #[derive(Debug)]
     pub struct DiscoveredOidcClient {
         client: DiscoveredCoreClient,
-        http_client: reqwest::Client,
+        http_client: OidcHttpClient,
         scopes: Vec<String>,
     }
 
@@ -124,10 +199,8 @@ mod discovered {
             redirect_url: &str,
             scopes: Vec<String>,
         ) -> Result<Self, OidcError> {
-            let http_client = reqwest::ClientBuilder::new()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| OidcError::Discovery(e.to_string()))?;
+            let http_client =
+                OidcHttpClient::new().map_err(|e| OidcError::Discovery(e.to_string()))?;
 
             let issuer_url = IssuerUrl::new(issuer.to_string())
                 .map_err(|e| OidcError::Discovery(e.to_string()))?;
@@ -244,6 +317,184 @@ mod discovered {
             return serde_json::Value::Null;
         };
         serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[cfg(test)]
+    mod http_client_tests {
+        use super::{OidcHttpClient, into_http_response};
+        use openidconnect::http::{self, Method, StatusCode, Version, header::LOCATION};
+        use openidconnect::{AsyncHttpClient, HttpClientError};
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        /// Reads one HTTP/1.1 request (head plus a `Content-Length` body)
+        /// off `stream` and returns it raw.
+        async fn read_request(stream: &mut TcpStream) -> String {
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "connection closed mid-request");
+                raw.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&raw);
+                let Some(head_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = text[..head_end]
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if raw.len() >= head_end + 4 + content_length {
+                    return String::from_utf8(raw).unwrap();
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_redirect_is_returned_as_is_and_its_target_is_never_contacted() {
+            // Following an IdP's redirect would let whoever controls that
+            // response aim the server at an arbitrary host (SSRF), so the 3xx
+            // must come back to `openidconnect` unfollowed.
+            let idp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let elsewhere = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let elsewhere_url = format!("http://{}/", elsewhere.local_addr().unwrap());
+            let idp_url = format!("http://{}/token", idp.local_addr().unwrap());
+
+            let location = elsewhere_url.clone();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = idp.accept().await.unwrap();
+                let request = read_request(&mut stream).await;
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                request
+            });
+
+            let body = b"grant_type=authorization_code&code=abc".to_vec();
+            let request = http::Request::builder()
+                .method(Method::POST)
+                .uri(&idp_url)
+                .header("x-beam-probe", "forwarded")
+                .body(body.clone())
+                .unwrap();
+
+            let client = OidcHttpClient::new().unwrap();
+            let response = client.call(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers()[LOCATION], elsewhere_url.as_str());
+
+            // The request reached the IdP as `openidconnect` built it.
+            let received = server.await.unwrap();
+            assert!(
+                received.starts_with("POST /token HTTP/1.1\r\n"),
+                "{received}"
+            );
+            assert!(
+                received
+                    .to_ascii_lowercase()
+                    .contains("\r\nx-beam-probe: forwarded\r\n"),
+                "{received}"
+            );
+            assert!(
+                received.ends_with(std::str::from_utf8(&body).unwrap()),
+                "{received}"
+            );
+
+            // A followed redirect would have left a connection queued here.
+            let elsewhere = elsewhere.into_std().unwrap();
+            elsewhere.set_nonblocking(true).unwrap();
+            assert_eq!(
+                elsewhere.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the redirect target was contacted"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unreachable_idp_is_a_transport_error() {
+            // Bind then drop, so the port is known to have no listener.
+            let addr = TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            let request = http::Request::builder()
+                .uri(format!("http://{addr}/.well-known/openid-configuration"))
+                .body(Vec::new())
+                .unwrap();
+
+            let result = OidcHttpClient::new().unwrap().call(request).await;
+
+            match result {
+                Err(HttpClientError::Reqwest(error)) => assert!(error.is_connect(), "{error}"),
+                other => panic!("expected a reqwest connect error, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn an_idp_that_never_answers_times_out() {
+            // An IdP that accepts the connection and then goes silent must not
+            // hold discovery (startup) or a code exchange (a login) forever.
+            let idp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", idp.local_addr().unwrap());
+            let _server = tokio::spawn(async move {
+                let (mut stream, _) = idp.accept().await.unwrap();
+                // Read until the client gives up and closes; never reply.
+                let mut sink = Vec::new();
+                let _ = stream.read_to_end(&mut sink).await;
+            });
+            let request = http::Request::builder().uri(url).body(Vec::new()).unwrap();
+            let client = OidcHttpClient::with_timeouts(
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            )
+            .unwrap();
+
+            // The outer bound only turns a missing timeout into a failure
+            // instead of a hung test run.
+            let result = tokio::time::timeout(Duration::from_secs(10), client.call(request))
+                .await
+                .expect("the request was not bounded by the client's timeout");
+
+            match result {
+                Err(HttpClientError::Reqwest(error)) => assert!(error.is_timeout(), "{error}"),
+                other => panic!("expected a reqwest timeout error, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_response_is_copied_with_status_version_every_header_and_body() {
+            // `openidconnect` parses this copy, so a dropped header, a
+            // collapsed repeat, or a lost body misreports why discovery or the
+            // exchange failed.
+            let upstream = http::Response::builder()
+                .status(StatusCode::FOUND)
+                .version(Version::HTTP_2)
+                .header(LOCATION, "https://elsewhere.test/")
+                .header("x-repeated", "first")
+                .header("x-repeated", "second")
+                .body("redirect body")
+                .unwrap();
+
+            let converted = into_http_response(reqwest::Response::from(upstream))
+                .await
+                .unwrap();
+
+            assert_eq!(converted.status(), StatusCode::FOUND);
+            assert_eq!(converted.version(), Version::HTTP_2);
+            assert_eq!(converted.headers()[LOCATION], "https://elsewhere.test/");
+            let repeated: Vec<_> = converted.headers().get_all("x-repeated").iter().collect();
+            assert_eq!(repeated, ["first", "second"]);
+            assert_eq!(converted.body().as_slice(), b"redirect body");
+        }
     }
 
     #[cfg(test)]
