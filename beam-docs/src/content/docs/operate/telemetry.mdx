@@ -111,17 +111,22 @@ a reason -- `container`, `video_codec`, `audio_codec`, `network` or `other` -- a
 failed in `preflight`, before the player tried, or in `playback`), a **rebuffer** (a mid-stream
 stall, with its duration), and a **source switch** (`manual` or `auto`).
 
-Each event names the file that was playing. The server looks that file up, notes only its coarse
-dimensions, and forgets the file:
+Each event names the file that was playing (a switch names both files). The server looks the file
+up, notes only coarse dimensions of it, and forgets the file. Every event is counted per UTC day and
+per client kind -- `web_chromium`, `web_firefox`, `web_safari`, `web_other`, `android`,
+`android_tv`, `apple_ios`, `apple_tvos`, `apple_macos` or `other` -- and then by dimensions that
+differ with the kind of event:
 
-- the client kind -- `web_chromium`, `web_firefox`, `web_safari`, `web_other`, `android`,
-  `android_tv`, `apple_ios`, `apple_tvos`, `apple_macos` or `other`
-- the container, and the video and audio codecs (normalised the same way as in the library report)
-- a resolution class (`sd`, `hd`, `fhd`, `uhd`) and, for rebuffers, a bitrate class
-- the UTC day
+| Event | Counted by |
+|---|---|
+| Start, and failed start | container, video codec, the audio codec of the track that played, resolution class; a failure also by its reason and stage |
+| Rebuffer | container, video codec, resolution class, bitrate class -- no audio codec |
+| Source switch | `manual` or `auto`, and the resolution class switched from and to -- no container, codec or bitrate |
 
-and adds one to the count for that combination. A rebuffer also adds its duration to a total and
-to a histogram (under 1 s, 1–3 s, 3–10 s, 10–30 s, 30 s and over).
+Codec and container names are normalised the same way as in the library report. Resolution classes
+are `sd`, `hd`, `fhd`, `uhd` and `unknown`. The server adds one to the count for the event's
+combination; a rebuffer also adds its duration to a total and to a histogram (under 1 s, 1–3 s,
+3–10 s, 10–30 s, 30 s and over). A batch of reports is counted whole or not at all.
 
 ### What is never kept
 
