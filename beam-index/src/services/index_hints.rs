@@ -153,6 +153,13 @@ pub(super) fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     options.open(path)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many NFOs this thread has read the bytes of: what a test counts to
+    /// tell an NFO read from one skipped by its stat stamp.
+    pub(super) static NFO_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Read the NFO at `path`: `None` when there is no regular file there, or it
 /// is larger than [`MAX_NFO_BYTES`], or cannot be read. Opened read-only and
 /// never through a link; a failure is logged, never raised -- a broken NFO
@@ -184,6 +191,8 @@ pub(super) fn read_nfo_file(path: &Path) -> Option<NfoRead> {
             return None;
         }
     };
+    #[cfg(test)]
+    NFO_READS.with(|reads| reads.set(reads.get() + 1));
     let mut bytes = Vec::new();
     if let Err(err) = file.take(MAX_NFO_BYTES + 1).read_to_end(&mut bytes) {
         warn!(path = %path.display(), error = %err, "could not read an NFO; ignored");

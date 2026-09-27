@@ -137,15 +137,15 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
-        Self::build(Probe::Double).await
+        Self::build(Probe::Double, Arc::new(RealClock)).await
     }
 
     async fn with_real_prober() -> Self {
         let _ = crate::probe::init();
-        Self::build(Probe::Real).await
+        Self::build(Probe::Real, Arc::new(RealClock)).await
     }
 
-    async fn build(probe: Probe) -> Self {
+    async fn build(probe: Probe, clock: Arc<dyn Clock>) -> Self {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("library");
         std::fs::create_dir_all(&root).unwrap();
@@ -229,7 +229,8 @@ impl Harness {
         )
         .with_enrichment_repo(enrichment_repo.clone())
         .with_sidecar_repo(sidecar_repo.clone())
-        .with_applied_nfo_repo(applied_nfo_repo.clone());
+        .with_applied_nfo_repo(applied_nfo_repo.clone())
+        .with_clock(clock);
 
         Self {
             _dir: dir,
@@ -1597,4 +1598,146 @@ async fn an_nfo_event_reads_only_the_files_beneath_its_folder() {
         (0, 1),
         "(whole-library reads, folder reads)"
     );
+}
+
+/// How many NFOs this test's thread has read the bytes of.
+fn nfo_reads() -> usize {
+    hints::NFO_READS.with(std::cell::Cell::get)
+}
+
+/// A scan well after an NFO's last write -- by the injected clock -- records
+/// its stat stamp, and a later scan that finds the same stamp does not read
+/// the NFO again; a write moves the stamp, and the next scan reads it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_settled_nfos_stamp_is_recorded_and_spares_the_next_scan_a_read() {
+    let clock = Arc::new(beam_domain::services::TestClock::starting_at(
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    ));
+    let h = Harness::build(Probe::Double, clock).await;
+    h.video("Matrix/matrix.mkv");
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+
+    h.scan().await;
+
+    let nfo = h.root.join("Matrix/movie.nfo");
+    let stamp = hints::change_stamp(&std::fs::symlink_metadata(&nfo).unwrap());
+    assert!(stamp.is_some());
+    assert_eq!(
+        h.applied("Matrix/movie.nfo")
+            .await
+            .expect("recorded")
+            .change_stamp,
+        stamp,
+        "written long before the clock's now, so its stamp is vouched for"
+    );
+
+    let before = nfo_reads();
+    h.scan().await;
+    assert_eq!(nfo_reads(), before, "the same stamp: not read again");
+
+    h.write("Matrix/movie.nfo", &tmdb_movie(604));
+    h.scan().await;
+    assert!(nfo_reads() > before, "a write moved the stamp: read");
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:604")
+    );
+}
+
+/// A walk that cannot read the folder a kept, conflicting NFO lives in says
+/// nothing about that NFO: its record is kept, so once the folder is readable
+/// again the NFO is not taken for a new one and does not replace the pin.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_walk_failure_where_a_kept_nfo_lives_keeps_its_record_and_the_pin() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Harness::new().await;
+    h.video("Alien (1979)/Alien (1979).mkv");
+    h.video("Heat (1995)/Heat (1995).mkv");
+    h.write("Heat (1995)/Heat (1995).nfo", &tmdb_movie(949));
+    h.scan().await;
+    h.video("Heat (1995)/Heat (1995) - Remux.mkv");
+    h.write("Heat (1995)/Heat (1995) - Remux.nfo", &tmdb_movie(1));
+    h.scan().await;
+    assert_eq!(
+        h.movie_of("Heat (1995)/Heat (1995).mkv")
+            .pinned_ref
+            .as_deref(),
+        Some("tmdb:949"),
+        "the conflicting NFO was kept"
+    );
+
+    let locked = h.root.join("Heat (1995)");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&locked).is_ok() {
+        // Running as root: permissions do not bind, so the walk cannot fail.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: running as root, which ignores file permissions");
+        return;
+    }
+    let scanned = h.service.scan_library(h.library.id.to_string()).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    scanned.unwrap();
+
+    assert!(
+        h.applied("Heat (1995)/Heat (1995) - Remux.nfo")
+            .await
+            .is_some(),
+        "an NFO the walk could not see is not an NFO the walk found gone"
+    );
+    h.scan().await;
+    assert_eq!(
+        h.movie_of("Heat (1995)/Heat (1995).mkv")
+            .pinned_ref
+            .as_deref(),
+        Some("tmdb:949"),
+        "the kept NFO is not re-applied as new"
+    );
+}
+
+/// A removal the watcher reports while the library root is gone -- a volume
+/// unmounted -- is not an NFO or a subtitle deleted: their records stay.
+#[tokio::test]
+async fn a_removal_while_the_root_is_gone_forgets_no_nfo_or_subtitle() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.write("Matrix/matrix.en.srt", "1");
+    h.scan().await;
+    assert!(h.applied("Matrix/movie.nfo").await.is_some());
+    assert_eq!(h.subtitles_of("Matrix/matrix.mkv").await.len(), 1);
+
+    let parked = h.root.with_extension("unmounted");
+    std::fs::rename(&h.root, &parked).unwrap();
+    h.event("Matrix/movie.nfo", FsEventKind::Removed).await;
+    h.event("Matrix/matrix.en.srt", FsEventKind::Removed).await;
+    std::fs::rename(&parked, &h.root).unwrap();
+
+    assert!(h.applied("Matrix/movie.nfo").await.is_some());
+    assert_eq!(h.subtitles_of("Matrix/matrix.mkv").await.len(), 1);
+}
+
+/// Deleting a kept, conflicting NFO forgets its record; one created at that
+/// path again is an NFO added after indexing, and re-pins the title (FR-219).
+#[tokio::test]
+async fn a_kept_nfo_deleted_and_recreated_repins_its_title() {
+    let h = Harness::new().await;
+    h.video("Heat (1995)/Heat (1995).mkv");
+    h.write("Heat (1995)/Heat (1995).nfo", &tmdb_movie(949));
+    h.scan().await;
+    h.video("Heat (1995)/Heat (1995) - Remux.mkv");
+    h.write("Heat (1995)/Heat (1995) - Remux.nfo", &tmdb_movie(1));
+    h.scan().await;
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+
+    std::fs::remove_file(h.root.join("Heat (1995)/Heat (1995) - Remux.nfo")).unwrap();
+    h.event("Heat (1995)/Heat (1995) - Remux.nfo", FsEventKind::Removed)
+        .await;
+    h.write("Heat (1995)/Heat (1995) - Remux.nfo", &tmdb_movie(1));
+    h.event("Heat (1995)/Heat (1995) - Remux.nfo", FsEventKind::Created)
+        .await;
+
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:1".to_string())]);
 }
