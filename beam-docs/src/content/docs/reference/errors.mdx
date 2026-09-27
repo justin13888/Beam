@@ -100,6 +100,14 @@ mount is present.
 A library already registered against a path that has since become a regular file cannot be repaired
 in place — there is no update-library endpoint — so it has to be deleted and registered again.
 
+A rescan also answers with this code when the root **is** a directory but holds no files at all
+while the library still has files indexed — the `detail` reads `Library root contains no files but
+files are indexed; refusing to reconcile`. An unmounted volume usually leaves its mount point behind
+as an empty directory, and believing that walk would delete every indexed file from the catalogue,
+so Beam refuses the scan and changes nothing. Check the mount inside the container and rescan once
+the files are visible again; the admin notification and the Logs tab name the root and how many
+files were at stake. If you really did empty the library on purpose, delete the library instead.
+
 ### library-path-outside-root
 
 **400.** The root path resolves outside the directory Beam is permitted to serve from.
