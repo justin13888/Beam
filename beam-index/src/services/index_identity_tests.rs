@@ -190,7 +190,19 @@ impl Harness {
     /// display title enrichment wrote, and a present file at `rel` for each
     /// path given.
     async fn legacy_movie(&self, title: &str, year: Option<u32>, rels: &[&str]) -> Uuid {
-        let now = chrono::Utc::now();
+        self.legacy_movie_created_at(title, year, rels, chrono::Utc::now())
+            .await
+    }
+
+    /// [`Self::legacy_movie`], created at `created_at`.
+    async fn legacy_movie_created_at(
+        &self,
+        title: &str,
+        year: Option<u32>,
+        rels: &[&str],
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Uuid {
+        let now = created_at;
         let movie = Movie {
             id: Uuid::new_v4(),
             title: title.to_string(),
@@ -299,6 +311,22 @@ impl Harness {
                 content: Some(content),
                 status: FileStatus::Known,
             })
+            .await
+            .unwrap();
+    }
+
+    /// Soft-delete every file row, as a scan that found them all gone would.
+    async fn mark_every_file_missing(&self) {
+        let ids: Vec<Uuid> = self
+            .file_repo
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        self.file_repo
+            .mark_missing(ids, chrono::Utc::now())
             .await
             .unwrap();
     }
@@ -565,6 +593,160 @@ async fn a_legacy_title_with_no_file_is_keyed_from_its_stored_title() {
             .identity_key,
         Some(title_identity_key("Ghost", Some(1990)))
     );
+}
+
+#[tokio::test]
+async fn a_legacy_title_whose_files_are_all_missing_is_keyed_from_those_files() {
+    let h = Harness::keeping_missing_files().await;
+    let movie = h
+        .legacy_movie(
+            "Amélie: Provider Title",
+            Some(2001),
+            &["Amelie.2001.1080p.mkv"],
+        )
+        .await;
+    let show = h
+        .legacy_show(
+            "Severance: Provider Title",
+            &["Severance/Severance.S01E01.mkv"],
+        )
+        .await;
+    // Upgraded while the volume was away: every file is only soft-deleted.
+    h.mark_every_file_missing().await;
+
+    let report = h.service.backfill_identity_keys().await.unwrap();
+
+    assert_eq!(report.keyed, 2);
+    assert_eq!(
+        h.movie_repo
+            .find_by_id(movie)
+            .await
+            .unwrap()
+            .unwrap()
+            .identity_key,
+        Some(title_identity_key("Amelie", Some(2001))),
+        "a missing file still names its title; the enriched title does not"
+    );
+    assert_eq!(
+        h.show_repo
+            .find_by_id(show)
+            .await
+            .unwrap()
+            .unwrap()
+            .identity_key,
+        Some(title_identity_key("Severance", None))
+    );
+}
+
+#[tokio::test]
+async fn of_legacy_duplicates_the_oldest_takes_the_key() {
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::DateTime::from_timestamp(1_600_000_000, 0).unwrap();
+    let qualities = ["480p", "576p", "720p", "1080p", "1440p", "2160p"];
+    // Duplicates the old title lookup created, one per file, inserted newest
+    // first so neither insertion order nor chance hands the original the key.
+    let mut created = Vec::new();
+    for (age, quality) in qualities.iter().enumerate().rev() {
+        let id = h
+            .legacy_movie_created_at(
+                "Amelie",
+                Some(2001),
+                &[&format!("Amelie.2001.{quality}.mkv")],
+                base + chrono::Duration::days(age as i64),
+            )
+            .await;
+        created.push((age, id));
+    }
+    created.sort();
+    let original = created[0].1;
+
+    let report = h.service.backfill_identity_keys().await.unwrap();
+
+    assert_eq!(report.keyed, 1);
+    assert_eq!(
+        h.movie_repo
+            .find_by_id(original)
+            .await
+            .unwrap()
+            .unwrap()
+            .identity_key,
+        Some(title_identity_key("Amelie", Some(2001))),
+        "the original, which enrichment and progress most likely hang off"
+    );
+    let later: Vec<Uuid> = created[1..].iter().map(|(_, id)| *id).collect();
+    let warning = h.backfill_warning().await.expect("the admin is told");
+    let mut reported: Vec<Uuid> =
+        serde_json::from_value(warning["duplicate_movies"].clone()).unwrap();
+    reported.sort();
+    let mut expected = later;
+    expected.sort();
+    assert_eq!(reported, expected, "every later duplicate is named");
+}
+
+#[tokio::test]
+async fn a_failed_backfill_does_not_hold_up_the_scan_and_is_retried() {
+    use beam_domain::repositories::movie::MockMovieRepository;
+
+    let dir = TempDir::new().unwrap();
+    let library_repo = Arc::new(InMemoryLibraryRepository::default());
+    let library = library_repo
+        .create(CreateLibrary {
+            name: "Backfill".to_string(),
+            root_path: dir.path().to_path_buf(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    // The database refuses the backfill's first read, then recovers. The
+    // strict counts are the point: the second scan retries, the third does
+    // not backfill again.
+    let mut movie_repo = MockMovieRepository::new();
+    let mut attempts = mockall::Sequence::new();
+    movie_repo
+        .expect_find_unkeyed()
+        .times(1)
+        .in_sequence(&mut attempts)
+        .returning(|| Err(DbErr::Custom("connection reset".to_string())));
+    movie_repo
+        .expect_find_unkeyed()
+        .times(1)
+        .in_sequence(&mut attempts)
+        .returning(|| Ok(Vec::new()));
+    movie_repo.expect_delete_orphaned().returning(|_| Ok(0));
+    let service = LocalIndexService::new(
+        library_repo.clone(),
+        Arc::new(InMemoryFileRepository::default()),
+        Arc::new(movie_repo),
+        Arc::new(InMemoryShowRepository::default()),
+        Arc::new(InMemoryMediaStreamRepository::default()),
+        Arc::new(MockHashService::new()),
+        Arc::new(MockMediaInfoService::new()),
+        Arc::new(InMemoryNotificationService::new()),
+        Arc::new(LocalAdminLogService::new(
+            Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
+        )),
+    );
+
+    service.scan_all_libraries().await.unwrap();
+    assert!(
+        library_repo
+            .find_by_id(library.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_scan_finished_at
+            .is_some(),
+        "the scan ran despite the failed backfill"
+    );
+    assert!(
+        !*service.identity_backfill_done.lock().await,
+        "a failed backfill is not recorded as done"
+    );
+
+    service.scan_all_libraries().await.unwrap();
+    assert!(*service.identity_backfill_done.lock().await, "retried");
+
+    service.scan_all_libraries().await.unwrap();
 }
 
 #[tokio::test]

@@ -1232,10 +1232,12 @@ impl LocalIndexService {
     ///
     /// The key comes from the paths, not the stored title: enrichment may
     /// already have replaced the title with the provider's spelling, which is
-    /// the very thing the key exists to be independent of. A title whose files
-    /// all derive one key takes it; one with no present file takes the key of
-    /// its stored title and year (it is about to be deleted as orphaned
-    /// anyway). A title whose files disagree -- `Dune (1984)` and `Dune
+    /// the very thing the key exists to be independent of. Every file row
+    /// counts, soft-deleted or not, so a title whose files are all missing at
+    /// upgrade -- and may come back -- is keyed as its files say. A title
+    /// whose files all derive one key takes it; one with no file row at all
+    /// takes the key of its stored title and year (it is about to be deleted
+    /// as orphaned anyway). A title whose files disagree -- `Dune (1984)` and `Dune
     /// (2021)` once merged under one title -- or whose key another title
     /// already holds -- the duplicate the old title lookup created -- is left
     /// keyless and named in an admin warning: it stays browsable, is never
@@ -1243,11 +1245,44 @@ impl LocalIndexService {
     async fn backfill_identity_keys(&self) -> Result<IdentityBackfill, IndexError> {
         let mut report = IdentityBackfill::default();
 
-        for movie in self.movie_repo.find_unkeyed().await? {
+        let movies = self.movie_repo.find_unkeyed().await?;
+        let shows = self.show_repo.find_unkeyed().await?;
+        if movies.is_empty() && shows.is_empty() {
+            return Ok(report);
+        }
+
+        // Every file row, soft-deleted ones included: a title whose files are
+        // all missing at upgrade still has their paths, and they -- not the
+        // display title enrichment may have rewritten -- are what it is keyed
+        // by. Read once per library rather than once per title.
+        let mut entry_paths: HashMap<Uuid, Vec<PathBuf>> = HashMap::new();
+        let mut episode_paths: HashMap<Uuid, Vec<PathBuf>> = HashMap::new();
+        for library in self.library_repo.find_all().await? {
+            for file in self
+                .file_repo
+                .find_all_by_library_including_missing(library.id)
+                .await?
+            {
+                match file.content {
+                    Some(MediaFileContent::Movie { movie_entry_id }) => entry_paths
+                        .entry(movie_entry_id)
+                        .or_default()
+                        .push(file.path),
+                    Some(MediaFileContent::Episode { episode_id }) => {
+                        episode_paths.entry(episode_id).or_default().push(file.path)
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        // Oldest first (`find_unkeyed`'s order): of two legacy duplicates the
+        // original takes the key and the later one is reported.
+        for movie in movies {
             let mut keys = std::collections::BTreeSet::new();
             for entry in self.movie_repo.find_entries_by_movie_id(movie.id).await? {
-                for file in self.file_repo.find_by_movie_entry_id(entry.id).await? {
-                    keys.extend(identify_path(&file.path).movie_key());
+                for path in entry_paths.get(&entry.id).into_iter().flatten() {
+                    keys.extend(identify_path(path).movie_key());
                 }
             }
             let key = match keys.len() {
@@ -1265,12 +1300,12 @@ impl LocalIndexService {
             }
         }
 
-        for show in self.show_repo.find_unkeyed().await? {
+        for show in shows {
             let mut keys = std::collections::BTreeSet::new();
             for season in self.show_repo.find_seasons_by_show_id(show.id).await? {
                 for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
-                    for file in self.file_repo.find_by_episode_id(episode.id).await? {
-                        keys.extend(identify_path(&file.path).show_key());
+                    for path in episode_paths.get(&episode.id).into_iter().flatten() {
+                        keys.extend(identify_path(path).show_key());
                     }
                 }
             }
