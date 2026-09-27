@@ -252,6 +252,7 @@ pub(crate) fn make_app_state_full(
             session_idle_days: 14,
             session_max_days: 60,
         },
+        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
     };
 
     let config = crate::config::ServerConfig {

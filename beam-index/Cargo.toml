@@ -38,6 +38,12 @@ uuid = { workspace = true }
 walkdir = { workspace = true }
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 
+# `statfs(2)` for the filesystem-kind probe (network roots are polled rather
+# than watched). Already in the tree through tempfile; `fs` is the only
+# feature the probe needs.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
 [dev-dependencies]
 # `test-utils` here (not just under the crate's own `test-utils` feature) so the
 # domain-level doubles -- `TestClock`, builders -- are available to this crate's
@@ -49,6 +55,12 @@ metrics-util = { workspace = true }
 mockall = "0.15.0"
 sea-orm = { workspace = true, features = ["mock"] }
 tempfile = "3.27.0"
+
+# Independent sources for the filesystem magic numbers the probe classifies:
+# libc's constants, and the kernel's `linux/magic.h` for the ones libc lacks.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+linux-raw-sys = "0.12"
 
 [features]
 # Opt-in tier: runs the shared repository contracts against a real Postgres.

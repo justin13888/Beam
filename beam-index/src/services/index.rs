@@ -69,28 +69,36 @@ struct WalkOutcome {
 /// stat, contributes no files, and
 /// reading that silence as "every file under it is gone" is how a transient
 /// permission or I/O error used to delete rows.
+///
+/// Symbolic links under the root are never followed, to a file or to a
+/// directory (issue #186): a link is not part of the library. Following one
+/// would index files outside the root the administrator registered -- past
+/// the containment check library creation makes -- and, for a directory,
+/// risk a cycle. The root itself may be a link; only what is beneath it is
+/// held to this.
 fn walk_library_root(root: &Path) -> WalkOutcome {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut failed_subtrees: Vec<PathBuf> = Vec::new();
     let mut unscoped_failure = false;
-    for entry in WalkDir::new(root) {
+    for entry in WalkDir::new(root).follow_links(false) {
         match entry {
             Ok(entry) => {
                 // A directory is descended by the walk itself, which reports
-                // any failure to list it as an `Err` below.
-                if entry.file_type().is_dir() {
+                // any failure to list it as an `Err` below. A symlink is
+                // skipped whatever it points at.
+                if entry.file_type().is_dir() || entry.file_type().is_symlink() {
                     continue;
                 }
                 let path = entry.into_path();
-                // `metadata` follows a symlink, as `Path::is_file` did, so a
-                // link to a regular file is still indexed. Only a stat that
-                // says "no such file" (a dangling link, a file deleted
-                // mid-walk) means the entry is absent. Any other failure --
-                // a listable but unsearchable parent (EACCES), a transient
-                // EIO or ESTALE on a network mount -- says nothing about the
-                // file, so it shields the path exactly like a directory the
-                // walk could not list (issue #179).
-                match std::fs::metadata(&path) {
+                // `symlink_metadata`, so an entry replaced by a link since it
+                // was listed is still not followed. Only a stat that says "no
+                // such file" (a file deleted mid-walk) means the entry is
+                // absent. Any other failure -- a listable but unsearchable
+                // parent (EACCES), a transient EIO or ESTALE on a network
+                // mount -- says nothing about the file, so it shields the path
+                // exactly like a directory the walk could not list (issue
+                // #179).
+                match std::fs::symlink_metadata(&path) {
                     Ok(meta) => {
                         if meta.is_file() {
                             files.push(path);
@@ -1184,11 +1192,13 @@ impl LocalIndexService {
         // other failure (EACCES from an unsearchable parent, a transient EIO
         // or ESTALE on a network mount) says nothing about the file, so the
         // event is dropped rather than read as a deletion; the next scan
-        // shields the same path (issue #179).
+        // shields the same path (issue #179). The stat does not follow a
+        // symlink: a link is not a library file (issue #186), so a path that
+        // is now one reconciles exactly like a path that is gone.
         let is_file = if kind == FsEventKind::Removed {
             false
         } else {
-            match std::fs::metadata(&path) {
+            match std::fs::symlink_metadata(&path) {
                 Ok(meta) => meta.is_file(),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
                 Err(err) => {
