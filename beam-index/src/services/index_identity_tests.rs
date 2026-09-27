@@ -730,6 +730,7 @@ async fn a_legacy_title_is_keyed_from_its_files_not_its_enriched_title() {
 async fn a_legacy_title_with_no_file_is_keyed_from_its_stored_title() {
     let h = Harness::keeping_missing_files().await;
     let movie = h.legacy_movie("Ghost", Some(1990), &[]).await;
+    let show = h.legacy_show("Severance", &[]).await;
 
     h.service.backfill_identity_keys().await.unwrap();
 
@@ -741,6 +742,16 @@ async fn a_legacy_title_with_no_file_is_keyed_from_its_stored_title() {
             .unwrap()
             .identity_key,
         Some(title_identity_key("Ghost", Some(1990)))
+    );
+    assert_eq!(
+        h.show_repo
+            .find_by_id(show)
+            .await
+            .unwrap()
+            .unwrap()
+            .identity_key,
+        Some(title_identity_key("Severance", None)),
+        "no file row names it a husk"
     );
 }
 

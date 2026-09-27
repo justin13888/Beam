@@ -1531,13 +1531,11 @@ impl LocalIndexService {
             // matched: reclassification moves its files to the series they
             // name, and orphan cleanup retires it. It is known by the name
             // those rules gave its files -- every one a season folder's --
-            // not by its display title, which enrichment may have replaced;
-            // with no file row, by the key its stored title would take.
-            let husk = if legacy_keys.is_empty() {
-                is_season_folder_husk_key(&title_identity_key(&show.title, show.year))
-            } else {
-                legacy_keys.iter().all(|key| is_season_folder_husk_key(key))
-            };
+            // not by its display title, which enrichment may have replaced.
+            // A show with no file row is keyed from its stored title like any
+            // fileless title: husk or not, orphan cleanup retires it.
+            let husk = !legacy_keys.is_empty()
+                && legacy_keys.iter().all(|key| is_season_folder_husk_key(key));
             if husk {
                 debug!(show_id = %show.id, title = %show.title, "not keying a season-folder husk");
                 continue;
