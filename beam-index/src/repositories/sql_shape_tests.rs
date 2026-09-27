@@ -1250,18 +1250,20 @@ mod playback_telemetry {
         let sql = statements(db);
         assert_eq!(sql.len(), 3);
         for (statement, table) in sql.iter().zip([
-            "playback_start_counts",
-            "playback_rebuffer_counts",
-            "playback_switch_counts",
+            playback_start_count::Entity.table_name(),
+            playback_rebuffer_count::Entity.table_name(),
+            playback_switch_count::Entity.table_name(),
         ]) {
-            assert_contains(
-                statement,
-                &format!("FROM {table} WHERE day >= $1 AND day <= $2"),
-            );
-            assert_contains(statement, "GROUP BY");
+            assert_contains(statement, &format!("FROM {table} "));
+            // The lower bound is the first parameter and the upper the second,
+            // and each is bound to the end of the range it bounds.
+            assert_contains(statement, "day >= $1");
+            assert_contains(statement, "day <= $2");
             let values = bound_values(statement);
+            assert_eq!(values.len(), 2, "{values:?}");
             assert!(values[0].contains("2026-08-01"), "{values:?}");
             assert!(values[1].contains("2026-09-27"), "{values:?}");
+            assert_contains(statement, "GROUP BY");
         }
     }
 }
