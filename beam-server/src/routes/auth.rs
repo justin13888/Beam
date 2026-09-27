@@ -790,10 +790,21 @@ pub async fn start_device_login(
 // per operation and has no way to declare "cookie or bearer" (an OpenAPI
 // security requirement list of alternatives), so accepting a bearer token
 // would mean either a second, undescribed authenticator or re-declaring every
-// secured operation. That is an upstream gap in kynos -- not yet filed on
-// getkono/kynos; recorded in ADR-0017 (D151-3) for the maintainer to file.
-// Until a release closes it, the one described scheme is the one every client
-// uses.
+// secured operation.
+//
+// Upstream gap in kynos, NOT YET FILED -- to be filed on getkono/kynos by the
+// maintainer (the run that wrote this could not file there), with this title
+// and ask, also recorded in ADR-0017 (D151-3):
+//
+//   "Auth<S> cannot declare alternative security schemes (OpenAPI any-of
+//   security requirements)": an operation that accepts a cookie session *or*
+//   an `Authorization: Bearer` token cannot be described; `Auth<S>` binds one
+//   scheme and emits a single security requirement. Asked for: an any-of
+//   form of `Auth` that emits `security: [{cookie: []}, {bearer: []}]` and
+//   authenticates with whichever credential the request carries.
+//
+// Replace this block with the issue link once filed. Until a release closes
+// it, the one described scheme is the one every client uses.
 #[kynos::post("/auth/device/token", tag = Auth, operation_id = "pollDeviceLogin")]
 pub async fn poll_device_login(
     Headers(headers): Headers<ClientHeaders>,
