@@ -343,6 +343,77 @@ mod tests {
         assert_eq!(response.bytes().as_ref(), b"still");
     }
 
+    /// The artwork paths `ShowMetadata` publishes are ones this route
+    /// actually serves: a client following them gets the show's own poster
+    /// and backdrop, not a 404.
+    #[tokio::test]
+    async fn a_shows_published_artwork_urls_resolve_to_its_own_art() {
+        use crate::models::MediaMetadata;
+        use crate::services::metadata::{DbMetadataService, MetadataService};
+        use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+        use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+
+        const SHOW_POSTER: &str = "https://image.tmdb.org/t/p/w500/show-poster.jpg";
+        const SHOW_BACKDROP: &str = "https://image.tmdb.org/t/p/w1280/show-backdrop.jpg";
+        let fixture = fixture(
+            InMemoryArtworkFetcher::new()
+                .with_image(SHOW_POSTER, ImageFormat::Jpeg, b"show-poster")
+                .with_image(SHOW_BACKDROP, ImageFormat::Jpeg, b"show-backdrop"),
+        );
+        let show = fixture
+            .shows
+            .create(CreateShow {
+                title: "Severance".to_string(),
+                year: Some(2022),
+            })
+            .await
+            .expect("show is created");
+        fixture
+            .shows
+            .apply_enrichment(
+                show.id,
+                &beam_domain::providers::enrichment::ShowEnrichment {
+                    title: "Severance".to_string(),
+                    poster_url: Some(SHOW_POSTER.to_string()),
+                    backdrop_url: Some(SHOW_BACKDROP.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("enrichment applies");
+
+        let metadata = DbMetadataService::new(
+            fixture.movies.clone(),
+            fixture.shows.clone(),
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+        let Some(MediaMetadata::Show(published)) =
+            metadata.get_media_metadata(&show.id.to_string()).await
+        else {
+            panic!("the show resolves");
+        };
+        let poster_path = published.poster_url.expect("a poster path is published");
+        let backdrop_path = published
+            .backdrop_url
+            .expect("a backdrop path is published");
+
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+        for (path, expected) in [
+            (poster_path, b"show-poster".as_slice()),
+            (backdrop_path, b"show-backdrop".as_slice()),
+        ] {
+            let response = client
+                .get(&path)
+                .cookie("beam_session", &token)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.bytes().as_ref(), expected, "{path}");
+        }
+    }
+
     /// Every "there is no image here" case is one answer, because every client
     /// already renders a placeholder for it.
     #[tokio::test]

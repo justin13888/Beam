@@ -278,6 +278,14 @@ impl DbMetadataService {
             },
             description: show.description.clone(),
             year: show.year,
+            poster_url: show
+                .poster_url
+                .as_ref()
+                .map(|_| artwork_path(ArtworkKind::Show, show.id, ArtworkVariant::Poster)),
+            backdrop_url: show
+                .backdrop_url
+                .as_ref()
+                .map(|_| artwork_path(ArtworkKind::Show, show.id, ArtworkVariant::Backdrop)),
             seasons,
         }))
     }
@@ -527,6 +535,12 @@ impl MetadataService for DbMetadataService {
                             },
                             description: show.description.clone(),
                             year: show.year,
+                            poster_url: show.poster_url.as_ref().map(|_| {
+                                artwork_path(ArtworkKind::Show, show.id, ArtworkVariant::Poster)
+                            }),
+                            backdrop_url: show.backdrop_url.as_ref().map(|_| {
+                                artwork_path(ArtworkKind::Show, show.id, ArtworkVariant::Backdrop)
+                            }),
                             seasons: vec![],
                         });
                         items.push(MediaItem::Show {

@@ -1043,4 +1043,145 @@ mod tests {
             Some(format!("/v1/artwork/episode/{episode_id}/thumbnail").as_str()),
         );
     }
+
+    /// Seeds a show through the repository trait -- created, then enriched
+    /// with whatever artwork the provider supplied -- so the metadata service
+    /// sees the same row shape enrichment leaves behind.
+    async fn seed_enriched_show(
+        show_repo: &InMemoryShowRepository,
+        poster_url: Option<&str>,
+        backdrop_url: Option<&str>,
+    ) -> Uuid {
+        use beam_domain::models::CreateShow;
+        use beam_domain::providers::enrichment::ShowEnrichment;
+        use beam_domain::repositories::ShowRepository;
+
+        let show = show_repo
+            .create(CreateShow {
+                title: "Severance".to_string(),
+                year: Some(2022),
+            })
+            .await
+            .expect("in-memory create succeeds");
+        show_repo
+            .apply_enrichment(
+                show.id,
+                &ShowEnrichment {
+                    title: "Severance".to_string(),
+                    year: Some(2022),
+                    poster_url: poster_url.map(str::to_string),
+                    backdrop_url: backdrop_url.map(str::to_string),
+                    ..ShowEnrichment::default()
+                },
+            )
+            .await
+            .expect("in-memory enrichment succeeds");
+        show.id
+    }
+
+    fn only_shows() -> MediaSearchFilters {
+        use crate::services::metadata::MediaTypeFilter;
+
+        MediaSearchFilters {
+            media_type: Some(MediaTypeFilter::Show),
+            genre: None,
+            year: None,
+            year_from: None,
+            year_to: None,
+            query: None,
+            min_rating: None,
+        }
+    }
+
+    /// Returns the show metadata from the detail view and from browse, for a
+    /// catalogue holding exactly the one show.
+    async fn show_detail_and_browsed(
+        service: &DbMetadataService,
+        show_id: Uuid,
+    ) -> (crate::models::ShowMetadata, crate::models::ShowMetadata) {
+        use crate::models::MediaMetadata;
+
+        let Some(MediaMetadata::Show(detail)) =
+            service.get_media_metadata(&show_id.to_string()).await
+        else {
+            panic!("the show resolves");
+        };
+        let conn = service
+            .search_media(
+                Some(10),
+                None,
+                None,
+                None,
+                MediaSortField::Title,
+                SortOrder::Asc,
+                only_shows(),
+            )
+            .await;
+        let [edge] = conn.edges.as_slice() else {
+            panic!("exactly the one seeded show is browsed");
+        };
+        let MediaMetadata::Show(browsed) = &edge.node else {
+            panic!("the browsed item is a show");
+        };
+        (detail, browsed.clone())
+    }
+
+    /// A show's own artwork reaches the client -- on the detail view and in
+    /// browse results alike -- as a Beam artwork path, never as the provider
+    /// URL enrichment stored.
+    #[tokio::test]
+    async fn a_show_points_at_beam_for_its_own_artwork() {
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let show_id = seed_enriched_show(
+            &show_repo,
+            Some("https://image.tmdb.org/t/p/w500/show-poster.jpg"),
+            Some("https://image.tmdb.org/t/p/w1280/show-backdrop.jpg"),
+        )
+        .await;
+        let service = DbMetadataService::new(
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+        let expected_poster = format!("/v1/artwork/show/{show_id}/poster");
+        let expected_backdrop = format!("/v1/artwork/show/{show_id}/backdrop");
+
+        let (detail, browsed) = show_detail_and_browsed(&service, show_id).await;
+
+        for (view, show) in [("detail", &detail), ("browse", &browsed)] {
+            assert_eq!(
+                show.poster_url.as_deref(),
+                Some(expected_poster.as_str()),
+                "{view} poster",
+            );
+            assert_eq!(
+                show.backdrop_url.as_deref(),
+                Some(expected_backdrop.as_str()),
+                "{view} backdrop",
+            );
+        }
+    }
+
+    /// A show with no art of its own carries no artwork URL, on detail or in
+    /// browse, so clients fall back to a season poster rather than requesting
+    /// a path that 404s.
+    #[tokio::test]
+    async fn a_show_with_no_artwork_is_given_no_artwork_url() {
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let show_id = seed_enriched_show(&show_repo, None, None).await;
+        let service = DbMetadataService::new(
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            Arc::new(InMemoryFileRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let (detail, browsed) = show_detail_and_browsed(&service, show_id).await;
+
+        for (view, show) in [("detail", &detail), ("browse", &browsed)] {
+            assert_eq!(show.poster_url, None, "{view} poster");
+            assert_eq!(show.backdrop_url, None, "{view} backdrop");
+        }
+    }
 }
