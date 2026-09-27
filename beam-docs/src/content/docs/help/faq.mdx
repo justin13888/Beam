@@ -86,6 +86,13 @@ automatically the first time.
 Beam delegates authentication entirely, so it never stores passwords and cannot leak them. There
 is no sign-up, no password reset and no credential in Beam to steal.
 
+### Will Beam ever bundle an identity provider so I don't need one?
+
+No. Shipping one would put passwords, password resets and user management back inside Beam,
+which is exactly what delegating authentication avoids. If you run no provider yet,
+[Pocket ID](/operate/providers/pocket-id/) is a small one to start with, and there are
+[quickstarts for others](/operate/identity-and-access/#register-beam-with-your-provider).
+
 ### How do I become an admin?
 
 Your identity provider must assert the claim the server configured. Only the person running the

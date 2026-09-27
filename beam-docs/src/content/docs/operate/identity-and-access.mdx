@@ -3,7 +3,7 @@ title: Identity and admin access
 description: Point Beam at your OIDC provider and decide who is an admin — both are configured outside Beam.
 ---
 
-import { Aside, LinkCard, Tabs, TabItem } from "@astrojs/starlight/components";
+import { Aside, CardGrid, LinkCard } from "@astrojs/starlight/components";
 
 Beam has no user database of its own to speak of and no passwords. Authentication is OpenID
 Connect, exclusively. Without a working provider, nobody can sign in — including you.
@@ -23,31 +23,33 @@ Then set `BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID` and `BEAM_OIDC_CLIENT_SECRET`
 required together** — Beam treats OIDC as unconfigured unless it has all of them, and
 `/v1/auth/login` answers 503.
 
-<Tabs syncKey="idp">
-	<TabItem label="Keycloak">
-	Create a client in your realm with client authentication enabled and the standard authorization
-	code flow. The issuer is `https://<host>/realms/<realm>`.
-	</TabItem>
-	<TabItem label="Authentik">
-	Create an OAuth2/OIDC provider with client type *Confidential*, then an application bound to
-	it. The issuer is the provider's configuration URL without the
-	`.well-known/openid-configuration` suffix.
-	</TabItem>
-	<TabItem label="Authelia">
-	Add Beam to `identity_providers.oidc.clients` with a hashed client secret and the redirect URI
-	above. The issuer is Authelia's root URL.
-	</TabItem>
-	<TabItem label="Dex (local only)">
-	`mise run dev:up` starts Dex with static test users, so you can develop without an external
-	provider. It is opt-in: it sits behind the `dev-idp` Compose profile and is absent from the
-	default stack.
+Step-by-step guides for common providers, each ending with a check that admin works:
 
-	It is **not** for production — the users are fixed and defined in the repo, and Dex's builtin
-	connector cannot assert group membership for them, so there is no per-user admin claim to
-	point `BEAM_OIDC_ADMIN_CLAIM` at. The dev setup aims it at `email_verified`, which makes
-	*every* Dex user an admin.
-	</TabItem>
-</Tabs>
+<CardGrid>
+	<LinkCard title="Authentik" href="/operate/providers/authentik/" />
+	<LinkCard title="Keycloak" href="/operate/providers/keycloak/" />
+	<LinkCard title="Authelia" href="/operate/providers/authelia/" />
+	<LinkCard
+		title="Pocket ID"
+		description="The smallest option if you run no identity provider yet."
+		href="/operate/providers/pocket-id/"
+	/>
+</CardGrid>
+
+Any other OpenID Connect provider works the same way: a confidential client, the redirect URI
+above, and a claim in the **ID token** for admin.
+
+Beam will not ship an identity provider of its own for you to deploy. That is a settled decision,
+not a missing feature — see
+[ADR-0016](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0016-bring-your-own-idp.md).
+
+<Aside title="The bundled Dex is for local development only">
+`mise run dev:up` starts Dex with static test users, so you can develop without an external
+provider. It is opt-in: it sits behind the `dev-idp` Compose profile and is absent from the
+default stack. It is **not** for production — the users and the client secret are fixed and
+committed to the repo. The dev setup also aims `BEAM_OIDC_ADMIN_CLAIM` at `email_verified`, which
+makes *every* Dex user an admin.
+</Aside>
 
 Beam must be able to reach the issuer's `.well-known/openid-configuration` at startup.
 
