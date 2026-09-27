@@ -96,6 +96,12 @@ private class CredentialInterceptor(
     }
 }
 
-/** Same scheme, host and port -- the web's definition of an origin. */
-private fun HttpUrl.sameOrigin(other: HttpUrl): Boolean =
+/**
+ * Same scheme, host and port -- the web's definition of an origin, and so the
+ * test for whether a request may carry the session.
+ *
+ * [HttpUrl] has already normalised what the web treats as equal: a host is
+ * lower-cased, and a scheme's default port is filled in when none is written.
+ */
+internal fun HttpUrl.sameOrigin(other: HttpUrl): Boolean =
     scheme == other.scheme && host == other.host && port == other.port

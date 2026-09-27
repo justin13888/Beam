@@ -68,6 +68,9 @@ class BeamImageLoaderTest {
     /** Some other host, which serves anyone and records what it was sent. */
     private val elsewhere = MockWebServer()
 
+    /** Another service on the signed-in server's host, at another port. */
+    private val sibling = MockWebServer()
+
     /** What the core reports: the active server and its session, or none. */
     private var active: ServerHttpConfig? = null
 
@@ -82,6 +85,8 @@ class BeamImageLoaderTest {
         beam.start(InetAddress.getByName(SERVER_HOST), 0)
         elsewhere.dispatcher = OpenServer()
         elsewhere.start(InetAddress.getByName(OTHER_HOST), 0)
+        sibling.dispatcher = OpenServer()
+        sibling.start(InetAddress.getByName(SERVER_HOST), 0)
         loader =
             BeamImageLoader.build(
                 context = context,
@@ -96,6 +101,7 @@ class BeamImageLoaderTest {
         beam.close()
         secure.close()
         elsewhere.close()
+        sibling.close()
         Dispatchers.resetMain()
     }
 
@@ -147,6 +153,20 @@ class BeamImageLoaderTest {
             assertTrue("rendered, got $result", result is SuccessResult)
             assertEquals(SESSION, beam.takeRequest(TIMEOUT_SECONDS, TimeUnit.SECONDS)?.headers?.get("Cookie"))
             val followed = elsewhere.takeRequest(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            assertNotNull("the redirect was followed", followed)
+            assertNull(followed!!.headers["Cookie"])
+        }
+
+    @Test
+    fun `a redirect to another port on the server's host drops the session`() =
+        runTest {
+            signIn()
+
+            val result = render(beam.url("/v1/redirect-port"))
+
+            assertTrue("rendered, got $result", result is SuccessResult)
+            assertEquals(SESSION, beam.takeRequest(TIMEOUT_SECONDS, TimeUnit.SECONDS)?.headers?.get("Cookie"))
+            val followed = sibling.takeRequest(TIMEOUT_SECONDS, TimeUnit.SECONDS)
             assertNotNull("the redirect was followed", followed)
             assertNull(followed!!.headers["Cookie"])
         }
@@ -240,6 +260,14 @@ class BeamImageLoaderTest {
                         .Builder()
                         .code(302)
                         .setHeader("Location", elsewhereUrl().toString())
+                        .build()
+                }
+
+                request.url.encodedPath == "/v1/redirect-port" -> {
+                    MockResponse
+                        .Builder()
+                        .code(302)
+                        .setHeader("Location", sibling.url("/poster.png").toString())
                         .build()
                 }
 
