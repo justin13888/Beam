@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Delivered with [#93](https://github.com/justin13888/beam/issues/93).
+Accepted. Delivered with [#93](https://github.com/justin13888/beam/issues/93). Extended with
+[Playback telemetry](#playback-telemetry) by [#143](https://github.com/justin13888/beam/issues/143)
+(server half; the client emitters follow).
 
 ## Context
 
@@ -67,7 +69,8 @@ fixed rather than configurable: a knob would add nothing an operator needs, and 
 only makes reports more linkable by timing.
 
 **Playback stays local.** What users watch, when, and how far they got (FR-5xx progress, history) is
-never part of any report. The report reads the library's shape, not its use.
+never part of any report. The report reads the library's shape, not its use. Playback telemetry
+(below) is counted on the server and stays there: it is not part of this report either.
 
 ## Consequences
 
@@ -91,6 +94,74 @@ never part of any report. The report reads the library's shape, not its use.
 - Everything above the network is hermetic: the shape is a repository trait with a shared contract
   (bound to the in-memory double and, under `pg-integration`, to the SQL), and delivery is a
   `TelemetrySink` trait with a recording double.
+
+## Playback telemetry
+
+[ADR-0014](ADR-0014-adaptive-streaming-rejected.md) settles adaptive streaming on the argument that
+the failures viewers hit are capability failures, and hands the counter-argument --
+constrained-bandwidth behaviour is insufficient -- to evidence nothing collected. #143 collects it.
+What fails to start, what rebuffers and what switches source is far more sensitive than a library's
+shape: a per-title failure record is a viewing record. So it takes this ADR's posture and tightens
+it.
+
+**Operator-local, with no phone-home at all.** Playback counts are kept in the server's database
+and read by an admin at `GET /v1/admin/telemetry/playback`. They are never added to the library
+report and never sent anywhere, whatever `BEAM_TELEMETRY_URL` says. A shared, cross-server picture
+would be a separate decision with its own coarsening; none is made here.
+
+**Off by default.** `BEAM_PLAYBACK_TELEMETRY_ENABLED` defaults to `false`. Unlike the library
+report there is no URL to be the opt-in, so the switch is its own knob -- the issue's "default off"
+is the stated reason for it. While off, `POST /v1/telemetry/playback` answers `409
+playback-telemetry-disabled`: a 4xx a client's transport does not retry (the native core retries
+5xx), and a distinct type a client reads as "stop reporting".
+
+**Daily counters in three typed tables, not an event log.** `playback_start_counts`,
+`playback_rebuffer_counts` and `playback_switch_counts` each hold one row per UTC day per
+combination of coarse dimensions, incremented with `INSERT ... ON CONFLICT DO UPDATE`. A raw event
+log, even one without a user column, is a timeline a determined reader can match against who was
+watching; a daily counter is not. One generic `(kind, dimensions jsonb, count)` table was rejected:
+it loses the `CHECK`s and the typed report, and every consumer would re-parse the dimensions.
+
+**Dimensions the server derives, then forgets.** An event names a file only so the server can look
+up its container, first video codec, chosen audio codec (the client's `audio_track_index`, else the
+default track, else the first), resolution class (`sd` < 720 lines ≤ `hd` < 1080 ≤ `fhd` < 2160 ≤
+`uhd`) and bitrate class (the file's average, else its video stream's). The file id goes no further
+than that lookup, and codec and container names pass through the same `normalize_label` as the
+library report. A file the server cannot resolve -- unknown, or missing from disk -- drops the event
+rather than refusing the batch. The time recorded is the UTC day of arrival.
+
+**Authenticated, then anonymous.** Reporting needs a session, which is what keeps the endpoint from
+being an open write surface, and the handler passes no identity to the service. A batch holds at
+most 50 events; there is no dedicated rate-limit class, since the same-origin rule, the session and
+the batch bound already cap what one client can add, and a counter cannot be made to hold anything
+but counts.
+
+**One list per kind, and every reason with its stage.** A batch carries `starts`,
+`start_failures`, `rebuffers` and `source_switches` as separate arrays, so each event's shape is
+exact rather than a tagged union of optional fields. A failure carries one of five reasons
+(`container`, `video_codec`, `audio_codec`, `network`, `other`) -- the vocabulary
+`RejectionReason` in `beam-client-core` already has, coarsened -- and a stage (`preflight`, when the
+client ruled the source out, or `playback`, when the player tried and failed). Successful starts
+are counted too: a failure count means nothing without its denominator.
+
+**Kept for a year, pruned daily, whether or not collection is on.**
+`BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS` (default 365, 1 to 3650) bounds how long a day's counts
+live; a loop on the injected `Clock` prunes at start and then daily. Turning collection off stops new
+counts but does not purge old ones -- deleting an operator's data is a separate, explicit act, not a
+side effect of a config change -- and the admin report stays readable either way.
+
+Consequences for playback telemetry:
+
+- NFR-503 carries the rule; FR-511 the ingest, FR-609 the admin report and retention.
+- The report is a closed set of typed rows (`starts`, `start_failures`, `rebuffers` with a
+  five-range duration histogram, `source_switches`) summed over at most 366 days, largest count
+  first. None of it names a user, file or title.
+- `validation-failed` enters the error vocabulary as a generic 422 with RFC 9457's per-pointer
+  `errors` extension. Kynos's `Json<T>` enforces serde only, not the `maxItems`/`minimum`/`maximum`
+  its `Schema` derive publishes, so the service enforces every bound itself until a Kynos release
+  does (CLAUDE.md rule 3; the gap is noted on `PlaybackTelemetryBatch`).
+- Where a file's container and codecs come from is one function (`ResolvedFile::of`) over today's
+  stream model, so the unified stream model (#189) replaces it in one place.
 
 ## Alternatives considered
 

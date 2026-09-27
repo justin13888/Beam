@@ -1,9 +1,20 @@
 ---
-title: Anonymous library report
-description: What Beam's opt-in library report contains, where it goes, and how to see it before you turn it on.
+title: Telemetry
+description: What Beam's two opt-in telemetry features contain -- the anonymous library report and operator-local playback counts -- where each goes, and how to see it.
 ---
 
 import { Aside } from "@astrojs/starlight/components";
+
+Beam has two telemetry features, both off by default:
+
+- the **anonymous library report**, which sends the *shape* of your libraries to a collector you
+  choose; and
+- **playback telemetry**, which counts what failed to play, rebuffered or switched source, and keeps
+  those counts on your server for you to read.
+
+Neither sends anything anywhere unless you name a destination, and playback telemetry never does.
+
+## Anonymous library report
 
 Beam can send a small, anonymous report describing the *shape* of your libraries — how many titles
 and files, which containers and codecs, roughly how large — to a collector you choose. It helps
@@ -14,7 +25,7 @@ Nothing is sent unless you set `BEAM_TELEMETRY_URL`. There is no built-in destin
 report on means naming where it goes.
 </Aside>
 
-## What is in it
+### What is in it
 
 Ranges only. No number in the report is exact: every "how many" is one of `none`, `from_1_to_9`,
 `from_10_to_99`, `from_100_to_999`, `from_1000_to_9999` or `at_least_10000`.
@@ -27,7 +38,7 @@ Ranges only. No number in the report is exact: every "how many" is one of `none`
 - which range your total indexed size falls into (under 100 GiB, … 50 TiB and over)
 - the Beam version, and the day (not the time) the report describes
 
-## What is never in it
+### What is never in it
 
 No title, file name, path, library name or description. No user, no session, no playback progress
 or history. No file hash, host name, IP-derived value, or install or server identifier, and no exact
@@ -38,7 +49,7 @@ a rare mix of ranges — that stays the same from week to week, the collector ma
 a run of reports came from one server, especially alongside the address they arrive from. Choose a
 collector you would trust with that.
 
-## See it before you turn it on
+### See it before you turn it on
 
 An admin can fetch the exact report — and the exact bytes that would be sent — at any time, whether
 or not the report is turned on:
@@ -49,7 +60,7 @@ curl -b "beam_session=…" http://localhost:8000/v1/admin/telemetry/library
 
 The `payload` field is the request body, byte for byte. Previewing sends nothing.
 
-## Turning it on
+### Turning it on
 
 Set `BEAM_TELEMETRY_URL` to an [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/) metrics
 endpoint — for an OpenTelemetry Collector, usually `https://collector.example/v1/metrics`. The URL
@@ -64,7 +75,7 @@ is used exactly as given. With the [Helm chart](/operate/kubernetes/), set `tele
   delivery fails; anything in the URL's path, query or user info, such as an ingest token, is not
   shown.
 
-### Authenticating to the collector
+#### Authenticating to the collector
 
 If your collector wants credentials, put them in the URL. Two forms are supported:
 
@@ -78,3 +89,59 @@ ever attached to the report.
 
 To turn it off, unset the variable and restart. See the
 [configuration reference](/reference/configuration/) for the exact semantics.
+
+## Playback telemetry
+
+Playback telemetry answers "what fails to play, and where does playback stall?" -- which codecs and
+containers are refused by which clients, and how often and for how long viewers wait on the network.
+Beam's decisions not to transcode and not to package for adaptive streaming
+([ADR-0004](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0004-never-transcode.md),
+[ADR-0014](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0014-adaptive-streaming-rejected.md))
+are only as good as the evidence behind them; these counts are that evidence, for your server.
+
+<Aside type="note" title="Off by default, and never sent anywhere">
+Clients' reports are counted only when you set `BEAM_PLAYBACK_TELEMETRY_ENABLED=true`. The counts
+stay in your database; they are not part of the anonymous library report.
+</Aside>
+
+### What is counted
+
+Clients report four kinds of event: a playback that **started**, one that **failed to start** (with
+a reason -- `container`, `video_codec`, `audio_codec`, `network` or `other` -- and whether it
+failed in `preflight`, before the player tried, or in `playback`), a **rebuffer** (a mid-stream
+stall, with its duration), and a **source switch** (`manual` or `auto`).
+
+Each event names the file that was playing. The server looks that file up, notes only its coarse
+dimensions, and forgets the file:
+
+- the client kind -- `web_chromium`, `web_firefox`, `web_safari`, `web_other`, `android`,
+  `android_tv`, `apple_ios`, `apple_tvos`, `apple_macos` or `other`
+- the container, and the video and audio codecs (normalised the same way as in the library report)
+- a resolution class (`sd`, `hd`, `fhd`, `uhd`) and, for rebuffers, a bitrate class
+- the UTC day
+
+and adds one to the count for that combination. A rebuffer also adds its duration to a total and
+to a histogram (under 1 s, 1–3 s, 3–10 s, 10–30 s, 30 s and over).
+
+### What is never kept
+
+No user, session, file, title or path, and no time finer than the day. The server authenticates the
+report and then discards who sent it, and there is no per-event record to go back to: a count of
+"12 HEVC failures on Firefox on the 27th" is all that exists. On a server with one viewer, that is
+still a statement about what that viewer watched in aggregate -- which is why it is off by default.
+
+### Reading the counts
+
+An admin reads the counts, summed over a range of days (the last 30 by default, at most 366):
+
+```bash
+curl -b "beam_session=…" "http://localhost:8000/v1/admin/telemetry/playback?from=2026-09-01&to=2026-09-27"
+```
+
+The report works whether or not collection is on, so counts gathered while it was on stay readable.
+
+### Retention
+
+Counts are kept for `BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS` days (365 by default) after the day
+they count, and pruned daily. Turning collection off stops new counts but does not delete old ones;
+they age out on the same schedule.

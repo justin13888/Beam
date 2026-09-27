@@ -36,6 +36,7 @@ role.
 | `/v1/files/{fileId}/progress` | PUT | Report playback position |
 | `/v1/continue-watching` | GET | Resume list for the current user |
 | `/v1/history` | GET | Watch history for the current user (limit/offset paged) |
+| `/v1/telemetry/playback` | POST | Report a batch of playback starts, start failures, rebuffers and source switches (at most 50 events). Counted as daily aggregates under the named files' coarse dimensions, never the file or the user; `409` `playback-telemetry-disabled` unless the operator enabled it, `422` `validation-failed` with per-pointer `errors` ([ADR-0019](decisions/ADR-0019-telemetry-posture.md)) |
 | `/v1/auth/login`, `/v1/auth/callback` | GET | OIDC login redirect and callback |
 | `/v1/auth/device` | POST | Start a device login (RFC 8628) for a client with no browser: user code, verification URI, opaque device handle. `501` when the IdP does not offer the grant ([ADR-0017](decisions/ADR-0017-device-authorization-grant.md)) |
 | `/v1/auth/device/token` | POST | Poll a device login once: `202` while waiting (`authorization_pending` / `slow_down`), `200` with the `beam_session` value on approval |
@@ -51,6 +52,7 @@ role.
 | `/v1/admin/events` | GET | Recent admin events (JSON) |
 | `/v1/admin/events/stream` | GET | Admin event stream (SSE) |
 | `/v1/admin/telemetry/library` | GET | The anonymous library report, and its exact OTLP request body, as it would be sent now -- sends nothing ([ADR-0019](decisions/ADR-0019-telemetry-posture.md)) |
+| `/v1/admin/telemetry/playback` | GET | Playback telemetry counts summed over `from`..`to` (UTC days, inclusive; default the last 30, at most 366, else `400` `invalid-date-range`) -- operator-local, never sent anywhere |
 
 Three routes sit outside `/v1` and outside the client contract: `GET /metrics` (Prometheus text
 exposition, tagged `internal` — see `../operations/deployment.md`), `GET /openapi` (the Scalar UI)

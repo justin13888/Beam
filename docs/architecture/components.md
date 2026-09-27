@@ -49,7 +49,9 @@ hard (e.g. a cookie-Secure misconfiguration is a startup error) and logs redact 
   implementation and an in-memory fake for tests. `telemetry/` builds, encodes (OTLP/HTTP JSON) and
   schedules the opt-in anonymous library report
   ([ADR-0019](decisions/ADR-0019-telemetry-posture.md)); it is concrete, its two boundaries -- the
-  library shape and the outbound request -- being traits already.
+  library shape and the outbound request -- being traits already. `playback_telemetry.rs` counts
+  clients' playback reports as daily aggregates and serves the admin report (issue #143); concrete
+  too, over the `PlaybackTelemetryRepository`, file, stream and `Clock` seams.
 - `state.rs` — dependency-injection wiring. `AppServices` holds `Arc<dyn Trait>` for every
   service; this is the only place that constructs concrete (Postgres-backed) implementations.
 - `config.rs`, `logging.rs` — configuration and tracing/log setup.

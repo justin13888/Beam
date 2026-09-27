@@ -122,7 +122,7 @@ export default defineConfig({
 						},
 						{ slug: "operate/metadata", label: "Metadata and artwork" },
 						{ slug: "operate/monitoring", label: "Monitoring and logs" },
-						{ slug: "operate/telemetry", label: "Anonymous library report" },
+						{ slug: "operate/telemetry", label: "Telemetry" },
 						{ slug: "operate/backup-and-upgrade" },
 						{ slug: "operate/production" },
 						{ slug: "operate/kubernetes" },

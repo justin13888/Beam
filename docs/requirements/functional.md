@@ -206,6 +206,14 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-510**: On resuming a previously started title, the web client MUST seek playback to the
   last-reported resume position (per FR-507) rather than starting from the beginning, subject to user
   override.
+- **FR-511**: When the operator enables playback telemetry (`BEAM_PLAYBACK_TELEMETRY_ENABLED`), the
+  server MUST accept authenticated batches of playback starts, start failures (with a reason --
+  container, video codec, audio codec, network, other -- and a stage -- preflight or playback),
+  mid-stream rebuffers with their duration, and source switches (manual or automatic), and MUST
+  count each only as a daily aggregate under coarse dimensions derived server-side from the file it
+  names (client kind, container, codecs, resolution class, bitrate class), discarding the file and
+  the reporting user (NFR-503). A file it cannot resolve MUST be dropped, not refused. When
+  telemetry is disabled the endpoint MUST refuse with a distinct 409 so clients stop reporting.
 
 ## FR-6xx — Administration
 
@@ -230,6 +238,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
   report it would send now -- the report and the exact request body, byte for byte -- with whether a
   destination is configured and when the report was last and will next be sent, without sending
   anything (NFR-503).
+- **FR-609**: The server MUST provide an admin-only endpoint that returns the playback telemetry
+  counts (FR-511) summed over a caller-chosen range of UTC days (default the last 30, at most 366),
+  whether or not collection is currently enabled, and MUST prune counts older than the configured
+  retention (`BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS`) daily.
 
 ## FR-7xx — Client Behavior (Resume, Search, Player)
 
