@@ -1541,20 +1541,16 @@ xcrun xcodebuild build \
 
 [tasks."dev:up"]
 description = "Bring up the dev stack, including the bundled Dex IdP"
-# BEAM_OIDC_ADMIN_CLAIM here is load-bearing, not a placeholder. Admin is
-# derived solely from an IdP-asserted claim (FR-106), but Dex's builtin
-# connector cannot emit `groups` for staticPasswords (dexidp/dex#1080, #3958),
-# so there is no per-user claim to point at. `email_verified` is boolean true
-# for both static users, which makes *every* dev user an admin. Acceptable for
-# a dev fixture -- without it nobody can reach the admin surface at all -- and
-# precisely why the bundled Dex is not a production IdP.
+# The admin wiring models Beam's real rule (FR-106): admin is derived solely
+# from an IdP-asserted claim. dex/config.yaml gives only admin@beam.localhost the
+# `beam-admin` group (static-user `groups` needs Dex v2.45.0+, dexidp/dex#4456),
+# so user@beam.localhost is a genuine non-admin for exercising the admin guards
+# by hand. BEAM_OIDC_SCOPES must request `groups`: Dex puts the claim in the ID
+# token only when that scope is asked for, and without it nobody would be admin.
 #
-# BEAM_OIDC_ADMIN_VALUE is pinned *empty*, which the server normalises to unset
-# and so requires the claim to be boolean true. Left alone, a value from a root
-# `.env` would reach the container, and a set value is matched against a string
-# or an array -- a boolean claim can never satisfy it -- so no dev user would be
-# admin, with no warning. Empty rather than unset because shell env outranks
-# `.env` for compose, and an unset variable does not.
+# All three are pinned here rather than left to a root `.env`, because shell
+# env outranks `.env` for compose interpolation: a stray `.env` admin claim or
+# scope list would otherwise silently change who is admin in the dev stack.
 #
 # BEAM_WEB_URL is deliberately *not* set here. compose.beam.yaml already
 # supplies `${BEAM_WEB_URL:-http://localhost:8080}`, and setting it from mise
@@ -1562,7 +1558,7 @@ description = "Bring up the dev stack, including the bundled Dex IdP"
 # shell env outranks `.env` for compose interpolation, so the redirect target
 # and the CSRF allowed-origin set would both point at :8080 while the app was
 # published somewhere else.
-env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_OIDC_ADMIN_CLAIM = "email_verified", BEAM_OIDC_ADMIN_VALUE = "" }
+env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_OIDC_SCOPES = "openid profile email groups", BEAM_OIDC_ADMIN_CLAIM = "groups", BEAM_OIDC_ADMIN_VALUE = "beam-admin" }
 run = '''
 set -eu
 . scripts/compose.sh
@@ -1574,7 +1570,8 @@ compose --profile dev-idp up -d --wait
 echo
 echo "Web      $(published_url web 80)"
 echo "API      $(published_url server 8000)"
-echo "Sign in  admin@beam.localhost / password   (also user@beam.localhost)"
+echo "Sign in  admin@beam.localhost / password   (admin)"
+echo "         user@beam.localhost  / password   (non-admin)"
 '''
 
 [tasks."dev:down"]
