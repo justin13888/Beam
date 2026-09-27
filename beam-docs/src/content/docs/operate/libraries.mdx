@@ -116,8 +116,12 @@ Two things never count as a file going missing:
   the library is scanned as normal, so files elsewhere can still be marked missing or removed.
 - **The whole library went away.** A watcher event while the library root is unavailable changes
   nothing, and a root that holds **no video files at all** — none with an extension listed
-  [below](#which-files-get-indexed), counting the samples and extras Beam skips — while the library
-  still has video files indexed is refused outright. That is what an unmounted volume looks like, whether its mount point is left empty or
+  [below](#which-files-get-indexed), counting files Beam skips by their name (samples, trailers,
+  your ignore patterns) — while the library still has video files indexed is refused outright.
+  Files inside a folder Beam skips wholesale (a hidden or housekeeping folder, an extras folder, a
+  folder an ignore pattern matches) are never looked at, so they do not count: a root holding only
+  `Movie (2019)/Trailers/Teaser.mkv` is refused too. A refused scan changes nothing, so this errs
+  on the safe side. That is what an unmounted volume looks like, whether its mount point is left empty or
   holds only a sentinel or hidden file such as `.not_mounted` or `.DS_Store` — see
   [Scan refused: library root is empty](/help/troubleshooting/#scan-refused-library-root-is-empty).
 
@@ -152,14 +156,17 @@ Some video files are skipped too, because they are not what a library is for:
   `System Volume Information`, `lost+found`.
 - **Extras folders** inside a title's folder — `Extras`, `Featurettes`, `Behind The Scenes`,
   `Deleted Scenes`, `Interviews`, `Scenes`, `Shorts`, `Trailers`, `Other`, `Sample`, `Samples`,
-  `Bonus`. Only below the top level: a top-level `Shorts/` folder is a collection of short films,
-  and is indexed.
+  `Bonus`. A title's folder is one naming a title and year (`Movie (2019)/Trailers/`), a season
+  folder (`Show/Season 1/Deleted Scenes/`), or any folder below the top level
+  (`TV/Show/Extras/`). A top-level folder without a year is taken for a category, so
+  `Movies/Trailers/` and a top-level `Shorts/` are collections, and are indexed.
 - **Files named as extras** — a name ending in `-trailer`, `-sample`, `.sample`, `_sample`,
   `-featurette`, `-behindthescenes`, `-deleted` or `-interview`, or a file called just `sample` or
   `trailer`.
 - **Your own ignore patterns** — set `BEAM_SCAN_IGNORE` to comma-separated glob patterns, matched
   case-insensitively against the path relative to the library root: `Downloads,**/*.partial.mkv`.
-  `*` stops at a `/` and `**` crosses it; a pattern that matches a folder skips everything in it.
+  `*` stops at a `/` and `**` crosses it; a pattern that matches a folder skips everything in it,
+  so `Downloads/*` — which matches each folder in `Downloads` too — skips all of it.
   Patterns live in Beam's configuration, never in files written into your library. See
   [Configuration](/reference/configuration/).
 
@@ -177,30 +184,49 @@ A file is a **TV episode** when its path gives it an episode number, in any of t
 
 | Form | Example | Season, episode |
 |---|---|---|
-| `SxxEyy` | `Show.S01E02.mkv`, `show s1e2.mkv` | 1, 2 |
+| `SxxEyy` | `Show.S01E02.mkv`, `show s1e2.mkv`, `Show.S01.E02.mkv` | 1, 2 |
 | `1x02` | `Show.1x02.mkv` | 1, 2 |
 | Air date | `The.Daily.Show.2024.03.01.mkv`, `Show 2024-03-01.mkv` | 2024, 301 (the year, and `MMDD`) |
 | Absolute number | `[Group] Show - 012 [1080p].mkv`, `E12.mkv` | 1 (or the season folder's), 12 |
+| In a season folder only | `Season 5/Episode 1.mkv`, `Season 5/Ep 1.mkv`, `Season 5/501 - Title.mkv` | 5, 1 |
 
-Everything else is a **movie** — with one exception: a file **in a season folder** with no episode
-number (`Show/Season 01/Behind the Scenes.mkv`) is indexed without a title, as an unknown file,
-and Beam writes a warning to the admin log naming it. It is clearly part of a show, and guessing it
-into a movie would invent a film.
+A three- or four-digit number such as `501` counts only in a season folder, and only when its
+leading digits are that folder's season: `Season 5/601.mkv` is not an episode. Outside a season
+folder, `Show.101.mkv` is a movie.
+
+Everything else is a **movie** — with two exceptions, each indexed without a title, as an unknown
+file, with a warning in the admin log naming it:
+
+- a file **in a season folder** with no episode number (`Show/Season 01/Behind the Scenes.mkv`). It
+  is clearly part of a show, and guessing it into a movie would invent a film;
+- a fansub-style `<title> - <number>` that no folder names as a show — at the top of a library, or
+  in a folder spelling the show differently (`Frieren (2023)/[SubsPlease] Sousou no Frieren - 12
+  (1080p).mkv`). Read as a movie, a season would become dozens of films. Name the folder as the
+  files do, or put them in a season folder.
 
 Absolute numbers are read only where the layout makes them unambiguous — typically anime. The file
 must be in a folder, and either that folder is a season folder, or the title before the number
-names the same show as the folder (`Show (1998)/Show - 012.mkv`). A four-digit year is never an
-episode number, and at the top of a library a `Show - 012.mkv` is a movie.
+names the same show as the folder (`Show (1998)/Show - 012.mkv`). The `<title> - <number>` form also
+needs a season folder or a number of at least two digits, and is a movie's when the folder carries
+the filename's own year: `Movie (2019)/Movie (2019) - 1.mkv` is a movie. A four-digit year is an
+episode number only in a season folder of the show the title names
+(`One Piece (1999)/Season 1/One Piece - 1999.mkv`); elsewhere it is the release year.
 
 If a name carries more than one marker, the real one is the **last before the release noise**:
 `Show.S01E01.1080p.WEB-S00E00.mkv` is S01E01. A multi-episode file — `S01E01E02`, `S01E01-E03`,
-`S01E01-03` — belongs to its **first** episode and records the range it runs to.
+`S01E01-03`, or markers written back to back such as `S01E01.S01E02` — belongs to its **first**
+episode and records the range it runs to.
 
 ### Titles and years
 
 - A **movie**'s title and year come from its filename: `Movie.Name.2019.2160p.WEB-DL.x265-GROUP.mkv`
   is *Movie Name* (2019). A title that is itself a year still works: `1917.2019.mkv` is *1917*
-  (2019), and `Blade.Runner.2049.2017.mkv` is *Blade Runner 2049* (2017).
+  (2019), and `Blade.Runner.2049.2017.mkv` is *Blade Runner 2049* (2017). A release word that
+  opens a title is part of it: `Uncut.Gems.2019.mkv` is *Uncut Gems*.
+- A movie's **folder** fills in what its filename leaves out: `Kill Bill (2003)/Kill Bill.mkv` takes
+  the folder's year, since the folder names the same title, and a filename that is nothing but
+  release noise (`Movie (2019)/1080p.BluRay.x264.mkv`) takes the folder's title too. The top of a
+  library is never a folder for this.
 - An **episode**'s title is the text **after** its marker: `Show.S01E02.The.Title.1080p.mkv` is
   titled *The Title*. With nothing there it is *Episode 2* until metadata enrichment names it.
 - A **show**'s year is the one in its folder (`Doctor Who (2005)`), or a year right before the
@@ -211,7 +237,7 @@ If a name carries more than one marker, the real one is the **last before the re
 
 A film can have several editions in one library, each listed separately. Beam reads the edition
 from a Plex/Jellyfin tag — `Movie (2019) {edition-Final Cut}.mkv` — or, failing that, from edition
-words after the title: *Director's Cut* (or `DC`), *Extended*, *Theatrical*, *Unrated*, *Uncut*,
+words after the title or its year (`Movie (2019) Director's Cut.mkv`): *Director's Cut* (or `DC`), *Extended*, *Theatrical*, *Unrated*, *Uncut*,
 *IMAX*, *Remastered*, *Special Edition*, *Ultimate*, *Final Cut*, *Criterion*, *Anniversary*.
 `Movie.2019.Extended.Remastered.1080p.mkv` is the *Extended, Remastered* edition. Every copy of the
 same edition — a 1080p and a 4K file — is a version of that one edition (see
@@ -221,10 +247,16 @@ same edition — a 1080p and a 4K file — is a version of that one edition (see
 
 A show is named by its **series folder**:
 
-- In a **season folder** — `Season 01`, `Season 1`, `Series 2`, `Saison 3`, `Staffel 4`,
-  `Temporada 5`, `S06`, or `Specials` — the show is the season folder's parent.
-  `Specials` is season 0.
-- Otherwise the show is the folder the episode is in.
+- In a **season folder** the show is the season folder's parent. A season folder is any folder
+  whose name carries a season word and number — `Season 01`, `Series 2`, `Saison 3`, `Staffel 4`,
+  `Temporada 5`, and also `Breaking Bad Season 1`, `Season 1 (2008)`, `Season 01 - Pilot Season`
+  — or a lone `S06` with no episode after it, or `Specials` (season 0).
+- A **season pack** folder such as `The.Office.US.S02.1080p.BluRay` is a season folder too. The
+  text before its season token names the show when there is no series folder above it, or when the
+  folder above names something else (a category such as `TV`).
+- Otherwise the show is the folder the episode is in — unless the filename names a different show.
+  `TV Shows/Breaking.Bad.S01E01.mkv` is *Breaking Bad*, not *TV Shows*; `Breaking Bad
+  (2008)/Breaking.Bad.S01E01.mkv` is the folder's *Breaking Bad* (2008).
 - An episode at the top of a library, or in a season folder at the top, takes its show's name from
   its filename; with none there it belongs to a show called *Unknown Show*.
 
@@ -269,7 +301,8 @@ Cyrillic letters, and punctuation, and reads `&` as `and`: `Amelie.2001.mkv` and
 `ñ` matches `n`, `ä` matches `a` and `й` matches `и`, so `Мой (2010)` and `Мои (2010)` are one
 movie. Marks in other scripts, such as a Japanese voicing mark or a Devanagari vowel sign, still
 count: `かぎ` and `かき` are two titles. Shows are grouped
-the same way by their **series folder name** (and a year in it, such as `Doctor Who (2005)`).
+the same way by the name the [TV layout](#directory-layout-for-tv) gives them — usually the
+**series folder name** (and a year in it, such as `Doctor Who (2005)`).
 
 The grouping comes from the filenames and never changes afterwards. When metadata enrichment gives
 a title the provider's name, later files still join it under the name their filename parses to.
@@ -284,8 +317,8 @@ It is also the fix when a file will not play in a browser — add an H.264/AAC M
 Two limits to know:
 
 - **The year is part of the grouping key.** `Dune.1984.mkv` and `Dune.2021.mkv` are two movies, as
-  they should be — but so are `Dune.2021.mkv` and a `Dune.mkv` with no year. Give every version of
-  a film the same year in its name.
+  they should be — but so are `Dune.2021.mkv` and a `Dune.mkv` with no year, unless it sits in a
+  `Dune (2021)` folder. Give every version of a film the same year in its name or its folder.
 - **The first file names the episode.** An episode's title and runtime come from the first file
   indexed for it (or from metadata enrichment since). A later version's filename never renames it.
 

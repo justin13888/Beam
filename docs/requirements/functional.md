@@ -62,20 +62,37 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-204**: The server MUST classify indexed filesystem entries into movies and TV
   shows/seasons/episodes, persisting them as `movie_entries` and `episode`-family rows respectively.
   Classification MUST read the file's path relative to its library root, folders included:
-  - a show is named by its series folder -- the parent of a season folder (`Season 01`, `Series 2`,
-    `Saison`, `Staffel`, `Temporada`, `S01`, or `Specials`, which is season 0), else the file's
-    parent folder, else the filename;
-  - an episode is numbered by an `SxxEyy` or `1x02` marker (of several, the last one before the
-    first release-noise token), by an air date (`2024-03-01`: season = year, episode = `MMDD`), or
-    by an absolute number (`Show - 012`, `E12`) only where the layout is unambiguous (a season
-    folder, or a folder naming the same title); a marker contradicting its season folder wins;
+  - a season folder is one whose name carries a season word and number anywhere (`Season 01`,
+    `Series 2`, `Saison`, `Staffel`, `Temporada`, `Breaking Bad Season 1`, `Season 1 (2008)`), a
+    lone `S01` with no episode after it (`S01`, a season pack's `Show.S02.1080p`), or `Specials`
+    (season 0);
+  - a show in a season folder is named by its series folder (the season folder's parent), unless
+    the season folder's own text before its season token names another title or there is no
+    series folder, when that text names it; else by the filename;
+  - a show outside a season folder is named by the file's parent folder, unless the filename names
+    another title (compared after identity normalisation), when the filename names it; with
+    neither, `Unknown Show`;
+  - an episode is numbered by an `SxxEyy`, `S01.E01` or `1x02` marker (of several, the last one
+    before the first release-noise token, merged into a range with the markers written back to back
+    before it for the same season with rising episodes), by an air date (`2024-03-01`: season =
+    year, episode = `MMDD`), or by an absolute number (`Show - 012`, `E12`) only where the layout
+    is unambiguous (a season folder, or a folder naming the same title); the `<title> - <n>` form
+    also needs a season folder or a number of two or more digits, and never applies when the parent
+    folder carries the filename's own year; a year-shaped number (1900-2099) is an episode only in a
+    season folder of the show the title names; inside a season folder only, `Episode N` / `Ep N`
+    and a three- or four-digit number whose leading digits are the folder's season (`501`) number
+    it too; a marker contradicting its season folder wins;
   - an episode's title is the text after its marker, else `Episode N`; a multi-episode file
-    (`S01E01E02`, `S01E01-E03`) MUST attach to its first episode and record the last;
-  - a movie is identified by title and year, and each edition (a `{edition-...}` tag, or edition
-    words such as `Director's Cut` or `Extended` after the title) of it in a library MUST be one
-    `movie_entries` row however many copies exist;
-  - a file in a season folder with no episode number MUST be indexed without a title (status
-    `unknown`) and reported through the admin log, never guessed into a movie.
+    (`S01E01E02`, `S01E01-E03`, `S01E01.S01E02`) MUST attach to its first episode and record the
+    last;
+  - a movie is identified by title and year, taking its parent folder's year when the filename
+    names the same title without one, and its parent folder's title when the filename's is empty or
+    only release noise (never the library root's); each edition (a `{edition-...}` tag, or edition
+    words such as `Director's Cut` or `Extended` after the title or its parenthesised year) of it in
+    a library MUST be one `movie_entries` row however many copies exist;
+  - a file in a season folder with no episode number, and a `<title> - <n>` name no folder names
+    as a show, MUST be indexed without a title (status `unknown`) and reported through the admin
+    log, never guessed into a movie.
 
   Every row MUST record the version of these rules that classified it, and a scan MUST reclassify a
   row classified by an older version from its path -- keeping its id, hash and probe results -- so a
@@ -135,17 +152,22 @@ strength. Each requirement is independently testable. See `product.md` for narra
   row -- present or soft-deleted -- is left for it.
 - **FR-216**: The indexer MUST index only video files. It MUST NOT index, hash or probe hidden files
   or anything under a hidden folder; NAS and operating-system housekeeping folders (`@eaDir`,
-  `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); extras folders below the
-  top level of a library (`Extras`, `Featurettes`, `Behind The Scenes`, `Deleted Scenes`,
-  `Interviews`, `Scenes`, `Shorts`, `Trailers`, `Other`, `Sample(s)`, `Bonus`); files named as extras
+  `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); extras folders inside a
+  title's folder -- one naming a title and year, a season folder, or any folder below the top level
+  of a library -- (`Extras`, `Featurettes`, `Behind The Scenes`, `Deleted Scenes`, `Interviews`,
+  `Scenes`, `Shorts`, `Trailers`, `Other`, `Sample(s)`, `Bonus`); files named as extras
   (`-trailer`, `-sample`, `.sample`, `_sample`, `-featurette`, `-behindthescenes`, `-deleted`,
   `-interview`, or exactly `sample`/`trailer`); or paths matching an administrator's
   `BEAM_SCAN_IGNORE` glob patterns, which live in server configuration, never in files written into
   a library (FR-202). An invalid pattern MUST fail startup. The full scan and the watcher MUST
   decide identically; a row for a path that is no longer indexed MUST be soft-deleted (FR-211).
-- **FR-217**: A library root whose walk found video files -- including ones FR-216 excludes -- MUST
-  NOT be refused as unmounted by the empty-root guard; only a root with no video files at all, under
-  a library with indexed video files, is refused.
+- **FR-217**: A library root whose walk found video files -- including ones FR-216 excludes by
+  name or by an ignore pattern matching the file -- MUST NOT be refused as unmounted by the
+  empty-root guard; only a root with no such video files, under a library with indexed video files,
+  is refused. The walk never descends into a folder FR-216 excludes (hidden, housekeeping, extras,
+  or matched by an ignore pattern), so video files under one are not counted: a root holding only
+  those is refused. This errs toward refusing -- the safe side, since a refused scan changes no
+  rows.
 
 ## FR-3xx — Metadata Enrichment
 

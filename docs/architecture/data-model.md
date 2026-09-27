@@ -145,13 +145,16 @@ is part of its letter, so `かぎ` and `かき`, or `दिल` and `दल`, st
 not by language, so it also merges letters some languages treat as distinct — Cyrillic `й`/`и`,
 `ї`/`і`, `ў`/`у`, Latin `ñ`/`n`, `ä`/`a` — and `Мой` and `Мои` of one year are one title. That is
 the accepted cost of `Amélie` and `Amelie` being one (decision D183-6 on
-[#214](https://github.com/justin13888/beam/pull/214)). A movie is keyed by its filename, a show by its series folder: the
-parent of a season folder, else the episode file's parent folder, else the filename
+[#214](https://github.com/justin13888/beam/pull/214)). A movie is keyed by its filename (with its folder's year, or its
+folder's title for a noise-only name), a show by its series folder: the parent of a season folder
+(or the season folder's own leading text, for a season pack), else the episode file's parent folder
+unless the filename names another show, else the filename
 (`beam_domain::utils::media_path::infer_media`, FR-204). Builds before
 [#182](https://github.com/justin13888/beam/issues/182) took the immediate parent, so a
 `Show/Season 01/` layout keyed a show as `season 01|`; the first scan under the current rules
 reclassifies those files onto the correctly keyed show (see `classifier_version` under `files`) and
-the emptied husk is retired below. The year is part of the key, so a remake is a separate title.
+the emptied husk is retired below. The identity backfill never keys a show whose stored title is a
+season-folder name: holding its files' key, the husk would capture the series' files instead. The year is part of the key, so a remake is a separate title.
 
 **Find-or-create** is one `INSERT ... ON CONFLICT (identity_key) DO NOTHING` followed by a read by
 key, against the unique index `idx_movies_identity_key` / `idx_shows_identity_key`. There is no

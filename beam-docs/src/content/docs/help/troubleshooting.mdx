@@ -71,7 +71,7 @@ Beam cannot start a sign-in flow.
 
 The rescan failed with "Library root contains no video files but video files are indexed". Beam
 found the library's directory but no video files anywhere beneath it — no file with one of the
-[indexed extensions](/operate/libraries/#which-files-get-indexed), not even a skipped sample — while the catalogue
+[indexed extensions](/operate/libraries/#which-files-get-indexed), not even a skipped sample (files inside a skipped folder, such as `Trailers/`, are not looked at) — while the catalogue
 still lists video files for that library. That is almost always a volume that is not mounted: an
 unmounted bind mount, dropped NFS or SMB share, or disk that failed to attach leaves its mount point
 behind empty, or holding only files such as `.not_mounted`, `.DS_Store` or `Thumbs.db`. Beam refuses
@@ -98,11 +98,19 @@ removes no titles. See [the layout guidance](/operate/libraries/#directory-layou
 
 ## My episodes are showing up as movies
 
-Beam recognises `SxxEyy`, `1x02`, air dates (`2024-03-01`) and — only where the layout makes it
-unambiguous — absolute numbers such as `Show - 012`. Names like `Episode 2`, or a bare number with no
-show folder around it, classify as movies. Rename to include an `SxxEyy` marker, or put the files
-in a season folder, and rescan. See
+Beam recognises `SxxEyy` (also `S01.E02`), `1x02`, air dates (`2024-03-01`) and — only where the
+layout makes it unambiguous — absolute numbers such as `Show - 012`. Names like `Episode 2` or
+`501` are read only inside a season folder; elsewhere they classify as movies. Rename to include an
+`SxxEyy` marker, or put the files in a season folder, and rescan. See
 [How Beam decides what a file is](/operate/libraries/#how-beam-decides-what-a-file-is).
+
+## An anime episode has no title
+
+A fansub name such as `[SubsPlease] Sousou no Frieren - 12 (1080p).mkv` is read as episode 12 only
+when a folder names the same show, or it sits in a season folder. In `Frieren (2023)/` — the folder
+spells the show differently — or at the top of a library, it is indexed without a title and the
+admin log names it ("no folder names the show"). Rename the folder to the name the files use, or
+put the files in a `Season 1` folder, and rescan.
 
 ## A file in a season folder has no title
 
