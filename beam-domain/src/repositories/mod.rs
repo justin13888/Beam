@@ -12,6 +12,7 @@ pub mod library;
 pub mod library_shape;
 pub mod movie;
 pub mod playback_progress;
+pub mod playback_telemetry;
 pub mod show;
 pub mod stream;
 
@@ -23,5 +24,6 @@ pub use library::LibraryRepository;
 pub use library_shape::LibraryShapeRepository;
 pub use movie::MovieRepository;
 pub use playback_progress::PlaybackProgressRepository;
+pub use playback_telemetry::PlaybackTelemetryRepository;
 pub use show::ShowRepository;
 pub use stream::MediaStreamRepository;
