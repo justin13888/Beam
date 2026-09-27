@@ -189,6 +189,7 @@ mod tests {
             oidc_client: oidc_dyn,
             pending_auth_store,
             oidc_config: config,
+            watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         };
 
         let state = AppState::new(

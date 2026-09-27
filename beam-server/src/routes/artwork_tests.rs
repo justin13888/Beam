@@ -76,6 +76,7 @@ mod tests {
             oidc_client: base.services.oidc_client.clone(),
             pending_auth_store: base.services.pending_auth_store.clone(),
             oidc_config: base.services.oidc_config.clone(),
+            watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         };
 
         Fixture {

@@ -6,6 +6,7 @@
 
 use beam_domain::models::admin_log::{AdminLog, AdminLogCategory, AdminLogLevel};
 use beam_index::services::notification::{AdminEvent, EventCategory, EventLevel};
+use beam_index::services::watch_status::{PollReason, WatchMode, WatchStatusSnapshot};
 use chrono::{DateTime, Utc};
 use kynos::Schema;
 use kynos::schema::unchecked::Unchecked;
@@ -276,6 +277,110 @@ pub struct AdminStatusResponse {
     pub enrichment: EnrichmentQueueCounts,
     /// Most recent `library_scan` admin log entries, newest first.
     pub recent_scans: Vec<RecentScanDto>,
+    /// How the filesystem watcher observes each library.
+    pub watcher: WatcherStatus,
+}
+
+/// How a library's changes reach the index between full rescans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryWatchMode {
+    /// Native change events (inotify on Linux, FSEvents on macOS).
+    Native,
+    /// A walk of the library every `BEAM_WATCH_POLL_INTERVAL_SECS`.
+    Polling,
+    /// Not watched: the watcher is off, or registering the library failed.
+    /// Only the periodic rescan (`BEAM_SCAN_INTERVAL_SECS`) sees its changes.
+    Unwatched,
+}
+
+/// Why a library is polled rather than natively watched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryPollReason {
+    /// The root is on a network filesystem (NFS, SMB/CIFS, FUSE, ...), where
+    /// changes made by other hosts raise no native event.
+    NetworkFilesystem,
+    /// Watching it natively hit the OS watch limit.
+    WatchLimitReached,
+    /// The native watcher could not be created.
+    NativeUnavailable,
+}
+
+impl From<PollReason> for LibraryPollReason {
+    fn from(reason: PollReason) -> Self {
+        match reason {
+            PollReason::NetworkFilesystem => Self::NetworkFilesystem,
+            PollReason::WatchLimitReached => Self::WatchLimitReached,
+            PollReason::NativeUnavailable => Self::NativeUnavailable,
+        }
+    }
+}
+
+/// One library's watch state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct LibraryWatch {
+    pub library_id: uuid::Uuid,
+    pub mode: LibraryWatchMode,
+    /// Set exactly when `mode` is `polling`.
+    pub poll_reason: Option<LibraryPollReason>,
+}
+
+/// The filesystem watcher's state, for the admin system-status tab.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct WatcherStatus {
+    /// Whether the filesystem watcher runs (`BEAM_WATCH_ENABLED`).
+    pub enabled: bool,
+    /// Whether a native watch has hit the OS watch limit since the server
+    /// started. The libraries affected are polled; raising the limit
+    /// (`fs.inotify.max_user_watches` on Linux) and restarting watches them
+    /// natively again.
+    pub watch_limit_reached: bool,
+    /// The Linux per-user inotify watch limit (`fs.inotify.max_user_watches`),
+    /// absent where it cannot be read.
+    pub watch_limit_count: Option<u64>,
+    /// Every library, in the order the library list returns them.
+    pub libraries: Vec<LibraryWatch>,
+}
+
+impl WatcherStatus {
+    /// Join the watcher's snapshot with the libraries that exist. A library
+    /// the watcher has no entry for is `unwatched`; an entry for a library
+    /// that no longer exists is dropped.
+    pub fn from_snapshot(
+        snapshot: WatchStatusSnapshot,
+        library_ids: impl IntoIterator<Item = uuid::Uuid>,
+    ) -> Self {
+        let WatchStatusSnapshot {
+            enabled,
+            limit_reached,
+            max_user_watches,
+            libraries,
+        } = snapshot;
+        let libraries = library_ids
+            .into_iter()
+            .map(|library_id| {
+                let (mode, poll_reason) = match libraries.get(&library_id) {
+                    Some(WatchMode::Native) => (LibraryWatchMode::Native, None),
+                    Some(WatchMode::Polling(reason)) => {
+                        (LibraryWatchMode::Polling, Some((*reason).into()))
+                    }
+                    None => (LibraryWatchMode::Unwatched, None),
+                };
+                LibraryWatch {
+                    library_id,
+                    mode,
+                    poll_reason,
+                }
+            })
+            .collect();
+        Self {
+            enabled,
+            watch_limit_reached: limit_reached,
+            watch_limit_count: max_user_watches,
+            libraries,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -316,5 +421,52 @@ mod tests {
         assert_eq!(dto.category, "enrichment");
         assert!(matches!(dto.level, AdminLogLevelDto::Error));
         assert_eq!(dto.message, "match failed");
+    }
+
+    #[test]
+    fn watcher_status_joins_the_snapshot_with_the_libraries_that_exist() {
+        let native = Uuid::from_u128(1);
+        let polled = Uuid::from_u128(2);
+        let unwatched = Uuid::from_u128(3);
+        let deleted = Uuid::from_u128(4);
+        let snapshot = WatchStatusSnapshot {
+            enabled: true,
+            limit_reached: true,
+            max_user_watches: Some(8192),
+            libraries: [
+                (native, WatchMode::Native),
+                (polled, WatchMode::Polling(PollReason::WatchLimitReached)),
+                (deleted, WatchMode::Native),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let status = WatcherStatus::from_snapshot(snapshot, [unwatched, polled, native]);
+
+        assert!(status.enabled);
+        assert!(status.watch_limit_reached);
+        assert_eq!(status.watch_limit_count, Some(8192));
+        assert_eq!(
+            status.libraries,
+            vec![
+                LibraryWatch {
+                    library_id: unwatched,
+                    mode: LibraryWatchMode::Unwatched,
+                    poll_reason: None,
+                },
+                LibraryWatch {
+                    library_id: polled,
+                    mode: LibraryWatchMode::Polling,
+                    poll_reason: Some(LibraryPollReason::WatchLimitReached),
+                },
+                LibraryWatch {
+                    library_id: native,
+                    mode: LibraryWatchMode::Native,
+                    poll_reason: None,
+                },
+            ],
+            "library order is preserved, a missing entry is unwatched, and a deleted library is dropped"
+        );
     }
 }

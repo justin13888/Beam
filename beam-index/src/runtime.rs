@@ -21,7 +21,9 @@ use beam_domain::repositories::LibraryRepository;
 use beam_domain::services::{Clock, RealClock};
 
 use crate::services::enrichment::MetadataEnrichmentService;
+use crate::services::filesystem_probe::StatfsFilesystemProbe;
 use crate::services::index::{IndexError, LocalIndexService};
+use crate::services::watch_status::{WatchStatus, read_max_user_watches};
 use crate::services::watcher::{FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer};
 
 /// The slice of the indexer the background tasks actually use.
@@ -88,12 +90,16 @@ pub struct BackgroundIndexingConfig {
     /// Interval between periodic full rescans of every library, in seconds.
     /// Acts as the backstop that catches changes the watcher missed.
     pub scan_interval_secs: u64,
-    /// Whether to run the inotify-based filesystem watcher. When false, only
-    /// the startup scan and the periodic rescans run.
+    /// Whether to run the filesystem watcher. When false, only the startup
+    /// scan and the periodic rescans run.
     pub watch_enabled: bool,
     /// Debounce window for filesystem-watcher events, in milliseconds. Bursts
     /// of events for the same path within this window collapse into one.
     pub watch_debounce_ms: u64,
+    /// Interval between walks of every library the watcher polls rather than
+    /// watches natively (network filesystems, and libraries past the watch
+    /// limit), in seconds.
+    pub watch_poll_interval_secs: u64,
 }
 
 /// The tasks [`spawn_background_indexing`] started, so a caller can await or
@@ -101,8 +107,11 @@ pub struct BackgroundIndexingConfig {
 #[derive(Debug)]
 pub struct BackgroundIndexingTasks {
     pub startup_scan: JoinHandle<()>,
-    /// `None` when the watcher is disabled or could not be created.
+    /// `None` when the watcher is disabled.
     pub watch_consumer: Option<JoinHandle<()>>,
+    /// Drives the watcher's polled libraries. `None` when the watcher is
+    /// disabled.
+    pub watch_poller: Option<JoinHandle<()>>,
     pub periodic_maintenance: JoinHandle<()>,
 }
 
@@ -113,6 +122,9 @@ impl BackgroundIndexingTasks {
         if let Some(handle) = &self.watch_consumer {
             handle.abort();
         }
+        if let Some(handle) = &self.watch_poller {
+            handle.abort();
+        }
         self.periodic_maintenance.abort();
     }
 }
@@ -120,21 +132,24 @@ impl BackgroundIndexingTasks {
 /// Spawn the startup scan, filesystem watcher, and periodic-maintenance
 /// background tasks for in-process indexing. Call once at server startup,
 /// after the [`LocalIndexService`] is constructed.
+///
+/// `watch_status` is where the watcher reports how each library is watched;
+/// the admin status endpoint reads the same instance.
 pub fn spawn_background_indexing(
     index_service: Arc<LocalIndexService>,
     config: BackgroundIndexingConfig,
+    watch_status: Arc<WatchStatus>,
 ) -> BackgroundIndexingTasks {
     let indexer: Arc<dyn BackgroundIndexer> = index_service;
 
     // Filesystem watcher for near-real-time reconciliation (optional).
     let watcher: Option<Arc<dyn FsWatcher>> = if config.watch_enabled {
-        match NotifyFsWatcher::new() {
-            Ok(w) => Some(Arc::new(w)),
-            Err(e) => {
-                error!("Filesystem watcher unavailable ({e}); periodic scans only");
-                None
-            }
-        }
+        watch_status.set_enabled(true);
+        watch_status.set_max_user_watches(read_max_user_watches());
+        Some(Arc::new(NotifyFsWatcher::new(
+            Arc::new(StatfsFilesystemProbe),
+            watch_status,
+        )))
     } else {
         info!("Filesystem watcher disabled by configuration");
         None
@@ -172,6 +187,14 @@ pub fn spawn_background_indexing_with(
         ))
     });
 
+    let watch_poller = watcher.clone().map(|watcher| {
+        tokio::spawn(run_watch_poller(
+            watcher,
+            clock.clone(),
+            Duration::from_secs(config.watch_poll_interval_secs),
+        ))
+    });
+
     let periodic_maintenance = tokio::spawn(run_periodic_maintenance(
         indexer,
         watcher,
@@ -182,6 +205,7 @@ pub fn spawn_background_indexing_with(
     BackgroundIndexingTasks {
         startup_scan,
         watch_consumer,
+        watch_poller,
         periodic_maintenance,
     }
 }
@@ -226,6 +250,18 @@ async fn run_watch_consumer(
                 warn!("Failed to reconcile {}: {e}", path.display());
             }
         }
+    }
+}
+
+/// Poll the watcher's polled libraries once per `interval`.
+///
+/// Called directly rather than on a blocking thread: a poll is a message to
+/// the poll watcher's own thread, and only a watch-limit demotion walks a
+/// tree here -- once per library, for the life of the process.
+async fn run_watch_poller(watcher: Arc<dyn FsWatcher>, clock: Arc<dyn Clock>, interval: Duration) {
+    loop {
+        clock.sleep(interval).await;
+        watcher.poll_once();
     }
 }
 

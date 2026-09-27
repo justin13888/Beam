@@ -22,7 +22,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::models::{
     AdminEventDto, AdminLogCountResponse, AdminLogEntryDto, AdminStatusCounts, AdminStatusResponse,
     AdminUserDto, AdminUserListResponse, CreateLibraryRequest, EnrichmentQueueCounts, Library,
-    LibraryFile, RecentScanDto, ScanLibraryResponse, UpdateAdminUserRequest,
+    LibraryFile, RecentScanDto, ScanLibraryResponse, UpdateAdminUserRequest, WatcherStatus,
 };
 use crate::routes::api_error::{
     AdminAuth, AdminUserError, InternalError, LibraryCreateError, LibraryRefError,
@@ -516,8 +516,8 @@ pub async fn update_admin_user(
 const RECENT_SCANS_LIMIT: u32 = 10;
 
 /// Operational snapshot for the admin system-status tab: process uptime and
-/// version, entity counts, the metadata-enrichment queue state, and recent
-/// library-scan history.
+/// version, entity counts, the metadata-enrichment queue state, recent
+/// library-scan history, and how the filesystem watcher observes each library.
 #[kynos::get("/admin/status", tag = Admin, operation_id = "getAdminStatus")]
 pub async fn get_admin_status(
     _auth: AdminAuth,
@@ -554,6 +554,15 @@ pub async fn get_admin_status(
         )
         .await
         .map_err(|e| InternalError::Internal(e.to_string()))?;
+    let library_ids = state
+        .services
+        .library_repo
+        .find_all()
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|library| library.id);
+    let watcher = WatcherStatus::from_snapshot(state.services.watch_status.snapshot(), library_ids);
 
     Ok(Json(AdminStatusResponse {
         uptime_secs: state.uptime_secs(),
@@ -565,6 +574,7 @@ pub async fn get_admin_status(
         },
         enrichment: EnrichmentQueueCounts::from(enrichment),
         recent_scans: recent_scans.into_iter().map(RecentScanDto::from).collect(),
+        watcher,
     }))
 }
 

@@ -275,6 +275,7 @@ fn make_test_state_with(
             session_idle_days: 14,
             session_max_days: 60,
         },
+        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
     };
 
     let config = crate::config::ServerConfig {
@@ -1277,4 +1278,65 @@ async fn registering_a_root_that_overlaps_an_existing_library_is_409_and_changes
         .await
         .json::<Vec<Library>>();
     assert_eq!(listed.len(), 1, "the rejected library was not stored");
+}
+
+// ── Watcher status (issue #186) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn the_status_endpoint_reports_how_each_library_is_watched() {
+    use crate::models::{LibraryPollReason, LibraryWatchMode};
+    use beam_index::services::watch_status::{PollReason, WatchMode};
+
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let library: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+    let library_id = uuid::Uuid::parse_str(&library.id).unwrap();
+
+    let get_watcher = || async {
+        client
+            .get("/v1/admin/status")
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .json::<AdminStatusResponse>()
+            .watcher
+    };
+
+    // Nothing has registered a watch yet: the library is unwatched.
+    let watcher = get_watcher().await;
+    assert!(!watcher.enabled);
+    assert_eq!(watcher.libraries.len(), 1);
+    assert_eq!(watcher.libraries[0].library_id, library_id);
+    assert_eq!(watcher.libraries[0].mode, LibraryWatchMode::Unwatched);
+    assert_eq!(watcher.libraries[0].poll_reason, None);
+
+    // What the runtime writes when the library hits the watch limit.
+    let status = &fixture.state.services.watch_status;
+    status.set_enabled(true);
+    status.set_max_user_watches(Some(8192));
+    status.mark_limit_reached();
+    status.set_mode(
+        library_id,
+        WatchMode::Polling(PollReason::WatchLimitReached),
+    );
+
+    let watcher = get_watcher().await;
+    assert!(watcher.enabled);
+    assert!(watcher.watch_limit_reached);
+    assert_eq!(watcher.watch_limit_count, Some(8192));
+    assert_eq!(watcher.libraries[0].mode, LibraryWatchMode::Polling);
+    assert_eq!(
+        watcher.libraries[0].poll_reason,
+        Some(LibraryPollReason::WatchLimitReached)
+    );
 }

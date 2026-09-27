@@ -72,6 +72,7 @@ fn config(scan_interval_secs: u64, watch_debounce_ms: u64) -> BackgroundIndexing
         scan_interval_secs,
         watch_enabled: true,
         watch_debounce_ms,
+        watch_poll_interval_secs: 300,
     }
 }
 
@@ -239,8 +240,9 @@ async fn a_burst_of_events_for_one_path_reconciles_once_after_the_debounce() {
         });
     }
 
-    // Two sleepers: the maintenance interval and the debounce window.
-    until("the debounce window to open", || clock.waiter_count() >= 2).await;
+    // Three sleepers: the maintenance interval, the poll interval and the
+    // debounce window.
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
     assert!(
         indexer.reconciled().is_empty(),
         "nothing is reconciled while the debounce window is still open"
@@ -286,7 +288,7 @@ async fn events_for_different_paths_in_one_burst_each_reconcile() {
         });
     }
 
-    until("the debounce window to open", || clock.waiter_count() >= 2).await;
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
     clock.advance(Duration::from_millis(2000));
     until("both reconciles", || indexer.reconciled().len() == 2).await;
 
@@ -354,6 +356,28 @@ mod local_index_service_adapter {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
         ))
+    }
+
+    /// The admin status reads `enabled` from the status the runtime is handed,
+    /// so the production entry point is what has to set it.
+    #[tokio::test]
+    async fn the_production_spawn_reports_whether_the_watcher_runs() {
+        for watch_enabled in [false, true] {
+            let status = Arc::new(WatchStatus::new());
+            let tasks = spawn_background_indexing(
+                service(Arc::new(InMemoryLibraryRepository::default())),
+                BackgroundIndexingConfig {
+                    watch_enabled,
+                    ..config(3600, 2000)
+                },
+                status.clone(),
+            );
+
+            assert_eq!(status.snapshot().enabled, watch_enabled);
+            assert_eq!(tasks.watch_poller.is_some(), watch_enabled);
+            assert_eq!(tasks.watch_consumer.is_some(), watch_enabled);
+            tasks.abort();
+        }
     }
 
     #[tokio::test]
@@ -486,6 +510,61 @@ async fn aborting_stops_every_spawned_task() {
                 .watch_consumer
                 .as_ref()
                 .is_some_and(JoinHandle::is_finished)
+            && tasks
+                .watch_poller
+                .as_ref()
+                .is_some_and(JoinHandle::is_finished)
     })
     .await;
+}
+
+#[tokio::test]
+async fn the_watcher_is_polled_once_per_poll_interval_and_not_before() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    until("the startup scan to run", || indexer.scan_count() == 1).await;
+    // Two sleepers: the maintenance interval and the poll interval.
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+
+    clock.advance(Duration::from_secs(299));
+    assert_eq!(
+        watcher.poll_count(),
+        0,
+        "no poll before the interval elapses"
+    );
+
+    clock.advance(Duration::from_secs(1));
+    until("the first poll", || watcher.poll_count() == 1).await;
+    until("the poller to re-park", || clock.waiter_count() == 2).await;
+
+    clock.advance(Duration::from_secs(300));
+    until("the second poll", || watcher.poll_count() == 2).await;
+    assert_eq!(
+        indexer.scan_count(),
+        1,
+        "a poll is not a rescan: only the startup scan has run"
+    );
+
+    tasks.abort();
+}
+
+#[tokio::test]
+async fn without_a_watcher_nothing_is_polled() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+
+    let tasks =
+        spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(3600, 2000));
+
+    assert!(tasks.watch_poller.is_none());
+    assert!(tasks.watch_consumer.is_none());
+    tasks.abort();
 }

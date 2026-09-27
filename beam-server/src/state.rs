@@ -17,6 +17,7 @@ use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
+use beam_index::services::watch_status::WatchStatus;
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::{
@@ -155,6 +156,10 @@ pub struct AppServices {
     pub oidc_client: Arc<dyn OidcClient>,
     pub pending_auth_store: Arc<dyn PendingAuthStore>,
     pub oidc_config: OidcRuntimeConfig,
+    /// How the filesystem watcher observes each library. Written by the
+    /// background indexing runtime (`main` hands it this instance), read by
+    /// the admin status endpoint.
+    pub watch_status: Arc<WatchStatus>,
 }
 
 impl AppServices {
@@ -372,6 +377,7 @@ impl AppServices {
             oidc_client,
             pending_auth_store,
             oidc_config,
+            watch_status: Arc::new(WatchStatus::new()),
         };
 
         Ok((services, index_service, enrichment_service))
