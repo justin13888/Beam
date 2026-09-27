@@ -324,3 +324,94 @@ async fn the_classifier_migration_merges_duplicate_entries_and_constrains_what_i
 
     scoped.drop_schema().await.expect("drop schema");
 }
+
+/// Issue #182's migration reverses: `down()` drops the two columns (and the
+/// `CHECK` that reads one of them) and restores the unique index's old,
+/// `NULL`s-distinct semantics; `up()` then applies again over the result.
+#[tokio::test]
+async fn the_classifier_migration_rolls_back_and_reapplies() {
+    use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
+
+    let scoped = ScopedSchema::create("classifier_v2_down")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+        .await
+        .expect("every migration applies");
+    let last = beam_migration::Migrator::migrations()
+        .last()
+        .map(|m| m.name().to_string());
+    assert_eq!(
+        last.as_deref(),
+        Some("m20260929_000001_classifier_v2"),
+        "rolling back one step reverts exactly this migration"
+    );
+
+    let text = |sql: &'static str| async move {
+        db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
+            .await
+            .expect("query")
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "v").expect("a text column v"))
+            .collect::<Vec<String>>()
+    };
+    let added_columns = "SELECT column_name::text AS v FROM information_schema.columns \
+                          WHERE table_schema = current_schema() AND table_name = 'files' \
+                            AND column_name IN ('classifier_version', 'last_episode_number') \
+                          ORDER BY column_name";
+    let nulls_not_distinct = "SELECT i.indnullsnotdistinct::text AS v FROM pg_index i \
+                               JOIN pg_class c ON c.oid = i.indexrelid \
+                               JOIN pg_namespace n ON n.oid = c.relnamespace \
+                              WHERE c.relname = 'idx_movie_entries_unique' \
+                                AND n.nspname = current_schema()";
+    assert_eq!(
+        text(added_columns).await,
+        vec!["classifier_version", "last_episode_number"]
+    );
+    assert_eq!(text(nulls_not_distinct).await, vec!["true"]);
+
+    beam_migration::Migrator::down(db, Some(1))
+        .await
+        .expect("the classifier migration rolls back");
+
+    assert!(
+        text(added_columns).await.is_empty(),
+        "down() drops both columns"
+    );
+    assert_eq!(
+        text(nulls_not_distinct).await,
+        vec!["false"],
+        "down() restores the NULLs-distinct unique index"
+    );
+    let seed = [
+        "INSERT INTO libraries (id, name, root_path, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
+        "INSERT INTO movies (id, title, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000b', 'Movie', now(), now())",
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) \
+         VALUES (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', \
+                 '00000000-0000-0000-0000-00000000000b', NULL, true, now()), \
+                (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', \
+                 '00000000-0000-0000-0000-00000000000b', NULL, true, now())",
+    ];
+    for sql in seed {
+        db.execute_unprepared(sql)
+            .await
+            .expect("the rolled-back schema takes what it took before the migration");
+    }
+
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+        .await
+        .expect("the migration reapplies over the rolled-back schema");
+    assert_eq!(
+        text("SELECT count(*)::text AS v FROM movie_entries").await,
+        vec!["1"],
+        "reapplying merges the duplicates the rolled-back schema let in"
+    );
+    assert_eq!(text(nulls_not_distinct).await, vec!["true"]);
+
+    scoped.drop_schema().await.expect("drop schema");
+}
