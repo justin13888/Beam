@@ -189,6 +189,7 @@ case "${BEAM_CARGO_FEATURES:-}" in
 esac
 cargo test --package beam-index --features "$features" --test pg_integration
 cargo test --package beam-auth --features "pg-integration,test-utils" --test pg_integration
+cargo test --package beam-migration --features pg-integration --test pg_integration
 '''
 
 [tasks."rust:coverage:report"]

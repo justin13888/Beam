@@ -251,7 +251,8 @@ Two mechanisms close that:
 - **The `pg-integration` cargo feature** runs the shared behavioural contract against a real
   Postgres, and covers what only a real engine can answer: `ON CONFLICT` atomicity under
   concurrency, foreign keys and unique indexes, `DELETE ... RETURNING` single-use semantics,
-  `pg_trgm`, index usage, and migration up/down.
+  `pg_trgm`, index usage, migration up/down, and that a pending migration batch applies
+  all-or-nothing (`beam-migration/tests/pg_integration.rs`).
 
 `MockDatabase` required one structural change: enabling sea-orm's `mock` feature removes `Clone`
 from `DatabaseConnection` for the whole build graph, so every repository now holds an
