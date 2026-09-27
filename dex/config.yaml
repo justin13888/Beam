@@ -44,12 +44,11 @@ staticClients:
       # the flow is unaffected.
       #
       # Known Dex limit (ADR-0017 D151-9): Dex's device endpoint reads the
-      # client secret from the form only, and Beam authenticates device
-      # requests with HTTP Basic as it does the code exchange. Dex never
-      # rejects the request, so Beam cannot fall back; approval then fails at
-      # /dex/device/callback with "Invalid client credentials.". A dev device
-      # login therefore starts (the smoke test checks that much) but does not
-      # complete against this Dex.
+      # client secret from the form only. Sent HTTP Basic, it records an empty
+      # secret and approval fails at /dex/device/callback with "Invalid client
+      # credentials.". `mise run dev:up` therefore runs Beam with
+      # BEAM_OIDC_CLIENT_AUTH_METHOD=client_secret_post against this Dex; a
+      # host-run server pointed here needs the same.
       - "/device/callback"
 
 enablePasswordDB: true
