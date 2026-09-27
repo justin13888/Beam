@@ -11,7 +11,8 @@ use super::*;
 
 /// `episode <series>|<year> s<season> e<first>[-<last>] [<title>] <numbering>
 /// [@<air date>] [!folder<n>]`, `movie <title>|<year> [ed=<edition>]`,
-/// `unclassifiable season <n>`, or `unclassifiable absolute <n>`.
+/// `unclassifiable season <n>`, `unclassifiable absolute <n>`, or
+/// `unclassifiable fractional <n>.<d>`.
 fn describe(inference: &MediaInference) -> String {
     fn year(year: Option<u32>) -> String {
         year.map_or_else(|| "-".to_string(), |y| y.to_string())
@@ -62,6 +63,10 @@ fn describe(inference: &MediaInference) -> String {
         }) => {
             format!("unclassifiable absolute {number}")
         }
+        MediaInference::Unclassifiable(UnclassifiableReason::FractionalAbsoluteNumber {
+            whole,
+            tenth,
+        }) => format!("unclassifiable fractional {whole}.{tenth}"),
     }
 }
 
@@ -286,6 +291,17 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     ("Show/Show - 2019.mkv", "movie Show|2019"),
     ("Show/Season 1/Other - 2019.mkv", "unclassifiable season 1"),
+    // A fractional number is a recap or special between two episodes, not
+    // the first of them with a title of `5`.
+    (
+        "Show (1998)/[G] Show - 12.5 [1080p].mkv",
+        "unclassifiable fractional 12.5",
+    ),
+    (
+        "Show/Season 1/Show - 12.5.mkv",
+        "unclassifiable fractional 12.5",
+    ),
+    ("Show/Show - 12.1080p.mkv", "episode Show|- s1 e12 Absolute"),
     // A `<title> - <n>` nothing around names as a show is not a movie either
     // (D182-C4): a folder naming another title -- romaji against English --
     // or the root.

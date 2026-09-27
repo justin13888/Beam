@@ -89,8 +89,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
     only release noise (never the library root's); each edition (a `{edition-...}` tag, or edition
     words such as `Director's Cut` or `Extended` after the title or its parenthesised year) of it in
     a library MUST be one `movie_entries` row however many copies exist;
-  - a file in a season folder with no episode number, and a `<title> - <n>` name no folder names
-    as a show, MUST be indexed without a title (status `unknown`) and reported through the admin
+  - a file in a season folder with no episode number, a `<title> - <n>` name no folder names as a
+    show, and a fractional `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title (status `unknown`) and reported through the admin
     log, never guessed into a movie.
 
   Every row MUST record the version of these rules that classified it, and a scan MUST reclassify a

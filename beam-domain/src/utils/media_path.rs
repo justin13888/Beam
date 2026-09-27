@@ -88,6 +88,11 @@ pub enum UnclassifiableReason {
     /// library root, or its folder names another title (decision D182-4).
     /// Indexing it as a movie would turn a season into dozens of films.
     AmbiguousAbsoluteNumber { number: u32 },
+    /// The name is `<title> - <n>.<d>` (`Show - 12.5`), the fansub spelling
+    /// of a recap or special between two episodes. It has no episode number
+    /// of its own, and reading it as episode `n` would put two files on one
+    /// episode.
+    FractionalAbsoluteNumber { whole: u32, tenth: u32 },
 }
 
 /// What a library path is.
@@ -119,6 +124,13 @@ static SPECIALS_FOLDER_REGEX: LazyLock<Regex> =
 /// `<title> - <n>` with an optional `v2` revision: the fansub convention.
 static ABSOLUTE_DASH_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(.+?) - (\d{1,4})(?:v\d)?(?: |$)").expect("valid regex"));
+
+/// A `- <n>.<d>` in a raw stem, before separators are normalised: the
+/// fractional episode `Show - 12.5`. The digit after the point must end the
+/// number, so `Show - 12.1080p` is not one.
+static ABSOLUTE_DASH_FRACTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r" - (\d{1,4})\.(\d)(?:v\d)?(?:[ ._\[\(]|$)").expect("valid regex")
+});
 
 /// A bare `E<n>` or `EP<n>`, optionally after a title.
 static ABSOLUTE_BARE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -298,6 +310,14 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         // an episode -- so it is not consulted.
         let dash_plausible = !absolute.dash || parent_season.is_some() || absolute.digits >= 2;
         if year_is_episode && dash_plausible {
+            if let Some(tenth) = absolute.tenth {
+                return MediaInference::Unclassifiable(
+                    UnclassifiableReason::FractionalAbsoluteNumber {
+                        whole: absolute.number,
+                        tenth,
+                    },
+                );
+            }
             if names_show {
                 // The folder was just checked against the title (or is a
                 // season folder), so it -- not the whole `<title> - <n>`
@@ -380,6 +400,9 @@ struct AbsoluteNumber {
     dash: bool,
     /// Whether the number could be a release year (1900-2099).
     year_shaped: bool,
+    /// The digit after a decimal point (`5` in `Show - 12.5`): the number
+    /// is fractional.
+    tenth: Option<u32>,
     episode_title: Option<String>,
 }
 
@@ -391,15 +414,27 @@ fn absolute_number(stem: &str) -> Option<AbsoluteNumber> {
         None => (ABSOLUTE_BARE_REGEX.captures(&normalized)?, false),
     };
     let digits = caps.get(2)?;
+    let number: u32 = digits.as_str().parse().ok()?;
+    // Normalising read the point as a separator (`Show - 12 5`), so the
+    // raw stem says whether the number was fractional.
+    let tenth = if dash {
+        ABSOLUTE_DASH_FRACTION_REGEX
+            .captures_iter(stem)
+            .find(|fraction| fraction[1].parse::<u32>().ok() == Some(number))
+            .and_then(|fraction| fraction[2].parse().ok())
+    } else {
+        None
+    };
     Some(AbsoluteNumber {
         title: caps
             .get(1)
             .map(|m| m.as_str().trim().to_string())
             .unwrap_or_default(),
-        number: digits.as_str().parse().ok()?,
+        number,
         digits: digits.as_str().len(),
         dash,
         year_shaped: YEAR_REGEX.is_match(digits.as_str()),
+        tenth,
         episode_title: episode_title_after(&normalized, digits.end()),
     })
 }

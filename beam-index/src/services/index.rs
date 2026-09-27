@@ -695,6 +695,23 @@ impl LocalIndexService {
                     serde_json::json!({ "absolute_number": number }),
                 )
             }
+            UnclassifiableReason::FractionalAbsoluteNumber { whole, tenth } => {
+                warn!(
+                    path = %path.display(),
+                    number = %format!("{whole}.{tenth}"),
+                    "a file is numbered like a recap between two episodes; indexed without a title"
+                );
+                (
+                    format!(
+                        "A file in \"{}\" is numbered {whole}.{tenth}, like a recap or special \
+                         between two episodes, which has no episode number of its own, so it \
+                         was indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "fractional_number": format!("{whole}.{tenth}") }),
+                )
+            }
         };
         let mut metadata = serde_json::json!({
             "library_id": library.id.to_string(),

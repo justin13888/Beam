@@ -370,6 +370,30 @@ async fn an_absolute_number_no_folder_names_is_kept_untitled_and_reported() {
     );
 }
 
+/// A fractional `Show - 12.5` recap is kept untitled and reported, rather
+/// than landing on episode 12 beside the real one.
+#[tokio::test]
+async fn a_fractional_episode_number_is_kept_untitled_and_reported() {
+    let h = Harness::new().await;
+    h.write("Show (1998)/[G] Show - 12 [1080p].mkv");
+    let rel = "Show (1998)/[G] Show - 12.5 [1080p].mkv";
+    h.write(rel);
+
+    h.scan().await;
+
+    let file = h.file(rel);
+    assert_eq!(file.status, FileStatus::Unknown);
+    assert!(file.content.is_none(), "{:?}", file.content);
+    assert_eq!(h.shows().len(), 1, "episode 12 still makes its show");
+    assert!(
+        h.warnings()
+            .await
+            .iter()
+            .any(|m| m.contains("numbered 12.5") && m.contains(rel)),
+        "the administrator is told"
+    );
+}
+
 // ─── movies ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
