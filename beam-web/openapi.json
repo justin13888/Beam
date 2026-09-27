@@ -4391,7 +4391,8 @@
             "description": "Library id (UUID).",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -4514,40 +4515,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid library id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-library-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -4651,7 +4633,8 @@
             "description": "Library id (UUID).",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -4774,7 +4757,7 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid library id; Library path not found",
+            "description": "Bad Request; Library path not found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4803,28 +4786,11 @@
                           "properties": {
                             "type": {
                               "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-library-id"
-                            }
-                          }
-                        }
-                      ],
-                      "title": "Invalid library id"
-                    },
-                    {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
                               "const": "https://beam.justinchung.net/reference/errors/#library-path-not-found"
                             }
                           }
                         }
-                      ],
-                      "title": "Library path not found"
+                      ]
                     }
                   ]
                 }

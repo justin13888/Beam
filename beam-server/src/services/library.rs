@@ -351,11 +351,11 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// [`Self::get_scan`]. Fails with [`LibraryError::ScanInProgress`] while
     /// a scan of the library is queued or running, and with
     /// [`LibraryError::PathNotFound`] when its root is not a directory.
-    async fn start_scan(&self, library_id: String) -> Result<ScanJob, LibraryError>;
+    async fn start_scan(&self, library_id: Uuid) -> Result<ScanJob, LibraryError>;
 
     /// The latest scan of a library in this process: `None` when there has
     /// been none since the server started.
-    async fn get_scan(&self, library_id: String) -> Result<Option<ScanJob>, LibraryError>;
+    async fn get_scan(&self, library_id: Uuid) -> Result<Option<ScanJob>, LibraryError>;
 
     /// Delete a library by ID. A scan of it that is queued or running is
     /// cancelled first.
@@ -558,11 +558,10 @@ impl LibraryService for LocalLibraryService {
         })
     }
 
-    async fn start_scan(&self, library_id: String) -> Result<ScanJob, LibraryError> {
-        let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
+    async fn start_scan(&self, library_id: Uuid) -> Result<ScanJob, LibraryError> {
         let ticket = self
             .index_service
-            .begin_scan(lib_uuid, ScanTrigger::Manual)
+            .begin_scan(library_id, ScanTrigger::Manual)
             .await?;
         let job = ticket.job();
         // The request answers now; the scan runs as long as it runs. A task
@@ -570,19 +569,18 @@ impl LibraryService for LocalLibraryService {
         let index_service = self.index_service.clone();
         tokio::spawn(async move {
             if let Err(e) = index_service.run_scan(ticket).await {
-                warn!(library_id = %lib_uuid, error = %e, "library scan failed");
+                warn!(library_id = %library_id, error = %e, "library scan failed");
             }
         });
         Ok(ScanJob::from(job))
     }
 
-    async fn get_scan(&self, library_id: String) -> Result<Option<ScanJob>, LibraryError> {
-        let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
+    async fn get_scan(&self, library_id: Uuid) -> Result<Option<ScanJob>, LibraryError> {
         self.library_repo
-            .find_by_id(lib_uuid)
+            .find_by_id(library_id)
             .await?
             .ok_or(LibraryError::LibraryNotFound)?;
-        Ok(self.index_service.scan_job(lib_uuid).map(ScanJob::from))
+        Ok(self.index_service.scan_job(library_id).map(ScanJob::from))
     }
 
     async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError> {

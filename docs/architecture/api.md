@@ -47,7 +47,7 @@ role.
 | `/v1/admin/users` | GET | User accounts (limit/offset paged) |
 | `/v1/admin/users/{id}` | PATCH | Block or unblock an account |
 | `/v1/admin/libraries`, `/v1/admin/libraries/{id}` | POST, DELETE | Library management; deleting a library cancels its scan first |
-| `/v1/admin/libraries/{id}/scan` | POST, GET | Start a scan: `202` with the scan job, queued, and the scan runs in the background; `409` `library-scan-in-progress` while one is queued or running. `GET` reads the latest job since the server started (`404` `scan-not-found` before one) |
+| `/v1/admin/libraries/{id}/scan` | POST, GET | Start a scan: `202` with the scan job, queued, and the scan runs in the background; `409` `library-scan-in-progress` while one is queued or running. `GET` reads the latest job since the server started (`404` `scan-not-found` before one). `{id}` is a UUID (`format: uuid`); a malformed one is the path extractor's `400` `about:blank` |
 | `/v1/admin/media/{id}/refresh` | POST | Re-trigger enrichment for a title |
 | `/v1/admin/logs`, `/v1/admin/logs/count` | GET | Admin log view |
 | `/v1/admin/events` | GET | Recent admin events (JSON) |

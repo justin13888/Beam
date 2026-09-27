@@ -926,6 +926,9 @@ async fn reading_the_scan_of_a_library_never_scanned_is_404_scan_not_found() {
     response.assert_problem_type("https://beam.justinchung.net/reference/errors/#scan-not-found");
 }
 
+/// The scan routes capture a `Uuid` (wire conventions), so a malformed id is
+/// the `Path` extractor's own `about:blank` 400; an
+/// unknown one is the library's 404.
 #[tokio::test]
 async fn a_scan_of_a_malformed_or_unknown_library_is_400_or_404() {
     let fixture = make_scan_test_state(Gate::Open);
@@ -938,25 +941,25 @@ async fn a_scan_of_a_malformed_or_unknown_library_is_400_or_404() {
             "POST",
             "/v1/admin/libraries/not-a-uuid/scan".to_string(),
             StatusCode::BAD_REQUEST,
-            "invalid-library-id",
+            "about:blank",
         ),
         (
             "GET",
             "/v1/admin/libraries/not-a-uuid/scan".to_string(),
             StatusCode::BAD_REQUEST,
-            "invalid-library-id",
+            "about:blank",
         ),
         (
             "POST",
             format!("/v1/admin/libraries/{unknown}/scan"),
             StatusCode::NOT_FOUND,
-            "library-not-found",
+            "https://beam.justinchung.net/reference/errors/#library-not-found",
         ),
         (
             "GET",
             format!("/v1/admin/libraries/{unknown}/scan"),
             StatusCode::NOT_FOUND,
-            "library-not-found",
+            "https://beam.justinchung.net/reference/errors/#library-not-found",
         ),
     ] {
         let request = match method {
@@ -965,9 +968,7 @@ async fn a_scan_of_a_malformed_or_unknown_library_is_400_or_404() {
         };
         let response = request.cookie("beam_session", &token).send().await;
         assert_eq!(response.status(), status, "{method} {path}");
-        response.assert_problem_type(&format!(
-            "https://beam.justinchung.net/reference/errors/#{problem}"
-        ));
+        response.assert_problem_type(problem);
     }
     assert_eq!(fixture.index.scan_job(unknown), None);
 }

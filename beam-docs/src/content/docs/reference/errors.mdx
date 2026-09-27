@@ -72,7 +72,8 @@ not this error — it returns an empty list.
 
 ### invalid-library-id
 
-**400.** The library id in the path is not a UUID.
+**400.** The library id in the path is not a UUID. The scan routes (`/v1/admin/libraries/{id}/scan`)
+take the id as a UUID and answer a malformed one with a plain `400` (`about:blank`) instead.
 
 ### library-path-not-found
 

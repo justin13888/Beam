@@ -99,16 +99,16 @@ impl From<LibraryError> for LibraryCreateError {
 impl From<LibraryError> for LibraryScanError {
     fn from(err: LibraryError) -> Self {
         match err {
-            LibraryError::InvalidId => Self::InvalidLibraryId(err.to_string()),
             LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
             // Reachable here: a rescan revisits the root, which may have gone.
             // Passed through verbatim: `IndexError::PathNotFound` guarantees
             // its message carries no filesystem path (NFR-108).
             LibraryError::PathNotFound(_) => Self::PathNotFound(err.to_string()),
             LibraryError::ScanInProgress => Self::ScanInProgress(err.to_string()),
-            // Unreachable: containment and overlap are decided at
-            // registration.
-            LibraryError::PathOutsideRoot(_)
+            // Unreachable: the id arrives parsed, and containment and overlap
+            // are decided at registration.
+            LibraryError::InvalidId
+            | LibraryError::PathOutsideRoot(_)
             | LibraryError::PathOverlapsLibrary
             | LibraryError::PathOverlapsDataDir
             | LibraryError::Db(_) => Self::Internal(err.to_string()),
@@ -119,10 +119,11 @@ impl From<LibraryError> for LibraryScanError {
 impl From<LibraryError> for LibraryScanReadError {
     fn from(err: LibraryError) -> Self {
         match err {
-            LibraryError::InvalidId => Self::InvalidLibraryId(err.to_string()),
             LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
-            // Unreachable: reading a job validates no path and starts no scan.
-            LibraryError::PathNotFound(_)
+            // Unreachable: the id arrives parsed, and reading a job validates
+            // no path and starts no scan.
+            LibraryError::InvalidId
+            | LibraryError::PathNotFound(_)
             | LibraryError::PathOutsideRoot(_)
             | LibraryError::PathOverlapsLibrary
             | LibraryError::PathOverlapsDataDir
@@ -137,6 +138,15 @@ impl From<LibraryError> for LibraryScanReadError {
 pub struct LibraryPath {
     /// Library id (UUID).
     pub id: String,
+}
+
+/// What `/v1/admin/libraries/{id}/scan` captures. A `Uuid` rather than
+/// [`LibraryPath`]'s string, per the wire conventions: a malformed id is the
+/// `Path` extractor's 400. The other library routes move with #190.
+#[derive(Debug, Schema, PathParams)]
+pub struct LibraryScanPath {
+    /// Library id (UUID).
+    pub id: uuid::Uuid,
 }
 
 /// What `/v1/admin/media/{id}/refresh` captures.
@@ -269,7 +279,7 @@ pub async fn create_library(
 )]
 pub async fn scan_library(
     _auth: AdminAuth,
-    Path(path): Path<LibraryPath>,
+    Path(path): Path<LibraryScanPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Accepted<Json<ScanJob>>, LibraryScanError> {
     let job = state.services.library.start_scan(path.id).await?;
@@ -285,10 +295,10 @@ pub async fn scan_library(
 )]
 pub async fn get_library_scan(
     _auth: AdminAuth,
-    Path(path): Path<LibraryPath>,
+    Path(path): Path<LibraryScanPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<ScanJob>, LibraryScanReadError> {
-    match state.services.library.get_scan(path.id.clone()).await? {
+    match state.services.library.get_scan(path.id).await? {
         Some(job) => Ok(Json(job)),
         None => Err(LibraryScanReadError::ScanNotFound(format!(
             "library {} has not been scanned since the server started",

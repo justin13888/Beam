@@ -1452,12 +1452,14 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator, and
+    /// Returns [`BeamError::BadRequest`] when `library_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator, and
     /// [`BeamError::Server`] with status 409 while a scan of the library is
     /// already running.
     pub async fn scan_library(&self, library_id: String) -> Result<(), BeamError> {
+        let wire_library_id = parse_uuid("library_id", &library_id)?;
         let (server_id, client, _) = self.active_context()?;
-        self.send(&server_id, client.scan_library(library_id, None))
+        self.send(&server_id, client.scan_library(wire_library_id, None))
             .await?;
         Ok(())
     }
@@ -3395,6 +3397,31 @@ mod tests {
             "{}",
             recorded[0].url
         );
+    }
+
+    /// A library id that is not a UUID is refused before anything is sent:
+    /// the route captures a `Uuid`, so the request could only be a 400.
+    #[tokio::test]
+    async fn a_scan_of_a_malformed_library_id_is_refused_without_a_request() {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering(202, "application/json", "{}"));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .scan_library("not-a-uuid".to_owned())
+            .await
+            .expect_err("a malformed id fails the call");
+
+        assert!(
+            matches!(&error, BeamError::BadRequest { code, .. } if code == ABOUT_BLANK),
+            "{error:?}"
+        );
+        assert!(backend.recorded().is_empty(), "nothing was sent");
     }
 
     /// A scan already running is the server's 409, surfaced with its problem

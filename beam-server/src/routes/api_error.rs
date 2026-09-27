@@ -271,6 +271,9 @@ pub enum LibraryCreateError {
 }
 
 /// `POST /v1/admin/libraries/{id}/scan`.
+///
+/// No invalid-library-id: the path captures a `Uuid`, so a malformed id is
+/// the `Path` extractor's own 400 and never reaches the handler.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum LibraryScanError {
     /// A library is scanned by one job at a time; the running one can be
@@ -282,14 +285,6 @@ pub enum LibraryScanError {
         title = "A scan of this library is already queued or running"
     )]
     ScanInProgress(String),
-
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-library-id",
-        title = "Invalid library id"
-    )]
-    InvalidLibraryId(String),
 
     #[error("{0}")]
     #[problem(
@@ -316,17 +311,10 @@ pub enum LibraryScanError {
     Internal(String),
 }
 
-/// `GET /v1/admin/libraries/{id}/scan`.
+/// `GET /v1/admin/libraries/{id}/scan`. A malformed id is the `Path`
+/// extractor's 400, as for `scanLibrary`.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum LibraryScanReadError {
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-library-id",
-        title = "Invalid library id"
-    )]
-    InvalidLibraryId(String),
-
     #[error("{0}")]
     #[problem(
         status = 404,

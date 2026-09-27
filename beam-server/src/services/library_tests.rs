@@ -72,21 +72,6 @@ mod tests {
     // ── start_scan ────────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn start_scan_refuses_a_malformed_id_without_asking_the_indexer() {
-        let mut mock_index = MockIndexService::new();
-        mock_index.expect_begin_scan().never();
-        let service = make_service(
-            MockLibraryRepository::new(),
-            MockFileRepository::new(),
-            PathBuf::from("/media/videos"),
-            mock_index,
-        );
-
-        let result = service.start_scan("not-a-uuid".to_string()).await;
-        assert!(matches!(result, Err(LibraryError::InvalidId)));
-    }
-
-    #[tokio::test]
     async fn start_scan_reports_a_running_scan_as_scan_in_progress() {
         let lib_id = Uuid::new_v4();
         let mut mock_index = MockIndexService::new();
@@ -103,7 +88,7 @@ mod tests {
             mock_index,
         );
 
-        let result = service.start_scan(lib_id.to_string()).await;
+        let result = service.start_scan(lib_id).await;
         assert!(matches!(result, Err(LibraryError::ScanInProgress)));
     }
 
