@@ -22,7 +22,8 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::models::{
     AdminEventDto, AdminLogCountResponse, AdminLogEntryDto, AdminStatusCounts, AdminStatusResponse,
     AdminUserDto, AdminUserListResponse, CreateLibraryRequest, EnrichmentQueueCounts, Library,
-    LibraryFile, RecentScanDto, ScanLibraryResponse, UpdateAdminUserRequest, WatcherStatus,
+    LibraryFile, LibraryTelemetryPreview, RecentScanDto, ScanLibraryResponse,
+    UpdateAdminUserRequest, WatcherStatus,
 };
 use crate::routes::api_error::{
     AdminAuth, AdminUserError, InternalError, LibraryCreateError, LibraryRefError,
@@ -31,6 +32,7 @@ use crate::routes::api_error::{
 use crate::routes::tags::Admin;
 use crate::services::library::LibraryError;
 use crate::services::metadata::{MediaFilter, MetadataError};
+use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
 
 // The service errors are one vocabulary per service; the route errors are one
@@ -578,6 +580,50 @@ pub async fn get_admin_status(
     }))
 }
 
+// ── Anonymous library report (admin only, issue #93) ───────────────────────
+
+/// The anonymous library report this server would send now, byte for byte,
+/// and whether and where it would go. Sends nothing: this is how an admin
+/// decides whether to set `BEAM_TELEMETRY_URL`, and checks what it sends once
+/// set.
+#[kynos::get(
+    "/admin/telemetry/library",
+    tag = Admin,
+    operation_id = "previewLibraryTelemetry"
+)]
+pub async fn preview_library_telemetry(
+    _auth: AdminAuth,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<LibraryTelemetryPreview>, InternalError> {
+    let telemetry = &state.services.telemetry;
+    let LibraryReportPreview {
+        destination_origin,
+        last_sent_at,
+        next_send_at,
+        report,
+        content_type,
+        payload,
+    } = telemetry
+        .preview()
+        .await
+        .map_err(|e| InternalError::Internal(e.to_string()))?;
+    Ok(Json(LibraryTelemetryPreview {
+        destination_configured: telemetry.destination_configured(),
+        destination_origin,
+        last_sent_at,
+        next_send_at,
+        report,
+        content_type: content_type.to_owned(),
+        // The encoder writes JSON, which is UTF-8; lossless in practice, and
+        // never a panic if that ever stopped being true.
+        payload: String::from_utf8_lossy(&payload).into_owned(),
+    }))
+}
+
 #[cfg(test)]
 #[path = "admin_tests.rs"]
 mod admin_tests;
+
+#[cfg(test)]
+#[path = "admin_telemetry_tests.rs"]
+mod admin_telemetry_tests;

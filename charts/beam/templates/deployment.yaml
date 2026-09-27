@@ -171,6 +171,18 @@ spec:
                   key: tmdb-api-token
                   {{- end }}
             {{- end }}
+            {{- if or .Values.telemetry.existingSecret .Values.telemetry.url }}
+            - name: BEAM_TELEMETRY_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.telemetry.existingSecret }}
+                  name: {{ .Values.telemetry.existingSecret }}
+                  key: {{ .Values.telemetry.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "beam.secretName" . }}
+                  key: telemetry-url
+                  {{- end }}
+            {{- end }}
             {{- range $name, $value := .Values.server.env }}
             - name: {{ $name }}
               value: {{ $value | quote }}

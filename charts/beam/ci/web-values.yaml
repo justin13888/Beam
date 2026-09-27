@@ -10,6 +10,8 @@ oidc:
   clientSecret: not-a-real-secret
 tmdb:
   apiToken: not-a-real-token
+telemetry:
+  url: https://collector.example.test/v1/metrics
 persistence:
   data:
     enabled: false

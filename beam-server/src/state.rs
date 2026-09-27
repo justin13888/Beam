@@ -16,6 +16,7 @@ use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvi
 use beam_domain::services::{Clock, RealClock};
 use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
+use beam_index::providers::telemetry::ReqwestTelemetrySink;
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
 use beam_index::services::watch_status::WatchStatus;
@@ -32,6 +33,7 @@ use crate::{
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
         playback::{DbPlaybackService, PlaybackService},
+        telemetry::LibraryReportService,
     },
 };
 
@@ -163,6 +165,10 @@ pub struct AppServices {
     /// background indexing runtime (`main` hands it this instance), read by
     /// the admin status endpoint.
     pub watch_status: Arc<WatchStatus>,
+    /// The opt-in anonymous library report (issue #93): previewed by
+    /// `GET /v1/admin/telemetry/library`, and run on its weekly schedule by
+    /// `main` only when `BEAM_TELEMETRY_URL` is set.
+    pub telemetry: Arc<LibraryReportService>,
 }
 
 impl AppServices {
@@ -227,6 +233,10 @@ impl AppServices {
         );
         let playback_repo: Arc<dyn beam_domain::repositories::PlaybackProgressRepository> =
             Arc::new(beam_index::repositories::SqlPlaybackProgressRepository::new(db.clone()));
+        let library_shape_repo: Arc<dyn beam_domain::repositories::LibraryShapeRepository> =
+            Arc::new(beam_index::repositories::SqlLibraryShapeRepository::new(
+                db.clone(),
+            ));
 
         let notification_service = Arc::new(LocalNotificationService::new());
         let hash_service = Arc::new(LocalHashService::new(hash_config));
@@ -353,6 +363,13 @@ impl AppServices {
             .await?,
         );
 
+        let telemetry = Arc::new(LibraryReportService::new(
+            config.library_report_config(),
+            library_shape_repo,
+            Arc::new(ReqwestTelemetrySink::new()?),
+            clock.clone(),
+        ));
+
         let services = Self {
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
@@ -390,6 +407,7 @@ impl AppServices {
             device_auth_store,
             oidc_config,
             watch_status: Arc::new(WatchStatus::new()),
+            telemetry,
         };
 
         Ok((services, index_service, enrichment_service))

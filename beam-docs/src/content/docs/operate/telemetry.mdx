@@ -1,0 +1,80 @@
+---
+title: Anonymous library report
+description: What Beam's opt-in library report contains, where it goes, and how to see it before you turn it on.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Beam can send a small, anonymous report describing the *shape* of your libraries — how many titles
+and files, which containers and codecs, roughly how large — to a collector you choose. It helps
+decide which formats and library sizes Beam's development should care about.
+
+<Aside type="note" title="Off unless you turn it on">
+Nothing is sent unless you set `BEAM_TELEMETRY_URL`. There is no built-in destination: turning the
+report on means naming where it goes.
+</Aside>
+
+## What is in it
+
+Ranges only. No number in the report is exact: every "how many" is one of `none`, `from_1_to_9`,
+`from_10_to_99`, `from_100_to_999`, `from_1000_to_9999` or `at_least_10000`.
+
+- how many libraries, movies, shows, seasons and episodes
+- how many files are movies, episodes or unclassified
+- how many files use each container (`matroska,webm`, `mov,mp4,m4a,3gp,3g2,mj2`, …)
+- how many video, audio and subtitle streams use each codec (`h264`, `aac`, `subrip`, …)
+- how many files fall into each size range (under 1 GiB, 1–4 GiB, … 50 GiB and over)
+- which range your total indexed size falls into (under 100 GiB, … 50 TiB and over)
+- the Beam version, and the day (not the time) the report describes
+
+## What is never in it
+
+No title, file name, path, library name or description. No user, no session, no playback progress
+or history. No file hash, host name, IP-derived value, or install or server identifier, and no exact
+count.
+
+That does not make reports unlinkable. If your libraries have a distinctive shape — an unusual codec,
+a rare mix of ranges — that stays the same from week to week, the collector may be able to tell that
+a run of reports came from one server, especially alongside the address they arrive from. Choose a
+collector you would trust with that.
+
+## See it before you turn it on
+
+An admin can fetch the exact report — and the exact bytes that would be sent — at any time, whether
+or not the report is turned on:
+
+```bash
+curl -b "beam_session=…" http://localhost:8000/v1/admin/telemetry/library
+```
+
+The `payload` field is the request body, byte for byte. Previewing sends nothing.
+
+## Turning it on
+
+Set `BEAM_TELEMETRY_URL` to an [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/) metrics
+endpoint — for an OpenTelemetry Collector, usually `https://collector.example/v1/metrics`. The URL
+is used exactly as given. With the [Helm chart](/operate/kubernetes/), set `telemetry.url`, or
+`telemetry.existingSecret` for a URL that carries the collector's credentials.
+
+- The first report is sent an hour after the server starts, then once a week.
+- A failed delivery is retried after an hour, then two, four, and so on up to a day.
+- The time of the last successful delivery is kept in `BEAM_DATA_DIR/telemetry/`, so restarting the
+  server does not send an extra report.
+- Only the collector's `scheme://host` appears in logs and in the preview — including when a
+  delivery fails; anything in the URL's path, query or user info, such as an ingest token, is not
+  shown.
+
+### Authenticating to the collector
+
+If your collector wants credentials, put them in the URL. Two forms are supported:
+
+- **A token in the query**, e.g. `https://collector.example/v1/metrics?token=…`, for a collector
+  that reads one there.
+- **A user name and password**, e.g. `https://user:secret@collector.example/v1/metrics`. They are
+  taken out of the URL and sent as an HTTP Basic `Authorization` header.
+
+Either way the credential is yours, sent only to the URL you named; no Beam session or credential is
+ever attached to the report.
+
+To turn it off, unset the variable and restart. See the
+[configuration reference](/reference/configuration/) for the exact semantics.

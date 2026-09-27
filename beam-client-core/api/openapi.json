@@ -6330,6 +6330,175 @@
         ]
       }
     },
+    "/v1/admin/telemetry/library": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "The anonymous library report this server would send now, byte for byte, and whether and where it would go. Sends nothing: this is how an admin decides whether to set `BEAM_TELEMETRY_URL`, and checks what it sends once set.",
+        "operationId": "previewLibraryTelemetry",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryTelemetryPreview"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": [
+              "admin"
+            ]
+          }
+        ]
+      }
+    },
     "/v1/me": {
       "get": {
         "tags": [
@@ -10062,6 +10231,262 @@
           "recent_scans",
           "watcher"
         ]
+      },
+      "LibraryCountBucket": {
+        "type": "string",
+        "enum": [
+          "none",
+          "from_1_to_9",
+          "from_10_to_99",
+          "from_100_to_999",
+          "from_1000_to_9999",
+          "at_least_10000"
+        ],
+        "description": "The order of magnitude a count falls into. A report never carries an exact\ncount."
+      },
+      "LibraryReportTitles": {
+        "properties": {
+          "movies": {
+            "$ref": "#/components/schemas/LibraryCountBucket"
+          },
+          "shows": {
+            "$ref": "#/components/schemas/LibraryCountBucket"
+          }
+        },
+        "type": "object",
+        "required": [
+          "movies",
+          "shows"
+        ],
+        "description": "Live titles by kind."
+      },
+      "LibraryReportFiles": {
+        "properties": {
+          "movie": {
+            "$ref": "#/components/schemas/LibraryCountBucket"
+          },
+          "episode": {
+            "$ref": "#/components/schemas/LibraryCountBucket"
+          },
+          "unclassified": {
+            "$ref": "#/components/schemas/LibraryCountBucket"
+          }
+        },
+        "type": "object",
+        "required": [
+          "movie",
+          "episode",
+          "unclassified"
+        ],
+        "description": "Present files by what the indexer classified them as."
+      },
+      "LibraryReportCount": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "A container or codec name, lowercased, as FFmpeg names it; `unknown`\nwhen the prober could not name it."
+          },
+          "count": {
+            "$ref": "#/components/schemas/LibraryCountBucket"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "count"
+        ],
+        "description": "How many of one named thing a library holds."
+      },
+      "LibraryReportCodecs": {
+        "properties": {
+          "video": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryReportCount"
+            },
+            "type": "array"
+          },
+          "audio": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryReportCount"
+            },
+            "type": "array"
+          },
+          "subtitle": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryReportCount"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object",
+        "required": [
+          "video",
+          "audio",
+          "subtitle"
+        ],
+        "description": "Streams of present files, per codec."
+      },
+      "LibraryFileSizeBucket": {
+        "type": "string",
+        "enum": [
+          "under_1_gib",
+          "from_1_to_4_gib",
+          "from_4_to_10_gib",
+          "from_10_to_25_gib",
+          "from_25_to_50_gib",
+          "at_least_50_gib"
+        ],
+        "description": "The size range one file falls into."
+      },
+      "LibraryReportFileSize": {
+        "properties": {
+          "bucket": {
+            "$ref": "#/components/schemas/LibraryFileSizeBucket"
+          },
+          "count": {
+            "$ref": "#/components/schemas/LibraryCountBucket"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "count"
+        ],
+        "description": "How many present files fall into one size range."
+      },
+      "LibraryTotalSizeBucket": {
+        "type": "string",
+        "enum": [
+          "under_100_gib",
+          "from_100_gib_to_1_tib",
+          "from_1_to_10_tib",
+          "from_10_to_50_tib",
+          "at_least_50_tib"
+        ],
+        "description": "The range the server's indexed bytes fall into. Never reported exactly."
+      },
+      "LibraryReport": {
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "This report's shape; see the operator documentation."
+          },
+          "server_version": {
+            "type": "string",
+            "description": "The Beam release that produced the report."
+          },
+          "generated_on": {
+            "type": "string",
+            "format": "date",
+            "description": "The UTC day the report describes. A day rather than an instant, so the\nmoment of sending says nothing about when the server is running."
+          },
+          "libraries": {
+            "$ref": "#/components/schemas/LibraryCountBucket"
+          },
+          "titles": {
+            "$ref": "#/components/schemas/LibraryReportTitles"
+          },
+          "seasons": {
+            "$ref": "#/components/schemas/LibraryCountBucket",
+            "description": "Seasons with at least one present episode file."
+          },
+          "episodes": {
+            "$ref": "#/components/schemas/LibraryCountBucket",
+            "description": "Episodes with a present file."
+          },
+          "files": {
+            "$ref": "#/components/schemas/LibraryReportFiles"
+          },
+          "containers": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryReportCount"
+            },
+            "type": "array",
+            "description": "Present files per container, sorted by name."
+          },
+          "codecs": {
+            "$ref": "#/components/schemas/LibraryReportCodecs"
+          },
+          "file_sizes": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryReportFileSize"
+            },
+            "type": "array",
+            "description": "Present files per size range, smallest first; every range is listed."
+          },
+          "total_size": {
+            "$ref": "#/components/schemas/LibraryTotalSizeBucket"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_version",
+          "server_version",
+          "generated_on",
+          "libraries",
+          "titles",
+          "seasons",
+          "episodes",
+          "files",
+          "containers",
+          "codecs",
+          "file_sizes",
+          "total_size"
+        ],
+        "description": "The anonymous library report: what a server holds, in aggregate, every\nnumber as a range."
+      },
+      "LibraryTelemetryPreview": {
+        "properties": {
+          "destination_configured": {
+            "type": "boolean",
+            "description": "Whether `BEAM_TELEMETRY_URL` is set. When false nothing is ever sent;\nthe preview is still available, to decide whether to opt in."
+          },
+          "destination_origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`scheme://host[:port]` of the collector; its path and query are not\nshown, since they may carry an ingest token."
+          },
+          "last_sent_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When a report last reached the collector."
+          },
+          "next_send_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the next report is due, once the schedule is running."
+          },
+          "report": {
+            "$ref": "#/components/schemas/LibraryReport"
+          },
+          "content_type": {
+            "type": "string",
+            "description": "The `Content-Type` the payload is sent under."
+          },
+          "payload": {
+            "type": "string",
+            "description": "The exact request body that would be sent: the report encoded as\nOTLP/HTTP JSON metrics."
+          }
+        },
+        "type": "object",
+        "required": [
+          "destination_configured",
+          "report",
+          "content_type",
+          "payload"
+        ],
+        "description": "What `GET /v1/admin/telemetry/library` answers: the report this server\nwould send now, byte for byte, and whether and where it would go."
       },
       "MeResponse": {
         "properties": {

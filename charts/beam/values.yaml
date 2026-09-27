@@ -99,6 +99,15 @@ tmdb:
   existingSecret: ""
   existingSecretKey: api-token
 
+# BEAM_TELEMETRY_URL: the opt-in anonymous library report (ADR-0019). Empty
+# sends nothing; there is no default collector. The URL may carry the
+# collector's credentials (a query token or user:password@), so it is kept in
+# a Secret like the other credentials: inline here, or an existing Secret.
+telemetry:
+  url: ""
+  existingSecret: ""
+  existingSecretKey: url
+
 # Media libraries. Each is mounted read-only at /videos/<name> (Beam never
 # writes under a library root, FR-202); create the library in Beam's admin UI
 # with that path. `volume` is one Kubernetes volume source. Every source kind

@@ -144,6 +144,7 @@ fn build(
         device_auth_store: flows.clone(),
         oidc_config: oidc_config.clone(),
         watch_status: base.services.watch_status.clone(),
+        telemetry: base.services.telemetry.clone(),
     };
     let state = AppState::with_clock(
         base.config.clone(),
