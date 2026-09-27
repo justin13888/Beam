@@ -121,8 +121,10 @@ macOS and Linux are the supported development platforms, and both follow the sam
 1. Clone repository
 2. `mise install && mise run setup` -- installs tools, JS dependencies, and the git hooks
 
-That is all the `pre-push` hook needs. Anything heavier is provisioned by the task that uses it, the
-first time it runs: the JS tasks install `node_modules`, and every `android:*` task runs
+That is all the git hooks need. Anything heavier is provisioned by the task that uses it, the first
+time it runs: the JS tasks -- including the `pre-commit` hook's biome step -- install `node_modules`
+(and reinstall it when `bun.lock`, a `package.json` or the pinned Bun version changes), and every
+`android:*` task runs
 `android:sdk`, which installs the pinned Android SDK packages and NDK into
 `$XDG_DATA_HOME/beam/android-sdk` (`~/.local/share/beam/android-sdk` by default). That location is
 set by `mise.toml` rather than read from `ANDROID_HOME`, so no `beam-android/local.properties` is
