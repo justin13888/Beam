@@ -65,8 +65,15 @@ A device with no browser — Android TV, Apple TV — cannot complete a redirect
 the OAuth 2.0 **device authorization grant**: the app shows a short code and an address, you open
 the address on your phone or computer, sign in at your provider as usual, and enter the code. Beam
 then gives the app a session exactly like a browser's — same lifetime, same admin rule, and it
-appears under your sessions and can be revoked the same way. The Android app tries this first and
-falls back to its built-in browser when your provider does not offer it.
+appears under your sessions and can be revoked the same way. On a phone the Android app still
+signs in through its built-in browser, and **Sign in with a code** starts a device sign-in instead.
+On a device with no usable browser it goes straight to the code, and uses the built-in browser only
+when your provider does not offer device sign-in.
+
+Beam authenticates its device sign-in requests to your provider the same way it authenticates the
+browser sign-in: with HTTP Basic (`client_secret_basic`). If the provider answers `invalid_client`,
+Beam retries once with the secret in the form (`client_secret_post`), and keeps using that method
+until it restarts. Register Beam's client for `client_secret_basic` wherever your provider asks.
 
 Beam turns this on automatically when your provider's discovery document names a
 `device_authorization_endpoint`. Check with:

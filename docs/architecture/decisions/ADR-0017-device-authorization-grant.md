@@ -39,7 +39,9 @@ behalf, and mints an ordinary session when the user approves.**
    device code and returns the user code, the verification URI (and its code-filled variant, when
    the IdP offers one), the lifetime (capped at 30 minutes) and the poll interval -- plus an opaque
    **device handle**. The IdP's device code stays on the server; only the handle's SHA-256 is
-   stored, in `device_auths` (the `pending_auths` pattern of ADR-0005).
+   stored, in `device_auths` (the `pending_auths` pattern of ADR-0005). The answer carries
+   `Cache-Control: no-store` and `Pragma: no-cache`, as does every `200` and `202` of the poll: the
+   handle and the session are credentials (RFC 6749 section 5.1).
 2. `POST /v1/auth/device/token` (`pollDeviceLogin`) takes the handle. Each call reaches the IdP's
    token endpoint **at most once**, and not at all when it comes sooner than the flow's interval --
    Beam answers `slow_down` itself and grows the interval, as RFC 8628 section 3.5 has the IdP do.
@@ -56,9 +58,13 @@ behalf, and mints an ordinary session when the user approves.**
 5. The IdP's discovery document decides availability. When it names no
    `device_authorization_endpoint`, `startDeviceLogin` answers **501** `device-login-unsupported`
    and the browser flow is unaffected; a client with a web view falls back to it.
-6. `beam-android` signs in device-first and falls back to its WebView on a 501. `beam-apple` is
-   unchanged in this decision: its iOS/macOS client keeps the web view it has, and the tvOS client
-   it unblocks is future work.
+6. On `beam-android` a phone keeps its WebView sign-in as the default screen -- issue #151's "the
+   screens do not change" -- and gains a secondary **Sign in with a code** action that runs the
+   device flow. Device sign-in is the default only where no usable browser exists
+   (`FEATURE_LEANBACK`, or no WebView package), falling back to the WebView on a 501. `beam-apple`
+   is unchanged in this decision: its iOS/macOS client keeps the web view it has, and the tvOS
+   client it unblocks is future work.
+7. The device requests authenticate to the IdP exactly as the code exchange does (D151-9).
 
 ### Decision log
 
@@ -79,9 +85,15 @@ behalf, and mints an ordinary session when the user approves.**
   operation and cannot declare an OpenAPI security requirement list of alternatives ("cookie *or*
   bearer"). Adding a bearer scheme would mean a second, undescribed authenticator -- a document
   that no longer describes the server, which ADR-0010 exists to prevent -- or re-declaring every
-  secured operation twice. **This is an upstream gap in kynos (any-of security requirements) and
-  is recorded here for the maintainer to file on getkono/kynos**; until a release closes it, the
-  one described scheme is the one every client uses. The poll does not also `Set-Cookie`: a native
+  secured operation twice. **This is an upstream gap in kynos, not yet filed: it is to be filed on
+  getkono/kynos by the maintainer** (the unattended run that wrote this could not file there), as:
+  *"`Auth<S>` cannot declare alternative security schemes (OpenAPI any-of security
+  requirements)" -- an operation that accepts a cookie session or an `Authorization: Bearer` token
+  cannot be described, because `Auth<S>` binds one scheme and emits a single security requirement;
+  asked for: an any-of form of `Auth` that emits `security: [{cookie: []}, {bearer: []}]` and
+  authenticates with whichever credential the request carries.* The same text sits on
+  `poll_device_login` in `beam-server/src/routes/auth.rs`, to be replaced by the issue link once
+  filed. Until a release closes it, the one described scheme is the one every client uses. The poll does not also `Set-Cookie`: a native
   client has no cookie jar the response could usefully land in, and a browser never calls it.
 - **D151-4 -- NFR-104 is stated as the check actually works.** `EnforceSameOrigin` has always let a
   mutating request with *neither* `Origin` nor `Referer` through, and a native client sends
@@ -104,14 +116,43 @@ behalf, and mints an ordinary session when the user approves.**
   (`BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE`, default 30). The per-flow interval is what paces the
   IdP; the class caps how many flows one client can drive. Starting a device login joins the auth
   class, with `login` and `callback`.
-- **D151-8 -- device first, web view as the fallback, on Android only.** A phone has a browser, so
-  the device grant is not strictly needed there; making it the default proves the path end to end
-  on a shipped client, and the WebView remains for IdPs without the grant. Apple is left as it is.
+- **D151-8 -- on Android, the device grant is the default only without a usable browser.** Issue
+  #151 asks that "the screens do not change", and a phone has a browser, so a phone keeps the
+  WebView sign-in as its default screen. It gains a secondary **Sign in with a code** action that
+  runs the device flow, which is how a shipped client exercises the server path end to end. Where
+  no usable browser exists -- `PackageManager.FEATURE_LEANBACK`, or no WebView package installed --
+  device sign-in is the default and the WebView the fallback on a 501. The check is injected into
+  `AuthViewModel` so both paths are unit-tested. A poll that fails retryably (a retryable
+  `Server`, `RateLimited` after its `retry_after_secs`, a retryable `Network`) keeps polling;
+  only a refusal (403), an expiry (410), an invalid flow (400) or another non-retryable failure
+  ends it. Rejected: device-first on every Android device (the first version of this change),
+  which replaced the phone's sign-in screen the issue says must not change. Apple is left as it is.
+- **D151-9 -- device requests authenticate like the code exchange, with one `client_secret_post`
+  retry.** Both device requests use HTTP Basic (`client_secret_basic`), which is what the code
+  exchange sends, with `client_id` also repeated in the form -- RFC 8628 section 3.1 allows it, and
+  Dex answers "Invalid client_id" without it. If the device authorization request is answered
+  `invalid_client`, it is retried **once** with `client_secret_post`; whichever method succeeds is
+  kept for the rest of the process, so the polls and later logins use it directly. Rejected:
+  choosing by discovery's `token_endpoint_auth_methods_supported`, which lists the methods the IdP
+  can accept from *some* client (RFC 8414 section 2), not the method *this* client is registered
+  with. IdPs that pin one method per client (Authelia, configured `client_secret_basic` as Beam's
+  guide says; Zitadel's BASIC) advertise both and refuse the other, so that choice made device
+  login fail with a 503 while browser login worked. **Known limit -- Dex.** Dex's device
+  authorization endpoint does not authenticate the client at all: it reads `client_secret` from the
+  form only and stores it with the request (`server/deviceflowhandlers.go` in v2.45.1; the same in
+  `server/device/device.go` on master), then compares it at approval, answering the approving
+  *browser* `invalid_client` ("Invalid client credentials.") when it is empty. Beam is never told,
+  so the retry cannot fire, and with the bundled Dex a device login starts but its approval fails
+  at Dex. That is a Dex defect (it ignores `client_secret_basic` on an endpoint RFC 8628
+  says authenticates the client as the token endpoint does), to be filed on dexidp/dex by the
+  maintainer; it is not worked around by sending the secret both ways at once, which RFC 6749
+  section 2.3 forbids.
 
 ## Consequences
 
 tvOS and Android TV are no longer blocked on the server: a client with no browser can sign in
-wherever the IdP offers the device grant, as Dex, Keycloak and Authentik do. An IdP that does not offer it leaves those platforms blocked, and that is now a
+wherever the IdP offers the device grant, as Keycloak and Authentik do (Dex offers it but, per
+D151-9, never completes one authenticated by `client_secret_basic`). An IdP that does not offer it leaves those platforms blocked, and that is now a
 deployment choice the operator can change rather than a missing Beam feature.
 
 The server gains a second way to reach `complete_login`, and nothing else about sessions changes:

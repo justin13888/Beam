@@ -71,8 +71,8 @@ added.
 `AuthStrategy` seam, which never existed in code; the seam is the one described above. The native
 mint now exists -- the OAuth 2.0 device authorization grant,
 [ADR-0017](ADR-0017-device-authorization-grant.md). The core exposes it as
-`start_device_login`/`poll_device_login`, sharing `adopt_session` with `complete_login`; Android
-signs in device-first and keeps the WebView as the fallback for an IdP without the grant.
+`start_device_login`/`poll_device_login`, sharing `adopt_session` with `complete_login`. On
+Android a phone keeps its WebView sign-in as the default and offers device sign-in as a secondary "Sign in with a code" action; device sign-in is the default only where there is no usable browser (a TV, or no WebView).
 
 **Trust is decided by the user, once, per certificate.** Self-hosted servers on a LAN routinely
 present a self-signed certificate, so "the platform trust store said no" cannot be the end of the

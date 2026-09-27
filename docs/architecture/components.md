@@ -259,10 +259,15 @@ plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
   trust decision by the core, because a mismatch surfaces as apparently corrupt media rather than
   as an auth error. Downloads go through Media3's `DownloadManager` so their bytes land in a cache
   ExoPlayer can read directly.
-- **Auth** signs in by the device authorization grant first — the screen shows the user code and
-  the verification address while the core polls — and falls back to lifting the `beam_session`
-  cookie from an in-app WebView when the server answers `501` because the IdP does not offer the
-  grant. See NFR-605 and [ADR-0017](decisions/ADR-0017-device-authorization-grant.md).
+- **Auth** lifts the `beam_session` cookie from an in-app WebView on a phone, as it always has,
+  and offers a secondary **Sign in with a code** that runs the device authorization grant — the
+  screen shows the user code and the verification address while the core polls. Where there is no
+  usable browser (`FEATURE_LEANBACK`, or no WebView installed) the device grant is the default, and
+  the WebView the fallback when the server answers `501` because the IdP does not offer the grant.
+  A poll that fails retryably (a retryable server error, a rate limit, a transport error) is
+  retried at the current interval, or after `Retry-After`; only a refusal, an expiry or an
+  invalid flow ends it. See NFR-605 and
+  [ADR-0017](decisions/ADR-0017-device-authorization-grant.md).
 
 **Testing:** 129 JVM tests plus Roborazzi screenshot references, run under Robolectric. No emulator
 runs in CI.

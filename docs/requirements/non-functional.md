@@ -186,9 +186,10 @@ requirements (referenced below as FR-xxx).
 - **NFR-605**: A native client MUST be able to authenticate without a browser wherever the
   configured IdP offers the OAuth 2.0 device authorization grant (FR-111,
   [ADR-0017](../architecture/decisions/ADR-0017-device-authorization-grant.md)). The server mints the same opaque `beam_session` credential it gives a
-  browser, and the client presents it as that cookie; no client holds an IdP token. `beam-android`
-  signs in this way first and falls back to lifting the cookie out of an in-app WebView when the
-  server answers `501` (the IdP does not offer the grant); `beam-apple` still lifts it out of a
+  browser, and the client presents it as that cookie; no client holds an IdP token. On a phone
+  `beam-android` still lifts the cookie out of an in-app WebView and offers device sign-in as a
+  secondary action; without a usable browser it signs in this way first and falls back to the
+  WebView when the server answers `501` (the IdP does not offer the grant); `beam-apple` still lifts it out of a
   `WKWebView`. The browser redirect stays same-origin only — `sanitize_redirect_path` accepts only
   relative paths, so the IdP never redirects to a custom scheme. On a platform with **no web view
   at all** (tvOS, Android TV — [#66](https://github.com/justin13888/beam/issues/66),

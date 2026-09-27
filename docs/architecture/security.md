@@ -53,8 +53,13 @@ behalf:
 3. **Poll.** `POST /v1/auth/device/token` claims the flow with a conditional `UPDATE` on
    `next_poll_at`: a poll inside the interval is answered `slow_down` by Beam without contacting the
    IdP, and the interval grows. A claimed poll makes exactly one token-endpoint request through
-   `OidcHttpClient`. Both device requests authenticate with `client_secret_post` when discovery
-   advertises it (Dex reads the secret only from the form) and `client_secret_basic` otherwise. On
+   `OidcHttpClient`. Both device requests authenticate as the code exchange does, with
+   `client_secret_basic` and `client_id` repeated in the form. Only if the device authorization
+   request is refused with `invalid_client` is it retried, once, with `client_secret_post`, which
+   the process then keeps for every later device request. Discovery's
+   `token_endpoint_auth_methods_supported` is not consulted: it lists what the IdP can accept, not
+   the method Beam's client is registered with (ADR-0017 D151-9). The start and every `200`/`202`
+   poll answer carry `Cache-Control: no-store` and `Pragma: no-cache` (RFC 6749 section 5.1). On
    approval the ID token is verified (signature, issuer, audience, expiry — there is no nonce in
    this grant), the flow row is deleted
    with `DELETE ... RETURNING` (so one approval mints one session), and steps 4–5 of the browser
