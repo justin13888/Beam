@@ -429,11 +429,14 @@ pub struct LocalIndexService {
     divergence_policy: DivergencePolicy,
     clock: Arc<dyn Clock>,
     missing_file_grace: Duration,
-    /// Whether [`LocalIndexService::backfill_identity_keys`] has completed in
-    /// this process. A lock rather than a flag so two overlapping
-    /// `scan_all_libraries` calls cannot both backfill and report each
-    /// other's keys as clashes.
-    identity_backfill_done: tokio::sync::Mutex<bool>,
+    /// Whether [`LocalIndexService::backfill_identity_keys`] and then
+    /// [`LocalIndexService::rekey_stale_titles`] have both succeeded in this
+    /// process; until they have, no file classified by older rules is
+    /// reclassified. A lock rather than a flag so two overlapping scans
+    /// cannot both run the passes and report each other's keys as clashes,
+    /// and so a scan or watcher event that arrives while the passes run waits
+    /// for their outcome.
+    identity_passes_succeeded: tokio::sync::Mutex<bool>,
 }
 
 impl LocalIndexService {
@@ -464,7 +467,7 @@ impl LocalIndexService {
             divergence_policy: DivergencePolicy::default(),
             clock: Arc::new(RealClock),
             missing_file_grace: DEFAULT_MISSING_FILE_GRACE,
-            identity_backfill_done: tokio::sync::Mutex::new(false),
+            identity_passes_succeeded: tokio::sync::Mutex::new(false),
         }
     }
 
@@ -948,15 +951,19 @@ impl LocalIndexService {
     /// on disk. Shared by the full scan and single-path watcher events.
     ///
     /// A row classified by older rules is reclassified first, whether or not
-    /// the file changed: the rules changed, not the file.
+    /// the file changed: the rules changed, not the file. Only when
+    /// `reclassify` is set -- the identity passes have succeeded (see
+    /// [`Self::identity_passes_done`]); until then the row keeps its title
+    /// and its version, and a later scan reclassifies it.
     async fn reconcile_existing_file(
         &self,
         existing: &MediaFile,
         path: &Path,
         library: &Library,
+        reclassify: bool,
     ) -> Result<(), IndexError> {
         let probed = existing.content.is_some() || existing.duration.is_some();
-        if existing.classifier_version < CLASSIFIER_VERSION && probed {
+        if reclassify && existing.classifier_version < CLASSIFIER_VERSION && probed {
             self.reclassify_existing(existing, path, library).await?;
         }
 
@@ -1939,32 +1946,68 @@ impl LocalIndexService {
             .map(|_| ())
     }
 
+    /// Whether the identity passes have succeeded in this process, running
+    /// them first if they have not: the backfill of titles that predate
+    /// identity keys, then the re-derivation of keys older rules derived.
+    ///
+    /// Every path that reclassifies a file -- a scan of every library, a scan
+    /// of one, a watcher event -- asks this first and reclassifies only on
+    /// `true`, so a file is reclassified only once its title carries the key
+    /// the current rules derive, and finds that title rather than leaving it
+    /// with no file to be retired with its enrichment. A failed pass is
+    /// logged, reported to the administrator, and retried by the next caller;
+    /// until one succeeds, files classified by older rules keep their titles
+    /// while new and changed files are indexed as usual.
+    async fn identity_passes_done(&self) -> bool {
+        let mut done = self.identity_passes_succeeded.lock().await;
+        if *done {
+            return true;
+        }
+        let failure = match self.backfill_identity_keys().await {
+            Ok(_) => match self.rekey_stale_titles().await {
+                Ok(_) => None,
+                Err(e) => Some(("re-derivation", e)),
+            },
+            Err(e) => Some(("backfill", e)),
+        };
+        match failure {
+            None => *done = true,
+            Some((pass, e)) => {
+                error!(pass, error = %e, "identity key pass failed; reclassification held");
+                let _ = self
+                    .admin_log
+                    .log(
+                        AdminLogLevel::Warning,
+                        AdminLogCategory::LibraryScan,
+                        format!(
+                            "Titles could not be brought up to the current naming rules ({e}). \
+                             Files indexed under older rules keep their titles until a later \
+                             scan succeeds; new files are indexed as usual."
+                        ),
+                        Some(serde_json::json!({ "pass": pass, "error": e.to_string() })),
+                    )
+                    .await;
+            }
+        }
+        *done
+    }
+
     /// Scan every library. Used for the startup scan and the periodic backstop.
     /// A failure in one library is logged and does not abort the others.
     ///
-    /// The first call in a process first backfills identity keys for titles
-    /// that predate them, then re-derives keys older rules derived; either
-    /// failing is logged and retried by the next call rather than holding up
-    /// the scan. Both run before any file is reclassified, so reclassifying a
-    /// file finds its title by the title's current key.
+    /// The identity passes run once, before any library is scanned (see
+    /// [`Self::identity_passes_done`]); if they fail, every library is still
+    /// scanned, without reclassifying files classified by older rules.
     pub async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
-        {
-            let mut done = self.identity_backfill_done.lock().await;
-            if !*done {
-                match self.backfill_identity_keys().await {
-                    Ok(_) => match self.rekey_stale_titles().await {
-                        Ok(_) => *done = true,
-                        Err(e) => error!("Identity key re-derivation failed: {}", e),
-                    },
-                    Err(e) => error!("Identity key backfill failed: {}", e),
-                }
-            }
-        }
+        let reclassify = self.identity_passes_done().await;
 
         let libraries = self.library_repo.find_all().await?;
         let mut total_added = 0;
         for library in libraries {
-            match self.scan_library(library.id.to_string()).await {
+            match self
+                .scan_one_library(library.id.to_string(), reclassify)
+                .await
+            {
                 Ok(added) => total_added += added,
                 Err(e) => error!("Scan failed for library {}: {}", library.id, e),
             }
@@ -2055,7 +2098,8 @@ impl LocalIndexService {
         match self.file_repo.find_by_path(&path_str).await? {
             Some(existing) => {
                 self.restore_if_missing(&existing).await?;
-                self.reconcile_existing_file(&existing, &path, &library)
+                let reclassify = self.identity_passes_done().await;
+                self.reconcile_existing_file(&existing, &path, &library, reclassify)
                     .await
             }
             None => {
@@ -2070,7 +2114,24 @@ impl LocalIndexService {
 
 #[async_trait::async_trait]
 impl IndexService for LocalIndexService {
+    /// Scan one library -- the administrator's scan. The identity passes run
+    /// first if they have not succeeded yet, and until they have, files
+    /// classified by older rules are not reclassified (see
+    /// [`LocalIndexService::identity_passes_done`]).
     async fn scan_library(&self, library_id: String) -> Result<u32, IndexError> {
+        let reclassify = self.identity_passes_done().await;
+        self.scan_one_library(library_id, reclassify).await
+    }
+}
+
+impl LocalIndexService {
+    /// Scan one library, reclassifying files classified by older rules only
+    /// when `reclassify` is set.
+    async fn scan_one_library(
+        &self,
+        library_id: String,
+        reclassify: bool,
+    ) -> Result<u32, IndexError> {
         let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| IndexError::InvalidId)?;
         let start_time = self.clock.now();
 
@@ -2239,7 +2300,7 @@ impl IndexService for LocalIndexService {
                         if restored {
                             restored_count += 1;
                         }
-                        self.reconcile_existing_file(&existing_file, &path, &library)
+                        self.reconcile_existing_file(&existing_file, &path, &library, reclassify)
                             .await
                     }
                     Err(e) => Err(e),

@@ -174,14 +174,22 @@ filename for a movie, an episode path for a show) takes the key of its stored ti
 display-title lookup created, the original takes the key. Files that disagree (two films once merged
 under one title) or a key another row already holds (the later duplicate) leave the key NULL and are
 named in an admin-log warning; such a row stays listed but is never matched again. A backfill that
-fails is logged and retried by the next `scan_all_libraries`; the scan itself goes ahead.
+fails is logged, reported in the admin log and retried, and holds reclassification (below); the
+scan itself goes ahead.
 
 **Rekey.** A change to the path inference or the title fold changes the key a title's files
 derive: #183 keyed `Grey's Anatomy` as `grey s anatomy|`, and the current fold keys its files
 `greys anatomy|`. Left alone, the next file would create a second title beside the enriched one.
-So each key carries `identity_key_version`, and right after the backfill the same
-`scan_all_libraries` call re-derives every key older than `CLASSIFIER_VERSION`
-(`LocalIndexService::rekey_stale_titles`), before the scan reclassifies any file. The new key is
+So each key carries `identity_key_version`, and right after the backfill the indexer re-derives
+every key older than `CLASSIFIER_VERSION` (`LocalIndexService::rekey_stale_titles`), before any
+file is reclassified. The two passes run once per process, under one lock
+(`LocalIndexService::identity_passes_done`), asked first by every path that reclassifies:
+`scan_all_libraries`, the administrator's `scan_library`, and a watcher event for a known file. A
+caller arriving while they run waits for them. Until both have succeeded, a file row an older
+version classified is not reclassified — it keeps its title and its version — while new and changed
+files are indexed as usual; a failed pass is logged, reported in an admin-log warning, and retried
+by the next caller. Reclassifying before the rekey would find no title by the file's new key,
+create one, and leave the enriched title with no file for orphan cleanup to retire. The new key is
 the one the title's present files derive, by the backfill's derivation; with no present file, the
 one all its file rows derive. A free key is written in place (`rekey`), so the title keeps its id,
 enrichment, genres, provider ids and manual match. A key another title holds means the current

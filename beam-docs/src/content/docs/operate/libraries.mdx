@@ -321,6 +321,10 @@ release's `Greys.Anatomy` group together since these rules). When two titles now
 name, they become one: the one matched to a provider (else the older) is kept, and the other's
 files and episodes join it. The admin Logs tab lists what was updated and merged.
 
+If Beam cannot work the grouping names out — the database refused, say — the admin Logs tab says
+so, and until it succeeds no file is reclassified: every title keeps its files and its provider
+match, while new files are indexed as usual. The next scan tries again.
+
 ## Multiple versions
 
 Movies are grouped by their **cleaned title and year** (and [edition](#movie-editions)). Index two

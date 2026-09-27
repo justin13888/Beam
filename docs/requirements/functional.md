@@ -155,7 +155,12 @@ strength. Each requirement is independently testable. See `product.md` for narra
   the classification rules (FR-204) that derived it; before a scan reclassifies any file, a key an
   older version derived MUST be re-derived from the title's files, in place (the title keeping its
   id and enrichment), and two titles the current rules key alike MUST be merged into one, keeping
-  the one a provider matched, else the older.
+  the one a provider matched, else the older. Every path that reclassifies -- the scan of every
+  library, the administrator's scan of one, a watcher event -- MUST first run the identity-key
+  backfill and re-derivation if they have not succeeded in the process, and while they have not
+  (they failed, and are retried by the next such path) MUST NOT reclassify a file an older version
+  classified, still indexing new and changed files; a failed pass MUST be reported through the
+  admin log.
 - **FR-215**: A movie or show with no present file MUST be excluded from browse and search as soon as
   its last file is soft-deleted (FR-211), while remaining resolvable by id; it MUST be deleted,
   with its enrichment state, only by a scan whose walk read the whole library and only once no file

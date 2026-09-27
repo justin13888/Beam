@@ -53,6 +53,20 @@ impl Harness {
     }
 
     async fn with_grace(grace: Duration) -> Self {
+        Self::with_grace_and_movies(grace, None).await
+    }
+
+    /// [`Self::purging_at_once`], with the service reading movies from
+    /// `movies` instead of the harness's in-memory repository -- to make a
+    /// movie read fail.
+    async fn purging_at_once_with_movies(movies: Arc<dyn MovieRepository>) -> Self {
+        Self::with_grace_and_movies(Duration::ZERO, Some(movies)).await
+    }
+
+    async fn with_grace_and_movies(
+        grace: Duration,
+        service_movies: Option<Arc<dyn MovieRepository>>,
+    ) -> Self {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("library");
         std::fs::create_dir_all(&root).unwrap();
@@ -100,7 +114,7 @@ impl Harness {
         let service = LocalIndexService::new(
             library_repo.clone(),
             file_repo.clone(),
-            movie_repo.clone(),
+            service_movies.unwrap_or_else(|| movie_repo.clone() as Arc<dyn MovieRepository>),
             show_repo.clone(),
             Arc::new(InMemoryMediaStreamRepository::default()),
             Arc::new(hasher),
@@ -130,6 +144,19 @@ impl Harness {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, rel.as_bytes()).unwrap();
         path
+    }
+
+    /// The rules version the file row at `rel` was classified by.
+    fn file_version(&self, rel: &str) -> u16 {
+        let path = self.root.join(rel);
+        self.file_repo
+            .files
+            .lock()
+            .unwrap()
+            .values()
+            .find(|f| f.path == path)
+            .expect("the file is indexed")
+            .classifier_version
     }
 
     fn remove(&self, rel: &str) {
@@ -865,12 +892,12 @@ async fn a_failed_backfill_does_not_hold_up_the_scan_and_is_retried() {
         "the scan ran despite the failed backfill"
     );
     assert!(
-        !*service.identity_backfill_done.lock().await,
+        !*service.identity_passes_succeeded.lock().await,
         "a failed backfill is not recorded as done"
     );
 
     service.scan_all_libraries().await.unwrap();
-    assert!(*service.identity_backfill_done.lock().await, "retried");
+    assert!(*service.identity_passes_succeeded.lock().await, "retried");
 
     service.scan_all_libraries().await.unwrap();
 }
@@ -1282,4 +1309,113 @@ async fn a_title_whose_files_name_two_titles_keeps_its_key_and_is_reported() {
         .await
         .expect("the administrator is told");
     assert_eq!(warning["ambiguous_movies"], serde_json::json!([merged]));
+}
+
+// ─── reclassification waits for the identity passes (issue #182) ────────────
+
+const GREYS: &str = "Grey's Anatomy/Season 1/Greys.Anatomy.S01E01.mkv";
+
+/// A show a build between #183 and #182 keyed `grey s anatomy|`, which a
+/// provider has matched since. Its file derives `greys anatomy|` now.
+async fn stale_enriched_greys(h: &Harness) -> Uuid {
+    let show = h
+        .keyed_show(
+            "Grey's Anatomy",
+            "grey s anatomy|",
+            &[GREYS],
+            chrono::Utc::now() - chrono::Duration::days(30),
+        )
+        .await;
+    h.enrich_show(show, 1416).await;
+    show
+}
+
+/// The stale show is untouched: reclassification was held.
+fn assert_held(h: &Harness, show: Uuid) {
+    let after = h.only_show();
+    assert_eq!(after.id, show, "the stale show is not retired");
+    assert_eq!(after.tmdb_id, Some(1416), "it keeps its enrichment");
+    assert_eq!(after.identity_key.as_deref(), Some("grey s anatomy|"));
+    assert_eq!(
+        h.season_one(show),
+        vec![(1, vec![GREYS.to_string()])],
+        "it keeps its file"
+    );
+    assert_eq!(h.file_version(GREYS), 0, "left for a later scan");
+}
+
+/// While the identity passes fail, no entry point -- the scan of every
+/// library, the administrator's scan of one, a watcher event --
+/// reclassifies a file older rules classified: moving it would find no title
+/// by its new key, create one, and retire the stale title with its
+/// enrichment. The first pass to succeed rekeys the title in place, and the
+/// scan then reclassifies the file onto it.
+#[tokio::test]
+async fn a_failed_rekey_pass_holds_reclassification_until_a_pass_succeeds() {
+    use beam_domain::repositories::movie::MockMovieRepository;
+
+    let mut movies = MockMovieRepository::new();
+    let mut attempts = mockall::Sequence::new();
+    movies.expect_find_unkeyed().returning(|| Ok(Vec::new()));
+    movies
+        .expect_find_keyed_before_version()
+        .times(3)
+        .in_sequence(&mut attempts)
+        .returning(|_| Err(DbErr::Custom("connection reset".to_string())));
+    movies
+        .expect_find_keyed_before_version()
+        .times(1)
+        .in_sequence(&mut attempts)
+        .returning(|_| Ok(Vec::new()));
+    movies.expect_delete_orphaned().returning(|_| Ok(0));
+    let h = Harness::purging_at_once_with_movies(Arc::new(movies)).await;
+    let show = stale_enriched_greys(&h).await;
+
+    h.service.scan_all_libraries().await.unwrap();
+    assert_held(&h, show);
+    h.scan().await;
+    assert_held(&h, show);
+    h.service
+        .reconcile_path(h.library.id, h.root.join(GREYS), FsEventKind::Modified)
+        .await
+        .unwrap();
+    assert_held(&h, show);
+    let warning = h
+        .admin_log_details("current naming rules")
+        .await
+        .expect("the administrator is told");
+    assert_eq!(warning["pass"], "re-derivation");
+
+    h.service.scan_all_libraries().await.unwrap();
+
+    let after = h.only_show();
+    assert_eq!(after.id, show, "the same show");
+    assert_eq!(after.tmdb_id, Some(1416), "with its enrichment");
+    assert_eq!(after.identity_key.as_deref(), Some("greys anatomy|"));
+    assert_eq!(h.season_one(show), vec![(1, vec![GREYS.to_string()])]);
+    assert_eq!(
+        h.file_version(GREYS),
+        CLASSIFIER_VERSION,
+        "now reclassified"
+    );
+}
+
+/// The administrator's scan of one library, arriving before any scan of
+/// every library, runs the identity passes itself before it reclassifies.
+#[tokio::test]
+async fn a_scan_of_one_library_rekeys_before_it_reclassifies() {
+    let h = Harness::purging_at_once().await;
+    let show = stale_enriched_greys(&h).await;
+
+    h.scan().await;
+
+    let after = h.only_show();
+    assert_eq!(after.id, show, "the same show");
+    assert_eq!(after.tmdb_id, Some(1416), "with its enrichment");
+    assert_eq!(after.identity_key.as_deref(), Some("greys anatomy|"));
+    assert_eq!(h.season_one(show), vec![(1, vec![GREYS.to_string()])]);
+    assert_eq!(h.file_version(GREYS), CLASSIFIER_VERSION);
+
+    h.service.scan_all_libraries().await.unwrap();
+    assert_eq!(h.only_show().id, show);
 }
