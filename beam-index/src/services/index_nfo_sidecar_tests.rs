@@ -1325,6 +1325,50 @@ async fn a_movie_nfo_never_overrides_a_videos_own_stem_nfo() {
     );
 }
 
+/// An NFO edited to an id another title holds is refused by the unique pin
+/// and not recorded as applied, so once that title lets the id go the next
+/// scan applies it.
+#[tokio::test]
+async fn an_nfo_whose_pin_another_title_holds_is_tried_again_until_it_applies() {
+    let h = Harness::new().await;
+    h.video("Heat/Heat.mkv");
+    h.write("Heat/Heat.nfo", &tmdb_movie(949));
+    h.video("Alien/Alien.mkv");
+    h.write("Alien/Alien.nfo", &tmdb_movie(348));
+    h.scan().await;
+    let applied_before = h.applied("Alien/Alien.nfo").await.expect("recorded");
+
+    h.write("Alien/Alien.nfo", &tmdb_movie(949));
+    h.scan().await;
+    assert_eq!(
+        h.movie_of("Alien/Alien.mkv").pinned_ref.as_deref(),
+        Some("tmdb:348"),
+        "Heat holds tmdb:949"
+    );
+    assert_eq!(
+        h.applied("Alien/Alien.nfo")
+            .await
+            .expect("still recorded")
+            .content_hash,
+        applied_before.content_hash,
+        "a refused NFO is not recorded as applied"
+    );
+
+    h.write("Heat/Heat.nfo", &tmdb_movie(1));
+    h.event("Heat/Heat.nfo", FsEventKind::Modified).await;
+    assert_eq!(
+        h.movie_of("Heat/Heat.mkv").pinned_ref.as_deref(),
+        Some("tmdb:1")
+    );
+    h.scan().await;
+
+    assert_eq!(
+        h.movie_of("Alien/Alien.mkv").pinned_ref.as_deref(),
+        Some("tmdb:949"),
+        "tried again, and applied once the id was free"
+    );
+}
+
 /// An edited `<stem>.nfo` re-pins the movie of its own video at the next
 /// scan.
 #[tokio::test]

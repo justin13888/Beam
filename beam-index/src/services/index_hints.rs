@@ -331,6 +331,18 @@ pub(super) enum PinConflict {
     Replace,
 }
 
+/// What became of an NFO's pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub(super) enum PinOutcome {
+    /// Settled: set, already in place, or decided against -- an
+    /// administrator's pin, or a conflict the administrator was told of.
+    Settled,
+    /// Refused by the unique pin: another title holds that id. The NFO is
+    /// not recorded as applied, so a later scan tries it again.
+    Refused,
+}
+
 impl LocalIndexService {
     /// Pin the title `target` -- currently pinned to `current` by
     /// `current_source`, matched to the ids `carried` -- to the NFO's `pin`.
@@ -348,10 +360,10 @@ impl LocalIndexService {
         pin: &ProviderPin,
         conflict: PinConflict,
         source: &Path,
-    ) -> Result<(), IndexError> {
+    ) -> Result<PinOutcome, IndexError> {
         let stored = pin.to_ref_string();
         match current {
-            Some(current) if current == stored => return Ok(()),
+            Some(current) if current == stored => return Ok(PinOutcome::Settled),
             Some(current) if current_source == Some(PinSource::Admin) => {
                 info!(
                     path = %source.display(),
@@ -359,7 +371,7 @@ impl LocalIndexService {
                     nfo = %stored,
                     "an administrator pinned this title; the NFO's pin is not applied"
                 );
-                return Ok(());
+                return Ok(PinOutcome::Settled);
             }
             Some(current) if conflict == PinConflict::Keep => {
                 warn!(
@@ -385,7 +397,7 @@ impl LocalIndexService {
                         })),
                     )
                     .await;
-                return Ok(());
+                return Ok(PinOutcome::Settled);
             }
             _ => {}
         }
@@ -404,20 +416,22 @@ impl LocalIndexService {
             ),
         };
         if !pinned {
+            // An administrator's pin was answered above, so this is the
+            // unique pin: another title holds the id. (Should an administrator
+            // have pinned this title meanwhile, the retry finds that above.)
             warn!(
                 path = %source.display(),
                 title = %id,
                 pin = %stored,
-                "another title is already pinned to this id, or an administrator pinned \
-                 this one; not pinned"
+                "another title is already pinned to this id; not pinned, tried again later"
             );
-            return Ok(());
+            return Ok(PinOutcome::Refused);
         }
         info!(path = %source.display(), title = %id, pin = %stored, "title pinned by its NFO");
         if !carried && let Some(enrichment_repo) = &self.enrichment_repo {
             enrichment_repo.request_refresh(target, true).await?;
         }
-        Ok(())
+        Ok(PinOutcome::Settled)
     }
 
     /// The movie a file is attached to: the one `pin` names, if one does,
@@ -449,16 +463,19 @@ impl LocalIndexService {
                 movie.tvdb_id,
                 movie.anilist_id,
             );
-            self.apply_pin(
-                EnrichmentTargetId::Movie(movie.id),
-                movie.pinned_ref.as_deref(),
-                movie.pin_source,
-                carried,
-                pin,
-                PinConflict::Keep,
-                source,
-            )
-            .await?;
+            // `find_by_pin` just found no other title holding the pin, so only
+            // a concurrent writer could have it refused here.
+            let _ = self
+                .apply_pin(
+                    EnrichmentTargetId::Movie(movie.id),
+                    movie.pinned_ref.as_deref(),
+                    movie.pin_source,
+                    carried,
+                    pin,
+                    PinConflict::Keep,
+                    source,
+                )
+                .await?;
         }
         Ok(movie)
     }
@@ -491,16 +508,18 @@ impl LocalIndexService {
                 show.tvdb_id,
                 show.anilist_id,
             );
-            self.apply_pin(
-                EnrichmentTargetId::Show(show.id),
-                show.pinned_ref.as_deref(),
-                show.pin_source,
-                carried,
-                pin,
-                PinConflict::Keep,
-                source,
-            )
-            .await?;
+            // As in `movie_for`: only a concurrent writer could refuse it.
+            let _ = self
+                .apply_pin(
+                    EnrichmentTargetId::Show(show.id),
+                    show.pinned_ref.as_deref(),
+                    show.pin_source,
+                    carried,
+                    pin,
+                    PinConflict::Keep,
+                    source,
+                )
+                .await?;
         }
         Ok(show)
     }
@@ -516,15 +535,17 @@ impl LocalIndexService {
     /// NFO's pin replaces the one it set before, but never an
     /// administrator's (FR-312). An NFO that pins nothing leaves the pin as
     /// it is: the title stays fetched by the id it was last given.
+    /// [`PinOutcome::Refused`] when the unique pin refused any of the titles.
     pub(super) async fn repin_from_nfo(
         &self,
         library: &Library,
         nfo_path: &Path,
         nfo: &Nfo,
         files: &[&MediaFile],
-    ) -> Result<(), IndexError> {
+    ) -> Result<PinOutcome, IndexError> {
+        let mut outcome = PinOutcome::Settled;
         let Some(pin) = nfo.ids.pin() else {
-            return Ok(());
+            return Ok(outcome);
         };
         let describes = |wanted: NfoKind| nfo.kind.is_none_or(|kind| kind == wanted);
         let root = library.root_path.as_path();
@@ -533,7 +554,7 @@ impl LocalIndexService {
         let mut targets: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
         if is_tvshow_nfo(nfo_path) {
             if !describes(NfoKind::TvShow) {
-                return Ok(());
+                return Ok(outcome);
             }
             // Every episode in one folder locates the same `tvshow.nfo`.
             let mut located_here: HashMap<&Path, bool> = HashMap::new();
@@ -568,22 +589,27 @@ impl LocalIndexService {
                     show.tvdb_id,
                     show.anilist_id,
                 );
-                self.apply_pin(
-                    EnrichmentTargetId::Show(show.id),
-                    show.pinned_ref.as_deref(),
-                    show.pin_source,
-                    carried,
-                    &pin,
-                    PinConflict::Replace,
-                    nfo_path,
-                )
-                .await?;
+                if self
+                    .apply_pin(
+                        EnrichmentTargetId::Show(show.id),
+                        show.pinned_ref.as_deref(),
+                        show.pin_source,
+                        carried,
+                        &pin,
+                        PinConflict::Replace,
+                        nfo_path,
+                    )
+                    .await?
+                    == PinOutcome::Refused
+                {
+                    outcome = PinOutcome::Refused;
+                }
             }
-            return Ok(());
+            return Ok(outcome);
         }
 
         if !describes(NfoKind::Movie) {
-            return Ok(());
+            return Ok(outcome);
         }
         for file in files {
             let Some(MediaFileContent::Movie { movie_entry_id }) = file.content else {
@@ -607,18 +633,23 @@ impl LocalIndexService {
                 movie.tvdb_id,
                 movie.anilist_id,
             );
-            self.apply_pin(
-                EnrichmentTargetId::Movie(movie.id),
-                movie.pinned_ref.as_deref(),
-                movie.pin_source,
-                carried,
-                &pin,
-                PinConflict::Replace,
-                nfo_path,
-            )
-            .await?;
+            if self
+                .apply_pin(
+                    EnrichmentTargetId::Movie(movie.id),
+                    movie.pinned_ref.as_deref(),
+                    movie.pin_source,
+                    carried,
+                    &pin,
+                    PinConflict::Replace,
+                    nfo_path,
+                )
+                .await?
+                == PinOutcome::Refused
+            {
+                outcome = PinOutcome::Refused;
+            }
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// Record, as applied, the NFOs classification just read for a file
@@ -661,7 +692,8 @@ impl LocalIndexService {
     /// Re-read the NFO at `path` -- whose record is `stored` -- and, when its
     /// content differs from what was last applied, re-apply it to those of
     /// `files` it describes; then record what it holds. An NFO that cannot be
-    /// read is neither applied nor recorded, so it is tried again.
+    /// read is neither applied nor recorded, so it is tried again; so is one
+    /// whose pin another title holds ([`PinOutcome::Refused`]).
     pub(super) async fn reapply_nfo(
         &self,
         library: &Library,
@@ -674,8 +706,9 @@ impl LocalIndexService {
         };
         if !stored.is_some_and(|stored| content.same_as(stored))
             && let Some(nfo) = &nfo
+            && self.repin_from_nfo(library, path, nfo, files).await? == PinOutcome::Refused
         {
-            self.repin_from_nfo(library, path, nfo, files).await?;
+            return Ok(());
         }
         if let Some(repo) = &self.applied_nfo_repo {
             let record = content.record(library.id, path, self.clock.now());

@@ -221,7 +221,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   re-applied MUST turn on its content alone: the size and content hash last applied are recorded
   per NFO (`applied_nfos`), so an NFO whose modification time is old (`cp -p`), skewed by another
   host's clock, or older than a scan that died is still applied, and one whose content did not
-  change is never applied again. A watcher event MUST read only the files beneath the NFO's
+  change is never applied again. An NFO whose pin is refused because another title already holds
+  that id MUST NOT be recorded as applied, so a later scan tries it again. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a
   symbolic link, FR-212 -- on Unix with `O_NOFOLLOW`) and at most 1 MiB of it; an NFO larger than that, not
   UTF-8, declaring a document type, or over 10 000 XML nodes MUST be ignored and the file
