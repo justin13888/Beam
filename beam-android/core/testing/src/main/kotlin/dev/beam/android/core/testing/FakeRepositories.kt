@@ -555,10 +555,9 @@ public class FakeAdminRepository : AdminRepository {
         failWith?.let { throw it }
     }
 
-    override suspend fun scanLibrary(libraryId: String): UInt {
+    override suspend fun scanLibrary(libraryId: String) {
         failWith?.let { throw it }
         scanCalls += libraryId
-        return 7u
     }
 
     override suspend fun refreshMetadata(mediaId: String) {

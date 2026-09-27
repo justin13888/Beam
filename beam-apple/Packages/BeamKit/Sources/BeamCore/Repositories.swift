@@ -115,8 +115,9 @@ public protocol AdminRepository: Sendable {
     func createLibrary(name: String, rootPath: String) async throws -> LibrarySummary
     /// Remove a library.
     func deleteLibrary(id libraryId: String) async throws
-    /// Scan a library, returning how many files were added.
-    func scanLibrary(id libraryId: String) async throws -> UInt32
+    /// Start a rescan of a library. Returns once the server has accepted it;
+    /// the scan itself runs on the server afterwards.
+    func scanLibrary(id libraryId: String) async throws
     /// Re-run enrichment for one title.
     func refreshMetadata(mediaId: String) async throws
     /// The server's own health report.
