@@ -95,7 +95,10 @@ pub mod in_memory {
                         files.movie += 1;
                         live_entries.insert(*movie_entry_id);
                     }
-                    Some(MediaFileContent::Episode { episode_id }) => {
+                    Some(MediaFileContent::Episode {
+                        episode_id,
+                        last_episode_number: _,
+                    }) => {
                         files.episode += 1;
                         live_episodes.insert(*episode_id);
                     }

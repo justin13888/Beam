@@ -60,9 +60,9 @@ Beam cannot start a sign-in flow.
 <Steps>
 1. The library path is the path **inside the container**. If you mounted `/srv/media` at
    `/videos`, use `/videos/...`.
-2. Check your files use an indexed extension — see
-   [Managing libraries](/operate/libraries/#which-files-get-indexed). `.iso` and `.vob` are not
-   indexed.
+2. Check your files use an indexed extension and are not skipped as hidden files, extras, samples
+   or by a `BEAM_SCAN_IGNORE` pattern — see
+   [Managing libraries](/operate/libraries/#which-files-get-indexed). `.iso` is not indexed.
 3. Check the server can read the directory.
 4. Look at the admin Logs tab for per-file failures.
 </Steps>
@@ -70,8 +70,8 @@ Beam cannot start a sign-in flow.
 ## Scan refused: library root is empty
 
 The rescan failed with "Library root contains no video files but video files are indexed". Beam
-found the library's directory but no video files Beam can index anywhere beneath it — no file with
-one of the [indexed extensions](/operate/libraries/#which-files-get-indexed) — while the catalogue
+found the library's directory but no video files anywhere beneath it — no file with one of the
+[indexed extensions](/operate/libraries/#which-files-get-indexed), not even a skipped sample (files inside a skipped folder, such as `Trailers/`, are not looked at) — while the catalogue
 still lists video files for that library. That is almost always a volume that is not mounted: an
 unmounted bind mount, dropped NFS or SMB share, or disk that failed to attach leaves its mount point
 behind empty, or holding only files such as `.not_mounted`, `.DS_Store` or `Thumbs.db`. Beam refuses
@@ -90,17 +90,43 @@ to reconcile rather than mark the library's whole catalogue missing. Nothing was
 
 ## My TV show is called "Season 01"
 
-Expected, and the most common layout mistake. A show's name comes from the episode file's
-immediate parent directory, so `Show Name/Season 01/episode.mkv` produces a show called
-"Season 01".
-
-Put episodes directly under a folder named after the show, then rescan. See
-[the layout guidance](/operate/libraries/#directory-layout-for-tv).
+Beam versions before the current path rules named a show after the episode's immediate folder, so
+`Show Name/Season 01/episode.mkv` made a show called "Season 01". The first scan after upgrading
+moves those episodes to *Show Name* and removes the "Season 01" show. If it is still there after a
+full scan, check the admin Logs tab for a scan that could not read part of the library: such a scan
+removes no titles. See [the layout guidance](/operate/libraries/#directory-layout-for-tv).
 
 ## My episodes are showing up as movies
 
-Beam recognises exactly one episode pattern: `SxxEyy`. Names using `1x02`, `Episode 2` or plain
-sequential numbering classify as movies. Rename to include an `SxxEyy` marker and rescan.
+Beam recognises `SxxEyy` (also `S01.E02`), `1x02`, air dates (`2024-03-01`) and — only where the
+layout makes it unambiguous — absolute numbers such as `Show - 012`. Names like `Episode 2` or
+`501` are read only inside a season folder; elsewhere they classify as movies. Rename to include an
+`SxxEyy` marker, or put the files in a season folder, and rescan. See
+[How Beam decides what a file is](/operate/libraries/#how-beam-decides-what-a-file-is).
+
+## An anime episode has no title
+
+A fansub name such as `[SubsPlease] Sousou no Frieren - 12 (1080p).mkv` is read as episode 12 only
+when a folder names the same show, or it sits in a season folder. In `Frieren (2023)/` — the folder
+spells the show differently — or at the top of a library, it is indexed without a title and the
+admin log names it ("no folder names the show"). Rename the folder to the name the files use, or
+put the files in a `Season 1` folder, and rescan.
+
+A fractional number such as `Show - 12.5.mkv` is a recap or special between two episodes, with no
+episode number of its own; it is always indexed without a title, and the admin log names it
+("numbered 12.5"). To have it listed, rename it as a special (`Show - S00E01.mkv`) and rescan.
+
+## A file in a season folder has no title
+
+A file inside a season folder (`Season 01`, `Specials`, ...) whose name has no episode number is
+indexed without a title, and the admin log names it ("has no episode number"). Beam does not guess:
+the folder says it is an episode, but not which one. Add an `SxxEyy` marker to its name, or move it
+out of the season folder (or into an `Extras` folder, which Beam skips), then rescan.
+
+A file in a folder that is only a range of seasons (`Season 1-2`, `Seasons 1 to 10`) needs a full
+`SxxEyy` marker: the range cannot say which season `Episode 1` belongs to. Such a file is indexed
+without a title and the admin log names it ("multi-season folder"). Add the marker, or move the file
+into its own `Season N` folder, then rescan.
 
 ## Two different films merged into one entry
 

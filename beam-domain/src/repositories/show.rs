@@ -34,10 +34,31 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// first (`created_at`, then `id`), so of two legacy duplicates the
     /// backfill keys the original.
     async fn find_unkeyed(&self) -> Result<Vec<Show>, DbErr>;
-    /// Give the keyless show `show_id` the key `identity_key`. Returns
-    /// `false`, changing nothing, when the show does not exist, already has a
-    /// key, or another show already holds `identity_key`.
-    async fn assign_identity_key(&self, show_id: Uuid, identity_key: &str) -> Result<bool, DbErr>;
+    /// Give the keyless show `show_id` the key `identity_key`, derived by
+    /// version `version` of the rules. Returns `false`, changing nothing, when
+    /// the show does not exist, already has a key, or another show already
+    /// holds `identity_key`.
+    async fn assign_identity_key(
+        &self,
+        show_id: Uuid,
+        identity_key: &str,
+        version: u16,
+    ) -> Result<bool, DbErr>;
+    /// The show keyed `identity_key`, if any.
+    async fn find_by_identity_key(&self, identity_key: &str) -> Result<Option<Show>, DbErr>;
+    /// Every keyed show whose key an older version of the rules than
+    /// `version` derived, oldest first -- see
+    /// [`crate::repositories::MovieRepository::find_keyed_before_version`].
+    async fn find_keyed_before_version(&self, version: u16) -> Result<Vec<Show>, DbErr>;
+    /// Replace the key of `show_id` with `identity_key` (`None`: keyless),
+    /// derived by version `version` of the rules, exactly as
+    /// [`crate::repositories::MovieRepository::rekey`] does for a movie.
+    async fn rekey(
+        &self,
+        show_id: Uuid,
+        identity_key: Option<String>,
+        version: u16,
+    ) -> Result<bool, DbErr>;
     /// Delete every episode created before `created_before` that no file row
     /// references, then every season left with no episode, then every show
     /// created before `created_before` left with no season, returning how many
@@ -71,7 +92,7 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     ///
     /// Atomic: concurrent calls for one pair all return the same row.
     async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
-    /// Reverse lookup from a `MediaFileContent::Episode { episode_id }` back
+    /// Reverse lookup from a `MediaFileContent::Episode { episode_id, .. }` back
     /// to the episode -- used together with `find_season_by_id` to resolve a
     /// file id to its show for continue-watching.
     async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr>;
@@ -115,6 +136,9 @@ pub mod in_memory {
         pub shows: Mutex<HashMap<Uuid, Show>>,
         pub seasons: Mutex<HashMap<Uuid, Season>>,
         pub episodes: Mutex<HashMap<Uuid, Episode>>,
+        /// The rules version behind each show's key; absent is `0`, as for
+        /// `InMemoryMovieRepository::key_versions`.
+        pub key_versions: Mutex<HashMap<Uuid, u16>>,
         files: Option<Arc<InMemoryFileRepository>>,
     }
 
@@ -139,7 +163,7 @@ pub mod in_memory {
                     .values()
                     .filter(|f| !present_only || f.missing_since.is_none())
                     .filter_map(|f| match &f.content {
-                        Some(MediaFileContent::Episode { episode_id }) => Some(*episode_id),
+                        Some(MediaFileContent::Episode { episode_id, .. }) => Some(*episode_id),
                         _ => None,
                     })
                     .collect(),
@@ -218,6 +242,7 @@ pub mod in_memory {
         async fn find_or_create_by_identity(&self, create: CreateShow) -> Result<Show, DbErr> {
             let CreateShow {
                 identity_key,
+                identity_key_version,
                 title,
                 year,
             } = create;
@@ -246,6 +271,10 @@ pub mod in_memory {
                 updated_at: chrono::Utc::now(),
             };
             shows.insert(show.id, show.clone());
+            self.key_versions
+                .lock()
+                .unwrap()
+                .insert(show.id, identity_key_version);
             Ok(show)
         }
 
@@ -266,6 +295,7 @@ pub mod in_memory {
             &self,
             show_id: Uuid,
             identity_key: &str,
+            version: u16,
         ) -> Result<bool, DbErr> {
             let mut shows = self.shows.lock().unwrap();
             if shows
@@ -277,10 +307,58 @@ pub mod in_memory {
             match shows.get_mut(&show_id) {
                 Some(show) if show.identity_key.is_none() => {
                     show.identity_key = Some(identity_key.to_string());
+                    self.key_versions.lock().unwrap().insert(show_id, version);
                     Ok(true)
                 }
                 _ => Ok(false),
             }
+        }
+
+        async fn find_by_identity_key(&self, identity_key: &str) -> Result<Option<Show>, DbErr> {
+            Ok(self
+                .shows
+                .lock()
+                .unwrap()
+                .values()
+                .find(|s| s.identity_key.as_deref() == Some(identity_key))
+                .cloned())
+        }
+
+        async fn find_keyed_before_version(&self, version: u16) -> Result<Vec<Show>, DbErr> {
+            // `shows` before `key_versions`, the order every method takes
+            // them in, so no two calls can deadlock.
+            let shows = self.shows.lock().unwrap();
+            let versions = self.key_versions.lock().unwrap();
+            let mut stale: Vec<_> = shows
+                .values()
+                .filter(|s| s.identity_key.is_some())
+                .filter(|s| versions.get(&s.id).copied().unwrap_or(0) < version)
+                .cloned()
+                .collect();
+            stale.sort_by_key(|s| (s.created_at, s.id));
+            Ok(stale)
+        }
+
+        async fn rekey(
+            &self,
+            show_id: Uuid,
+            identity_key: Option<String>,
+            version: u16,
+        ) -> Result<bool, DbErr> {
+            let mut shows = self.shows.lock().unwrap();
+            if let Some(key) = identity_key.as_deref()
+                && shows
+                    .values()
+                    .any(|s| s.id != show_id && s.identity_key.as_deref() == Some(key))
+            {
+                return Ok(false);
+            }
+            let Some(show) = shows.get_mut(&show_id) else {
+                return Ok(false);
+            };
+            show.identity_key = identity_key;
+            self.key_versions.lock().unwrap().insert(show_id, version);
+            Ok(true)
         }
 
         async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
@@ -368,6 +446,7 @@ pub mod in_memory {
                 episode_number,
                 title,
                 runtime,
+                air_date,
             } = create;
             // Lookup and insert under one lock, so the double is as atomic as
             // the `ON CONFLICT` statement it stands in for.
@@ -384,7 +463,7 @@ pub mod in_memory {
                 episode_number,
                 title,
                 description: None,
-                air_date: None,
+                air_date: air_date.map(|d| d.to_string()),
                 runtime,
                 thumbnail_url: None,
                 created_at: chrono::Utc::now(),

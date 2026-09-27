@@ -48,6 +48,26 @@ pub fn check_cookie_security(config: &ServerConfig) -> Result<StartupGate, Strin
     }
 }
 
+/// Environment variables Beam no longer reads, and what replaced each.
+const RETIRED_ENV_VARS: &[(&str, &str)] = &[(
+    "BEAM_HASH_UNKNOWN_FILES",
+    "only video files are indexed now, and every one of them is hashed; \
+     subtitles, artwork and other files are no longer given rows (issue #182)",
+)];
+
+/// A warning for each retired variable `is_set` reports as still set, so an
+/// operator whose deployment still sets one learns it does nothing rather than
+/// assuming it still takes effect. Never fatal: the variable is harmless.
+pub fn retired_env_warnings(is_set: impl Fn(&str) -> bool) -> Vec<String> {
+    RETIRED_ENV_VARS
+        .iter()
+        .filter(|(name, _)| is_set(name))
+        .map(|(name, replacement)| {
+            format!("{name} is set but no longer has any effect: {replacement}")
+        })
+        .collect()
+}
+
 /// The CORS policy every `/v1` response passes through.
 ///
 /// The origin is mirrored rather than allow-listed, and credentials are

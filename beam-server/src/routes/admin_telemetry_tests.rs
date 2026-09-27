@@ -65,7 +65,7 @@ async fn seeded_store() -> InMemoryLibraryShapeRepository {
         .unwrap();
     let entry = store
         .movies
-        .create_entry(CreateMovieEntry {
+        .find_or_create_entry(CreateMovieEntry {
             library_id: library.id,
             movie_id: movie.id,
             edition: None,
@@ -88,6 +88,7 @@ async fn seeded_store() -> InMemoryLibraryShapeRepository {
                 movie_entry_id: entry.id,
             }),
             status: FileStatus::Known,
+            classifier_version: 0,
         })
         .await
         .unwrap();

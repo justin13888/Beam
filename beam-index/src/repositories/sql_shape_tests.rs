@@ -761,6 +761,7 @@ mod show {
                 episode_number: 7,
                 title: "Seven".to_string(),
                 runtime: None,
+                air_date: None,
             })
             .await;
         drop(repo);
@@ -783,6 +784,55 @@ mod show {
     }
 }
 
+mod movie_entry {
+    use super::*;
+    use beam_domain::models::CreateMovieEntry;
+    use beam_domain::repositories::MovieRepository;
+
+    use crate::repositories::SqlMovieRepository;
+
+    /// One entry per `(library, movie, edition)` (issue #182): the insert
+    /// targets the whole triple -- the `NULLS NOT DISTINCT` index, so a second
+    /// default-edition copy conflicts -- and the read-back matches a missing
+    /// edition with `IS NULL`, since `= NULL` matches nothing.
+    #[tokio::test]
+    async fn find_or_create_entry_inserts_with_do_nothing_on_the_triple_then_reads_it() {
+        for edition in [None, Some("Director's Cut")] {
+            let db = connection(empty_mock());
+            let repo = SqlMovieRepository::new(db.clone());
+            let library = Uuid::from_u128(91);
+            let movie = Uuid::from_u128(92);
+            let _ = repo
+                .find_or_create_entry(CreateMovieEntry {
+                    library_id: library,
+                    movie_id: movie,
+                    edition: edition.map(str::to_string),
+                    is_primary: true,
+                })
+                .await;
+            drop(repo);
+
+            let sql = statements(db);
+            assert_eq!(sql.len(), 2, "one insert, one read-back: {sql:?}");
+            assert_contains(
+                &sql[0],
+                r#"ON CONFLICT ("library_id", "movie_id", "edition") DO NOTHING"#,
+            );
+            assert_filters(&sql[1], "movie_entries", "library_id", "=");
+            assert_filters(&sql[1], "movie_entries", "movie_id", "=");
+            assert_bound(&sql[1], &library.to_string());
+            assert_bound(&sql[1], &movie.to_string());
+            match edition {
+                Some(edition) => {
+                    assert_filters(&sql[1], "movie_entries", "edition", "=");
+                    assert_bound(&sql[1], edition);
+                }
+                None => assert_filters(&sql[1], "movie_entries", "edition", "IS NULL"),
+            }
+        }
+    }
+}
+
 /// Title identity and liveness (issue #183), for movies and shows alike.
 mod title_identity {
     use super::*;
@@ -798,6 +848,7 @@ mod title_identity {
             id: Uuid::from_u128(81),
             title: "Amelie".to_string(),
             identity_key: Some("amelie|2001".to_string()),
+            identity_key_version: 1,
             title_localized: None,
             description: None,
             year: Some(2001),
@@ -822,6 +873,7 @@ mod title_identity {
             id: Uuid::from_u128(82),
             title: "Shogun".to_string(),
             identity_key: Some("shogun|".to_string()),
+            identity_key_version: 1,
             title_localized: None,
             description: None,
             year: None,
@@ -963,11 +1015,11 @@ mod title_identity {
         let db = connection(empty_mock());
         let movies = SqlMovieRepository::new(db.clone());
         let _ = movies
-            .assign_identity_key(Uuid::from_u128(83), "dune|1984")
+            .assign_identity_key(Uuid::from_u128(83), "dune|1984", 7)
             .await;
         let shows = SqlShowRepository::new(db.clone());
         let _ = shows
-            .assign_identity_key(Uuid::from_u128(84), "shogun|")
+            .assign_identity_key(Uuid::from_u128(84), "shogun|", 7)
             .await;
         drop((movies, shows));
 
@@ -981,6 +1033,105 @@ mod title_identity {
             assert_bound(statement, &id.to_string());
             assert_filters(statement, table, "identity_key", "IS NULL");
             assert_contains(statement, "NOT EXISTS");
+            assert_bound(statement, key);
+            assert_contains(statement, r#""identity_key_version" = $2"#);
+            assert_eq!(bound_values(statement)[1], "SmallInt(Some(7))");
+        }
+    }
+
+    /// A rekey replaces the key and its version on the one row, refusing a
+    /// key another row -- not the row itself -- holds; releasing a key needs
+    /// no such check.
+    #[tokio::test]
+    async fn rekey_updates_one_row_and_checks_only_other_rows_for_the_key() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies
+            .rekey(Uuid::from_u128(85), Some("greys anatomy|".to_string()), 7)
+            .await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows
+            .rekey(
+                Uuid::from_u128(86),
+                Some("oceans eleven|2001".to_string()),
+                7,
+            )
+            .await;
+        let _ = shows.rekey(Uuid::from_u128(87), None, 7).await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        for (statement, table, id, key) in [
+            (&sql[0], "movies", Uuid::from_u128(85), "greys anatomy|"),
+            (&sql[1], "shows", Uuid::from_u128(86), "oceans eleven|2001"),
+        ] {
+            assert!(statement.sql.starts_with("UPDATE"), "{}", statement.sql);
+            assert_contains(statement, r#""identity_key" = $1"#);
+            assert_contains(statement, r#""identity_key_version" = $2"#);
+            assert_filters(statement, table, "id", "=");
+            assert_contains(statement, "NOT EXISTS");
+            assert_contains(statement, r#""other"."identity_key" = "#);
+            assert_contains(statement, r#""other"."id" <> "#);
+            let values = bound_values(statement);
+            assert!(values[0].contains(key), "{values:?}");
+            assert_eq!(values[1], "SmallInt(Some(7))");
+            assert_eq!(
+                values
+                    .iter()
+                    .filter(|v| v.contains(&id.to_string()))
+                    .count(),
+                2,
+                "the row updated, and the row excluded from the clash check: {values:?}"
+            );
+        }
+        let release = &sql[2];
+        assert_filters(release, "shows", "id", "=");
+        assert!(
+            !release.sql.contains("NOT EXISTS"),
+            "releasing a key clashes with nothing: {}",
+            release.sql
+        );
+    }
+
+    /// The rekey pass reads keyed titles whose key older rules derived,
+    /// oldest first, never a keyless one.
+    #[tokio::test]
+    async fn find_keyed_before_version_reads_stale_keys_oldest_first() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies.find_keyed_before_version(7).await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows.find_keyed_before_version(7).await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        for (statement, table) in [(&sql[0], "movies"), (&sql[1], "shows")] {
+            assert_filters(statement, table, "identity_key", "IS NOT NULL");
+            assert_filters(statement, table, "identity_key_version", "<");
+            assert_eq!(bound_values(statement), vec!["SmallInt(Some(7))"]);
+            assert_contains(
+                statement,
+                &format!(r#"ORDER BY "{table}"."created_at" ASC, "{table}"."id" ASC"#),
+            );
+        }
+    }
+
+    /// A lookup by key binds the key to the key column, never the title.
+    #[tokio::test]
+    async fn find_by_identity_key_filters_on_the_key() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies.find_by_identity_key("heat|1995").await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows.find_by_identity_key("the wire|").await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        for (statement, table, key) in [
+            (&sql[0], "movies", "heat|1995"),
+            (&sql[1], "shows", "the wire|"),
+        ] {
+            assert_filters(statement, table, "identity_key", "=");
             assert_bound(statement, key);
         }
     }

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use serde_json;
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -17,22 +17,25 @@ use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use crate::services::watcher::FsEventKind;
+use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
-    CreateMediaFile, FileStatus, MediaFile, MediaFileContent, UpdateMediaFile,
+    CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent, UpdateMediaFile,
 };
+use beam_domain::models::movie::{CreateMovieEntry, MovieEntry};
+use beam_domain::models::show::{CreateEpisode, Episode};
 use beam_domain::repositories::{
     EnrichmentStateRepository, FileRepository, LibraryRepository, MediaStreamRepository,
     MovieRepository, ShowRepository,
 };
 use beam_domain::services::{Clock, RealClock};
+use beam_domain::utils::filename::{ParsedFilename, parse_media_filename};
 use beam_domain::utils::identity::title_identity_key;
-
-// TODO: See if these can be improved. Ensure logic can detect all of them properly
-const KNOWN_VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "m2ts", "flv", "wmv", "3gp", "ogv", "mpg",
-    "mpeg",
-];
+use beam_domain::utils::media_path::{
+    CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, UnclassifiableReason,
+    infer_media, season_folder_number,
+};
+use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path};
 
 /// Read the size and modification time of a file in a single stat call.
 fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
@@ -46,12 +49,19 @@ fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
 /// A named result rather than a bare `Vec` so the walk can report more than
 /// the files it reached without changing its call site.
 struct WalkOutcome {
-    /// Every regular file under the root, in walk order. Non-video files are
-    /// included: the scan indexes them as `Unknown`.
+    /// Every file under the root the [`PathPolicy`] calls media, in walk
+    /// order -- the files the scan indexes.
     files: Vec<PathBuf>,
-    /// How many of `files` have a known video extension -- the files Beam can
-    /// index as media, and so the ones the empty-root guard counts.
-    video_files: usize,
+    /// How many regular files with a video extension the walk saw, *before*
+    /// the policy excluded any: the empty-root guard counts these. A root
+    /// holding only samples or extras is a mounted root with nothing to
+    /// index, not an unmounted one, so the files the policy keeps out still
+    /// count here. What the walk never descends into (a hidden or housekeeping
+    /// folder, an extras folder, an ignored directory) is not counted.
+    video_files_seen: usize,
+    /// How many regular files the policy excluded (hidden, extras, samples,
+    /// ignore patterns). Reported in the scan's summary.
+    excluded: usize,
     /// Every path the walk failed to read: a directory it could not list, or
     /// a listed entry it could not stat for any reason other than "not
     /// found". The walk says nothing about what is beneath one of these, so an
@@ -77,11 +87,24 @@ struct WalkOutcome {
 /// the containment check library creation makes -- and, for a directory,
 /// risk a cycle. The root itself may be a link; only what is beneath it is
 /// held to this.
-fn walk_library_root(root: &Path) -> WalkOutcome {
+///
+/// A directory `policy` excludes wholesale is not descended into (issue
+/// #182); a file it does not call media is not collected.
+fn walk_library_root(root: &Path, policy: &PathPolicy) -> WalkOutcome {
     let mut files: Vec<PathBuf> = Vec::new();
+    let mut video_files_seen = 0usize;
+    let mut excluded = 0usize;
     let mut failed_subtrees: Vec<PathBuf> = Vec::new();
     let mut unscoped_failure = false;
-    for entry in WalkDir::new(root).follow_links(false) {
+    let walk = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            !(entry.depth() > 0
+                && entry.file_type().is_dir()
+                && policy.excludes_directory(relative_to(root, entry.path())))
+        });
+    for entry in walk {
         match entry {
             Ok(entry) => {
                 // A directory is descended by the walk itself, which reports
@@ -101,8 +124,16 @@ fn walk_library_root(root: &Path) -> WalkOutcome {
                 // #179).
                 match std::fs::symlink_metadata(&path) {
                     Ok(meta) => {
-                        if meta.is_file() {
-                            files.push(path);
+                        if !meta.is_file() {
+                            continue;
+                        }
+                        if is_video_path(&path) {
+                            video_files_seen += 1;
+                        }
+                        match policy.disposition(relative_to(root, &path)) {
+                            PathDisposition::Media => files.push(path),
+                            PathDisposition::Excluded(_) => excluded += 1,
+                            PathDisposition::Sidecar | PathDisposition::Ignored => {}
                         }
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -124,10 +155,10 @@ fn walk_library_root(root: &Path) -> WalkOutcome {
             },
         }
     }
-    let video_files = files.iter().filter(|path| is_known_video(path)).count();
     WalkOutcome {
         files,
-        video_files,
+        video_files_seen,
+        excluded,
         failed_subtrees,
         unscoped_failure,
     }
@@ -199,12 +230,11 @@ const MAX_REPORTED_FAILED_PATHS: usize = 50;
 /// caller sets it with [`LocalIndexService::with_missing_file_grace`].
 pub const DEFAULT_MISSING_FILE_GRACE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// Whether a path has a recognised video file extension.
-fn is_known_video(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .is_some_and(|e| KNOWN_VIDEO_EXTENSIONS.contains(&e.as_str()))
+/// `path` relative to the library `root` -- what the path policy and path
+/// inference read. A path outside the root (never produced by the walk) is
+/// returned whole.
+fn relative_to<'a>(root: &Path, path: &'a Path) -> &'a Path {
+    path.strip_prefix(root).unwrap_or(path)
 }
 
 /// What [`LocalIndexService::backfill_identity_keys`] did: how many legacy
@@ -220,93 +250,118 @@ struct IdentityBackfill {
     clashing_shows: Vec<Uuid>,
 }
 
-/// What a media file's path alone says it is: the parse classification
-/// matches it to a title by, before any row exists.
+/// What [`LocalIndexService::rekey_stale_titles`] did.
+#[derive(Debug, Default)]
+struct IdentityRekey {
+    /// Titles whose key changed in place.
+    rekeyed: u64,
+    /// `(kept, retired)`: titles merged because the current rules read them
+    /// as one.
+    merged_movies: Vec<(Uuid, Uuid)>,
+    merged_shows: Vec<(Uuid, Uuid)>,
+    /// Titles whose files derive more than one key, which keep their old one.
+    ambiguous_movies: Vec<Uuid>,
+    ambiguous_shows: Vec<Uuid>,
+}
+
+/// The one key `rows` derive through `key_of`: from the present files when
+/// any derives one, else from every row. `None` when they derive none, or
+/// more than one.
+fn derived_key(
+    rows: &[&(MediaFile, MediaInference)],
+    key_of: fn(&MediaInference) -> Option<String>,
+) -> Option<String> {
+    let keys = |present_only: bool| {
+        rows.iter()
+            .filter(|(file, _)| !present_only || file.missing_since.is_none())
+            .filter_map(|(_, inferred)| key_of(inferred))
+            .collect::<std::collections::BTreeSet<String>>()
+    };
+    let mut keys = match keys(true) {
+        present if present.is_empty() => keys(false),
+        present => present,
+    };
+    match keys.len() {
+        1 => keys.pop_first(),
+        _ => None,
+    }
+}
+
+/// Whether a provider has matched the title: enrichment, genres and a manual
+/// match hang off such a title, so of two titles merged it is the one kept.
+fn has_provider_ids(
+    tmdb_id: Option<u32>,
+    imdb_id: &Option<String>,
+    tvdb_id: Option<u32>,
+    anilist_id: Option<u32>,
+) -> bool {
+    tmdb_id.is_some() || imdb_id.is_some() || tvdb_id.is_some() || anilist_id.is_some()
+}
+
+/// Whether title `a` survives a merge with title `b`: the one with provider
+/// ids, else the older (`created_at`, then `id`).
+fn survives(
+    a: (&DateTime<Utc>, &Uuid),
+    a_matched: bool,
+    b: (&DateTime<Utc>, &Uuid),
+    b_matched: bool,
+) -> bool {
+    match (a_matched, b_matched) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => a <= b,
+    }
+}
+
+/// The identity key of the movie a file's path names, if it names one.
 ///
-/// Pure, so the identity-key backfill derives a legacy title's key from its
-/// files' paths with exactly the function that keys new titles.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PathIdentity {
-    /// An `SxxEyy` file. The show is identified by its series folder -- the
-    /// parent directory's parse -- not by anything in the filename.
-    Episode {
-        show_title: String,
-        show_year: Option<u32>,
-        season: u32,
-        episode: u32,
-        episode_title: String,
-    },
-    /// Anything else: a movie identified by its filename's title and year.
-    Movie { title: String, year: Option<u32> },
-}
-
-impl PathIdentity {
-    /// The identity key of the movie this path belongs to, if it is a movie.
-    fn movie_key(&self) -> Option<String> {
-        match self {
-            PathIdentity::Movie { title, year } => Some(title_identity_key(title, *year)),
-            PathIdentity::Episode { .. } => None,
-        }
-    }
-
-    /// The identity key of the show this path belongs to, if it is an episode.
-    fn show_key(&self) -> Option<String> {
-        match self {
-            PathIdentity::Episode {
-                show_title,
-                show_year,
-                ..
-            } => Some(title_identity_key(show_title, *show_year)),
-            PathIdentity::Movie { .. } => None,
-        }
+/// Used by the identity-key backfill. It is the key classification gives a
+/// new title -- `TitleGuess::identity_key` and `CreateMovie::new` /
+/// `CreateShow::new` both apply `title_identity_key` to the same inferred
+/// title and year -- so a legacy title is keyed from its files' paths exactly
+/// as a new one would be.
+fn movie_key(inference: &MediaInference) -> Option<String> {
+    match inference {
+        MediaInference::Movie(movie) => Some(movie.title.identity_key()),
+        MediaInference::Episode(_) | MediaInference::Unclassifiable(_) => None,
     }
 }
 
-fn identify_path(path: &Path) -> PathIdentity {
-    use beam_domain::utils::filename::parse_media_filename;
+/// The identity key of the show a file's path names, if it is an episode.
+fn show_key(inference: &MediaInference) -> Option<String> {
+    match inference {
+        MediaInference::Episode(episode) => Some(episode.series.identity_key()),
+        MediaInference::Movie(_) | MediaInference::Unclassifiable(_) => None,
+    }
+}
 
-    let file_stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy())
+/// Whether a show identity key names a season folder (`season 05|`): the
+/// key of a husk, the show a build before issue #182 named after the season
+/// folder its episodes sat in. Read from a key, never from the display
+/// title, which enrichment rewrites.
+fn is_season_folder_husk_key(key: &str) -> bool {
+    let title = key.split_once('|').map_or(key, |(title, _)| title);
+    season_folder_number(title).is_some()
+}
+
+/// Whether `file` was classified by older rules and is to be reclassified:
+/// a probed row below [`CLASSIFIER_VERSION`]. An unprobed row -- its probe
+/// failed -- was never classified, so there is nothing to reclassify.
+fn awaits_reclassification(file: &MediaFile) -> bool {
+    let probed = file.content.is_some() || file.duration.is_some();
+    file.classifier_version < CLASSIFIER_VERSION && probed
+}
+
+/// The key a build before issue #182 derived for the show of the episode at
+/// `path`: its parent folder's parse, whatever that folder was.
+fn legacy_show_key(path: &Path) -> String {
+    let folder = path
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy())
         .unwrap_or_default();
-    let parsed = parse_media_filename(&file_stem);
-
-    if let (Some(season), Some(episode)) = (parsed.season, parsed.episode) {
-        // Show title/year guess: parent directory name, parsed the same way.
-        let dir_name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let parsed_show = parse_media_filename(&dir_name);
-        let show_title = if parsed_show.title.is_empty() {
-            "Unknown Show".to_string()
-        } else {
-            parsed_show.title
-        };
-        let episode_title = if parsed.title.is_empty() {
-            file_stem.to_string()
-        } else {
-            parsed.title
-        };
-        PathIdentity::Episode {
-            show_title,
-            show_year: parsed_show.year,
-            season,
-            episode,
-            episode_title,
-        }
-    } else {
-        let title = if parsed.title.is_empty() {
-            file_stem.to_string()
-        } else {
-            parsed.title
-        };
-        PathIdentity::Movie {
-            title,
-            year: parsed.year,
-        }
-    }
+    let ParsedFilename { title, year, .. } = parse_media_filename(&folder);
+    title_identity_key(&title, year)
 }
 
 /// Records one processed-file outcome on the
@@ -399,16 +454,19 @@ pub struct LocalIndexService {
     media_info_service: Arc<dyn MediaInfoService>,
     notification_service: Arc<dyn NotificationService>,
     admin_log: Arc<dyn AdminLogService>,
-    hash_unknown_files: bool,
+    path_policy: PathPolicy,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
     divergence_policy: DivergencePolicy,
     clock: Arc<dyn Clock>,
     missing_file_grace: Duration,
-    /// Whether [`LocalIndexService::backfill_identity_keys`] has completed in
-    /// this process. A lock rather than a flag so two overlapping
-    /// `scan_all_libraries` calls cannot both backfill and report each
-    /// other's keys as clashes.
-    identity_backfill_done: tokio::sync::Mutex<bool>,
+    /// Whether [`LocalIndexService::backfill_identity_keys`] and then
+    /// [`LocalIndexService::rekey_stale_titles`] have both succeeded in this
+    /// process; until they have, no file classified by older rules is
+    /// reclassified. A lock rather than a flag so two overlapping scans
+    /// cannot both run the passes and report each other's keys as clashes,
+    /// and so a scan or watcher event that arrives while the passes run waits
+    /// for their outcome.
+    identity_passes_succeeded: tokio::sync::Mutex<bool>,
 }
 
 impl LocalIndexService {
@@ -434,12 +492,12 @@ impl LocalIndexService {
             media_info_service,
             notification_service,
             admin_log,
-            hash_unknown_files: true,
+            path_policy: PathPolicy::default(),
             enrichment_repo: None,
             divergence_policy: DivergencePolicy::default(),
             clock: Arc::new(RealClock),
             missing_file_grace: DEFAULT_MISSING_FILE_GRACE,
-            identity_backfill_done: tokio::sync::Mutex::new(false),
+            identity_passes_succeeded: tokio::sync::Mutex::new(false),
         }
     }
 
@@ -467,10 +525,12 @@ impl LocalIndexService {
         self
     }
 
-    /// Override whether files with unknown extensions are hashed for duplicate
-    /// detection. Defaults to `true`.
-    pub fn with_hash_unknown_files(mut self, value: bool) -> Self {
-        self.hash_unknown_files = value;
+    /// Override which paths under a library root are indexed -- to add an
+    /// administrator's ignore patterns (issue #182). Defaults to
+    /// [`PathPolicy::default`]: video files, less hidden files, housekeeping
+    /// folders and extras.
+    pub fn with_path_policy(mut self, policy: PathPolicy) -> Self {
+        self.path_policy = policy;
         self
     }
 
@@ -564,37 +624,51 @@ impl LocalIndexService {
         Ok(count)
     }
 
-    /// Classify media content (Movie vs Episode) using the scene-filename
-    /// parser, finding or creating the title by its identity key.
+    /// Classify a file from its path relative to `library.root_path`,
+    /// finding or creating its movie or show by identity key (issue #182).
+    ///
+    /// `None` when the path says the file is media but not which: an episode
+    /// file with no episode number in a season folder. Such a file is kept as
+    /// an `Unknown` row with no content, and the administrator is told.
     async fn classify_media_content(
         &self,
         path: &Path,
-        lib_uuid: Uuid,
-        duration: Duration,
-    ) -> Result<MediaFileContent, IndexError> {
-        use beam_domain::models::{
-            CreateEpisode, CreateMovie, CreateMovieEntry, CreateShow, MediaFileContent,
-        };
+        library: &Library,
+        runtime: Option<Duration>,
+    ) -> Result<Option<MediaFileContent>, IndexError> {
+        use beam_domain::models::{CreateEpisode, CreateMovie, CreateMovieEntry, CreateShow};
 
-        match identify_path(path) {
-            PathIdentity::Episode {
-                show_title,
-                show_year,
+        match infer_media(relative_to(&library.root_path, path)) {
+            MediaInference::Episode(EpisodeInference {
+                series,
                 season: season_num,
-                episode: episode_num,
+                first_episode,
+                last_episode,
+                air_date,
                 episode_title,
-            } => {
+                numbering: _,
+                contradicted_season_folder,
+            }) => {
+                if let Some(folder) = contradicted_season_folder {
+                    warn!(
+                        path = %path.display(),
+                        folder_season = folder,
+                        file_season = season_num,
+                        "the filename names a different season than its season folder; \
+                         the filename wins"
+                    );
+                }
                 // One `ON CONFLICT` statement on the show's identity key: the
                 // show is found however enrichment has since renamed it, and
                 // two episodes of a new show indexed at once share one row.
                 let show = self
                     .show_repo
-                    .find_or_create_by_identity(CreateShow::new(show_title, show_year))
+                    .find_or_create_by_identity(CreateShow::new(series.title, series.year))
                     .await?;
 
                 // Ensure library-show association exists
                 self.show_repo
-                    .ensure_library_association(lib_uuid, show.id)
+                    .ensure_library_association(library.id, show.id)
                     .await?;
 
                 if let Some(enrichment_repo) = &self.enrichment_repo {
@@ -605,7 +679,6 @@ impl LocalIndexService {
                         .await?;
                 }
 
-                // Find or create season
                 let season = self
                     .show_repo
                     .find_or_create_season(show.id, season_num)
@@ -615,33 +688,37 @@ impl LocalIndexService {
                 // (season, episode) -- another resolution, another encode --
                 // attaches to the existing episode as another source rather
                 // than colliding with it; the episode's title and runtime stay
-                // those the first file (or enrichment since) established.
+                // those the first file (or enrichment since) established. A
+                // multi-episode file attaches to its first episode and carries
+                // the rest of its range itself.
                 let create_episode = CreateEpisode {
                     season_id: season.id,
-                    episode_number: episode_num,
-                    title: episode_title,
-                    runtime: Some(duration),
+                    episode_number: first_episode,
+                    title: episode_title.unwrap_or_else(|| format!("Episode {first_episode}")),
+                    runtime,
+                    air_date,
                 };
                 let episode = self
                     .show_repo
                     .find_or_create_episode(create_episode)
                     .await?;
 
-                Ok(MediaFileContent::Episode {
+                Ok(Some(MediaFileContent::Episode {
                     episode_id: episode.id,
-                })
+                    last_episode_number: last_episode,
+                }))
             }
-            PathIdentity::Movie { title, year } => {
+            MediaInference::Movie(MovieInference { title, edition }) => {
                 // Found by identity key, never by display title: enrichment
                 // may have renamed the movie since its first file (#183).
                 let movie = self
                     .movie_repo
-                    .find_or_create_by_identity(CreateMovie::new(title, year, Some(duration)))
+                    .find_or_create_by_identity(CreateMovie::new(title.title, title.year, runtime))
                     .await?;
 
                 // Ensure library-movie association exists
                 self.movie_repo
-                    .ensure_library_association(lib_uuid, movie.id)
+                    .ensure_library_association(library.id, movie.id)
                     .await?;
 
                 if let Some(enrichment_repo) = &self.enrichment_repo {
@@ -652,24 +729,164 @@ impl LocalIndexService {
                         .await?;
                 }
 
-                // Create movie entry
-                let create_entry = CreateMovieEntry {
-                    library_id: lib_uuid,
-                    movie_id: movie.id,
-                    edition: None,
-                    is_primary: true,
-                };
-                let entry = self.movie_repo.create_entry(create_entry).await?;
+                // One entry per edition of the film in this library: every
+                // copy of the same edition is another file of that entry.
+                let entry = self
+                    .movie_repo
+                    .find_or_create_entry(CreateMovieEntry {
+                        library_id: library.id,
+                        movie_id: movie.id,
+                        edition,
+                        is_primary: true,
+                    })
+                    .await?;
 
-                Ok(MediaFileContent::Movie {
+                Ok(Some(MediaFileContent::Movie {
                     movie_entry_id: entry.id,
-                })
+                }))
+            }
+            MediaInference::Unclassifiable(reason) => {
+                self.report_unclassifiable(library, path, reason).await;
+                Ok(None)
             }
         }
     }
 
-    /// Process a NEW file to add it to the library.
-    async fn process_new_file(&self, path: &Path, lib_uuid: Uuid) -> Result<bool, IndexError> {
+    /// Tell the administrator a file was indexed without a title, and why.
+    async fn report_unclassifiable(
+        &self,
+        library: &Library,
+        path: &Path,
+        reason: UnclassifiableReason,
+    ) {
+        let (message, details) = match reason {
+            UnclassifiableReason::NoEpisodeNumberInSeasonFolder { season } => {
+                warn!(
+                    path = %path.display(),
+                    season,
+                    "a file in a season folder has no episode number; indexed without a title"
+                );
+                (
+                    format!(
+                        "A file in a season folder of \"{}\" has no episode number, so it was \
+                         indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "season_folder": season }),
+                )
+            }
+            UnclassifiableReason::AmbiguousAbsoluteNumber { number } => {
+                warn!(
+                    path = %path.display(),
+                    number,
+                    "a file is numbered like an episode but no folder names its show; indexed \
+                     without a title"
+                );
+                (
+                    format!(
+                        "A file in \"{}\" is numbered like episode {number} of a show, but no \
+                         folder names the show, so it was indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "absolute_number": number }),
+                )
+            }
+            UnclassifiableReason::FractionalAbsoluteNumber { whole, tenth } => {
+                warn!(
+                    path = %path.display(),
+                    number = %format!("{whole}.{tenth}"),
+                    "a file is numbered like a recap between two episodes; indexed without a title"
+                );
+                (
+                    format!(
+                        "A file in \"{}\" is numbered {whole}.{tenth}, like a recap or special \
+                         between two episodes, which has no episode number of its own, so it \
+                         was indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "fractional_number": format!("{whole}.{tenth}") }),
+                )
+            }
+            UnclassifiableReason::NoEpisodeMarkerInMultiSeasonFolder => {
+                warn!(
+                    path = %path.display(),
+                    "a file in a multi-season folder has no season and episode marker; indexed \
+                     without a title"
+                );
+                (
+                    format!(
+                        "A file in a multi-season folder of \"{}\" has no season and episode \
+                         marker, so it was indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "multi_season_folder": true }),
+                )
+            }
+        };
+        let mut metadata = serde_json::json!({
+            "library_id": library.id.to_string(),
+            "path": path.display().to_string(),
+        });
+        if let (Some(metadata), serde_json::Value::Object(details)) =
+            (metadata.as_object_mut(), details)
+        {
+            metadata.extend(details);
+        }
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Warning,
+                AdminLogCategory::LibraryScan,
+                message,
+                Some(metadata),
+            )
+            .await;
+    }
+
+    /// Bring a row classified by older rules up to [`CLASSIFIER_VERSION`]:
+    /// reclassify it from its path, attaching it to the title the current
+    /// rules name, and stamp the version. The row keeps its id -- and so its
+    /// playback progress -- its hash and its probe results; nothing is
+    /// re-probed. A title the move leaves with no file (a show a legacy
+    /// build named after a `Season 01` folder) is retired by the scan's
+    /// orphan cleanup.
+    ///
+    /// Only a row that was probed is reclassified: one whose probe failed has
+    /// no runtime and was never classified.
+    async fn reclassify_existing(
+        &self,
+        existing: &MediaFile,
+        path: &Path,
+        library: &Library,
+    ) -> Result<(), IndexError> {
+        let content = self
+            .classify_media_content(path, library, existing.duration)
+            .await?;
+        let status = match (&content, existing.status) {
+            (None, _) => FileStatus::Unknown,
+            (Some(_), FileStatus::Unknown) => FileStatus::Known,
+            (Some(_), status) => status,
+        };
+        self.file_repo
+            .set_classification(
+                existing.id,
+                FileClassification {
+                    content,
+                    status,
+                    classifier_version: CLASSIFIER_VERSION,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Process a NEW media file to add it to the library. The caller has
+    /// already established that the [`PathPolicy`] calls `path` media.
+    async fn process_new_file(&self, path: &Path, library: &Library) -> Result<bool, IndexError> {
         info!("Processing new file: {}", path.display());
 
         let (size, mtime) = read_fs_meta(path).map_err(|e| {
@@ -677,45 +894,15 @@ impl LocalIndexService {
             IndexError::PathNotFound(format!("Could not read file metadata: {e}"))
         })?;
 
-        if !is_known_video(path) {
-            // Unsupported extension: index as Unknown. Hash it (when enabled) so
-            // duplicate detection still covers it.
-            let hash = if self.hash_unknown_files {
-                self.hash_service
-                    .hash_async(path.to_path_buf())
-                    .await
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let file = self
-                .file_repo
-                .create(CreateMediaFile {
-                    library_id: lib_uuid,
-                    path: path.to_path_buf(),
-                    hash,
-                    size_bytes: size,
-                    mtime,
-                    mime_type: None,
-                    duration: None,
-                    container_format: None,
-                    content: None,
-                    status: FileStatus::Unknown,
-                })
-                .await?;
-            self.check_and_report_duplicate(&file).await;
-            self.check_and_report_runtime_divergence(&file).await;
-            return Ok(true);
-        }
-
-        // Known video: extract metadata first.
+        // Extract metadata first.
         let metadata = match self.media_info_service.get_video_metadata(path).await {
             Ok(m) => m,
             Err(e) => {
                 warn!("Failed to extract metadata for {}: {}", path.display(), e);
+                // Never classified: version 0 until a probe succeeds.
                 self.file_repo
                     .create(CreateMediaFile {
-                        library_id: lib_uuid,
+                        library_id: library.id,
                         path: path.to_path_buf(),
                         hash: 0,
                         size_bytes: size,
@@ -725,6 +912,7 @@ impl LocalIndexService {
                         container_format: None,
                         content: None,
                         status: FileStatus::Unknown,
+                        classifier_version: 0,
                     })
                     .await?;
                 return Ok(true);
@@ -742,13 +930,18 @@ impl LocalIndexService {
 
         let duration = Duration::from_secs_f64(metadata.duration_seconds());
         let content = self
-            .classify_media_content(path, lib_uuid, duration)
+            .classify_media_content(path, library, Some(duration))
             .await?;
+        let status = if content.is_some() {
+            FileStatus::Known
+        } else {
+            FileStatus::Unknown
+        };
 
         let file = self
             .file_repo
             .create(CreateMediaFile {
-                library_id: lib_uuid,
+                library_id: library.id,
                 path: path.to_path_buf(),
                 hash,
                 size_bytes: size,
@@ -756,8 +949,9 @@ impl LocalIndexService {
                 mime_type: Some(format!("video/{}", metadata.format_name)),
                 duration: Some(duration),
                 container_format: Some(metadata.format_name.clone()),
-                content: Some(content),
-                status: FileStatus::Known,
+                content,
+                status,
+                classifier_version: CLASSIFIER_VERSION,
             })
             .await?;
 
@@ -785,11 +979,23 @@ impl LocalIndexService {
 
     /// Reconcile a file already present in the index against its current state
     /// on disk. Shared by the full scan and single-path watcher events.
+    ///
+    /// A row classified by older rules is reclassified first, whether or not
+    /// the file changed: the rules changed, not the file. Only when
+    /// `reclassify` is set -- the identity passes have succeeded (see
+    /// [`Self::identity_passes_done`]); until then the row keeps its title
+    /// and its version, and a later scan reclassifies it.
     async fn reconcile_existing_file(
         &self,
         existing: &MediaFile,
         path: &Path,
+        library: &Library,
+        reclassify: bool,
     ) -> Result<(), IndexError> {
+        if reclassify && awaits_reclassification(existing) {
+            self.reclassify_existing(existing, path, library).await?;
+        }
+
         let (size, mtime) = match read_fs_meta(path) {
             Ok(m) => m,
             Err(e) => {
@@ -802,26 +1008,6 @@ impl LocalIndexService {
         // Cheap gate: only a size or mtime change warrants a rehash.
         if size == existing.size_bytes && mtime == existing.mtime {
             record_file_outcome("unchanged");
-            return Ok(());
-        }
-
-        let known_video = is_known_video(path);
-        if !known_video && !self.hash_unknown_files {
-            // Unsupported extension with hashing disabled: just record size/mtime.
-            self.file_repo
-                .update(UpdateMediaFile {
-                    id: existing.id,
-                    hash: None,
-                    size_bytes: Some(size),
-                    mtime,
-                    mime_type: None,
-                    duration: None,
-                    container_format: None,
-                    content: None,
-                    status: None,
-                })
-                .await?;
-            record_file_outcome("changed");
             return Ok(());
         }
 
@@ -854,7 +1040,7 @@ impl LocalIndexService {
             return Ok(());
         }
 
-        self.reconcile_changed_file(existing, path, size, mtime, new_hash, known_video)
+        self.reconcile_changed_file(existing, path, size, mtime, new_hash)
             .await?;
         record_file_outcome("changed");
         Ok(())
@@ -862,7 +1048,12 @@ impl LocalIndexService {
 
     /// Apply a confirmed content change: refresh hash, metadata and streams.
     /// The file's movie/episode classification is intentionally left unchanged
-    /// since the path (and therefore the inferred title) has not moved.
+    /// since the path (and therefore the inferred title) has not moved -- and
+    /// so is its status when it has none: a file with no movie or episode
+    /// (one the path could not classify, or whose first probe failed) stays
+    /// `Unknown`, which is all the `files` CHECK allows it to be. A row whose
+    /// probe failed is classified by the next scan's reclassification, now
+    /// that it has a runtime.
     async fn reconcile_changed_file(
         &self,
         existing: &MediaFile,
@@ -870,29 +1061,8 @@ impl LocalIndexService {
         size: u64,
         mtime: Option<DateTime<Utc>>,
         new_hash: u64,
-        known_video: bool,
     ) -> Result<(), IndexError> {
         info!("File content changed, reconciling: {}", path.display());
-
-        if !known_video {
-            let updated = self
-                .file_repo
-                .update(UpdateMediaFile {
-                    id: existing.id,
-                    hash: Some(new_hash),
-                    size_bytes: Some(size),
-                    mtime,
-                    mime_type: None,
-                    duration: None,
-                    container_format: None,
-                    content: None,
-                    status: Some(FileStatus::Unknown),
-                })
-                .await?;
-            self.check_and_report_duplicate(&updated).await;
-            self.check_and_report_runtime_divergence(&updated).await;
-            return Ok(());
-        }
 
         match self.media_info_service.get_video_metadata(path).await {
             Ok(metadata) => {
@@ -901,6 +1071,11 @@ impl LocalIndexService {
                 self.insert_media_streams(existing.id, &metadata).await?;
 
                 let duration = Duration::from_secs_f64(metadata.duration_seconds());
+                let status = if existing.content.is_some() {
+                    FileStatus::Known
+                } else {
+                    FileStatus::Unknown
+                };
                 let updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -912,7 +1087,7 @@ impl LocalIndexService {
                         duration: Some(duration),
                         container_format: Some(metadata.format_name.clone()),
                         content: None,
-                        status: Some(FileStatus::Known),
+                        status: Some(status),
                     })
                     .await?;
                 self.check_and_report_duplicate(&updated).await;
@@ -925,6 +1100,11 @@ impl LocalIndexService {
                     path.display(),
                     e
                 );
+                let status = if existing.content.is_some() {
+                    FileStatus::Changed
+                } else {
+                    FileStatus::Unknown
+                };
                 let updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -936,7 +1116,7 @@ impl LocalIndexService {
                         duration: None,
                         container_format: None,
                         content: None,
-                        status: Some(FileStatus::Changed),
+                        status: Some(status),
                     })
                     .await?;
                 self.check_and_report_duplicate(&updated).await;
@@ -1053,9 +1233,25 @@ impl LocalIndexService {
                 }
                 collected
             }
-            Some(MediaFileContent::Episode { episode_id }) => {
+            Some(MediaFileContent::Episode {
+                episode_id,
+                last_episode_number,
+            }) => {
+                // A multi-episode file and a single episode share a first
+                // episode but not a runtime: compare like with like.
                 match self.file_repo.find_by_episode_id(*episode_id).await {
-                    Ok(files) => files,
+                    Ok(files) => files
+                        .into_iter()
+                        .filter(|sibling| {
+                            matches!(
+                                &sibling.content,
+                                Some(MediaFileContent::Episode {
+                                    last_episode_number: sibling_last,
+                                    ..
+                                }) if sibling_last == last_episode_number
+                            )
+                        })
+                        .collect(),
                     Err(e) => {
                         warn!(
                             "Runtime-divergence check failed for {}: {}",
@@ -1250,7 +1446,11 @@ impl LocalIndexService {
     /// (2021)` once merged under one title -- or whose key another title
     /// already holds -- the duplicate the old title lookup created -- is left
     /// keyless and named in an admin warning: it stays browsable, is never
-    /// matched, and new files of it go to the keyed title.
+    /// matched, and new files of it go to the keyed title. A show the rules
+    /// before issue #182 named after a season folder -- the name those rules
+    /// read from every one of its files' folders is a season folder's -- is
+    /// left keyless without a warning: it is a husk
+    /// the scan's reclassification empties and orphan cleanup retires.
     async fn backfill_identity_keys(&self) -> Result<IdentityBackfill, IndexError> {
         let mut report = IdentityBackfill::default();
 
@@ -1264,22 +1464,26 @@ impl LocalIndexService {
         // all missing at upgrade still has their paths, and they -- not the
         // display title enrichment may have rewritten -- are what it is keyed
         // by. Read once per library rather than once per title.
-        let mut entry_paths: HashMap<Uuid, Vec<PathBuf>> = HashMap::new();
-        let mut episode_paths: HashMap<Uuid, Vec<PathBuf>> = HashMap::new();
+        let mut entry_paths: HashMap<Uuid, Vec<MediaInference>> = HashMap::new();
+        // Beside each episode file's inference, the key the rules before
+        // issue #182 derived from it, which says whether its show is a husk.
+        let mut episode_paths: HashMap<Uuid, Vec<(MediaInference, String)>> = HashMap::new();
         for library in self.library_repo.find_all().await? {
             for file in self
                 .file_repo
                 .find_all_by_library_including_missing(library.id)
                 .await?
             {
+                let inferred = || infer_media(relative_to(&library.root_path, &file.path));
                 match file.content {
                     Some(MediaFileContent::Movie { movie_entry_id }) => entry_paths
                         .entry(movie_entry_id)
                         .or_default()
-                        .push(file.path),
-                    Some(MediaFileContent::Episode { episode_id }) => {
-                        episode_paths.entry(episode_id).or_default().push(file.path)
-                    }
+                        .push(inferred()),
+                    Some(MediaFileContent::Episode { episode_id, .. }) => episode_paths
+                        .entry(episode_id)
+                        .or_default()
+                        .push((inferred(), legacy_show_key(&file.path))),
                     None => {}
                 }
             }
@@ -1290,8 +1494,8 @@ impl LocalIndexService {
         for movie in movies {
             let mut keys = std::collections::BTreeSet::new();
             for entry in self.movie_repo.find_entries_by_movie_id(movie.id).await? {
-                for path in entry_paths.get(&entry.id).into_iter().flatten() {
-                    keys.extend(identify_path(path).movie_key());
+                for inferred in entry_paths.get(&entry.id).into_iter().flatten() {
+                    keys.extend(movie_key(inferred));
                 }
             }
             let key = match keys.len() {
@@ -1302,7 +1506,11 @@ impl LocalIndexService {
                     continue;
                 }
             };
-            if self.movie_repo.assign_identity_key(movie.id, &key).await? {
+            if self
+                .movie_repo
+                .assign_identity_key(movie.id, &key, CLASSIFIER_VERSION)
+                .await?
+            {
                 report.keyed += 1;
             } else {
                 report.clashing_movies.push(movie.id);
@@ -1311,12 +1519,33 @@ impl LocalIndexService {
 
         for show in shows {
             let mut keys = std::collections::BTreeSet::new();
+            let mut legacy_keys = std::collections::BTreeSet::new();
             for season in self.show_repo.find_seasons_by_show_id(show.id).await? {
                 for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
-                    for path in episode_paths.get(&episode.id).into_iter().flatten() {
-                        keys.extend(identify_path(path).show_key());
+                    for (inferred, legacy_key) in
+                        episode_paths.get(&episode.id).into_iter().flatten()
+                    {
+                        keys.extend(show_key(inferred));
+                        legacy_keys.insert(legacy_key.as_str());
                     }
                 }
+            }
+            // A show named after a season folder (`Season 05`) is the husk a
+            // build before issue #182 made by naming shows after the file's
+            // parent folder. Keying it with its files' key would hand it the
+            // real series' key, and reclassification would then move every
+            // file of the series onto the husk. Left keyless, it is never
+            // matched: reclassification moves its files to the series they
+            // name, and orphan cleanup retires it. It is known by the name
+            // those rules gave its files -- every one a season folder's --
+            // not by its display title, which enrichment may have replaced.
+            // A show with no file row is keyed from its stored title like any
+            // fileless title: husk or not, orphan cleanup retires it.
+            let husk = !legacy_keys.is_empty()
+                && legacy_keys.iter().all(|key| is_season_folder_husk_key(key));
+            if husk {
+                debug!(show_id = %show.id, title = %show.title, "not keying a season-folder husk");
+                continue;
             }
             let key = match keys.len() {
                 0 => title_identity_key(&show.title, show.year),
@@ -1326,7 +1555,11 @@ impl LocalIndexService {
                     continue;
                 }
             };
-            if self.show_repo.assign_identity_key(show.id, &key).await? {
+            if self
+                .show_repo
+                .assign_identity_key(show.id, &key, CLASSIFIER_VERSION)
+                .await?
+            {
                 report.keyed += 1;
             } else {
                 report.clashing_shows.push(show.id);
@@ -1375,27 +1608,474 @@ impl LocalIndexService {
         Ok(report)
     }
 
-    /// Scan every library. Used for the startup scan and the periodic backstop.
-    /// A failure in one library is logged and does not abort the others.
+    /// Re-derive every identity key an older version of the rules derived
+    /// (issue #182), so a title keyed before a change to the title fold or
+    /// the path inference is found by the next file that names it rather
+    /// than duplicated beside it. `Grey's Anatomy` keyed `grey s anatomy|`
+    /// before apostrophes were folded; its next file derives `greys
+    /// anatomy|`.
     ///
-    /// The first call in a process first backfills identity keys for titles
-    /// that predate them; a failed backfill is logged and retried by the next
-    /// call rather than holding up the scan.
-    pub async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
-        {
-            let mut done = self.identity_backfill_done.lock().await;
-            if !*done {
-                match self.backfill_identity_keys().await {
-                    Ok(_) => *done = true,
-                    Err(e) => error!("Identity key backfill failed: {}", e),
+    /// Each title's new key is its present files' key, derived exactly as
+    /// the backfill derives one; with no present file, every file row's
+    /// (a volume away at upgrade still names its titles). A title whose
+    /// files name no title of its kind keeps its key and version, and is
+    /// looked at again on the next process start; one whose files disagree
+    /// keeps its key and is named in an admin warning.
+    ///
+    /// A free key is taken in place: the title keeps its id, enrichment,
+    /// genres, provider ids and manual match. A key another title holds means
+    /// the two are one title: the one with provider ids survives (else the
+    /// older), takes the key, and receives the other's files -- its entries,
+    /// or its seasons and episodes, found or created on the survivor -- and
+    /// the other, left with no file, is retired by the scan's orphan cleanup.
+    /// A show keyed after a season folder (`season 05|`) is released instead,
+    /// never rekeyed, for the reason the backfill leaves one keyless.
+    async fn rekey_stale_titles(&self) -> Result<IdentityRekey, IndexError> {
+        let mut report = IdentityRekey::default();
+
+        let movies = self
+            .movie_repo
+            .find_keyed_before_version(CLASSIFIER_VERSION)
+            .await?;
+        let shows = self
+            .show_repo
+            .find_keyed_before_version(CLASSIFIER_VERSION)
+            .await?;
+        if movies.is_empty() && shows.is_empty() {
+            return Ok(report);
+        }
+
+        // Every file row, soft-deleted ones included, with what its path
+        // names; read once, and kept current as merges move files.
+        let mut entry_files: HashMap<Uuid, Vec<(MediaFile, MediaInference)>> = HashMap::new();
+        let mut episode_files: HashMap<Uuid, Vec<(MediaFile, MediaInference)>> = HashMap::new();
+        for library in self.library_repo.find_all().await? {
+            for file in self
+                .file_repo
+                .find_all_by_library_including_missing(library.id)
+                .await?
+            {
+                let inferred = infer_media(relative_to(&library.root_path, &file.path));
+                match file.content {
+                    Some(MediaFileContent::Movie { movie_entry_id }) => entry_files
+                        .entry(movie_entry_id)
+                        .or_default()
+                        .push((file, inferred)),
+                    Some(MediaFileContent::Episode { episode_id, .. }) => episode_files
+                        .entry(episode_id)
+                        .or_default()
+                        .push((file, inferred)),
+                    None => {}
                 }
             }
         }
 
+        // Titles already settled by this pass -- rekeyed, released, or a
+        // merge's survivor or loser -- which a later stale row must not undo.
+        let mut settled: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+
+        for stale in movies {
+            if settled.contains(&stale.id) {
+                continue;
+            }
+            // Re-read: an earlier merge may have changed or released the key.
+            let Some(movie) = self.movie_repo.find_by_id(stale.id).await? else {
+                continue;
+            };
+            if movie.identity_key != stale.identity_key {
+                continue;
+            }
+            let mut rows: Vec<&(MediaFile, MediaInference)> = Vec::new();
+            for entry in self.movie_repo.find_entries_by_movie_id(movie.id).await? {
+                rows.extend(entry_files.get(&entry.id).into_iter().flatten());
+            }
+            let Some(key) = derived_key(&rows, movie_key) else {
+                if rows
+                    .iter()
+                    .any(|(_, inferred)| movie_key(inferred).is_some())
+                {
+                    report.ambiguous_movies.push(movie.id);
+                }
+                continue;
+            };
+            let holder = match self.movie_repo.find_by_identity_key(&key).await? {
+                Some(holder) if holder.id != movie.id => holder,
+                _ => {
+                    if self
+                        .movie_repo
+                        .rekey(movie.id, Some(key.clone()), CLASSIFIER_VERSION)
+                        .await?
+                    {
+                        if movie.identity_key.as_deref() != Some(key.as_str()) {
+                            report.rekeyed += 1;
+                        }
+                        settled.insert(movie.id);
+                    }
+                    continue;
+                }
+            };
+            let (survivor, loser) = if survives(
+                (&movie.created_at, &movie.id),
+                has_provider_ids(
+                    movie.tmdb_id,
+                    &movie.imdb_id,
+                    movie.tvdb_id,
+                    movie.anilist_id,
+                ),
+                (&holder.created_at, &holder.id),
+                has_provider_ids(
+                    holder.tmdb_id,
+                    &holder.imdb_id,
+                    holder.tvdb_id,
+                    holder.anilist_id,
+                ),
+            ) {
+                (movie.id, holder.id)
+            } else {
+                (holder.id, movie.id)
+            };
+            // Release first: the survivor may be taking the loser's key.
+            self.movie_repo
+                .rekey(loser, None, CLASSIFIER_VERSION)
+                .await?;
+            if !self
+                .movie_repo
+                .rekey(survivor, Some(key.clone()), CLASSIFIER_VERSION)
+                .await?
+            {
+                // Another writer took the key in between: the survivor is
+                // still on its stale key, so moving files onto it would
+                // strand them there. Both keep their files; the loser,
+                // released, is never matched again.
+                warn!(%survivor, %loser, %key, "a movie merge lost its key to another writer");
+                settled.insert(survivor);
+                settled.insert(loser);
+                continue;
+            }
+            for entry in self.movie_repo.find_entries_by_movie_id(loser).await? {
+                let MovieEntry {
+                    id: entry_id,
+                    library_id,
+                    movie_id: _,
+                    edition,
+                    is_primary,
+                    created_at: _,
+                } = entry;
+                let target = self
+                    .movie_repo
+                    .find_or_create_entry(CreateMovieEntry {
+                        library_id,
+                        movie_id: survivor,
+                        edition,
+                        is_primary,
+                    })
+                    .await?;
+                self.movie_repo
+                    .ensure_library_association(library_id, survivor)
+                    .await?;
+                let moved = entry_files.remove(&entry_id).unwrap_or_default();
+                for (file, _) in &moved {
+                    self.move_file(
+                        file,
+                        MediaFileContent::Movie {
+                            movie_entry_id: target.id,
+                        },
+                    )
+                    .await?;
+                }
+                entry_files.entry(target.id).or_default().extend(moved);
+            }
+            report.merged_movies.push((survivor, loser));
+            settled.insert(survivor);
+            settled.insert(loser);
+        }
+
+        for stale in shows {
+            if settled.contains(&stale.id) {
+                continue;
+            }
+            let Some(show) = self.show_repo.find_by_id(stale.id).await? else {
+                continue;
+            };
+            if show.identity_key != stale.identity_key {
+                continue;
+            }
+            // A husk (see `backfill_identity_keys`): released, so the scan's
+            // reclassification moves its files to the series they name and
+            // orphan cleanup retires it. Known by its stored key, which
+            // enrichment never rewrites, not by its display title.
+            if show
+                .identity_key
+                .as_deref()
+                .is_some_and(is_season_folder_husk_key)
+            {
+                self.show_repo
+                    .rekey(show.id, None, CLASSIFIER_VERSION)
+                    .await?;
+                settled.insert(show.id);
+                continue;
+            }
+            let mut rows: Vec<&(MediaFile, MediaInference)> = Vec::new();
+            for season in self.show_repo.find_seasons_by_show_id(show.id).await? {
+                for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                    rows.extend(episode_files.get(&episode.id).into_iter().flatten());
+                }
+            }
+            let Some(key) = derived_key(&rows, show_key) else {
+                if rows
+                    .iter()
+                    .any(|(_, inferred)| show_key(inferred).is_some())
+                {
+                    report.ambiguous_shows.push(show.id);
+                }
+                continue;
+            };
+            let holder = match self.show_repo.find_by_identity_key(&key).await? {
+                Some(holder) if holder.id != show.id => holder,
+                _ => {
+                    if self
+                        .show_repo
+                        .rekey(show.id, Some(key.clone()), CLASSIFIER_VERSION)
+                        .await?
+                    {
+                        if show.identity_key.as_deref() != Some(key.as_str()) {
+                            report.rekeyed += 1;
+                        }
+                        settled.insert(show.id);
+                    }
+                    continue;
+                }
+            };
+            let (survivor, loser) = if survives(
+                (&show.created_at, &show.id),
+                has_provider_ids(show.tmdb_id, &show.imdb_id, show.tvdb_id, show.anilist_id),
+                (&holder.created_at, &holder.id),
+                has_provider_ids(
+                    holder.tmdb_id,
+                    &holder.imdb_id,
+                    holder.tvdb_id,
+                    holder.anilist_id,
+                ),
+            ) {
+                (show.id, holder.id)
+            } else {
+                (holder.id, show.id)
+            };
+            self.show_repo
+                .rekey(loser, None, CLASSIFIER_VERSION)
+                .await?;
+            if !self
+                .show_repo
+                .rekey(survivor, Some(key.clone()), CLASSIFIER_VERSION)
+                .await?
+            {
+                // As for a movie merge: files are never moved onto a
+                // survivor left on its stale key.
+                warn!(%survivor, %loser, %key, "a show merge lost its key to another writer");
+                settled.insert(survivor);
+                settled.insert(loser);
+                continue;
+            }
+            for season in self.show_repo.find_seasons_by_show_id(loser).await? {
+                let target_season = self
+                    .show_repo
+                    .find_or_create_season(survivor, season.season_number)
+                    .await?;
+                for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                    let Episode {
+                        id: episode_id,
+                        season_id: _,
+                        episode_number,
+                        title,
+                        description: _,
+                        air_date,
+                        runtime,
+                        thumbnail_url: _,
+                        created_at: _,
+                    } = episode;
+                    // Found or created on the survivor: one episode per
+                    // `(season, number)`, so a number both shows have
+                    // becomes one episode with both shows' files.
+                    let target = self
+                        .show_repo
+                        .find_or_create_episode(CreateEpisode {
+                            season_id: target_season.id,
+                            episode_number,
+                            title,
+                            runtime,
+                            air_date: air_date.as_deref().and_then(|d| {
+                                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()
+                            }),
+                        })
+                        .await?;
+                    let moved = episode_files.remove(&episode_id).unwrap_or_default();
+                    for (file, _) in &moved {
+                        let last_episode_number = match file.content {
+                            Some(MediaFileContent::Episode {
+                                last_episode_number,
+                                ..
+                            }) => last_episode_number,
+                            _ => None,
+                        };
+                        self.show_repo
+                            .ensure_library_association(file.library_id, survivor)
+                            .await?;
+                        self.move_file(
+                            file,
+                            MediaFileContent::Episode {
+                                episode_id: target.id,
+                                last_episode_number,
+                            },
+                        )
+                        .await?;
+                    }
+                    episode_files.entry(target.id).or_default().extend(moved);
+                }
+            }
+            report.merged_shows.push((survivor, loser));
+            settled.insert(survivor);
+            settled.insert(loser);
+        }
+
+        let IdentityRekey {
+            rekeyed,
+            merged_movies,
+            merged_shows,
+            ambiguous_movies,
+            ambiguous_shows,
+        } = &report;
+        if *rekeyed > 0 || !merged_movies.is_empty() || !merged_shows.is_empty() {
+            let merged = merged_movies.len() + merged_shows.len();
+            info!(rekeyed, merged, "Re-derived identity keys from older rules");
+            let pairs = |pairs: &[(Uuid, Uuid)]| {
+                pairs
+                    .iter()
+                    .map(|(survivor, retired)| {
+                        serde_json::json!({ "kept": survivor, "retired": retired })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Info,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "Updated the identity keys of {rekeyed} titles to the current naming \
+                         rules, and merged {merged} titles those rules now read as one"
+                    ),
+                    Some(serde_json::json!({
+                        "rekeyed": rekeyed,
+                        "merged_movies": pairs(merged_movies),
+                        "merged_shows": pairs(merged_shows),
+                    })),
+                )
+                .await;
+        }
+        let ambiguous = ambiguous_movies.len() + ambiguous_shows.len();
+        if ambiguous > 0 {
+            warn!(
+                ambiguous,
+                "titles whose files name more than one title keep their old identity keys"
+            );
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Warning,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "{ambiguous} titles keep identity keys from older naming rules: their \
+                         files name more than one title, so new files may be matched to other \
+                         titles."
+                    ),
+                    Some(serde_json::json!({
+                        "ambiguous_movies": ambiguous_movies,
+                        "ambiguous_shows": ambiguous_shows,
+                    })),
+                )
+                .await;
+        }
+        Ok(report)
+    }
+
+    /// Point `file` at `content`, keeping its status and classifier version.
+    async fn move_file(&self, file: &MediaFile, content: MediaFileContent) -> Result<(), DbErr> {
+        self.file_repo
+            .set_classification(
+                file.id,
+                FileClassification {
+                    content: Some(content),
+                    status: file.status,
+                    classifier_version: file.classifier_version,
+                },
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// Whether the identity passes have succeeded in this process, running
+    /// them first if they have not: the backfill of titles that predate
+    /// identity keys, then the re-derivation of keys older rules derived.
+    ///
+    /// Every path that reclassifies a file -- a scan of every library, a scan
+    /// of one, a watcher event for a file [awaiting
+    /// reclassification](awaits_reclassification) -- asks this first and reclassifies only on
+    /// `true`, so a file is reclassified only once its title carries the key
+    /// the current rules derive, and finds that title rather than leaving it
+    /// with no file to be retired with its enrichment. A failed pass is
+    /// logged, reported to the administrator, and retried by the next caller;
+    /// until one succeeds, files classified by older rules keep their titles
+    /// while new and changed files are indexed as usual.
+    async fn identity_passes_done(&self) -> bool {
+        let mut done = self.identity_passes_succeeded.lock().await;
+        if *done {
+            return true;
+        }
+        let failure = match self.backfill_identity_keys().await {
+            Ok(_) => match self.rekey_stale_titles().await {
+                Ok(_) => None,
+                Err(e) => Some(("re-derivation", e)),
+            },
+            Err(e) => Some(("backfill", e)),
+        };
+        match failure {
+            None => *done = true,
+            Some((pass, e)) => {
+                error!(pass, error = %e, "identity key pass failed; reclassification held");
+                let _ = self
+                    .admin_log
+                    .log(
+                        AdminLogLevel::Warning,
+                        AdminLogCategory::LibraryScan,
+                        format!(
+                            "Titles could not be brought up to the current naming rules ({e}). \
+                             Files indexed under older rules keep their titles until a later \
+                             scan succeeds; new files are indexed as usual."
+                        ),
+                        Some(serde_json::json!({ "pass": pass, "error": e.to_string() })),
+                    )
+                    .await;
+            }
+        }
+        *done
+    }
+
+    /// Scan every library. Used for the startup scan and the periodic backstop.
+    /// A failure in one library is logged and does not abort the others.
+    ///
+    /// The identity passes run once, before any library is scanned (see
+    /// [`Self::identity_passes_done`]); if they fail, every library is still
+    /// scanned, without reclassifying files classified by older rules.
+    pub async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
+        let reclassify = self.identity_passes_done().await;
+
         let libraries = self.library_repo.find_all().await?;
         let mut total_added = 0;
         for library in libraries {
-            match self.scan_library(library.id.to_string()).await {
+            match self
+                .scan_one_library(library.id.to_string(), reclassify)
+                .await
+            {
                 Ok(added) => total_added += added,
                 Err(e) => error!("Scan failed for library {}: {}", library.id, e),
             }
@@ -1464,13 +2144,38 @@ impl LocalIndexService {
             return Ok(());
         }
 
+        // A file the policy keeps out of the library is not indexed. One that
+        // was -- a `.nfo` from before issue #182, a sample renamed into place
+        // -- is marked missing, exactly as a full scan would leave it.
+        if self
+            .path_policy
+            .disposition(relative_to(&library.root_path, &path))
+            != PathDisposition::Media
+        {
+            if let Some(file) = self.file_repo.find_by_path(&path_str).await?
+                && file.missing_since.is_none()
+            {
+                info!("Marking excluded file missing: {}", path.display());
+                self.file_repo
+                    .mark_missing(vec![file.id], self.clock.now())
+                    .await?;
+            }
+            return Ok(());
+        }
+
         match self.file_repo.find_by_path(&path_str).await? {
             Some(existing) => {
                 self.restore_if_missing(&existing).await?;
-                self.reconcile_existing_file(&existing, &path).await
+                // Only a file awaiting reclassification needs the identity
+                // passes; asking for any other would retry a failing pass on
+                // every watcher event.
+                let reclassify =
+                    awaits_reclassification(&existing) && self.identity_passes_done().await;
+                self.reconcile_existing_file(&existing, &path, &library, reclassify)
+                    .await
             }
             None => {
-                if self.process_new_file(&path, library_id).await? {
+                if self.process_new_file(&path, &library).await? {
                     record_file_outcome("new");
                 }
                 Ok(())
@@ -1481,7 +2186,24 @@ impl LocalIndexService {
 
 #[async_trait::async_trait]
 impl IndexService for LocalIndexService {
+    /// Scan one library -- the administrator's scan. The identity passes run
+    /// first if they have not succeeded yet, and until they have, files
+    /// classified by older rules are not reclassified (see
+    /// [`LocalIndexService::identity_passes_done`]).
     async fn scan_library(&self, library_id: String) -> Result<u32, IndexError> {
+        let reclassify = self.identity_passes_done().await;
+        self.scan_one_library(library_id, reclassify).await
+    }
+}
+
+impl LocalIndexService {
+    /// Scan one library, reclassifying files classified by older rules only
+    /// when `reclassify` is set.
+    async fn scan_one_library(
+        &self,
+        library_id: String,
+        reclassify: bool,
+    ) -> Result<u32, IndexError> {
         let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| IndexError::InvalidId)?;
         let start_time = self.clock.now();
 
@@ -1569,10 +2291,11 @@ impl IndexService for LocalIndexService {
         // Phase 2: Walk FS
         let WalkOutcome {
             files: walked_files,
-            video_files: walked_video_files,
+            video_files_seen: walked_video_files,
+            excluded: excluded_count,
             failed_subtrees,
             unscoped_failure,
-        } = walk_library_root(&library.root_path);
+        } = walk_library_root(&library.root_path, &self.path_policy);
 
         // An unmounted volume usually leaves its mount point behind as an empty
         // directory, which passes the guard above -- or one holding only a
@@ -1583,10 +2306,11 @@ impl IndexService for LocalIndexService {
         // believed. Only video rows are counted on either side: they are what
         // is at stake, and a library that only ever held non-video files has
         // nothing an unmounted volume could take from it. Emptying a library on
-        // purpose is deleting the library.
+        // purpose is deleting the library. The walk counts video files the path
+        // policy excludes too: a root of samples is mounted (issue #182).
         let indexed_video_files = existing_map
             .keys()
-            .filter(|path| is_known_video(path))
+            .filter(|path| is_video_path(path))
             .count();
         if walked_video_files == 0 && indexed_video_files > 0 {
             warn!(
@@ -1648,7 +2372,8 @@ impl IndexService for LocalIndexService {
                         if restored {
                             restored_count += 1;
                         }
-                        self.reconcile_existing_file(&existing_file, &path).await
+                        self.reconcile_existing_file(&existing_file, &path, &library, reclassify)
+                            .await
                     }
                     Err(e) => Err(e),
                 };
@@ -1658,7 +2383,7 @@ impl IndexService for LocalIndexService {
                 }
             } else {
                 // New file.
-                match self.process_new_file(&path, lib_uuid).await {
+                match self.process_new_file(&path, &library).await {
                     Ok(true) => {
                         added_count += 1;
                         record_file_outcome("new");
@@ -1784,6 +2509,7 @@ impl IndexService for LocalIndexService {
                     "marked_missing": marked_count,
                     "restored": restored_count,
                     "purged": purged_count,
+                    "excluded": excluded_count,
                     "titles_removed": titles_removed,
                     "total": total_files,
                 })),
@@ -1801,6 +2527,10 @@ mod missing_tests;
 #[cfg(test)]
 #[path = "index_identity_tests.rs"]
 mod identity_tests;
+
+#[cfg(test)]
+#[path = "index_inference_tests.rs"]
+mod inference_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1862,6 +2592,44 @@ mod tests {
             !message.contains(std::path::MAIN_SEPARATOR),
             "a client-facing rejection must not carry any path component: {message:?}"
         );
+    }
+
+    /// A library rooted at `root`, for calling a per-file method directly.
+    fn test_library(id: Uuid, root: &Path) -> Library {
+        Library {
+            id,
+            name: "Test".to_string(),
+            root_path: root.to_path_buf(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_scan_started_at: None,
+            last_scan_finished_at: None,
+            last_scan_file_count: None,
+        }
+    }
+
+    impl LocalIndexService {
+        /// Classify `path` in a library rooted at its first component
+        /// (`/media` for `/media/Show/x.mkv`; nothing for a bare filename),
+        /// expecting a classification.
+        async fn classify_for_test(
+            &self,
+            path: &Path,
+            lib_id: Uuid,
+            runtime: Duration,
+        ) -> Result<MediaFileContent, IndexError> {
+            let root: PathBuf = path.components().take(2).collect();
+            let root = if path.is_absolute() {
+                root
+            } else {
+                PathBuf::new()
+            };
+            let content = self
+                .classify_media_content(path, &test_library(lib_id, &root), Some(runtime))
+                .await?;
+            Ok(content.expect("the path classifies"))
+        }
     }
 
     fn make_classify_service() -> (
@@ -2447,15 +3215,15 @@ mod tests {
     async fn test_classify_episode_standard_s01e02() {
         let (service, _, show_repo) = make_classify_service();
         let lib_id = Uuid::new_v4();
-        let path = PathBuf::from("/media/Breaking Bad/The.Show.S01E02.mkv");
+        let path = PathBuf::from("/media/Breaking Bad/Breaking.Bad.S01E02.mkv");
 
         let content = service
-            .classify_media_content(&path, lib_id, Duration::from_secs(3600))
+            .classify_for_test(&path, lib_id, Duration::from_secs(3600))
             .await
             .unwrap();
 
         let episode_id = match content {
-            MediaFileContent::Episode { episode_id } => episode_id,
+            MediaFileContent::Episode { episode_id, .. } => episode_id,
             _ => panic!("expected Episode, got Movie"),
         };
 
@@ -2492,7 +3260,7 @@ mod tests {
         let path = PathBuf::from("/media/My Show/show.s02e10.mp4");
 
         let content = service
-            .classify_media_content(&path, lib_id, Duration::from_secs(1800))
+            .classify_for_test(&path, lib_id, Duration::from_secs(1800))
             .await
             .unwrap();
 
@@ -2525,7 +3293,7 @@ mod tests {
         let path = PathBuf::from("/shows/Series/Series S01E01 720p.mkv");
 
         let content = service
-            .classify_media_content(&path, lib_id, Duration::from_secs(2700))
+            .classify_for_test(&path, lib_id, Duration::from_secs(2700))
             .await
             .unwrap();
 
@@ -2554,10 +3322,10 @@ mod tests {
     async fn test_classify_episode_show_title_from_parent_dir() {
         let (service, _, show_repo) = make_classify_service();
         let lib_id = Uuid::new_v4();
-        let path = PathBuf::from("/media/Breaking Bad/episode.S03E05.mkv");
+        let path = PathBuf::from("/media/Breaking Bad/S03E05.mkv");
 
         service
-            .classify_media_content(&path, lib_id, Duration::from_secs(3000))
+            .classify_for_test(&path, lib_id, Duration::from_secs(3000))
             .await
             .unwrap();
 
@@ -2574,7 +3342,7 @@ mod tests {
 
         // First call — creates the show
         service
-            .classify_media_content(
+            .classify_for_test(
                 &PathBuf::from("/media/My Show/My.Show.S01E01.mkv"),
                 lib_id,
                 duration,
@@ -2584,7 +3352,7 @@ mod tests {
 
         // Second call with same parent dir name — must reuse the existing show
         service
-            .classify_media_content(
+            .classify_for_test(
                 &PathBuf::from("/media/My Show/My.Show.S01E02.mkv"),
                 lib_id,
                 duration,
@@ -2603,7 +3371,7 @@ mod tests {
         let duration = Duration::from_secs(3600);
 
         service
-            .classify_media_content(
+            .classify_for_test(
                 &PathBuf::from("/media/Show/ep.S01E01.mkv"),
                 lib_id,
                 duration,
@@ -2612,7 +3380,7 @@ mod tests {
             .unwrap();
 
         service
-            .classify_media_content(
+            .classify_for_test(
                 &PathBuf::from("/media/Show/ep.S02E01.mkv"),
                 lib_id,
                 duration,
@@ -2664,7 +3432,7 @@ mod tests {
 
     fn episode_id_of(file: &MediaFile) -> Uuid {
         match file.content {
-            Some(MediaFileContent::Episode { episode_id }) => episode_id,
+            Some(MediaFileContent::Episode { episode_id, .. }) => episode_id,
             ref other => panic!("expected an episode file, got {other:?}"),
         }
     }
@@ -2730,6 +3498,7 @@ mod tests {
                 episode_number: 1,
                 title: "Good News About Hell".to_string(),
                 runtime: Some(Duration::from_secs(57 * 60)),
+                air_date: None,
             })
             .await
             .unwrap();
@@ -2776,7 +3545,7 @@ mod tests {
         let path = PathBuf::from("/media/movies/Avatar.mp4");
 
         let content = service
-            .classify_media_content(&path, lib_id, Duration::from_secs(9600))
+            .classify_for_test(&path, lib_id, Duration::from_secs(9600))
             .await
             .unwrap();
 
@@ -2814,7 +3583,7 @@ mod tests {
         let path = PathBuf::from("/media/The.Matrix.Reloaded.2003.mkv");
 
         let content = service
-            .classify_media_content(&path, lib_id, Duration::from_secs(7200))
+            .classify_for_test(&path, lib_id, Duration::from_secs(7200))
             .await
             .unwrap();
 
@@ -2839,7 +3608,7 @@ mod tests {
         let path = PathBuf::from("/media/movie (2024).avi");
 
         let content = service
-            .classify_media_content(&path, lib_id, Duration::from_secs(6000))
+            .classify_for_test(&path, lib_id, Duration::from_secs(6000))
             .await
             .unwrap();
 
@@ -2865,13 +3634,13 @@ mod tests {
 
         // First call — creates the movie
         service
-            .classify_media_content(&PathBuf::from("/media/Avatar.mp4"), lib_id, duration)
+            .classify_for_test(&PathBuf::from("/media/Avatar.mp4"), lib_id, duration)
             .await
             .unwrap();
 
         // Second call with the same title — must reuse the existing movie record
         service
-            .classify_media_content(&PathBuf::from("/backup/Avatar.mp4"), lib_id, duration)
+            .classify_for_test(&PathBuf::from("/backup/Avatar.mp4"), lib_id, duration)
             .await
             .unwrap();
 
@@ -2884,7 +3653,8 @@ mod tests {
             .collect();
         assert_eq!(movies.len(), 1, "movie must not be duplicated");
 
-        // Two distinct entries should exist (one per file path)
+        // Both copies are files of the one entry for the film's default
+        // edition in this library (issue #182), not an entry each.
         let entries: Vec<_> = movie_repo
             .entries
             .lock()
@@ -2892,10 +3662,8 @@ mod tests {
             .values()
             .cloned()
             .collect();
-        assert_eq!(entries.len(), 2);
-        for entry in &entries {
-            assert!(entry.is_primary);
-        }
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_primary);
     }
 
     // ─── classify_media_content: edge cases ───────────────────────────────────
@@ -2908,7 +3676,7 @@ mod tests {
         let path = PathBuf::from("/");
 
         let content = service
-            .classify_media_content(&path, lib_id, Duration::from_secs(100))
+            .classify_for_test(&path, lib_id, Duration::from_secs(100))
             .await
             .unwrap();
 
@@ -2936,7 +3704,7 @@ mod tests {
         let path = PathBuf::from("S01E01.mkv");
 
         let content = service
-            .classify_media_content(&path, lib_id, Duration::from_secs(3600))
+            .classify_for_test(&path, lib_id, Duration::from_secs(3600))
             .await
             .unwrap();
 
@@ -3021,7 +3789,7 @@ mod tests {
 
         let entry_id = Uuid::new_v4();
         mock_movie_repo
-            .expect_create_entry()
+            .expect_find_or_create_entry()
             .times(1)
             .returning(move |_| {
                 Ok(beam_domain::models::MovieEntry {
@@ -3055,6 +3823,7 @@ mod tests {
                     movie_entry_id: entry_id,
                 }),
                 status: FileStatus::Known,
+                classifier_version: 0,
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
@@ -3078,7 +3847,9 @@ mod tests {
             Arc::new(NoOpAdminLogService),
         );
 
-        let result = service.process_new_file(&path, lib_id).await;
+        let result = service
+            .process_new_file(&path, &test_library(lib_id, temp_dir.path()))
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
@@ -3203,8 +3974,9 @@ mod tests {
                 mime_type: Some("video/x-matroska".to_string()),
                 duration: None,
                 container_format: None,
-                content: Some(beam_domain::models::MediaFileContent::Episode { episode_id }),
+                content: Some(beam_domain::models::MediaFileContent::episode(episode_id)),
                 status: FileStatus::Known,
+                classifier_version: 0,
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
@@ -3228,7 +4000,9 @@ mod tests {
             Arc::new(NoOpAdminLogService),
         );
 
-        let result = service.process_new_file(&path, lib_id).await;
+        let result = service
+            .process_new_file(&path, &test_library(lib_id, temp_dir.path()))
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
@@ -3252,7 +4026,7 @@ mod tests {
         );
 
         let err = service
-            .process_new_file(&path, Uuid::new_v4())
+            .process_new_file(&path, &test_library(Uuid::new_v4(), temp_dir.path()))
             .await
             .expect_err("a file that cannot be stat'ed must be refused");
         assert!(matches!(err, IndexError::PathNotFound(_)));
@@ -3298,7 +4072,7 @@ mod tests {
         );
 
         let err = service
-            .process_new_file(&path, Uuid::new_v4())
+            .process_new_file(&path, &test_library(Uuid::new_v4(), temp_dir.path()))
             .await
             .expect_err("a file that cannot be hashed must be refused");
         assert!(matches!(err, IndexError::PathNotFound(_)));
@@ -3414,15 +4188,26 @@ mod tests {
         assert_eq!(files[0].status, FileStatus::Known);
     }
 
+    /// Only media is indexed (issue #182): a sidecar, a stray text file and
+    /// a sample are neither hashed nor probed nor given a row.
     #[tokio::test]
-    async fn test_scan_library_new_non_video_file() {
+    async fn test_scan_library_indexes_only_media() {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
-        let file_path = dir.path().join("notes.txt");
-        std::fs::write(&file_path, b"some text content").unwrap();
+        let movie = dir.path().join("Movie (2019)");
+        std::fs::create_dir_all(&movie).unwrap();
+        for name in [
+            "notes.txt",
+            "Movie.2019.en.srt",
+            "movie.nfo",
+            "poster.jpg",
+            "sample.mkv",
+        ] {
+            std::fs::write(movie.join(name), b"not media").unwrap();
+        }
 
         let service = LocalIndexService::new(
             lib_repo.clone(),
@@ -3434,15 +4219,17 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-        )
-        .with_hash_unknown_files(false);
+        );
 
         let result = service.scan_library(library.id.to_string()).await;
-        assert_eq!(result.unwrap(), 1);
-
-        let files = file_repo.find_all_by_library(library.id).await.unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].status, FileStatus::Unknown);
+        assert_eq!(result.unwrap(), 0);
+        assert!(
+            file_repo
+                .find_all_by_library(library.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -3510,8 +4297,12 @@ mod tests {
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: None,
-            content: None,
+            // A Known row is a movie's or an episode's file (the `files` CHECK).
+            content: Some(MediaFileContent::Movie {
+                movie_entry_id: Uuid::new_v4(),
+            }),
             status: FileStatus::Known,
+            classifier_version: CLASSIFIER_VERSION,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -3587,6 +4378,7 @@ mod tests {
             container_format: None,
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -3642,6 +4434,7 @@ mod tests {
             container_format: None,
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -3663,6 +4456,7 @@ mod tests {
             container_format: None,
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -3924,9 +4718,10 @@ mod tests {
             0
         );
 
+        // Both rows are legacy: sidecars and stray files are no longer
+        // indexed (issue #182), so the one still on disk goes missing too.
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
-        let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
-        assert_eq!(ids, vec![kept.id]);
+        assert!(files.is_empty(), "{files:?}");
         let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
         assert!(stored.last_scan_finished_at.is_some());
     }
@@ -4339,8 +5134,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
-        // File A: exists in DB and on disk with the same size → stays unchanged
-        let stays_path = dir.path().join("stays.txt");
+        // File A: exists in DB and on disk with the same size and hash →
+        // stays unchanged
+        let stays_path = dir.path().join("stays.mkv");
         std::fs::write(&stays_path, b"hello").unwrap(); // 5 bytes
         let file_a = beam_domain::models::MediaFile {
             id: Uuid::new_v4(),
@@ -4354,6 +5150,7 @@ mod tests {
             container_format: None,
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -4361,7 +5158,7 @@ mod tests {
         file_repo.files.lock().unwrap().insert(file_a.id, file_a);
 
         // File B: exists in DB only (phantom, no matching disk file) → will be marked missing
-        let phantom_path = dir.path().join("phantom.txt");
+        let phantom_path = dir.path().join("phantom.mkv");
         let file_b = beam_domain::models::MediaFile {
             id: Uuid::new_v4(),
             library_id: library.id,
@@ -4374,15 +5171,25 @@ mod tests {
             container_format: None,
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
         };
         file_repo.files.lock().unwrap().insert(file_b.id, file_b);
 
-        // File C: exists on disk only (not in DB) → will be added as Unknown (non-video)
-        let new_path = dir.path().join("new_file.txt");
+        // File C: exists on disk only (not in DB) → added as Unknown (its
+        // probe fails)
+        let new_path = dir.path().join("new_file.mkv");
         std::fs::write(&new_path, b"new").unwrap();
+        // File D: a sample → excluded, never indexed
+        std::fs::write(dir.path().join("new_file-sample.mkv"), b"sample").unwrap();
+        let mut unchanged_hash = MockHashService::new();
+        unchanged_hash.expect_hash_async().returning(|_| Ok(0));
+        let mut failing_probe = MockMediaInfoService::new();
+        failing_probe
+            .expect_get_video_metadata()
+            .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".to_string())));
 
         let service = LocalIndexService::new(
             lib_repo.clone(),
@@ -4390,12 +5197,11 @@ mod tests {
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
+            Arc::new(unchanged_hash),
+            Arc::new(failing_probe),
             Arc::new(InMemoryNotificationService::new()),
             admin_log_svc,
-        )
-        .with_hash_unknown_files(false);
+        );
 
         let added = service.scan_library(library.id.to_string()).await.unwrap();
         assert_eq!(added, 1);
@@ -4414,6 +5220,7 @@ mod tests {
         assert_eq!(details["marked_missing"], serde_json::json!(1));
         assert_eq!(details["restored"], serde_json::json!(0));
         assert_eq!(details["purged"], serde_json::json!(0));
+        assert_eq!(details["excluded"], serde_json::json!(1));
     }
 
     // ─── reconcile, dedup, reconcile_path, scan_all_libraries ───────────────
@@ -4444,6 +5251,7 @@ mod tests {
             container_format: Some("mp4".to_string()),
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -4497,8 +5305,12 @@ mod tests {
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: Some("mp4".to_string()),
-            content: None,
+            // A Known row is a movie's or an episode's file (the `files` CHECK).
+            content: Some(MediaFileContent::Movie {
+                movie_entry_id: Uuid::new_v4(),
+            }),
             status: FileStatus::Known,
+            classifier_version: CLASSIFIER_VERSION,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -4556,8 +5368,12 @@ mod tests {
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: Some("mp4".to_string()),
-            content: None,
+            // A Known row is a movie's or an episode's file (the `files` CHECK).
+            content: Some(MediaFileContent::Movie {
+                movie_entry_id: Uuid::new_v4(),
+            }),
             status: FileStatus::Known,
+            classifier_version: CLASSIFIER_VERSION,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -4599,6 +5415,80 @@ mod tests {
         assert_eq!(files[0].hash, 200);
     }
 
+    /// A file with no movie or episode -- one its path could not classify --
+    /// whose content changes and whose re-probe then fails stays `Unknown`:
+    /// `Changed` without content is what the `files` CHECK refuses, so the
+    /// write would fail and the new hash would never be recorded.
+    #[tokio::test]
+    async fn test_reconcile_changed_unclassifiable_file_ffmpeg_failure_stays_unknown() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("Show Name/Season 01/Behind the Scenes.mkv");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, b"new content").unwrap();
+
+        let existing = MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: file_path.clone(),
+            hash: 100,
+            size_bytes: 999, // wrong size → suspected
+            mtime: None,
+            mime_type: Some("video/x-matroska".to_string()),
+            duration: Some(Duration::from_secs(60)),
+            container_format: Some("matroska".to_string()),
+            content: None,
+            status: FileStatus::Unknown,
+            classifier_version: CLASSIFIER_VERSION,
+            scanned_at: Utc::now(),
+            updated_at: Utc::now(),
+            missing_since: None,
+        };
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(existing.id, existing);
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Ok(200)); // differs from existing.hash
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".into())));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service
+            .scan_library(library.id.to_string())
+            .await
+            .expect("the scan does not fail on the file");
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Unknown);
+        assert!(files[0].content.is_none(), "{:?}", files[0].content);
+        assert_eq!(files[0].hash, 200, "the new content was recorded");
+        assert_eq!(files[0].size_bytes, "new content".len() as u64);
+    }
+
     #[tokio::test]
     async fn test_reconcile_path_removed_marks_file_missing() {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
@@ -4621,6 +5511,7 @@ mod tests {
             container_format: None,
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -4725,44 +5616,6 @@ mod tests {
             .unwrap();
 
         assert!(file_repo.files.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_unknown_file_hashed_when_enabled() {
-        // hash_unknown_files defaults to true, so even a .txt file is hashed
-        // for duplicate detection. Status still ends up Unknown.
-        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
-        let file_repo = Arc::new(InMemoryFileRepository::default());
-        let dir = TempDir::new().unwrap();
-        let library = make_library_in_tempdir(&lib_repo, &dir).await;
-
-        let file_path = dir.path().join("notes.txt");
-        std::fs::write(&file_path, b"text").unwrap();
-
-        let mut mock_hash = MockHashService::new();
-        mock_hash
-            .expect_hash_async()
-            .times(1)
-            .returning(|_| Ok(555));
-
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-        );
-
-        service.scan_library(library.id.to_string()).await.unwrap();
-
-        let files = file_repo.find_all_by_library(library.id).await.unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].status, FileStatus::Unknown);
-        assert_eq!(files[0].hash, 555);
     }
 
     #[tokio::test]
@@ -4897,6 +5750,7 @@ mod tests {
             container_format: None,
             content,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -4931,7 +5785,7 @@ mod tests {
             .await
             .unwrap();
         let entry_a = movie_repo
-            .create_entry(CreateMovieEntry {
+            .find_or_create_entry(CreateMovieEntry {
                 library_id,
                 movie_id: movie.id,
                 edition: None,
@@ -4940,7 +5794,7 @@ mod tests {
             .await
             .unwrap();
         let entry_b = movie_repo
-            .create_entry(CreateMovieEntry {
+            .find_or_create_entry(CreateMovieEntry {
                 library_id,
                 movie_id: movie.id,
                 edition: Some("Extended".to_string()),
@@ -5029,12 +5883,12 @@ mod tests {
         let notification = Arc::new(InMemoryNotificationService::new());
 
         let file_a = make_file_with_content(
-            Some(MediaFileContent::Episode { episode_id }),
+            Some(MediaFileContent::episode(episode_id)),
             Some(2.0 * 60.0),
             "/media/ep-a.mkv",
         );
         let file_b = make_file_with_content(
-            Some(MediaFileContent::Episode { episode_id }),
+            Some(MediaFileContent::episode(episode_id)),
             Some(3.0 * 60.0),
             "/media/ep-b.mkv",
         );
@@ -5068,12 +5922,12 @@ mod tests {
         let notification = Arc::new(InMemoryNotificationService::new());
 
         let file_a = make_file_with_content(
-            Some(MediaFileContent::Episode { episode_id }),
+            Some(MediaFileContent::episode(episode_id)),
             Some(30.0 * 60.0),
             "/media/ep-a.mkv",
         );
         let file_b = make_file_with_content(
-            Some(MediaFileContent::Episode { episode_id }),
+            Some(MediaFileContent::episode(episode_id)),
             Some(60.0 * 60.0),
             "/media/ep-b.mkv",
         );
@@ -5100,6 +5954,63 @@ mod tests {
             .collect();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("/media/ep-b.mkv"));
+    }
+
+    /// A two-episode file runs twice as long as a single episode of the same
+    /// first episode; that is not a mismatch, so it is never compared.
+    #[tokio::test]
+    async fn test_divergence_multi_episode_sibling_is_not_compared_with_a_single_episode() {
+        let episode_id = Uuid::new_v4();
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let notification = Arc::new(InMemoryNotificationService::new());
+
+        let single = make_file_with_content(
+            Some(MediaFileContent::episode(episode_id)),
+            Some(30.0 * 60.0),
+            "/media/S01E01.mkv",
+        );
+        let double = make_file_with_content(
+            Some(MediaFileContent::Episode {
+                episode_id,
+                last_episode_number: Some(2),
+            }),
+            Some(60.0 * 60.0),
+            "/media/S01E01E02.mkv",
+        );
+        let other_double = make_file_with_content(
+            Some(MediaFileContent::Episode {
+                episode_id,
+                last_episode_number: Some(2),
+            }),
+            Some(20.0 * 60.0),
+            "/media/S01E01E02.short.mkv",
+        );
+        for file in [&single, &double, &other_double] {
+            file_repo
+                .files
+                .lock()
+                .unwrap()
+                .insert(file.id, (*file).clone());
+        }
+
+        let service = make_divergence_service(
+            file_repo,
+            Arc::new(InMemoryMovieRepository::default()),
+            notification.clone(),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service.check_and_report_runtime_divergence(&single).await;
+        assert!(
+            notification.published_events().is_empty(),
+            "a single episode is not compared with a two-episode file"
+        );
+
+        // Two files of the same range still are.
+        service.check_and_report_runtime_divergence(&double).await;
+        let warnings = notification.published_events();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("S01E01E02.short.mkv"));
     }
 
     #[tokio::test]
@@ -5137,9 +6048,7 @@ mod tests {
         );
 
         let file = make_file_with_content(
-            Some(MediaFileContent::Episode {
-                episode_id: Uuid::new_v4(),
-            }),
+            Some(MediaFileContent::episode(Uuid::new_v4())),
             Some(45.0 * 60.0),
             "/media/only.mkv",
         );

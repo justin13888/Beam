@@ -4,8 +4,11 @@
 //! The display title is not an identity. Enrichment rewrites it with the
 //! provider's spelling -- `Amelie` becomes `Amélie`, `Spider Man` becomes
 //! `Spider-Man` -- so a lookup by display title misses the enriched row on the
-//! next file and creates a duplicate. The key is derived once, from the
-//! filename parse, stored in its own column, and never touched by enrichment.
+//! next file and creates a duplicate. The key is derived from the filename
+//! parse, stored in its own column, and never touched by enrichment. A change
+//! to this fold changes stored keys too: bump
+//! [`crate::utils::media_path::CLASSIFIER_VERSION`] with it, and the indexer
+//! re-derives every key an older version derived.
 //!
 //! The key is deliberately forgiving about spelling and strict about year:
 //! case, punctuation, `&`/`and` and every combining mark in the Combining
@@ -35,6 +38,11 @@ use unicode_normalization::char::is_combining_mark;
 /// name.
 const FOLDED_DIACRITICS: RangeInclusive<char> = '\u{0300}'..='\u{036F}';
 
+/// Apostrophes, straight and typographic. Elided rather than read as a word
+/// break: scene releases always drop them (`Greys.Anatomy` for `Grey's
+/// Anatomy`), so `grey s` and `greys` would otherwise be two shows.
+const APOSTROPHES: [char; 2] = ['\'', '\u{2019}'];
+
 /// Separates the normalised title from the year inside a key. Never produced
 /// by [`normalize_title`], which maps every non-alphanumeric character to a
 /// space, so a key splits back into its two parts unambiguously.
@@ -46,7 +54,8 @@ const KEY_SEPARATOR: char = '|';
 /// behind in the Combining Diacritical Marks block -- Latin, Greek and
 /// Cyrillic accents alike (`é` -> `e`, but also `й` -> `и`; see
 /// [`FOLDED_DIACRITICS`] and the module docs for that accepted cost) -- while
-/// keeping every other combining mark, lowercases, spells `&` as `and`, turns every other
+/// keeping every other combining mark, lowercases, drops apostrophes (`'` and
+/// `’`: `Grey's` and `Greys` are one word), spells `&` as `and`, turns every other
 /// non-alphanumeric character into a space, collapses runs of spaces, and
 /// recomposes (NFC) what is left, so `が` stays `が` whether the filename
 /// spelled it precomposed or decomposed. Articles are kept: `The Thing` and
@@ -59,7 +68,7 @@ const KEY_SEPARATOR: char = '|';
 pub fn normalize_title(title: &str) -> String {
     let mut folded = String::with_capacity(title.len());
     for c in title.nfkd() {
-        if FOLDED_DIACRITICS.contains(&c) {
+        if FOLDED_DIACRITICS.contains(&c) || APOSTROPHES.contains(&c) {
             continue;
         }
         if c == '&' {
@@ -129,6 +138,10 @@ mod tests {
                 Some(1994),
             ),
             ("Mr. Robot", "Mr Robot", None),
+            // Scene names drop apostrophes; providers spell them either way.
+            ("Grey's Anatomy", "Greys Anatomy", Some(2005)),
+            ("Schitt\u{2019}s Creek", "Schitts Creek", Some(2015)),
+            ("The Handmaid's Tale", "The Handmaid\u{2019}s Tale", None),
             ("  Arrival  ", "Arrival", Some(2016)),
             ("Ёлки", "Елки", Some(2010)),
             // A known, deliberate collision: the fold is by block, so `й`

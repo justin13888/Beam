@@ -43,6 +43,14 @@ pub struct Model {
     /// it is present. A missing row is hidden from every visible read and
     /// purged once it has been missing for the grace period (issue #179).
     pub missing_since: Option<DateTimeWithTimeZone>,
+
+    /// The last episode of a multi-episode file, when `episode_id` is its
+    /// first. Only ever set alongside `episode_id` (a `CHECK` enforces it).
+    pub last_episode_number: Option<i32>,
+
+    /// The version of the classification rules that decided this row's
+    /// content; `0` for rows classified before versions existed.
+    pub classifier_version: i16,
 }
 
 /// The `file_status` column is a Postgres enum type, not text (see

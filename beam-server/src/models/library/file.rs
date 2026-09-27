@@ -129,6 +129,8 @@ impl LibraryFile {
             // Not exposed: every read that feeds this DTO is a visible read of
             // `FileRepository`, which never returns a missing file (#179).
             missing_since: _,
+            // Indexer bookkeeping: which rules classified the row.
+            classifier_version: _,
         } = file;
         let content_type = match &content {
             Some(beam_domain::models::MediaFileContent::Movie { .. }) => FileContentType::Movie,

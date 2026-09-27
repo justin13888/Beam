@@ -321,7 +321,7 @@ async fn indexed_movie(
         .await
         .unwrap();
     let entry = movies
-        .create_entry(CreateMovieEntry {
+        .find_or_create_entry(CreateMovieEntry {
             library_id,
             movie_id: movie.id,
             edition: None,
@@ -343,6 +343,7 @@ async fn indexed_movie(
                 movie_entry_id: entry.id,
             }),
             status: FileStatus::Known,
+            classifier_version: 0,
         })
         .await
         .unwrap();

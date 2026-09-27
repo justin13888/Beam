@@ -307,6 +307,7 @@ impl From<beam_domain::models::MediaFile> for LocatedFile {
             scanned_at: _,
             updated_at: _,
             missing_since: _,
+            classifier_version: _,
         } = file;
         LocatedFile {
             id,

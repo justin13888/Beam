@@ -62,6 +62,7 @@ pub async fn movie_entry(db: &DatabaseConnection, library_id: Uuid) -> Result<Uu
         id: Set(movie_id),
         title: Set(format!("movie-{movie_id}")),
         identity_key: Set(Some(format!("movie {movie_id}|"))),
+        identity_key_version: Set(beam_domain::utils::media_path::CLASSIFIER_VERSION as i16),
         title_localized: Set(None),
         description: Set(None),
         year: Set(None),
@@ -123,6 +124,8 @@ pub async fn file(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         file_status: Set(beam_entity::files::FileStatus::Known),
         mtime: Set(None),
         missing_since: Set(None),
+        last_episode_number: Set(None),
+        classifier_version: Set(0),
     }
     .insert(db)
     .await?;
@@ -139,6 +142,7 @@ pub async fn episode(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         id: Set(show_id),
         title: Set(format!("show-{show_id}")),
         identity_key: Set(Some(format!("show {show_id}|"))),
+        identity_key_version: Set(beam_domain::utils::media_path::CLASSIFIER_VERSION as i16),
         title_localized: Set(None),
         description: Set(None),
         year: Set(None),

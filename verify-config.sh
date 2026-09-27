@@ -76,7 +76,10 @@ check_var "RUST_LOG"
 echo ""
 
 echo "Checking Indexing / Filesystem Watcher Configuration:"
-check_var "BEAM_HASH_UNKNOWN_FILES"
+check_var "BEAM_SCAN_IGNORE"
+if [ -n "${BEAM_HASH_UNKNOWN_FILES:-}" ]; then
+    echo "⚠️  BEAM_HASH_UNKNOWN_FILES is set but no longer has any effect: only video files are indexed"
+fi
 check_var "BEAM_SCAN_INTERVAL_SECS"
 check_var "BEAM_MISSING_FILE_GRACE_DAYS"
 check_var "BEAM_WATCH_ENABLED"

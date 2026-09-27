@@ -15,6 +15,11 @@ pub struct Model {
     /// a row that predates the column and could not be backfilled.
     #[sea_orm(unique)]
     pub identity_key: Option<String>,
+    /// The version of the classification rules that derived `identity_key`
+    /// (`beam_domain::utils::media_path::CLASSIFIER_VERSION`); `0` for a key
+    /// stored before versions existed. The indexer re-derives a key older
+    /// than the current rules from the title's files.
+    pub identity_key_version: i16,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<i32>,

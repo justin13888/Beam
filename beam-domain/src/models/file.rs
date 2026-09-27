@@ -26,6 +26,10 @@ pub struct MediaFile {
     /// -- and so its playback progress -- until the path reappears or the
     /// grace period runs out (issue #179).
     pub missing_since: Option<DateTime<Utc>>,
+    /// The version of the path-classification rules that decided `content`
+    /// (see [`crate::utils::media_path::CLASSIFIER_VERSION`]). A row decided
+    /// by older rules is reclassified from its path by the next scan.
+    pub classifier_version: u16,
 }
 
 /// Status of the file in the library
@@ -51,8 +55,25 @@ pub enum FileStatus {
 pub enum MediaFileContent {
     /// File is a movie
     Movie { movie_entry_id: Uuid },
-    /// File is a TV episode
-    Episode { episode_id: Uuid },
+    /// File is a TV episode -- or, when `last_episode_number` is set, the
+    /// run of episodes from `episode_id`'s up to that number that one
+    /// multi-episode file holds (`S01E01E02`). The file is attached to the
+    /// first episode; the rest of the range is recorded here rather than as
+    /// extra rows.
+    Episode {
+        episode_id: Uuid,
+        last_episode_number: Option<u32>,
+    },
+}
+
+impl MediaFileContent {
+    /// A single-episode file of `episode_id`.
+    pub fn episode(episode_id: Uuid) -> Self {
+        MediaFileContent::Episode {
+            episode_id,
+            last_episode_number: None,
+        }
+    }
 }
 
 /// Parameters for creating a new media file
@@ -68,6 +89,18 @@ pub struct CreateMediaFile {
     pub container_format: Option<String>,
     pub content: Option<MediaFileContent>,
     pub status: FileStatus,
+    /// See [`MediaFile::classifier_version`].
+    pub classifier_version: u16,
+}
+
+/// A file's classification, replaced as a whole when a scan reclassifies it
+/// under newer rules. `content: None` clears it: the path no longer says what
+/// the file is.
+#[derive(Debug, Clone)]
+pub struct FileClassification {
+    pub content: Option<MediaFileContent>,
+    pub status: FileStatus,
+    pub classifier_version: u16,
 }
 
 /// Parameters for updating an existing media file
@@ -114,9 +147,10 @@ impl From<beam_entity::files::Model> for MediaFile {
             .movie_entry_id
             .map(|id| MediaFileContent::Movie { movie_entry_id: id })
             .or_else(|| {
-                model
-                    .episode_id
-                    .map(|id| MediaFileContent::Episode { episode_id: id })
+                model.episode_id.map(|id| MediaFileContent::Episode {
+                    episode_id: id,
+                    last_episode_number: model.last_episode_number.map(|n| n as u32),
+                })
             });
 
         Self {
@@ -134,6 +168,7 @@ impl From<beam_entity::files::Model> for MediaFile {
             scanned_at: model.scanned_at.with_timezone(&Utc),
             updated_at: model.updated_at.with_timezone(&Utc),
             missing_since: model.missing_since.map(|d| d.with_timezone(&Utc)),
+            classifier_version: model.classifier_version as u16,
         }
     }
 }

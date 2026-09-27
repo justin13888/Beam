@@ -108,7 +108,7 @@ impl DbPlaybackService {
                     .ok_or(PlaybackError::FileNotFound)?;
                 Ok((entry.movie_id.to_string(), "movie".to_string(), None))
             }
-            Some(MediaFileContent::Episode { episode_id }) => {
+            Some(MediaFileContent::Episode { episode_id, .. }) => {
                 let episode = self
                     .show_repo
                     .find_episode_by_id(episode_id)
