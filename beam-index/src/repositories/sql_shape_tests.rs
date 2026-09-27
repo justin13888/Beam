@@ -235,6 +235,7 @@ mod file {
     use beam_domain::repositories::FileRepository;
 
     use crate::repositories::SqlFileRepository;
+    use std::path::Path;
 
     #[tokio::test]
     async fn lookups_filter_on_the_column_they_are_named_for() {
@@ -266,6 +267,47 @@ mod file {
         assert_bound(&sql[4], &episode.to_string());
         assert_filters(&sql[5], "files", "library_id", "=");
         assert_bound(&sql[5], &library.to_string());
+    }
+
+    /// The files under a folder are one query, narrowed to the library and
+    /// to present rows, with the folder bound as a literal prefix ending in
+    /// a separator -- whole components only, and no `LIKE` pattern for a `_`
+    /// or `%` in a folder name to widen.
+    #[tokio::test]
+    async fn the_files_under_a_folder_are_one_literal_prefix_query() {
+        let library = Uuid::from_u128(15);
+        let db = connection(empty_mock());
+        let repo = SqlFileRepository::new(db.clone());
+        let _ = repo
+            .find_all_under(library, Path::new("/videos/Sho_w"))
+            .await;
+        let _ = repo
+            .find_all_under(library, Path::new("/videos/Sho_w/"))
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 2);
+        for statement in &sql {
+            assert_filters(statement, "files", "library_id", "=");
+            assert_bound(statement, &library.to_string());
+            assert_filters(statement, "files", "missing_since", "IS NULL");
+            assert_contains(statement, r#"starts_with("files"."file_path", "#);
+            assert!(
+                !statement.sql.contains("LIKE"),
+                "no pattern: {}",
+                statement.sql
+            );
+            let values = bound_values(statement);
+            assert_eq!(
+                values
+                    .iter()
+                    .filter(|v| v.contains("\"/videos/Sho_w/\""))
+                    .count(),
+                1,
+                "the folder, with one trailing separator: {values:?}"
+            );
+        }
     }
 
     /// The soft-delete split (issue #179): a visible read must exclude a

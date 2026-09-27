@@ -633,6 +633,82 @@ macro_rules! file_repository_contract {
             ids
         }
 
+        /// The files beneath a directory are those whose path starts with it a
+        /// whole component at a time, at any depth -- the directory name is a
+        /// literal, never a pattern -- and present, in that library.
+        #[tokio::test]
+        async fn the_files_under_a_directory_are_the_present_ones_beneath_it() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let other_library = fixture.new_library().await;
+            let root = PathBuf::from(format!("/videos/{library}"));
+            let mut by_name = ::std::collections::HashMap::new();
+            for (name, in_library) in [
+                ("Show/a.mkv", library),
+                ("Show/Season 1/b.mkv", library),
+                ("Show/Season 1/Extras/c.mkv", library),
+                ("Show 2/d.mkv", library),
+                ("Showtime/e.mkv", library),
+                ("Sho_/f.mkv", library),
+                ("Sh%/g.mkv", library),
+                ("Show/gone.mkv", library),
+                ("Show/elsewhere.mkv", other_library),
+            ] {
+                let movie_entry_id = fixture.new_movie_entry(in_library).await;
+                let unique = Uuid::new_v4();
+                let file = fixture
+                    .repo()
+                    .create(CreateMediaFile {
+                        library_id: in_library,
+                        path: root.join(name),
+                        hash: (unique.as_u128() as u64) >> 1,
+                        size_bytes: 1024,
+                        mtime: None,
+                        mime_type: None,
+                        duration: None,
+                        container_format: None,
+                        content: Some(MediaFileContent::Movie { movie_entry_id }),
+                        status: FileStatus::Known,
+                        classifier_version: 0,
+                    })
+                    .await
+                    .expect("create a file");
+                by_name.insert(name, file.id);
+            }
+            fixture
+                .repo()
+                .mark_missing(vec![by_name["Show/gone.mkv"]], at(0))
+                .await
+                .unwrap();
+            let under = |dir: &'static str| {
+                let dir = root.join(dir);
+                let repo = fixture.repo();
+                async move { ids(&repo.find_all_under(library, &dir).await.unwrap()) }
+            };
+            let named = |names: &[&str]| sorted(names.iter().map(|n| by_name[n]).collect());
+
+            assert_eq!(
+                under("Show").await,
+                named(&[
+                    "Show/a.mkv",
+                    "Show/Season 1/b.mkv",
+                    "Show/Season 1/Extras/c.mkv"
+                ]),
+                "every present file beneath, at any depth; not `Show 2` or `Showtime`"
+            );
+            assert_eq!(
+                under("Show/Season 1").await,
+                named(&["Show/Season 1/b.mkv", "Show/Season 1/Extras/c.mkv"])
+            );
+            assert_eq!(under("Sho_").await, named(&["Sho_/f.mkv"]), "`_` is literal");
+            assert_eq!(under("Sh%").await, named(&["Sh%/g.mkv"]), "`%` is literal");
+            assert_eq!(
+                under("Show/a.mkv").await,
+                Vec::<Uuid>::new(),
+                "a file is not beneath itself"
+            );
+        }
+
         /// One row per path (issue #181): a second file at a path is refused
         /// whatever its hash, and the first row is left as it was.
         #[tokio::test]

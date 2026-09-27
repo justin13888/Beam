@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -104,6 +105,31 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::LibraryId.eq(library_id))
+            .all(self.db.as_ref())
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
+    async fn find_all_under(&self, library_id: Uuid, dir: &Path) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        // `starts_with` rather than `LIKE`: the directory is a literal, and a
+        // `_` or `%` in a folder name is not a wildcard. The separator makes
+        // the prefix match whole components only.
+        let mut prefix = dir.to_string_lossy().into_owned();
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        let models = files::Entity::find()
+            .filter(files::Column::LibraryId.eq(library_id))
+            .filter(files::Column::MissingSince.is_null())
+            .filter(Expr::cust_with_values(
+                r#"starts_with("files"."file_path", $1)"#,
+                [prefix],
+            ))
             .all(self.db.as_ref())
             .await?;
 

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
@@ -38,6 +40,12 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
         &self,
         library_id: Uuid,
     ) -> Result<Vec<MediaFile>, DbErr>;
+    /// Visible read: every present file in the library whose path lies
+    /// beneath the directory `dir`, at any depth. `dir` is a literal prefix
+    /// matched a whole component at a time: `/a/b` holds `/a/b/c.mkv`, never
+    /// `/a/bc.mkv`. Used to find the files one NFO can describe without
+    /// reading the whole library (issue #184).
+    async fn find_all_under(&self, library_id: Uuid, dir: &Path) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read.
     async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read.
@@ -162,6 +170,22 @@ pub mod in_memory {
                 .unwrap()
                 .values()
                 .filter(|f| f.library_id == library_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn find_all_under(
+            &self,
+            library_id: Uuid,
+            dir: &Path,
+        ) -> Result<Vec<MediaFile>, DbErr> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|f| f.missing_since.is_none() && f.library_id == library_id)
+                .filter(|f| f.path != dir && f.path.starts_with(dir))
                 .cloned()
                 .collect())
         }
