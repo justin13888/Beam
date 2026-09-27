@@ -219,6 +219,7 @@ mod tests {
             Arc::new(prober),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         ));
 
         let mut libraries = MockLibraryRepository::new();

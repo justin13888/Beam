@@ -507,6 +507,38 @@ macro_rules! playback_progress_repository_contract {
             assert_eq!(rows, vec![visible]);
         }
 
+        /// A file's last play is its latest progress row's, across users;
+        /// a missing file keeps its own, and a file never played, or not
+        /// asked after, has none.
+        #[tokio::test]
+        async fn last_played_at_is_the_latest_report_for_each_file_asked() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (alice, bob) = (fixture.new_user().await, fixture.new_user().await);
+            let watched = fixture.new_file().await;
+            let gone = fixture.new_file().await;
+            let unplayed = fixture.new_file().await;
+            let unasked = fixture.new_file().await;
+
+            let first = repo.upsert(report(alice, watched, 10.0)).await.unwrap();
+            fixture.clock().advance(Duration::from_secs(60));
+            let latest = repo.upsert(report(bob, watched, 20.0)).await.unwrap();
+            let missing = repo.upsert(report(alice, gone, 30.0)).await.unwrap();
+            repo.upsert(report(alice, unasked, 40.0)).await.unwrap();
+            fixture.mark_file_missing(gone).await;
+
+            let last = repo
+                .last_played_at(vec![watched, gone, unplayed])
+                .await
+                .unwrap();
+
+            assert!(latest.updated_at > first.updated_at);
+            assert_eq!(last.get(&watched), Some(&latest.updated_at));
+            assert_eq!(last.get(&gone), Some(&missing.updated_at));
+            assert_eq!(last.len(), 2, "{last:?}");
+            assert!(repo.last_played_at(Vec::new()).await.unwrap().is_empty());
+        }
+
         #[tokio::test]
         async fn history_pages_and_counts_only_rows_whose_file_is_present() {
             let fixture = $setup().await;
@@ -558,8 +590,8 @@ macro_rules! file_repository_contract {
         use ::std::path::PathBuf;
         use ::uuid::Uuid;
         use $crate::models::file::{
-            CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent,
-            ProbeUpdate, UpdateMediaFile,
+            CreateMediaFile, FileClassification, FileRelink, FileStatus, MediaFile,
+            MediaFileContent, ProbeUpdate, UpdateMediaFile, displaced_path,
         };
         use $crate::repositories::contract::fixture::FileRepositoryFixture;
 
@@ -1132,6 +1164,30 @@ macro_rules! file_repository_contract {
                 .expect("create a file")
         }
 
+        /// Point `row` at `path`, found there at `size_bytes` bytes and `mtime`.
+        fn to(
+            row: &MediaFile,
+            path: &::std::path::Path,
+            size_bytes: u64,
+            mtime: Option<DateTime<Utc>>,
+        ) -> FileRelink {
+            FileRelink {
+                id: row.id,
+                path: path.to_path_buf(),
+                size_bytes,
+                mtime,
+            }
+        }
+
+        /// The row now stored at `path`, if any.
+        async fn at_path(fixture: &impl FileRepositoryFixture, path: &::std::path::Path) -> Option<MediaFile> {
+            fixture
+                .repo()
+                .find_by_path(&path.to_string_lossy())
+                .await
+                .unwrap()
+        }
+
         /// A moved file keeps its row (issue #180): the relink points it at
         /// the new path, records what was found there, and brings it back if
         /// it had been marked missing -- keeping its id, hash and title.
@@ -1144,12 +1200,10 @@ macro_rules! file_repository_contract {
             repo.mark_missing(vec![file.id], at(0)).await.unwrap();
             let moved_to = PathBuf::from(format!("/videos/{library}/moved/{}.mkv", Uuid::new_v4()));
 
-            let relinked = repo
-                .relink(file.id, moved_to.clone(), 4096, Some(at(30)))
+            repo.relink(vec![to(&file, &moved_to, 4096, Some(at(30)))], Vec::new(), at(60))
                 .await
                 .expect("relink the row");
 
-            assert_eq!(relinked.id, file.id);
             let stored = repo
                 .find_by_id(file.id)
                 .await
@@ -1166,71 +1220,180 @@ macro_rules! file_repository_contract {
                 "the content and its title are kept"
             );
             assert!(
-                repo.find_by_path(&file.path.to_string_lossy())
-                    .await
-                    .unwrap()
-                    .is_none(),
+                at_path(&fixture, &file.path).await.is_none(),
                 "nothing is left at the old path"
             );
-            assert_eq!(
-                repo.find_by_path(&moved_to.to_string_lossy())
-                    .await
-                    .unwrap()
-                    .map(|f| f.id),
-                Some(file.id)
-            );
+            assert_eq!(at_path(&fixture, &moved_to).await.map(|f| f.id), Some(file.id));
         }
 
-        /// One row per path holds for a relink too: moving a row onto a path
-        /// another row holds is refused, and neither row changes.
+        /// Two files that swapped names swap paths in one relink, although
+        /// neither path is free until the other row has left it: one row per
+        /// path holds when the relink is done, not step by step.
         #[tokio::test]
-        async fn relinking_onto_a_path_another_row_holds_is_refused() {
+        async fn two_rows_swap_paths_in_one_relink() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let heat = movie_file(&fixture, library).await;
+            let ronin = movie_file(&fixture, library).await;
+
+            fixture
+                .repo()
+                .relink(
+                    vec![
+                        to(&heat, &ronin.path, 7, Some(at(1))),
+                        to(&ronin, &heat.path, 9, Some(at(2))),
+                    ],
+                    Vec::new(),
+                    at(60),
+                )
+                .await
+                .expect("the rows swap paths");
+
+            let now_heat = at_path(&fixture, &ronin.path).await.unwrap();
+            let now_ronin = at_path(&fixture, &heat.path).await.unwrap();
+            assert_eq!((now_heat.id, now_heat.size_bytes), (heat.id, 7));
+            assert_eq!((now_ronin.id, now_ronin.size_bytes), (ronin.id, 9));
+            assert_eq!(now_heat.content, heat.content, "each keeps its title");
+        }
+
+        /// A rotation moves two rows along and displaces the third, whose
+        /// content is nowhere: it is kept, missing as of the relink, at its
+        /// displaced path -- which leaves its old path to the row moving in.
+        /// A displaced row already missing keeps its first stamp.
+        #[tokio::test]
+        async fn a_displaced_row_is_kept_aside_as_missing() {
             let fixture = $setup().await;
             let repo = fixture.repo();
             let library = fixture.new_library().await;
+            let (a, b, c) = (
+                movie_file(&fixture, library).await,
+                movie_file(&fixture, library).await,
+                movie_file(&fixture, library).await,
+            );
+            let stale = movie_file(&fixture, library).await;
+            let d = movie_file(&fixture, library).await;
+            repo.mark_missing(vec![stale.id], at(0)).await.unwrap();
+
+            repo.relink(
+                vec![
+                    to(&a, &b.path, 1, None),
+                    to(&c, &a.path, 1, None),
+                    to(&d, &stale.path, 1, None),
+                ],
+                vec![b.id, stale.id],
+                at(60),
+            )
+            .await
+            .expect("rotate");
+
+            assert_eq!(at_path(&fixture, &b.path).await.map(|f| f.id), Some(a.id));
+            assert_eq!(at_path(&fixture, &a.path).await.map(|f| f.id), Some(c.id));
+            assert_eq!(at_path(&fixture, &stale.path).await.map(|f| f.id), Some(d.id));
+            assert!(at_path(&fixture, &c.path).await.is_none());
+
+            let aside = at_path(&fixture, &displaced_path(&b.path, b.id))
+                .await
+                .expect("the displaced row is kept");
+            assert_eq!(aside.id, b.id);
+            assert_eq!(aside.missing_since, Some(at(60)));
+            assert_eq!(aside.content, b.content, "with its title");
+            let stale_aside = at_path(&fixture, &displaced_path(&stale.path, stale.id))
+                .await
+                .unwrap();
+            assert_eq!(stale_aside.missing_since, Some(at(0)), "the first stamp");
+        }
+
+        /// One row per path holds for a relink too: moving a row onto a path
+        /// a row outside the relink holds is refused, and no row changes --
+        /// not even those the same call would have moved.
+        #[tokio::test]
+        async fn relinking_onto_a_path_another_row_holds_changes_nothing() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let heat = movie_file(&fixture, library).await;
+            let ronin = movie_file(&fixture, library).await;
             let moving = movie_file(&fixture, library).await;
             let holder = movie_file(&fixture, library).await;
             repo.mark_missing(vec![moving.id], at(0)).await.unwrap();
 
             let refused = repo
-                .relink(moving.id, holder.path.clone(), 1, Some(at(9)))
+                .relink(
+                    vec![
+                        to(&heat, &ronin.path, 1, None),
+                        to(&ronin, &heat.path, 1, None),
+                        to(&moving, &holder.path, 1, Some(at(9))),
+                    ],
+                    Vec::new(),
+                    at(60),
+                )
                 .await;
 
             assert!(refused.is_err(), "the path is taken");
-            let stored = repo
-                .find_by_path(&moving.path.to_string_lossy())
-                .await
-                .unwrap()
-                .expect("the moving row is where it was");
-            assert_eq!(stored.id, moving.id);
-            assert_eq!(stored.missing_since, Some(at(0)), "and still missing");
-            assert_eq!(
-                repo.find_by_path(&holder.path.to_string_lossy())
+            for row in [&heat, &ronin, &moving, &holder] {
+                let stored = at_path(&fixture, &row.path)
                     .await
-                    .unwrap()
-                    .map(|f| f.id),
-                Some(holder.id)
-            );
+                    .expect("every row is where it was");
+                assert_eq!(stored.id, row.id);
+                assert_eq!(stored.missing_since, row.missing_since.or(
+                    (row.id == moving.id).then(|| at(0))
+                ));
+            }
         }
 
+        /// Two rows cannot be relinked to one path, and one row cannot be
+        /// named twice.
         #[tokio::test]
-        async fn relinking_a_row_that_does_not_exist_fails_and_creates_nothing() {
+        async fn a_relink_naming_a_path_or_a_row_twice_changes_nothing() {
             let fixture = $setup().await;
             let repo = fixture.repo();
             let library = fixture.new_library().await;
+            let heat = movie_file(&fixture, library).await;
+            let ronin = movie_file(&fixture, library).await;
+            let free = PathBuf::from(format!("/videos/{library}/{}.mkv", Uuid::new_v4()));
+
+            let one_path = repo
+                .relink(
+                    vec![to(&heat, &free, 1, None), to(&ronin, &free, 1, None)],
+                    Vec::new(),
+                    at(60),
+                )
+                .await;
+            let one_row = repo
+                .relink(vec![to(&heat, &free, 1, None)], vec![heat.id], at(60))
+                .await;
+
+            assert!(one_path.is_err() && one_row.is_err());
+            assert!(at_path(&fixture, &free).await.is_none());
+            assert_eq!(at_path(&fixture, &heat.path).await.map(|f| f.id), Some(heat.id));
+            assert_eq!(at_path(&fixture, &ronin.path).await.map(|f| f.id), Some(ronin.id));
+        }
+
+        #[tokio::test]
+        async fn relinking_a_row_that_does_not_exist_fails_and_changes_nothing() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let heat = movie_file(&fixture, library).await;
             let path = PathBuf::from(format!("/videos/{library}/{}.mkv", Uuid::new_v4()));
+            let ghost = MediaFile {
+                id: Uuid::new_v4(),
+                ..heat.clone()
+            };
 
             assert!(
-                repo.relink(Uuid::new_v4(), path.clone(), 1, None)
+                repo.relink(vec![to(&ghost, &path, 1, None)], Vec::new(), at(60))
                     .await
                     .is_err()
             );
             assert!(
-                repo.find_by_path(&path.to_string_lossy())
+                repo.relink(Vec::new(), vec![ghost.id, heat.id], at(60))
                     .await
-                    .unwrap()
-                    .is_none()
+                    .is_err()
             );
+            assert!(at_path(&fixture, &path).await.is_none());
+            let stored = at_path(&fixture, &heat.path).await.expect("left where it was");
+            assert_eq!(stored.missing_since, None);
         }
 
         /// The relink lookup sees a missing row -- the moved file's -- and

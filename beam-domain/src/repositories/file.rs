@@ -1,11 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::file::{CreateMediaFile, FileClassification, MediaFile, UpdateMediaFile};
+use crate::models::file::{
+    CreateMediaFile, FileClassification, FileRelink, MediaFile, UpdateMediaFile, displaced_path,
+};
 
 /// Persistence for indexed media files.
 ///
@@ -92,21 +94,27 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     /// Clear `missing_since` on `id`: the file is back on disk. The row keeps
     /// its id, so everything keyed on it (playback progress) is still there.
     async fn restore(&self, id: Uuid) -> Result<(), DbErr>;
-    /// Point `id` at `path`, where its file now is -- it was moved or renamed
-    /// (issue #180) -- recording the size and modification time found there
-    /// and clearing `missing_since`. Everything else about the row, its id
-    /// above all, is kept, so what is keyed on it (playback progress, its
-    /// movie or episode, its streams) follows the file to its new path.
+    /// Point each row of `relinks` at the path its file now has -- moved,
+    /// renamed, or swapped with another (issue #180) -- recording the size and
+    /// modification time found there and clearing `missing_since`; and move
+    /// each row of `displaced` to its [`displaced_path`], stamping it missing
+    /// at `at` unless it already is. All or nothing.
     ///
-    /// Fails, changing nothing, when `id` has no row, or when another row is
-    /// already stored at `path` (one row per path, issue #181).
+    /// Everything else about a relinked row, its id above all, is kept, so
+    /// what is keyed on it (playback progress, its movie or episode, its
+    /// streams) follows the file to its new path. Rows may trade paths -- a
+    /// swap, a rotation -- within one call: one row per path (issue #181)
+    /// holds once the call is done, not step by step.
+    ///
+    /// Fails, changing nothing, when an id has no row or is named twice, when
+    /// two relinks name one path, or when a relink's path is held by a row
+    /// neither relinked nor displaced.
     async fn relink(
         &self,
-        id: Uuid,
-        path: PathBuf,
-        size_bytes: u64,
-        mtime: Option<DateTime<Utc>>,
-    ) -> Result<MediaFile, DbErr>;
+        relinks: Vec<FileRelink>,
+        displaced: Vec<Uuid>,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbErr>;
     /// Hard-delete every listed row that is missing, returning how many went.
     /// A listed row that is present is left alone, so a caller racing a
     /// restore cannot purge a file that came back. An empty list touches
@@ -389,30 +397,58 @@ pub mod in_memory {
 
         async fn relink(
             &self,
-            id: Uuid,
-            path: PathBuf,
-            size_bytes: u64,
-            mtime: Option<DateTime<Utc>>,
-        ) -> Result<MediaFile, DbErr> {
+            relinks: Vec<FileRelink>,
+            displaced: Vec<Uuid>,
+            at: DateTime<Utc>,
+        ) -> Result<(), DbErr> {
             let mut files = self.files.lock().unwrap();
-            if files
-                .values()
-                .any(|stored| stored.id != id && stored.path == path)
+            let mut moving = std::collections::HashSet::new();
+            for id in relinks
+                .iter()
+                .map(|relink| relink.id)
+                .chain(displaced.iter().copied())
             {
-                return Err(DbErr::Custom(format!(
-                    "idx_files_path_unique: a file is already stored at {}",
-                    path.display()
-                )));
+                if !files.contains_key(&id) {
+                    return Err(DbErr::RecordNotFound(format!("File {id} not found")));
+                }
+                if !moving.insert(id) {
+                    return Err(DbErr::Custom(format!("file {id} is named twice")));
+                }
             }
-            let stored = files
-                .get_mut(&id)
-                .ok_or(DbErr::RecordNotFound(format!("File {id} not found")))?;
-            stored.path = path;
-            stored.size_bytes = size_bytes;
-            stored.mtime = mtime;
-            stored.missing_since = None;
-            stored.updated_at = chrono::Utc::now();
-            Ok(stored.clone())
+            let mut targets = std::collections::HashSet::new();
+            for relink in &relinks {
+                let held = files
+                    .values()
+                    .any(|stored| stored.path == relink.path && !moving.contains(&stored.id));
+                if held || !targets.insert(relink.path.clone()) {
+                    return Err(DbErr::Custom(format!(
+                        "idx_files_path_unique: a file is already stored at {}",
+                        relink.path.display()
+                    )));
+                }
+            }
+            let now = chrono::Utc::now();
+            for id in displaced {
+                let stored = files.get_mut(&id).expect("checked above");
+                stored.path = displaced_path(&stored.path, id);
+                stored.missing_since.get_or_insert(at);
+                stored.updated_at = now;
+            }
+            for FileRelink {
+                id,
+                path,
+                size_bytes,
+                mtime,
+            } in relinks
+            {
+                let stored = files.get_mut(&id).expect("checked above");
+                stored.path = path;
+                stored.size_bytes = size_bytes;
+                stored.mtime = mtime;
+                stored.missing_since = None;
+                stored.updated_at = now;
+            }
+            Ok(())
         }
 
         async fn purge_missing(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {

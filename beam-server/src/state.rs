@@ -328,6 +328,7 @@ impl AppServices {
                 media_info_service.clone(),
                 notification_service.clone(),
                 admin_log_service.clone(),
+                playback_repo.clone(),
             )
             .with_clock(clock.clone())
             .with_path_policy(config.scan_path_policy()?)

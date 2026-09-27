@@ -26,14 +26,14 @@ use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
-    CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent, ProbeUpdate,
-    UpdateMediaFile,
+    CreateMediaFile, FileClassification, FileRelink, FileStatus, MediaFile, MediaFileContent,
+    ProbeUpdate, UpdateMediaFile,
 };
 use beam_domain::models::movie::{CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, Episode};
 use beam_domain::repositories::{
     EnrichmentStateRepository, FileRepository, LibraryRepository, MediaStreamRepository,
-    MovieRepository, ShowRepository,
+    MovieRepository, PlaybackProgressRepository, ShowRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_domain::utils::filename::{ParsedFilename, parse_media_filename};
@@ -281,9 +281,40 @@ fn path_is_absent(path: &Path) -> bool {
     )
 }
 
+/// A walked file's size, modification time and content hash, read together
+/// once it had settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    size: u64,
+    mtime: Option<DateTime<Utc>>,
+    hash: u64,
+}
+
+/// How much `row` looks like the file now at `path`, best first: the same
+/// file name, then the same directory, then the row played most recently
+/// (by anyone; a row never played last), and last the lowest id, so the
+/// choice never depends on the order the rows came in. Breaks a tie
+/// between identical copies of a moved file (issue #180).
+fn relink_preference(
+    path: &Path,
+    row: &MediaFile,
+    last_played: &HashMap<Uuid, DateTime<Utc>>,
+) -> impl Ord + use<> {
+    let same_name = row.path.file_name() == path.file_name();
+    let same_directory = row.path.parent() == path.parent();
+    (
+        std::cmp::Reverse(same_name),
+        std::cmp::Reverse(same_directory),
+        std::cmp::Reverse(last_played.get(&row.id).copied()),
+        row.id,
+    )
+}
+
 /// Which of `candidates` a new file at `path`, of `size` bytes and content
 /// hash `hash`, is the same file as -- moved or renamed -- if any (issue
-/// #180). The candidates are rows of the file's own library.
+/// #180). The candidates are rows of the file's own library. The watcher's
+/// question; a full scan answers it for every path at once, with
+/// [`plan_content_moves`].
 ///
 /// A candidate is one with the same content (hash and size) whose own file
 /// is gone: marked missing, or no longer at its path per `is_absent`. A row
@@ -295,17 +326,14 @@ fn path_is_absent(path: &Path) -> bool {
 /// a move in no particular order: the new path's event can be reconciled
 /// before the old path's, while the old row is not yet marked missing.
 ///
-/// Two copies of one file moved together both match either new path, so
-/// the tie is broken toward the candidate that looks most like the same file:
-/// the same file name, then the same directory, then the one gone most
-/// recently -- an unmarked row, then the latest stamp -- and, last, the
-/// lowest id, so the choice never depends on the order the rows came in.
+/// Among several, [`relink_preference`] decides.
 fn choose_relink_candidate<'a>(
     path: &Path,
     size: u64,
     hash: u64,
     candidates: &'a [MediaFile],
     is_absent: impl Fn(&Path) -> bool,
+    last_played: &HashMap<Uuid, DateTime<Utc>>,
 ) -> Option<&'a MediaFile> {
     if hash == 0 {
         return None;
@@ -314,61 +342,148 @@ fn choose_relink_candidate<'a>(
         .iter()
         .filter(|row| row.hash == hash && row.size_bytes == size && row.path != path)
         .filter(|row| row.missing_since.is_some() || is_absent(&row.path))
-        .min_by_key(|row| {
-            let same_name = row.path.file_name() == path.file_name();
-            let same_directory = row.path.parent() == path.parent();
-            let gone_most_recently = (row.missing_since.is_none(), row.missing_since);
-            (
-                std::cmp::Reverse(same_name),
-                std::cmp::Reverse(same_directory),
-                std::cmp::Reverse(gone_most_recently),
-                row.id,
-            )
-        })
+        .min_by_key(|row| relink_preference(path, row, last_played))
 }
 
-/// The rows a scan may relink a new file to: every row of the library its
-/// walk did not see -- missing, or gone since the last visit -- keyed by
-/// content hash. A row under a path the walk could not read is left out: the
-/// walk cannot say its file is gone.
-#[derive(Debug, Default)]
-struct RelinkPool {
-    by_hash: HashMap<u64, Vec<MediaFile>>,
-    /// The paths the rows relinked so far were at: the scan no longer holds
-    /// a row for them, so none is marked missing.
-    vacated: Vec<PathBuf>,
+/// Whether `row`'s file may no longer be at its path: it is marked missing,
+/// or what is there now -- by a stat that does not follow links -- is not
+/// what the row recorded. A path that cannot be stat'ed says nothing, so it
+/// may have moved too. The watcher leaves a file whose content matches such
+/// a row to the next scan rather than guess (issue #180).
+fn may_have_moved(row: &MediaFile) -> bool {
+    row.missing_since.is_some()
+        || match std::fs::symlink_metadata(&row.path) {
+            Ok(meta) if meta.is_file() => {
+                read_fs_meta(&row.path).ok() != Some((row.size_bytes, row.mtime))
+            }
+            _ => true,
+        }
 }
 
-impl RelinkPool {
-    fn new<'a>(unseen: impl IntoIterator<Item = &'a MediaFile>) -> Self {
-        let mut pool = Self::default();
-        for row in unseen {
-            if row.hash != 0 {
-                pool.by_hash.entry(row.hash).or_default().push(row.clone());
+/// Whether the content `row` records has left its path, as a scan's walk
+/// sees it: the path was not walked (gone, or no longer media), or it was
+/// and was found holding other content. A row under a path the walk could
+/// not read is not known to have moved, and a row never hashed cannot be
+/// followed.
+fn content_left_its_path(
+    row: &MediaFile,
+    walked: &std::collections::HashSet<&Path>,
+    fingerprints: &HashMap<PathBuf, Fingerprint>,
+    is_shielded: &impl Fn(&Path) -> bool,
+) -> bool {
+    row.hash != 0
+        && !is_shielded(&row.path)
+        && match fingerprints.get(&row.path) {
+            Some(found) => found.hash != row.hash,
+            None => !walked.contains(row.path.as_path()),
+        }
+}
+
+/// A walked path whose content is a row's that has left its own path: the
+/// row may be pointed there.
+#[derive(Debug, Clone)]
+struct ContentMatch<'a> {
+    row: &'a MediaFile,
+    path: &'a Path,
+    found: Fingerprint,
+}
+
+/// Every walked path a scan hashed whose content a row records whose own
+/// content has left its path (see [`content_left_its_path`]): each pairing
+/// [`plan_content_moves`] may choose. A path is a new one, or an indexed one
+/// holding content other than its row's; the same content at a row's own
+/// path is that row's, and the same content elsewhere while the row's own
+/// path still holds it is a copy.
+fn content_matches<'a>(
+    rows: &'a HashMap<PathBuf, MediaFile>,
+    walked: &std::collections::HashSet<&Path>,
+    fingerprints: &'a HashMap<PathBuf, Fingerprint>,
+    is_shielded: impl Fn(&Path) -> bool,
+) -> Vec<ContentMatch<'a>> {
+    let mut by_hash: HashMap<u64, Vec<&MediaFile>> = HashMap::new();
+    for row in rows.values() {
+        if content_left_its_path(row, walked, fingerprints, &is_shielded) {
+            by_hash.entry(row.hash).or_default().push(row);
+        }
+    }
+    let mut matches = Vec::new();
+    for (path, found) in fingerprints {
+        let holds_its_own = rows.get(path).is_some_and(|row| row.hash == found.hash);
+        if found.hash == 0 || holds_its_own {
+            continue;
+        }
+        for row in by_hash.get(&found.hash).into_iter().flatten() {
+            if row.size_bytes == found.size && row.path != *path {
+                matches.push(ContentMatch {
+                    row,
+                    path,
+                    found: *found,
+                });
             }
         }
-        pool
     }
+    matches
+}
 
-    fn candidates(&self, hash: u64) -> &[MediaFile] {
-        self.by_hash.get(&hash).map_or(&[], Vec::as_slice)
-    }
+/// The rows a scan points at other paths, and the rows those paths held.
+#[derive(Debug, Default)]
+struct ContentMoves {
+    /// Each row, and the path its content is at now, as found there.
+    relinks: Vec<(MediaFile, PathBuf, Fingerprint)>,
+    /// Rows at a path a relink takes that are not themselves relinked: their
+    /// content is at no path the scan hashed. Kept as missing, aside (see
+    /// [`beam_domain::models::displaced_path`]).
+    displaced: Vec<MediaFile>,
+}
 
-    /// `row` was relinked: it is no longer a candidate, and its old path is
-    /// vacated.
-    fn take(&mut self, row: &MediaFile) {
-        if let Some(rows) = self.by_hash.get_mut(&row.hash) {
-            rows.retain(|candidate| candidate.id != row.id);
+/// Which rows follow their content to another path (issue #180): a move or
+/// a rename, two files swapping names, a rotation, a file renamed onto the
+/// path of a row already missing. Each row keeps its id, and so its playback
+/// progress, its title and its streams.
+///
+/// Every path gets at most one row and every row at most one path. The
+/// pairings are taken best first -- by [`relink_preference`], then by path --
+/// so the result depends on neither the order of the walk nor the order of
+/// the rows. A row whose path a relink takes, and that is not relinked
+/// itself, is displaced.
+fn plan_content_moves(
+    rows: &HashMap<PathBuf, MediaFile>,
+    matches: Vec<ContentMatch<'_>>,
+    last_played: &HashMap<Uuid, DateTime<Utc>>,
+) -> ContentMoves {
+    let mut matches = matches;
+    matches.sort_by(|a, b| {
+        relink_preference(a.path, a.row, last_played)
+            .cmp(&relink_preference(b.path, b.row, last_played))
+            .then_with(|| a.path.cmp(b.path))
+    });
+    let mut moved: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let mut taken: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+    let mut plan = ContentMoves::default();
+    for ContentMatch { row, path, found } in matches {
+        if moved.contains(&row.id) || taken.contains(path) {
+            continue;
         }
-        self.vacated.push(row.path.clone());
+        moved.insert(row.id);
+        taken.insert(path);
+        plan.relinks.push((row.clone(), path.to_path_buf(), found));
     }
+    plan.displaced = taken
+        .iter()
+        .filter_map(|path| rows.get(*path))
+        .filter(|holder| !moved.contains(&holder.id))
+        .cloned()
+        .collect();
+    plan.displaced.sort_by_key(|row| row.id);
+    plan
 }
 
 /// Where [`LocalIndexService::process_new_file`] looks for the row a new
 /// file may be a moved one of.
-enum RelinkSource<'a> {
-    /// A full scan: the rows its walk did not see.
-    Pool(&'a mut RelinkPool),
+enum RelinkSource {
+    /// A full scan, whose [`plan_content_moves`] has already relinked every
+    /// new file it could.
+    Planned,
     /// A watcher event: the library's rows with the file's hash, read from
     /// the repository. Order-independent across debounce windows: the row is
     /// found whether the old path's event was reconciled first or not yet.
@@ -648,6 +763,11 @@ enum FileOutcome {
     /// Still being written: left alone, to be visited again after the
     /// duration.
     Deferred(Duration),
+    /// Its content matches another file of the library that may have moved
+    /// or been swapped with it: left as it is for the next scan, which sees
+    /// every path at once, rather than guessed at by a watcher event (issue
+    /// #180).
+    LeftToScan,
     Failed,
 }
 
@@ -709,6 +829,9 @@ pub struct LocalIndexService {
     media_info_service: Arc<dyn MediaInfoService>,
     notification_service: Arc<dyn NotificationService>,
     admin_log: Arc<dyn AdminLogService>,
+    /// Asked when each candidate row was last played, to break a tie
+    /// between identical copies of a moved file (issue #180).
+    progress_repo: Arc<dyn PlaybackProgressRepository>,
     path_policy: PathPolicy,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
     divergence_policy: DivergencePolicy,
@@ -741,8 +864,10 @@ impl LocalIndexService {
         media_info_service: Arc<dyn MediaInfoService>,
         notification_service: Arc<dyn NotificationService>,
         admin_log: Arc<dyn AdminLogService>,
+        progress_repo: Arc<dyn PlaybackProgressRepository>,
     ) -> Self {
         Self {
+            progress_repo,
             library_repo,
             file_repo,
             movie_repo,
@@ -1179,11 +1304,15 @@ impl LocalIndexService {
     /// [relinked](Self::relink_file) instead: its old row, with its id and
     /// everything keyed on it, points at the new path, and the file is
     /// neither probed nor classified (issue #180).
+    ///
+    /// `known` is what a scan found at the path before, reused when the file
+    /// still has its size and modification time rather than hashed again.
     async fn process_new_file(
         &self,
         path: &Path,
         library: &Library,
-        relink: RelinkSource<'_>,
+        relink: RelinkSource,
+        known: Option<&Fingerprint>,
     ) -> Result<FileOutcome, IndexError> {
         info!("Processing new file: {}", path.display());
 
@@ -1199,46 +1328,45 @@ impl LocalIndexService {
             return Ok(FileOutcome::Deferred(retry_after));
         }
 
-        let hash = self.hash_settled(path, size, mtime).await.map_err(|e| {
-            error!(path = %path.display(), error = %e, "Failed to hash file");
-            IndexError::PathNotFound(format!("Hash failed: {}", e))
-        })?;
+        let hash = match known {
+            Some(found) if (found.size, found.mtime) == (size, mtime) => Some(found.hash),
+            _ => self.hash_settled(path, size, mtime).await.map_err(|e| {
+                error!(path = %path.display(), error = %e, "Failed to hash file");
+                IndexError::PathNotFound(format!("Hash failed: {}", e))
+            })?,
+        };
         let Some(hash) = hash else {
             debug!(path = %path.display(), "a new file changed while it was hashed; deferring it");
             return Ok(FileOutcome::Deferred(self.settle_window));
         };
 
-        let moved_from = match relink {
-            RelinkSource::Pool(pool) => {
-                let chosen = choose_relink_candidate(
-                    path,
-                    size,
-                    hash,
-                    pool.candidates(hash),
-                    path_is_absent,
-                )
-                .cloned();
-                if let Some(row) = &chosen {
-                    self.relink_file(row, path, size, mtime, library).await?;
-                    pool.take(row);
-                }
-                chosen
-            }
-            RelinkSource::Repository => {
-                let candidates = self
-                    .file_repo
-                    .find_by_library_and_hash_including_missing(library.id, hash)
+        if let RelinkSource::Repository = relink {
+            let candidates: Vec<MediaFile> = self
+                .file_repo
+                .find_by_library_and_hash_including_missing(library.id, hash)
+                .await?
+                .into_iter()
+                .filter(|row| row.size_bytes == size && row.path != path)
+                .collect();
+            let last_played = self.last_played(&candidates).await?;
+            let found = Fingerprint { size, mtime, hash };
+            if let Some(row) =
+                choose_relink_candidate(path, size, hash, &candidates, path_is_absent, &last_played)
+            {
+                self.relink_files(&[(row.clone(), path.to_path_buf(), found)], &[], library)
                     .await?;
-                let chosen =
-                    choose_relink_candidate(path, size, hash, &candidates, path_is_absent).cloned();
-                if let Some(row) = &chosen {
-                    self.relink_file(row, path, size, mtime, library).await?;
-                }
-                chosen
+                return Ok(FileOutcome::Relinked);
             }
-        };
-        if moved_from.is_some() {
-            return Ok(FileOutcome::Relinked);
+            // A row whose path now holds something else may be this file,
+            // moved in a swap or a rotation whose other halves have not
+            // reached the watcher: the scan sees them all.
+            if hash != 0 && candidates.iter().any(may_have_moved) {
+                info!(
+                    path = %path.display(),
+                    "a new file matches a file of the library that may have moved; leaving it to the next scan"
+                );
+                return Ok(FileOutcome::LeftToScan);
+            }
         }
 
         let metadata = match self.media_info_service.get_video_metadata(path).await {
@@ -1339,57 +1467,127 @@ impl LocalIndexService {
         Ok(true)
     }
 
-    /// Point `row` at `path`, where its file was moved or renamed to, found
-    /// there at `size` bytes and `mtime` (issue #180).
-    ///
-    /// The row keeps its id, and so its playback progress, its movie or
-    /// episode, and its streams; a missing row is visible again. Nothing is
-    /// probed or classified: the content is the content the row already
-    /// describes. The move is told to the administrator, naming both paths.
-    async fn relink_file(
+    /// When each of `rows` was last played; asked only when there is a tie
+    /// to break.
+    async fn last_played(
         &self,
-        row: &MediaFile,
-        path: &Path,
-        size: u64,
-        mtime: Option<DateTime<Utc>>,
+        rows: &[MediaFile],
+    ) -> Result<HashMap<Uuid, DateTime<Utc>>, IndexError> {
+        if rows.len() < 2 {
+            return Ok(HashMap::new());
+        }
+        Ok(self
+            .progress_repo
+            .last_played_at(rows.iter().map(|row| row.id).collect())
+            .await?)
+    }
+
+    /// Point each row of `relinks` at the path its file was moved, renamed or
+    /// swapped to, as found there, and move each of `displaced` aside as
+    /// missing -- in one step, so rows can trade paths (issue #180).
+    ///
+    /// A relinked row keeps its id, and so its playback progress, its movie
+    /// or episode, and its streams; a missing row is visible again. Nothing
+    /// is probed or classified: the content is the content the row already
+    /// describes. Each move, and each displaced row, is told to the
+    /// administrator.
+    async fn relink_files(
+        &self,
+        relinks: &[(MediaFile, PathBuf, Fingerprint)],
+        displaced: &[MediaFile],
         library: &Library,
     ) -> Result<(), IndexError> {
         self.file_repo
-            .relink(row.id, path.to_path_buf(), size, mtime)
-            .await?;
-        info!(
-            file_id = %row.id,
-            from = %row.path.display(),
-            to = %path.display(),
-            "a moved file keeps its row"
-        );
-        record_file_outcome("relinked");
-        let message = format!(
-            "File moved: '{}' is now '{}'",
-            row.path.display(),
-            path.display()
-        );
-        self.notification_service.publish(AdminEvent::info(
-            EventCategory::LibraryScan,
-            message.clone(),
-            Some(library.id.to_string()),
-            Some(library.name.clone()),
-        ));
-        let _ = self
-            .admin_log
-            .log(
-                AdminLogLevel::Info,
-                AdminLogCategory::LibraryScan,
-                message,
-                Some(serde_json::json!({
-                    "library_id": library.id.to_string(),
-                    "file_id": row.id.to_string(),
-                    "from": row.path.display().to_string(),
-                    "to": path.display().to_string(),
-                })),
+            .relink(
+                relinks
+                    .iter()
+                    .map(|(row, path, found)| FileRelink {
+                        id: row.id,
+                        path: path.clone(),
+                        size_bytes: found.size,
+                        mtime: found.mtime,
+                    })
+                    .collect(),
+                displaced.iter().map(|row| row.id).collect(),
+                self.clock.now(),
             )
-            .await;
+            .await?;
+        for (row, path, _) in relinks {
+            info!(
+                file_id = %row.id,
+                from = %row.path.display(),
+                to = %path.display(),
+                "a moved file keeps its row"
+            );
+            record_file_outcome("relinked");
+            let message = format!(
+                "File moved: '{}' is now '{}'",
+                row.path.display(),
+                path.display()
+            );
+            self.notification_service.publish(AdminEvent::info(
+                EventCategory::LibraryScan,
+                message.clone(),
+                Some(library.id.to_string()),
+                Some(library.name.clone()),
+            ));
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Info,
+                    AdminLogCategory::LibraryScan,
+                    message,
+                    Some(serde_json::json!({
+                        "library_id": library.id.to_string(),
+                        "file_id": row.id.to_string(),
+                        "from": row.path.display().to_string(),
+                        "to": path.display().to_string(),
+                    })),
+                )
+                .await;
+        }
+        for row in displaced {
+            info!(
+                file_id = %row.id,
+                path = %row.path.display(),
+                "another file's content took a file's path; its row is kept as missing"
+            );
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Info,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "File replaced: '{}' now holds another file; its old row is kept as missing",
+                        row.path.display()
+                    ),
+                    Some(serde_json::json!({
+                        "library_id": library.id.to_string(),
+                        "file_id": row.id.to_string(),
+                        "path": row.path.display().to_string(),
+                    })),
+                )
+                .await;
+        }
         Ok(())
+    }
+
+    /// What is at `path` now, hashed, when it may be content a row does not
+    /// already record: a path with no row, or one whose size or modification
+    /// time is no longer its row's. `None` for a file that is as recorded,
+    /// still being written, or cannot be read -- whoever reconciles it next
+    /// finds out which, and reports a failure.
+    async fn fingerprint(&self, path: &Path, recorded: Option<&MediaFile>) -> Option<Fingerprint> {
+        let (size, mtime) = read_fs_meta(path).ok()?;
+        if recorded.is_some_and(|row| (row.size_bytes, row.mtime) == (size, mtime)) {
+            return None;
+        }
+        if let Settle::Unsettled { .. } = settle_state(self.clock.now(), mtime, self.settle_window)
+        {
+            return None;
+        }
+        let hash = self.hash_settled(path, size, mtime).await.ok()??;
+        Some(Fingerprint { size, mtime, hash })
     }
 
     /// Reconcile a file already present in the index against its current state
@@ -1408,13 +1606,16 @@ impl LocalIndexService {
     /// or it was never hashed.
     ///
     /// A changed file is hashed only once it has settled; until then it is
-    /// [`FileOutcome::Deferred`] and its row is left as it is.
+    /// [`FileOutcome::Deferred`] and its row is left as it is. `known` is
+    /// what a scan found at the path before, reused when the file still has
+    /// its size and modification time rather than hashed again.
     async fn reconcile_existing_file(
         &self,
         existing: &MediaFile,
         path: &Path,
         library: &Library,
         reclassify: bool,
+        known: Option<&Fingerprint>,
     ) -> Result<FileOutcome, IndexError> {
         if reclassify && awaits_reclassification(existing) {
             self.reclassify_existing(existing, path, library).await?;
@@ -1449,7 +1650,12 @@ impl LocalIndexService {
             return Ok(FileOutcome::Deferred(retry_after));
         }
 
-        let new_hash = if moved || existing.hash == 0 {
+        let known = known
+            .filter(|found| (found.size, found.mtime) == (size, mtime))
+            .map(|found| found.hash);
+        let new_hash = if let Some(hash) = known {
+            hash
+        } else if moved || existing.hash == 0 {
             // Rehash to confirm the content actually changed.
             match self.hash_settled(path, size, mtime).await {
                 Ok(Some(h)) => h,
@@ -2671,7 +2877,10 @@ impl LocalIndexService {
     ///
     /// * **A file** is reconciled as a scan would: an indexed one against
     ///   its row, a new one indexed -- or, when it is a moved or renamed
-    ///   file, relinked to its row (issue #180).
+    ///   file, relinked to its row (issue #180). A file whose content is
+    ///   another row's that may have moved too -- one half of a swap or a
+    ///   rotation -- is left as it is for the next scan, which sees every
+    ///   path at once.
     /// * **A directory** -- one renamed, or moved into the library -- is
     ///   walked, and every file beneath it reconciled the same way. A row
     ///   beneath it the walk did not see is marked missing, as a scan would
@@ -2754,6 +2963,7 @@ impl LocalIndexService {
             | FileOutcome::Relinked
             | FileOutcome::Changed
             | FileOutcome::Unchanged
+            | FileOutcome::LeftToScan
             | FileOutcome::Failed => ReconcileOutcome::Done,
         })
     }
@@ -2788,13 +2998,39 @@ impl LocalIndexService {
 
         match self.file_repo.find_by_path(&path_str).await? {
             Some(existing) => {
+                // New content that another row of the library records, where
+                // that row may have moved: a swap, a rotation, a rename onto
+                // this row's path. Which row is which needs every path at
+                // once, so the next scan decides (issue #180); the row is not
+                // even restored meanwhile.
+                let found = self.fingerprint(path, Some(&existing)).await;
+                if let Some(found) = &found
+                    && found.hash != existing.hash
+                    && found.hash != 0
+                    && self
+                        .file_repo
+                        .find_by_library_and_hash_including_missing(library.id, found.hash)
+                        .await?
+                        .iter()
+                        .any(|row| {
+                            row.id != existing.id
+                                && row.size_bytes == found.size
+                                && may_have_moved(row)
+                        })
+                {
+                    info!(
+                        path = %path.display(),
+                        "a file's new content matches a file of the library that may have moved; leaving it to the next scan"
+                    );
+                    return Ok(FileOutcome::LeftToScan);
+                }
                 self.restore_if_missing(&existing).await?;
-                self.reconcile_existing_file(&existing, path, library, reclassify)
+                self.reconcile_existing_file(&existing, path, library, reclassify, found.as_ref())
                     .await
             }
             None => {
                 let outcome = self
-                    .process_new_file(path, library, RelinkSource::Repository)
+                    .process_new_file(path, library, RelinkSource::Repository, None)
                     .await?;
                 if outcome == FileOutcome::Added {
                     record_file_outcome("new");
@@ -3217,6 +3453,53 @@ impl LocalIndexService {
 }
 
 impl LocalIndexService {
+    /// Hash every walked path whose content may have moved to or from it --
+    /// a new path, or an indexed one whose size or modification time moved
+    /// -- when some row's content may have left its path: a row the walk did
+    /// not see, or one whose path changed. With neither, nothing moved, and
+    /// each file is hashed, if at all, when it is reconciled; with both, the
+    /// hash taken here is the one reconciling it reuses.
+    async fn fingerprint_walk(
+        &self,
+        walked_files: &[PathBuf],
+        rows: &HashMap<PathBuf, MediaFile>,
+        walked: &std::collections::HashSet<&Path>,
+        is_shielded: &impl Fn(&Path) -> bool,
+        ticket: &ScanTicket,
+    ) -> Result<HashMap<PathBuf, Fingerprint>, IndexError> {
+        let mut changed = 0usize;
+        let mut to_hash: Vec<&PathBuf> = Vec::new();
+        for path in walked_files {
+            let row = rows.get(path);
+            let Ok(stats) = read_fs_meta(path) else {
+                continue;
+            };
+            match row {
+                Some(row) if (row.size_bytes, row.mtime) == stats => continue,
+                Some(_) => changed += 1,
+                None => {}
+            }
+            to_hash.push(path);
+        }
+        let gone = rows.values().any(|row| {
+            row.hash != 0 && !walked.contains(row.path.as_path()) && !is_shielded(&row.path)
+        });
+        let mut fingerprints = HashMap::new();
+        if !(gone || changed > 0) {
+            return Ok(fingerprints);
+        }
+        for path in to_hash {
+            if ticket.is_cancelled() {
+                info!("Scan cancelled");
+                return Err(IndexError::Cancelled);
+            }
+            if let Some(found) = self.fingerprint(path, rows.get(path)).await {
+                fingerprints.insert(path.clone(), found);
+            }
+        }
+        Ok(fingerprints)
+    }
+
     /// Scan one library under a registered job, reclassifying files
     /// classified by older rules only when `reclassify` is set. The caller
     /// holds the library's lock and the catalog gate.
@@ -3358,30 +3641,54 @@ impl LocalIndexService {
         progress.total = Some(walked_files.len() as u64);
         ticket.record(progress);
 
-        // The rows a new file may be a moved one of: every row the walk did
-        // not see, but for those under a path it could not read (issue
-        // #180). A file moved since the last scan is found at its new path
-        // and relinked to its row, not indexed anew beside a row marked
-        // missing.
-        let mut relink_pool = {
-            let walked: std::collections::HashSet<&Path> =
-                walked_files.iter().map(PathBuf::as_path).collect();
-            RelinkPool::new(existing_map.values().filter(|row| {
-                !walked.contains(row.path.as_path())
-                    && !unscoped_failure
-                    && !failed_subtrees
-                        .iter()
-                        .any(|failed| row.path.starts_with(failed))
-            }))
+        // Phase 3a: find where content went (issue #180). A row whose file
+        // was moved, renamed, swapped with another or rotated among others
+        // follows its content to the path that holds it now, keeping its id;
+        // it is not left missing beside a new row, nor its path's new
+        // content read as a change to it.
+        let walked: std::collections::HashSet<&Path> =
+            walked_files.iter().map(PathBuf::as_path).collect();
+        let is_shielded = |path: &Path| {
+            unscoped_failure
+                || failed_subtrees
+                    .iter()
+                    .any(|failed| path.starts_with(failed))
         };
+        let fingerprints = self
+            .fingerprint_walk(&walked_files, &existing_map, &walked, &is_shielded, ticket)
+            .await?;
+        let matches = content_matches(&existing_map, &walked, &fingerprints, is_shielded);
+        let tied: Vec<MediaFile> = matches.iter().map(|m| m.row.clone()).collect();
+        let last_played = self.last_played(&tied).await?;
+        let ContentMoves { relinks, displaced } =
+            plan_content_moves(&existing_map, matches, &last_played);
+        drop(walked);
+        let mut relinked_to: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut displaced_marked = 0u64;
+        if !relinks.is_empty() {
+            self.relink_files(&relinks, &displaced, library).await?;
+            for (row, path, _) in &relinks {
+                existing_map.remove(&row.path);
+                relinked_to.insert(path.clone());
+            }
+            for row in &displaced {
+                existing_map.remove(&row.path);
+                if row.missing_since.is_none() {
+                    displaced_marked += 1;
+                }
+            }
+        }
 
-        // Phase 3: Compare with DB, add new files
-        for path in walked_files {
+        // Phase 3b: Compare with DB, add new files
+        for path in &walked_files {
             if ticket.is_cancelled() {
                 info!(library_id = %lib_uuid, "Scan cancelled");
                 return Err(IndexError::Cancelled);
             }
-            let outcome = if let Some(existing_file) = existing_map.remove(&path) {
+            let known = fingerprints.get(path);
+            let outcome = if relinked_to.contains(path) {
+                FileOutcome::Relinked
+            } else if let Some(existing_file) = existing_map.remove(path) {
                 // Known file: bring it back if it was missing, then reconcile
                 // it against its current on-disk state.
                 let reconciled = match self.restore_if_missing(&existing_file).await {
@@ -3389,23 +3696,29 @@ impl LocalIndexService {
                         if restored {
                             progress.restored += 1;
                         }
-                        self.reconcile_existing_file(&existing_file, &path, library, reclassify)
-                            .await
+                        self.reconcile_existing_file(
+                            &existing_file,
+                            path,
+                            library,
+                            reclassify,
+                            known,
+                        )
+                        .await
                     }
                     Err(e) => Err(e),
                 };
                 match reconciled {
                     Ok(outcome) => outcome,
                     Err(e) => {
-                        self.report_file_failure(lib_uuid, &library.name, &path, &e)
+                        self.report_file_failure(lib_uuid, &library.name, path, &e)
                             .await;
                         FileOutcome::Failed
                     }
                 }
             } else {
-                // New file, or a moved one.
+                // A new file: phase 3a relinked every moved one it found.
                 match self
-                    .process_new_file(&path, library, RelinkSource::Pool(&mut relink_pool))
+                    .process_new_file(path, library, RelinkSource::Planned, known)
                     .await
                 {
                     Ok(outcome) => {
@@ -3415,7 +3728,7 @@ impl LocalIndexService {
                         outcome
                     }
                     Err(e) => {
-                        self.report_file_failure(lib_uuid, &library.name, &path, &e)
+                        self.report_file_failure(lib_uuid, &library.name, path, &e)
                             .await;
                         FileOutcome::Failed
                     }
@@ -3428,7 +3741,9 @@ impl LocalIndexService {
                 FileOutcome::Unchanged => progress.unchanged += 1,
                 // Seen, so never marked missing: a file still being copied in
                 // is on disk. The watcher, or the next scan, comes back to it.
-                FileOutcome::Deferred(_) => progress.deferred += 1,
+                // A scan never leaves a file to itself; were it to, it would
+                // be the same wait.
+                FileOutcome::Deferred(_) | FileOutcome::LeftToScan => progress.deferred += 1,
                 FileOutcome::Failed => progress.failed += 1,
             }
             progress.processed += 1;
@@ -3443,12 +3758,6 @@ impl LocalIndexService {
         if ticket.is_cancelled() {
             info!(library_id = %lib_uuid, "Scan cancelled");
             return Err(IndexError::Cancelled);
-        }
-
-        // A relinked row is at its new path now, and its old one holds
-        // nothing to mark missing.
-        for vacated in &relink_pool.vacated {
-            existing_map.remove(vacated);
         }
 
         // Phase 4: Soft-delete the rows the walk did not see, and purge the
@@ -3468,7 +3777,8 @@ impl LocalIndexService {
             purge,
             shielded,
         } = plan;
-        let marked_count = self.file_repo.mark_missing(mark, now).await?;
+        // A displaced row was stamped missing as it was moved aside.
+        let marked_count = displaced_marked + self.file_repo.mark_missing(mark, now).await?;
         let purged_count = self.file_repo.purge_missing(purge).await?;
         progress.marked_missing = marked_count;
         progress.purged = purged_count;
@@ -3748,6 +4058,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
         (service, movie_repo, show_repo)
     }
@@ -3765,6 +4076,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         )
     }
 
@@ -4297,6 +4609,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let file_id = Uuid::new_v4();
@@ -4526,6 +4839,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         )
     }
 
@@ -4949,6 +5263,7 @@ mod tests {
             Arc::new(mock_media_info_service),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service
@@ -4956,6 +5271,7 @@ mod tests {
                 &path,
                 &test_library(lib_id, temp_dir.path()),
                 RelinkSource::Repository,
+                None,
             )
             .await;
         assert!(result.is_ok());
@@ -5111,6 +5427,7 @@ mod tests {
             Arc::new(mock_media_info_service),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service
@@ -5118,6 +5435,7 @@ mod tests {
                 &path,
                 &test_library(lib_id, temp_dir.path()),
                 RelinkSource::Repository,
+                None,
             )
             .await;
         assert!(result.is_ok());
@@ -5140,6 +5458,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let err = service
@@ -5147,6 +5466,7 @@ mod tests {
                 &path,
                 &test_library(Uuid::new_v4(), temp_dir.path()),
                 RelinkSource::Repository,
+                None,
             )
             .await
             .expect_err("a file that cannot be stat'ed must be refused");
@@ -5188,6 +5508,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let err = service
@@ -5195,6 +5516,7 @@ mod tests {
                 &path,
                 &test_library(Uuid::new_v4(), temp_dir.path()),
                 RelinkSource::Repository,
+                None,
             )
             .await
             .expect_err("a file that cannot be hashed must be refused");
@@ -5254,6 +5576,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -5301,6 +5624,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -5342,6 +5666,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -5388,6 +5713,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -5457,6 +5783,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -5522,6 +5849,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -5628,6 +5956,7 @@ mod tests {
             Arc::new(LocalAdminLogService::new(
                 admin_log_repo.clone() as Arc<dyn AdminLogRepository>
             )),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
         IndexedLibraryHarness {
             library,
@@ -5929,6 +6258,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             notification_svc.clone(),
             admin_log_svc,
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -6006,6 +6336,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let err = service
@@ -6059,6 +6390,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -6101,6 +6433,7 @@ mod tests {
             Arc::new(crate::services::media_info::LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -6148,6 +6481,7 @@ mod tests {
             Arc::new(mock_media_info),
             notification_svc.clone(),
             admin_log_svc,
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         // Scan should succeed overall; the failing file is not counted
@@ -6194,6 +6528,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -6224,6 +6559,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             notification_svc.clone(),
             admin_log_svc,
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -6334,6 +6670,7 @@ mod tests {
             Arc::new(failing_probe),
             Arc::new(InMemoryNotificationService::new()),
             admin_log_svc,
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let added = service.scan_library(library.id.to_string()).await.unwrap();
@@ -6406,6 +6743,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -6471,6 +6809,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()), // no expectation: ffmpeg must NOT be called
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -6539,6 +6878,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -6608,6 +6948,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service
@@ -6663,6 +7004,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service
@@ -6709,6 +7051,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service
@@ -6737,6 +7080,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         // No library matches this id; reconcile_path must be a no-op.
@@ -6789,6 +7133,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             admin_log_svc,
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -6836,6 +7181,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         );
 
         let total = service
@@ -6867,6 +7213,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             notification,
             admin_log,
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         )
     }
 

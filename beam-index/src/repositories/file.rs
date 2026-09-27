@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,7 +8,8 @@ use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
 use beam_domain::models::{
-    CreateMediaFile, FileClassification, MediaFile, MediaFileContent, ProbeUpdate, UpdateMediaFile,
+    CreateMediaFile, FileClassification, FileRelink, MediaFile, MediaFileContent, ProbeUpdate,
+    UpdateMediaFile, displaced_path,
 };
 
 /// The `files` columns a file's content is stored in: `(movie_entry_id,
@@ -353,29 +354,86 @@ impl FileRepository for SqlFileRepository {
 
     async fn relink(
         &self,
-        id: Uuid,
-        path: PathBuf,
-        size_bytes: u64,
-        mtime: Option<DateTime<Utc>>,
-    ) -> Result<MediaFile, DbErr> {
+        relinks: Vec<FileRelink>,
+        displaced: Vec<Uuid>,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbErr> {
         use beam_entity::files;
-        use sea_orm::{ActiveModelTrait, Set};
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set, TransactionTrait};
 
-        // One statement: `idx_files_path_unique` refuses a path another row
-        // holds, and an id with no row updates nothing, which sea-orm
-        // reports as an error. Either way the row is left as it was.
-        let result = files::ActiveModel {
-            id: Set(id),
-            file_path: Set(path.to_string_lossy().to_string()),
-            file_size: Set(size_bytes as i64),
-            mtime: Set(mtime.map(|d| d.into())),
-            missing_since: Set(None),
-            updated_at: Set(chrono::Utc::now().into()),
-            ..Default::default()
+        if relinks.is_empty() && displaced.is_empty() {
+            return Ok(());
         }
-        .update(self.db.as_ref())
-        .await?;
-        Ok(MediaFile::from(result))
+        let mut named = std::collections::HashSet::new();
+        for id in relinks
+            .iter()
+            .map(|relink| relink.id)
+            .chain(displaced.iter().copied())
+        {
+            if !named.insert(id) {
+                return Err(DbErr::Custom(format!("file {id} is named twice")));
+            }
+        }
+        // `idx_files_path_unique` is checked per statement, so rows trading
+        // paths cannot be written straight to their new ones: each relinked
+        // row first steps aside to a path only it can hold, and only then
+        // takes its new one. A path held by a row outside the call, or named
+        // twice, still fails the unique index, and the transaction -- rolled
+        // back when dropped unfinished -- leaves every row as it was.
+        let txn = self.db.begin().await?;
+        let now: DateTimeWithTimeZone = chrono::Utc::now().into();
+        let stored = |id: Uuid| {
+            let txn = &txn;
+            async move {
+                files::Entity::find_by_id(id)
+                    .one(txn)
+                    .await?
+                    .ok_or_else(|| DbErr::RecordNotFound(format!("File {id} not found")))
+            }
+        };
+        for id in displaced {
+            let row = stored(id).await?;
+            let parked = displaced_path(std::path::Path::new(&row.file_path), id);
+            files::ActiveModel {
+                id: Set(id),
+                file_path: Set(parked.to_string_lossy().to_string()),
+                missing_since: Set(Some(row.missing_since.unwrap_or_else(|| at.into()))),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .update(&txn)
+            .await?;
+        }
+        for relink in &relinks {
+            let row = stored(relink.id).await?;
+            files::ActiveModel {
+                id: Set(relink.id),
+                file_path: Set(format!("{}.beam-relinking-{}", row.file_path, relink.id)),
+                ..Default::default()
+            }
+            .update(&txn)
+            .await?;
+        }
+        for FileRelink {
+            id,
+            path,
+            size_bytes,
+            mtime,
+        } in relinks
+        {
+            files::ActiveModel {
+                id: Set(id),
+                file_path: Set(path.to_string_lossy().to_string()),
+                file_size: Set(size_bytes as i64),
+                mtime: Set(mtime.map(|d| d.into())),
+                missing_since: Set(None),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .update(&txn)
+            .await?;
+        }
+        txn.commit().await
     }
 
     async fn purge_missing(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {

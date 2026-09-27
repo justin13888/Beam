@@ -163,6 +163,7 @@ impl Harness {
                 Arc::new(LocalAdminLogService::new(
                     Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
                 )),
+                Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
             )
             .with_clock(clock.clone())
             .with_settle_window(SETTLE),

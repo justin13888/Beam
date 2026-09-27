@@ -19,11 +19,14 @@ use crate::services::hash::{HashConfig, LocalHashService};
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::CreateLibrary;
 use beam_domain::models::admin_log::AdminLog;
+use beam_domain::models::playback_progress::UpsertPlaybackProgress;
 use beam_domain::repositories::AdminLogRepository;
+use beam_domain::repositories::PlaybackProgressRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::services::TestClock;
@@ -126,56 +129,80 @@ fn only_a_gone_row_with_the_same_content_is_a_candidate() {
     } in cases
     {
         let rows = [row];
-        let chosen = choose_relink_candidate(new_path, 1000, hash, &rows, absent);
+        let chosen = choose_relink_candidate(new_path, 1000, hash, &rows, absent, &HashMap::new());
         assert_eq!(chosen.is_some(), matches, "{name}");
     }
 }
 
-/// Among several candidates the one most like the moved file wins, and the
-/// choice does not depend on the order the rows came in.
+/// Among several candidates the one most like the moved file wins -- the
+/// same name, then the same directory, then the one played most recently,
+/// then the lowest id -- and the choice does not depend on the order the
+/// rows came in.
 #[test]
 fn the_most_alike_candidate_wins_whatever_the_order() {
     let new_path = Path::new("/lib/b/One.mkv");
     let never_absent = |_: &Path| false;
-    let cases: [(&str, Vec<MediaFile>, u128); 4] = [
+    let gone = Some(instant(0));
+    let played = |plays: &[(u128, i64)]| -> HashMap<Uuid, DateTime<Utc>> {
+        plays
+            .iter()
+            .map(|(id, secs)| (Uuid::from_u128(*id), instant(*secs)))
+            .collect()
+    };
+    type Plays = HashMap<Uuid, DateTime<Utc>>;
+    let cases: [(&str, Vec<MediaFile>, Plays, u128); 5] = [
         (
-            "the same file name beats the same directory",
+            "the same file name beats the same directory, and being played",
             vec![
-                candidate(1, "/lib/b/Two.mkv", Some(instant(9))),
-                candidate(2, "/lib/a/One.mkv", Some(instant(1))),
+                candidate(1, "/lib/b/Two.mkv", gone),
+                candidate(2, "/lib/a/One.mkv", gone),
             ],
+            played(&[(1, 9)]),
             2,
         ),
         (
-            "then the same directory",
+            "then the same directory beats being played",
             vec![
-                candidate(1, "/lib/a/Two.mkv", Some(instant(9))),
-                candidate(2, "/lib/b/Two.mkv", Some(instant(1))),
+                candidate(1, "/lib/a/Two.mkv", gone),
+                candidate(2, "/lib/b/Two.mkv", gone),
             ],
+            played(&[(1, 9)]),
             2,
         ),
         (
-            "then the one gone most recently",
+            "then the one played most recently",
             vec![
-                candidate(1, "/lib/a/Two.mkv", Some(instant(1))),
-                candidate(2, "/lib/a/Six.mkv", Some(instant(9))),
+                candidate(1, "/lib/a/Two.mkv", gone),
+                candidate(2, "/lib/a/Six.mkv", gone),
             ],
+            played(&[(1, 1), (2, 9)]),
+            2,
+        ),
+        (
+            "a row played at all beats one never played",
+            vec![
+                candidate(1, "/lib/a/Two.mkv", gone),
+                candidate(2, "/lib/a/Six.mkv", gone),
+            ],
+            played(&[(2, 1)]),
             2,
         ),
         (
             "then the lowest id",
             vec![
-                candidate(2, "/lib/a/Two.mkv", Some(instant(5))),
-                candidate(1, "/lib/c/Two.mkv", Some(instant(5))),
+                candidate(2, "/lib/a/Two.mkv", gone),
+                candidate(1, "/lib/c/Two.mkv", gone),
             ],
+            played(&[(1, 5), (2, 5)]),
             1,
         ),
     ];
-    for (name, rows, expected) in cases {
+    for (name, rows, last_played, expected) in cases {
         let mut reversed = rows.clone();
         reversed.reverse();
         for rows in [rows, reversed] {
-            let chosen = choose_relink_candidate(new_path, 1000, 77, &rows, never_absent);
+            let chosen =
+                choose_relink_candidate(new_path, 1000, 77, &rows, never_absent, &last_played);
             assert_eq!(
                 chosen.map(|row| row.id),
                 Some(Uuid::from_u128(expected)),
@@ -185,18 +212,260 @@ fn the_most_alike_candidate_wins_whatever_the_order() {
     }
 }
 
-/// A row gone from disk but not marked yet was gone most recently of all:
-/// the watcher has not reconciled its path yet.
+// ─── plan_content_moves ──────────────────────────────────────────────────────
+
+/// A row of hash `hash` at `path`, 1000 bytes, with no modification time.
+fn row(id: u128, path: &str, hash: u64) -> MediaFile {
+    MediaFile {
+        hash,
+        ..candidate(id, path, None)
+    }
+}
+
+/// `hash` found at a path, 1000 bytes.
+fn found(hash: u64) -> Fingerprint {
+    Fingerprint {
+        size: 1000,
+        mtime: None,
+        hash,
+    }
+}
+
+/// The moves a scan plans for `rows`, given what it found at the paths it
+/// hashed (`fingerprints`) and the other paths it walked: each relink as
+/// `(row id, path)`, and the displaced row ids.
+fn moves(
+    rows: &[MediaFile],
+    walked: &[&str],
+    fingerprints: &[(&str, u64)],
+    shielded: &[&str],
+    last_played: &HashMap<Uuid, DateTime<Utc>>,
+) -> (Vec<(u128, PathBuf)>, Vec<u128>) {
+    let rows: HashMap<PathBuf, MediaFile> = rows
+        .iter()
+        .map(|row| (row.path.clone(), row.clone()))
+        .collect();
+    let fingerprints: HashMap<PathBuf, Fingerprint> = fingerprints
+        .iter()
+        .map(|(path, hash)| (PathBuf::from(path), found(*hash)))
+        .collect();
+    let walked: std::collections::HashSet<&Path> = walked
+        .iter()
+        .map(Path::new)
+        .chain(fingerprints.keys().map(PathBuf::as_path))
+        .collect();
+    let is_shielded = |path: &Path| shielded.iter().any(|failed| path.starts_with(failed));
+    let matches = content_matches(&rows, &walked, &fingerprints, is_shielded);
+    let ContentMoves { relinks, displaced } = plan_content_moves(&rows, matches, last_played);
+    let mut relinks: Vec<(u128, PathBuf)> = relinks
+        .into_iter()
+        .map(|(row, path, _)| (row.id.as_u128(), path))
+        .collect();
+    relinks.sort();
+    (
+        relinks,
+        displaced.into_iter().map(|row| row.id.as_u128()).collect(),
+    )
+}
+
+fn to(id: u128, path: &str) -> (u128, PathBuf) {
+    (id, PathBuf::from(path))
+}
+
+/// Each way content moves between the paths of one scan, and which rows
+/// follow it. Every case is planned from the walk as the scan sees it.
 #[test]
-fn an_unmarked_absent_row_counts_as_gone_most_recently() {
-    let rows = [
-        candidate(1, "/lib/a/Two.mkv", Some(instant(9))),
-        candidate(2, "/lib/absent/Six.mkv", None),
+fn rows_follow_their_content_across_the_walk() {
+    let none = HashMap::new();
+    struct Case {
+        name: &'static str,
+        rows: Vec<MediaFile>,
+        walked: Vec<&'static str>,
+        fingerprints: Vec<(&'static str, u64)>,
+        shielded: Vec<&'static str>,
+        relinks: Vec<(u128, PathBuf)>,
+        displaced: Vec<u128>,
+    }
+    let cases = [
+        Case {
+            name: "a rename",
+            rows: vec![row(1, "/lib/a.mkv", 10)],
+            walked: vec![],
+            fingerprints: vec![("/lib/b.mkv", 10)],
+            shielded: vec![],
+            relinks: vec![to(1, "/lib/b.mkv")],
+            displaced: vec![],
+        },
+        Case {
+            name: "a swap of two names",
+            rows: vec![row(1, "/lib/a.mkv", 10), row(2, "/lib/b.mkv", 20)],
+            walked: vec![],
+            fingerprints: vec![("/lib/a.mkv", 20), ("/lib/b.mkv", 10)],
+            shielded: vec![],
+            relinks: vec![to(1, "/lib/b.mkv"), to(2, "/lib/a.mkv")],
+            displaced: vec![],
+        },
+        Case {
+            name: "a rotation of three",
+            rows: vec![
+                row(1, "/lib/a.mkv", 10),
+                row(2, "/lib/b.mkv", 20),
+                row(3, "/lib/c.mkv", 30),
+            ],
+            walked: vec![],
+            fingerprints: vec![("/lib/a.mkv", 30), ("/lib/b.mkv", 10), ("/lib/c.mkv", 20)],
+            shielded: vec![],
+            relinks: vec![
+                to(1, "/lib/b.mkv"),
+                to(2, "/lib/c.mkv"),
+                to(3, "/lib/a.mkv"),
+            ],
+            displaced: vec![],
+        },
+        Case {
+            name: "a move onto another file's path displaces it",
+            rows: vec![
+                row(1, "/lib/a.mkv", 10),
+                row(2, "/lib/b.mkv", 20),
+                row(3, "/lib/c.mkv", 30),
+            ],
+            walked: vec![],
+            // a -> b over b's file, then c -> a.
+            fingerprints: vec![("/lib/a.mkv", 30), ("/lib/b.mkv", 10)],
+            shielded: vec![],
+            relinks: vec![to(1, "/lib/b.mkv"), to(3, "/lib/a.mkv")],
+            displaced: vec![2],
+        },
+        Case {
+            name: "a rename onto the path of a row already missing",
+            rows: vec![
+                row(1, "/lib/heat.mkv", 10),
+                MediaFile {
+                    missing_since: Some(instant(0)),
+                    ..row(2, "/lib/stale.mkv", 20)
+                },
+            ],
+            walked: vec![],
+            fingerprints: vec![("/lib/stale.mkv", 10)],
+            shielded: vec![],
+            relinks: vec![to(1, "/lib/stale.mkv")],
+            displaced: vec![2],
+        },
+        Case {
+            name: "a copy leaves the row whose path still holds it",
+            rows: vec![row(1, "/lib/a.mkv", 10)],
+            walked: vec!["/lib/a.mkv"],
+            fingerprints: vec![("/lib/copy.mkv", 10)],
+            shielded: vec![],
+            relinks: vec![],
+            displaced: vec![],
+        },
+        Case {
+            name: "a missing row back at its own path is restored, not moved",
+            rows: vec![MediaFile {
+                missing_since: Some(instant(0)),
+                ..row(1, "/lib/a.mkv", 10)
+            }],
+            walked: vec![],
+            fingerprints: vec![("/lib/a.mkv", 10)],
+            shielded: vec![],
+            relinks: vec![],
+            displaced: vec![],
+        },
+        Case {
+            name: "new content no row records is a change, and moves nothing",
+            rows: vec![row(1, "/lib/a.mkv", 10)],
+            walked: vec![],
+            fingerprints: vec![("/lib/a.mkv", 99)],
+            shielded: vec![],
+            relinks: vec![],
+            displaced: vec![],
+        },
+        Case {
+            name: "a row under a path the walk could not read is not moved",
+            rows: vec![row(1, "/lib/unreadable/a.mkv", 10)],
+            walked: vec![],
+            fingerprints: vec![("/lib/b.mkv", 10)],
+            shielded: vec!["/lib/unreadable"],
+            relinks: vec![],
+            displaced: vec![],
+        },
+        Case {
+            name: "a walk that failed without a path moves nothing",
+            rows: vec![row(1, "/lib/a.mkv", 10)],
+            walked: vec![],
+            fingerprints: vec![("/lib/b.mkv", 10)],
+            shielded: vec!["/"],
+            relinks: vec![],
+            displaced: vec![],
+        },
+        Case {
+            name: "a row never hashed cannot be followed",
+            rows: vec![row(1, "/lib/a.mkv", 0)],
+            walked: vec![],
+            fingerprints: vec![("/lib/b.mkv", 0)],
+            shielded: vec![],
+            relinks: vec![],
+            displaced: vec![],
+        },
+        Case {
+            name: "the same hash at another size is other content",
+            rows: vec![MediaFile {
+                size_bytes: 999,
+                ..row(1, "/lib/a.mkv", 10)
+            }],
+            walked: vec![],
+            fingerprints: vec![("/lib/b.mkv", 10)],
+            shielded: vec![],
+            relinks: vec![],
+            displaced: vec![],
+        },
+        Case {
+            name: "two identical files moved together keep their names",
+            rows: vec![row(1, "/lib/x/One.mkv", 10), row(2, "/lib/x/Two.mkv", 10)],
+            walked: vec![],
+            fingerprints: vec![("/lib/y/Two.mkv", 10), ("/lib/y/One.mkv", 10)],
+            shielded: vec![],
+            relinks: vec![to(1, "/lib/y/One.mkv"), to(2, "/lib/y/Two.mkv")],
+            displaced: vec![],
+        },
     ];
-    let chosen = choose_relink_candidate(Path::new("/lib/b/One.mkv"), 1000, 77, &rows, |path| {
-        path.starts_with("/lib/absent")
-    });
-    assert_eq!(chosen.map(|row| row.id), Some(Uuid::from_u128(2)));
+    for Case {
+        name,
+        rows,
+        walked,
+        fingerprints,
+        shielded,
+        relinks,
+        displaced,
+    } in cases
+    {
+        let mut reversed = rows.clone();
+        reversed.reverse();
+        for rows in [rows, reversed] {
+            assert_eq!(
+                moves(&rows, &walked, &fingerprints, &shielded, &none),
+                (relinks.clone(), displaced.clone()),
+                "{name}"
+            );
+        }
+    }
+}
+
+/// Two identical copies, one moved and one deleted: whichever the scan
+/// meets, the row someone has been watching keeps the file.
+#[test]
+fn of_identical_copies_the_row_played_most_recently_follows_the_file() {
+    let rows = [row(1, "/lib/a/Film.mkv", 10), row(2, "/lib/b/Film.mkv", 10)];
+    for (watched, other) in [(1u128, 2u128), (2, 1)] {
+        let last_played: HashMap<Uuid, DateTime<Utc>> =
+            [(Uuid::from_u128(watched), instant(5))].into();
+        assert_eq!(
+            moves(&rows, &[], &[("/lib/c/Film.mkv", 10)], &[], &last_played),
+            (vec![to(watched, "/lib/c/Film.mkv")], vec![]),
+            "the other, {other}, is left to be marked missing"
+        );
+    }
 }
 
 // ─── the scan and the watcher ────────────────────────────────────────────────
@@ -265,6 +534,7 @@ struct Harness {
     notifications: Arc<InMemoryNotificationService>,
     prober: Arc<CountingProber>,
     hasher: Arc<CountingHasher>,
+    progress: Arc<InMemoryPlaybackProgressRepository>,
     service: LocalIndexService,
 }
 
@@ -289,6 +559,11 @@ impl Harness {
             inner: LocalHashService::new(HashConfig { num_threads: 1 }),
             calls: AtomicUsize::new(0),
         });
+        let clock = Arc::new(TestClock::starting_at(instant(0)));
+        let progress = Arc::new(InMemoryPlaybackProgressRepository::new(
+            clock.clone(),
+            file_repo.clone(),
+        ));
         let library = library_repo
             .create(CreateLibrary {
                 name: "Moves".to_string(),
@@ -309,8 +584,9 @@ impl Harness {
             Arc::new(LocalAdminLogService::new(
                 admin_log_repo.clone() as Arc<dyn AdminLogRepository>
             )),
+            progress.clone(),
         )
-        .with_clock(Arc::new(TestClock::starting_at(instant(0))));
+        .with_clock(clock);
         let service = configure(service);
         Self {
             dir,
@@ -322,8 +598,23 @@ impl Harness {
             notifications,
             prober,
             hasher,
+            progress,
             service,
         }
+    }
+
+    /// Record that someone watched `path`'s file.
+    async fn watch(&self, path: &Path) {
+        let file = self.present(path).await;
+        self.progress
+            .upsert(UpsertPlaybackProgress {
+                user_id: Uuid::new_v4(),
+                file_id: file.id,
+                position_secs: 600.0,
+                duration_secs: Some(3600.0),
+            })
+            .await
+            .unwrap();
     }
 
     /// Write `rel` under the root with `content` as its bytes: two files with
@@ -888,6 +1179,7 @@ async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
         Arc::new(LocalAdminLogService::new(Arc::new(
             InMemoryAdminLogRepository::default(),
         ))),
+        Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
     );
 
     for removed in [
@@ -904,4 +1196,229 @@ async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
             "{removed}"
         );
     }
+}
+
+// ─── swaps, rotations, and paths taken over (issue #180) ─────────────────────
+
+/// Two files that swap names -- through a temporary name, as `mv` does it --
+/// each keep their own row: its playback progress stays on its content,
+/// not on its old name.
+#[tokio::test]
+async fn two_files_that_swap_names_keep_their_own_rows() {
+    let h = Harness::new().await;
+    let heat = h.write("Heat (1995).mkv", "heat, a film about a heist");
+    let ronin = h.write("Ronin (1998).mkv", "ronin");
+    h.scan().await;
+    let (heat_id, ronin_id) = (h.present(&heat).await.id, h.present(&ronin).await.id);
+    let probes = h.probes();
+
+    let tmp = h.mv(&heat, "tmp.mkv");
+    h.mv(&ronin, "Heat (1995).mkv");
+    h.mv(&tmp, "Ronin (1998).mkv");
+    let progress = h.scan().await;
+
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        h.present(&ronin).await.id,
+        heat_id,
+        "Heat's row is at its bytes"
+    );
+    assert_eq!(h.present(&heat).await.id, ronin_id);
+    assert_eq!(h.probes(), probes, "nothing was probed");
+    assert_eq!(h.row_count().await, 2);
+}
+
+/// Three files rotated among three names each keep their own row.
+#[tokio::test]
+async fn three_files_rotated_among_their_names_keep_their_own_rows() {
+    let h = Harness::new().await;
+    let a = h.write("A.mkv", "first");
+    let b = h.write("B.mkv", "second, longer");
+    let c = h.write("C.mkv", "third, longest of all");
+    h.scan().await;
+    let ids = [
+        h.present(&a).await.id,
+        h.present(&b).await.id,
+        h.present(&c).await.id,
+    ];
+
+    let tmp = h.mv(&a, "tmp.mkv");
+    h.mv(&c, "A.mkv");
+    h.mv(&b, "C.mkv");
+    h.mv(&tmp, "B.mkv");
+    let progress = h.scan().await;
+
+    assert_eq!((progress.relinked, progress.changed), (3, 0));
+    assert_eq!(h.present(&b).await.id, ids[0]);
+    assert_eq!(h.present(&c).await.id, ids[1]);
+    assert_eq!(h.present(&a).await.id, ids[2]);
+    assert_eq!(h.row_count().await, 3);
+}
+
+/// A file renamed onto the path of a file deleted earlier, whose row is
+/// still missing, keeps its own row and its progress; the stale row is not
+/// restored with the renamed file's content, but kept aside as missing.
+#[tokio::test]
+async fn a_file_renamed_onto_a_missing_rows_path_keeps_its_own_row() {
+    let h = Harness::new().await;
+    let heat = h.write("Heat (1995).mkv", "heat");
+    let stale = h.write("Old (1990).mkv", "an old film");
+    h.scan().await;
+    h.watch(&heat).await;
+    let heat_id = h.present(&heat).await.id;
+    let stale_id = h.present(&stale).await.id;
+    std::fs::remove_file(&stale).unwrap();
+    h.scan().await;
+    assert!(h.row(&stale).await.unwrap().missing_since.is_some());
+
+    h.mv(&heat, "Old (1990).mkv");
+    let progress = h.scan().await;
+
+    assert_eq!(
+        (progress.relinked, progress.restored, progress.changed),
+        (1, 0, 0)
+    );
+    assert_eq!(h.present(&stale).await.id, heat_id);
+    assert!(
+        h.row(&heat).await.is_none(),
+        "nothing left at Heat's old name"
+    );
+    let kept = h
+        .file_repo
+        .find_all_by_library_including_missing(h.library.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == stale_id)
+        .expect("the stale row is kept, not deleted");
+    assert!(kept.missing_since.is_some());
+    assert_eq!(
+        h.progress
+            .last_played_at(vec![heat_id])
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "Heat's progress is still Heat's"
+    );
+}
+
+/// One of two identical copies moved, the other deleted: the row someone
+/// was watching keeps the file, and the other is marked missing.
+#[tokio::test]
+async fn of_two_identical_copies_the_watched_row_keeps_the_moved_file() {
+    for watch_first in [true, false] {
+        let h = Harness::new().await;
+        let first = h.write("First/Film.mkv", "the same film");
+        let second = h.write("Second/Film.mkv", "the same film");
+        h.scan().await;
+        let (watched, other) = if watch_first {
+            (&first, &second)
+        } else {
+            (&second, &first)
+        };
+        h.watch(watched).await;
+        let watched_id = h.present(watched).await.id;
+        let other_id = h.present(other).await.id;
+
+        h.mv(&first, "Moved/Film.mkv");
+        std::fs::remove_file(&second).unwrap();
+        let progress = h.scan().await;
+
+        assert_eq!((progress.relinked, progress.marked_missing), (1, 1));
+        assert_eq!(
+            h.present(&h.root.join("Moved/Film.mkv")).await.id,
+            watched_id,
+            "watched first: {watch_first}"
+        );
+        let missing = h
+            .file_repo
+            .find_all_by_library_including_missing(h.library.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == other_id)
+            .unwrap();
+        assert!(missing.missing_since.is_some());
+    }
+}
+
+/// A watcher event cannot tell a swap from a change: the two halves arrive
+/// apart. A file whose new content is another file's that may have moved is
+/// left as it is -- not restored, not marked changed -- and the next scan,
+/// which sees both paths, gives each row back its content.
+#[tokio::test]
+async fn a_swap_seen_by_the_watcher_is_left_to_the_scan() {
+    let h = Harness::new().await;
+    let heat = h.write("Heat (1995).mkv", "heat, a film about a heist");
+    let ronin = h.write("Ronin (1998).mkv", "ronin");
+    h.scan().await;
+    let (heat_row, ronin_row) = (h.present(&heat).await, h.present(&ronin).await);
+
+    let tmp = h.mv(&heat, "tmp.mkv");
+    h.mv(&ronin, "Heat (1995).mkv");
+    h.mv(&tmp, "Ronin (1998).mkv");
+    for path in [&heat, &ronin, &tmp] {
+        let kind = if path == &tmp {
+            FsEventKind::Removed
+        } else {
+            FsEventKind::Modified
+        };
+        assert_eq!(h.reconcile(path, kind).await, ReconcileOutcome::Done);
+    }
+
+    let (at_heat, at_ronin) = (h.present(&heat).await, h.present(&ronin).await);
+    let recorded = |row: &MediaFile| {
+        (
+            row.id,
+            row.hash,
+            row.size_bytes,
+            row.mtime,
+            row.status,
+            row.duration,
+            row.missing_since,
+        )
+    };
+    assert_eq!(
+        recorded(&at_heat),
+        recorded(&heat_row),
+        "left exactly as it was"
+    );
+    assert_eq!(recorded(&at_ronin), recorded(&ronin_row));
+    assert!(
+        h.row(&tmp).await.is_none(),
+        "the passing name is not indexed"
+    );
+
+    let progress = h.scan().await;
+    assert_eq!((progress.relinked, progress.changed), (2, 0));
+    assert_eq!(h.present(&ronin).await.id, heat_row.id);
+    assert_eq!(h.present(&heat).await.id, ronin_row.id);
+}
+
+/// A new name whose content is a file whose own path now holds other
+/// content -- one half of a rotation -- is left to the scan by the watcher,
+/// rather than indexed as a copy beside the row it belongs to.
+#[tokio::test]
+async fn a_new_name_holding_a_file_whose_path_changed_is_left_to_the_scan() {
+    let h = Harness::new().await;
+    let a = h.write("A.mkv", "first");
+    let c = h.write("C.mkv", "third, longer");
+    h.scan().await;
+    let a_id = h.present(&a).await.id;
+
+    let n = h.mv(&a, "N.mkv");
+    h.mv(&c, "A.mkv");
+    assert_eq!(
+        h.reconcile(&n, FsEventKind::Created).await,
+        ReconcileOutcome::Done
+    );
+    assert!(h.row(&n).await.is_none(), "not indexed as a copy");
+
+    let progress = h.scan().await;
+    assert_eq!((progress.relinked, progress.added), (2, 0));
+    assert_eq!(h.present(&n).await.id, a_id);
 }

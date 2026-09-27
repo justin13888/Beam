@@ -116,6 +116,32 @@ pub struct UpdateMediaFile {
     pub status: Option<FileStatus>,
 }
 
+/// A row pointed at the path its file now has -- moved, renamed, or swapped
+/// with another (issue #180) -- found there at `size_bytes` and `mtime`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRelink {
+    pub id: Uuid,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub mtime: Option<DateTime<Utc>>,
+}
+
+/// Where a *displaced* row is kept: one whose path a relink hands to another
+/// row's file, and whose own file is nowhere to be found (issue #180).
+///
+/// One row per path means it cannot stay at its path, and deleting it would
+/// take its playback progress on first sight, which nothing else in the
+/// indexer does (issue #179). So it moves beside its old path, to a name no
+/// scan ever indexes -- no video extension -- that no other row can hold,
+/// since it names the row. It is missing there like any other gone file: a
+/// relink can still find it by content, and a scan purges it after the
+/// grace period.
+pub fn displaced_path(path: &std::path::Path, id: Uuid) -> PathBuf {
+    let mut displaced = path.as_os_str().to_os_string();
+    displaced.push(format!(".beam-displaced-{id}"));
+    PathBuf::from(displaced)
+}
+
 /// What an [`UpdateMediaFile`] does to a file's probe results -- its MIME
 /// type, duration and container format, which one probe sets together.
 ///

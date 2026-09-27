@@ -348,6 +348,7 @@ fn build_fixture(
         Arc::new(prober),
         notification.clone(),
         admin_log.clone(),
+        Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         )
         .with_clock(clock.clone()),
     );
