@@ -85,7 +85,8 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
 | `id` | UUID | no | PK |
-| `title` | TEXT | no | |
+| `title` | TEXT | no | the **display** title: the filename parse until enrichment replaces it with the provider's. Never used to find the movie |
+| `identity_key` | TEXT | yes | unique — what the indexer matches a file to this movie by; see *Title identity* below. NULL only on a row that predates the column and could not be backfilled |
 | `title_localized` | TEXT | yes | |
 | `description` | TEXT | yes | |
 | `year` | INTEGER | yes | |
@@ -106,9 +107,48 @@ A trigram GIN index on `title` (via the `pg_trgm` extension) backs catalog searc
 has the same.
 
 ### `shows`
-Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `title_localized`,
-`description`, `year`, `poster_url`, `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id`
-(each unique, nullable), `created_at`, `updated_at`.
+Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `identity_key` (unique,
+nullable — as for movies), `title_localized`, `description`, `year`, `poster_url`,
+`backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id` (each unique, nullable),
+`created_at`, `updated_at`.
+
+### Title identity and lifetime
+
+A movie or show has two names (FR-212, FR-213;
+[#183](https://github.com/justin13888/beam/issues/183)). `title` is what users see, and enrichment
+overwrites it with the provider's spelling. `identity_key` is what the indexer finds the title by,
+and nothing but the indexer's own backfill ever writes it after insert: enrichment's `UPDATE` does
+not name the column. It is `beam_domain::utils::identity::title_identity_key` of the filename parse — NFKD-folded, accents and punctuation dropped, lowercased, `&` read as
+`and` — followed by `|` and the parsed year (empty when there is none). A movie is keyed by its
+filename, a show by its series folder (the episode file's parent directory). The year is part of
+the key, so a remake is a separate title.
+
+**Find-or-create** is one `INSERT ... ON CONFLICT (identity_key) DO NOTHING` followed by a read by
+key, against the unique index `idx_movies_identity_key` / `idx_shows_identity_key`. There is no
+lookup by display title, and two files of one new title indexed at once — a scan and the watcher —
+resolve to one row rather than racing a SELECT against an INSERT. A NULL key is never matched.
+
+**Backfill.** Rows that predate the column have a NULL key, and it cannot be computed in SQL: their
+`title` may already be the provider's. On the first `scan_all_libraries` in a process the indexer
+derives each such title's key from its present files' paths, with the same function classification
+uses. Every file agreeing sets it; a title with no present file takes the key of its stored title and
+year. Files that disagree (two films once merged under one title) or a key another row already holds
+(the duplicate the display-title lookup created) leave the key NULL and are named in an admin-log
+warning; such a row stays listed but is never matched again.
+
+**Live titles.** A title is *live* while at least one file behind it is present
+(`missing_since IS NULL`): for a movie, through `movie_entries`; for a show, through `seasons` and
+`episodes`. `MovieRepository::search` / `ShowRepository::search` — browse and search — return only
+live titles, with the check an `EXISTS` in the same statement. Detail reads by id do not filter, so
+a bookmark or continue-watching tile still resolves while its file is away.
+
+**Retirement.** A scan whose walk read the whole tree finishes by deleting orphans:
+`movie_entries` (and `episodes`) no `files` row references, then `seasons` with no episodes, then
+`movies` and `shows` with no child left — each only if created before the scan started, which
+protects a title the watcher is creating concurrently. A soft-deleted file row still counts, so a
+title goes only once its last file is purged. `library_movies` / `library_shows`,
+`metadata_enrichment` and the genre links go by `ON DELETE CASCADE`. The scan's completion entry
+counts them as `titles_removed`.
 
 ### `library_movies` / `library_shows`
 Many-to-many junctions linking a `libraries` row to the `movies`/`shows` rows discovered within it
@@ -199,8 +239,8 @@ rows that are already missing, and a scan calls it only for rows its walk could 
 error above them, and not refused by the empty-root guard) once they have been missing for
 `BEAM_MISSING_FILE_GRACE_DAYS`. The `ON DELETE CASCADE` foreign keys from `media_streams` and
 `playback_progress` therefore fire only on that purge — a transient absence no longer takes every
-user's resume point with it. Hiding a *title* whose every file is missing is not this column's
-job; titles are still listed from their own tables.
+user's resume point with it. A *title* whose every file is missing is hidden from browse and search
+by the liveness check above, and retired once its last file is purged.
 
 ### `media_streams`
 One row per elementary stream (video/audio/subtitle track) within a `files` row, populated by
