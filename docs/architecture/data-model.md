@@ -295,7 +295,7 @@ quality/edition/language rip.
 | `file_size` | BIGINT | no | |
 | `mime_type` | TEXT | yes | |
 | `hash_xxh3` | BIGINT | no | content hash used for change detection and dedup |
-| `duration_secs` | DOUBLE PRECISION | yes | |
+| `duration_secs` | DOUBLE PRECISION | yes | NULL until a probe succeeds, and cleared (with `mime_type`, `container_format` and the file's `media_streams`) when changed content fails its probe; the indexer probes a NULL row again on every visit |
 | `container_format` | TEXT | yes | |
 | `language` | TEXT | yes | primary audio/release language tag |
 | `quality` | TEXT | yes | e.g. `"1080p"` — the human label the client's source picker displays |
@@ -313,9 +313,16 @@ quality/edition/language rip.
 `file_status = 'unknown'`, in which case both must be NULL (a file the indexer found but could not
 classify). This is the load-bearing polymorphic-association invariant for the media graph.
 
-**Unique index** on `(hash_xxh3, file_path)`: the same content hash can legitimately appear at more
-than one path (hardlinks, duplicates), but the *pair* must be unique — this is what the indexer's
-dedup logic keys off. Other indexes: `movie_entry_id`, `episode_id`, `library_id`, `hash_xxh3`.
+**Unique index** on `file_path` (`idx_files_path_unique`): one row per path, whatever its hash. The
+same content hash can legitimately appear at more than one path (hardlinks, duplicates) — that is
+what duplicate detection reads — but a path is one file. Before issue #181 the only uniqueness was
+`(hash_xxh3, file_path)`, and two tasks reconciling one library at once could each insert a row for
+one path. Migration `m20261001_000001_files_unique_path` merged the rows a path already had,
+keeping — in order — a present row before a missing one, a `known` row before any other status, the
+row with the most playback progress, the most recently updated, then the lowest id; each user's
+most recently updated progress on the path moved to the kept row, and the other rows were deleted
+with their streams. `down()` restores the old index but not the merged rows. Other indexes:
+`movie_entry_id`, `episode_id`, `library_id`, `hash_xxh3`.
 
 **Soft delete** (FR-211): the indexer never deletes a `files` row on first sight. A file the scan's
 walk or the watcher finds gone is stamped `missing_since`; a row with a stamp is *missing*. Every
@@ -485,8 +492,9 @@ Indexes: `created_at DESC` (recent-first admin log view), `level`.
   in application code.
 - **Enrichment dual-FK CHECK:** `metadata_enrichment` has `movie_id` XOR `show_id` set, always (no
   "unknown" escape hatch — a queue row is only ever created for a title that already exists).
-- **One file per `(hash_xxh3, file_path)`:** the indexer never creates two rows for the same content
-  at the same path, while tolerating the same hash at multiple paths.
+- **One file per `file_path`:** a path is one row, whatever its content, while the same hash may sit
+  at many paths. The indexer also serialises every scan and watcher reconcile of a library, so it
+  never races itself to the insert.
 - **One entry per `(library_id, movie_id, edition)`:** editions are a per-library, per-movie
   namespace.
 - **One title per pin:** `movies.pinned_ref` and `shows.pinned_ref` are unique, so a provider id an

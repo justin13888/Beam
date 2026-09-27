@@ -112,7 +112,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-207**: The server MUST support triggering a library scan from an admin action in the web
   client; no manual out-of-band process invocation is required.
 - **FR-208**: The server MUST emit scan progress events (started, per-item progress, completed,
-  failed) over Server-Sent Events (SSE) for consumption by the web client.
+  failed) over Server-Sent Events (SSE) for consumption by the web client. Each MUST name its scan
+  job and carry the job's per-file counts; per-item progress MAY be throttled (it is sent at most
+  once a second), and progress events MUST NOT displace other events from the recent-event log.
 - **FR-209**: The server MUST support adding and removing library root paths via an admin-facing API,
   without requiring a server restart or manual configuration file edit.
 - **FR-210**: A library scan MUST complete (or fail) independently of metadata enrichment; enrichment
@@ -145,9 +147,7 @@ strength. Each requirement is independently testable. See `product.md` for narra
   scan is that scan: the background indexer MUST register every watch before the startup scan
   starts, and MUST schedule no single-library scan alongside it); a deleted library MUST stop being
   watched; the admin status MUST report each library's watch mode and whether the watch limit has
-  been reached. Serialising *every* scan of a library -- admin-triggered, periodic and
-  watcher-initiated alike -- is not required here; it is
-  [#181](https://github.com/justin13888/beam/issues/181)'s scope.
+  been reached. Every scan of a library is serialised (FR-218).
 - **FR-214**: The indexer MUST match a file to an existing movie or show by an identity key derived
   from the filename parse -- the normalised title and year, and for a show its series folder --
   stored apart from the display title and never changed by enrichment, so a title enrichment renamed
@@ -161,7 +161,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   backfill and re-derivation if they have not succeeded in the process, and while they have not
   (they failed, and are retried by the next such path) MUST NOT reclassify a file an older version
   classified, still indexing new and changed files; a failed pass MUST be reported through the
-  admin log.
+  admin log. The passes MUST run while no scan or watcher reconcile classifies a file, so a key they
+  move is never taken by a file indexed in between.
 - **FR-215**: A movie or show with no present file MUST be excluded from browse and search as soon as
   its last file is soft-deleted (FR-211), while remaining resolvable by id; it MUST be deleted,
   with its enrichment state, only by a scan whose walk read the whole library and only once no file
@@ -187,6 +188,16 @@ strength. Each requirement is independently testable. See `product.md` for narra
   extras, or matched by an ignore pattern), so video files under one are not counted: a root holding
   only those is refused. This errs toward refusing -- the safe side, since a refused scan changes no
   rows.
+- **FR-218**: A library scan MUST be a job: requesting one MUST answer once the job is registered
+  (`202` with the job) rather than when the scan finishes, and the latest job of each library MUST
+  be readable. Every scan of a library -- administrator's, startup, periodic, newly polled -- and
+  every watcher reconcile of it MUST be serialised: a request while a scan is queued or running MUST
+  be refused with `library-scan-in-progress` (409), the periodic rescan MUST skip such a library,
+  and a watcher event MUST be deferred and retried rather than wait. A file MUST NOT be hashed until
+  it has gone `BEAM_SCAN_SETTLE_SECS` without a write (measured with the injected `Clock`), and a
+  file whose probe failed MUST be probed again on each visit and classified when a probe succeeds;
+  when a file's content changes and its probe fails, the old content's probe results and streams
+  MUST be cleared rather than kept. At most one `files` row MAY exist per path.
 - **FR-219**: Classification (FR-204) MUST also read the Kodi-style NFO describing a file --
   `<stem>.nfo` beside it, else `movie.nfo` in its folder, and for an episode `tvshow.nfo` in its
   folder or the folder above; never one at the library root -- and the file's container tags, in

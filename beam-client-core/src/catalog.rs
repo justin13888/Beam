@@ -975,13 +975,17 @@ impl AdminEvent {
             library_id,
             library_name,
             message,
+            scan: _,
             timestamp,
         } = event;
         Self {
             id,
             level: LogLevel::from_event(level),
             category: match category {
-                wire::AdminEventCategoryDto::LibraryScan => EventCategory::LibraryScan,
+                // A scan's structured progress reads, in the feed, as the
+                // scan event it is; the numbers are in the message too.
+                wire::AdminEventCategoryDto::LibraryScan
+                | wire::AdminEventCategoryDto::ScanProgress => EventCategory::LibraryScan,
                 wire::AdminEventCategoryDto::System => EventCategory::System,
             },
             message,

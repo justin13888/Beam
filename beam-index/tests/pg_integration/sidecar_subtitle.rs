@@ -139,3 +139,37 @@ async fn purging_a_video_file_takes_its_subtitles_with_it() {
 
     assert_eq!(fixture.repo.find_by_path(&path).await.unwrap(), None);
 }
+
+/// Deleting a library takes its subtitles with it (`ON DELETE CASCADE` on
+/// `library_id`): the library-deletion flow stops the library's scan and
+/// deletes the row, and no subtitle of it outlives that.
+#[tokio::test]
+async fn deleting_a_library_takes_its_subtitles_with_it() {
+    use beam_domain::repositories::LibraryRepository;
+    use beam_index::repositories::library::SqlLibraryRepository;
+
+    let fixture = setup().await;
+    let library = seed::library(fixture.db.as_ref()).await.unwrap();
+    let file = video_file(&fixture.db, library).await;
+    let path = PathBuf::from(format!("/videos/{}/Movie.en.srt", Uuid::new_v4()));
+    fixture
+        .repo
+        .upsert_by_path(english(library, file, &path))
+        .await
+        .unwrap();
+
+    SqlLibraryRepository::new(fixture.db.clone())
+        .delete(library)
+        .await
+        .expect("delete the library");
+
+    assert_eq!(fixture.repo.find_by_path(&path).await.unwrap(), None);
+    assert!(
+        fixture
+            .repo
+            .find_all_by_library(library)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

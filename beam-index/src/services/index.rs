@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -16,11 +17,17 @@ use crate::services::admin_log::AdminLogService;
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
+use crate::services::scan::{
+    CANCELLED, CatalogExclusive, ProgressThrottle, SCAN_STOP_TIMEOUT, ScanCoordinator, ScanEvent,
+    ScanInProgress, ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, Settle,
+    settle_state,
+};
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
-    CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent, UpdateMediaFile,
+    CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent, ProbeUpdate,
+    UpdateMediaFile,
 };
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode};
@@ -28,7 +35,7 @@ use beam_domain::repositories::{
     EnrichmentStateRepository, FileRepository, LibraryRepository, MediaStreamRepository,
     MovieRepository, ShowRepository, SidecarSubtitleRepository,
 };
-use beam_domain::services::{Clock, RealClock};
+use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_domain::utils::classification::{Classification, ContainerTags, Hints, classify};
 use beam_domain::utils::filename::{ParsedFilename, parse_media_filename};
 use beam_domain::utils::identity::title_identity_key;
@@ -43,6 +50,16 @@ fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
     let meta = std::fs::metadata(path)?;
     let mtime: Option<DateTime<Utc>> = meta.modified().ok().map(|t| t.into());
     Ok((meta.len(), mtime))
+}
+
+/// The container tags a probe read, as classification takes them (issue #184).
+fn container_tags(metadata: &VideoFileMetadata) -> ContainerTags {
+    ContainerTags::from_tags(
+        metadata
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    )
 }
 
 /// What a walk of a library root found on disk.
@@ -454,14 +471,103 @@ pub enum IndexError {
     /// `beam-index`'s runtime and never reaches the admin log at all.
     #[error("Path not found: {0}")]
     PathNotFound(String),
+    /// A scan job is already queued or running for the library.
+    #[error("A scan of this library is already queued or running")]
+    ScanInProgress,
+    /// The scan was cancelled -- its library is being deleted.
+    #[error("The scan was cancelled")]
+    Cancelled,
 }
 
+impl IndexError {
+    /// What a failed scan job reports: never a filesystem path (NFR-108),
+    /// and never a database error's text, which can quote a row.
+    fn job_failure(&self) -> String {
+        match self {
+            IndexError::PathNotFound(message) => message.clone(),
+            IndexError::LibraryNotFound => "Library not found".to_string(),
+            IndexError::Cancelled => CANCELLED.to_string(),
+            IndexError::Db(_) | IndexError::InvalidId | IndexError::ScanInProgress => {
+                "internal error".to_string()
+            }
+        }
+    }
+}
+
+impl From<ScanInProgress> for IndexError {
+    fn from(_: ScanInProgress) -> Self {
+        IndexError::ScanInProgress
+    }
+}
+
+/// What became of a watcher event handed to
+/// [`LocalIndexService::reconcile_path`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileOutcome {
+    /// Reconciled, or nothing to do.
+    Done,
+    /// Not now: the library is being scanned, or the file is still being
+    /// written. Hand the event back after `retry_after`.
+    Deferred { retry_after: Duration },
+}
+
+/// How long a watcher event waits before it retries a library a scan holds.
+pub const LIBRARY_BUSY_RETRY: Duration = Duration::from_secs(5);
+
+/// How often a running scan publishes a progress event at most (FR-208). The
+/// job itself is updated after every file.
+pub const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// What one visit to one file came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileOutcome {
+    Added,
+    Changed,
+    Unchanged,
+    /// Still being written: left alone, to be visited again after the
+    /// duration.
+    Deferred(Duration),
+    Failed,
+}
+
+/// The scan side of the indexer, as the server drives it.
+///
+/// A scan is two steps so the caller can answer before the scan runs:
+/// [`Self::begin_scan`] checks the library and registers a job -- refusing
+/// with [`IndexError::ScanInProgress`] while one is queued or running -- and
+/// [`Self::run_scan`] runs it, typically on a task of its own.
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait IndexService: Send + Sync + std::fmt::Debug {
-    /// Scan a library for new/changed/removed files.
-    /// Returns the count of newly added files.
-    async fn scan_library(&self, library_id: String) -> Result<u32, IndexError>;
+    /// Register a scan of `library_id`. Fails with
+    /// [`IndexError::LibraryNotFound`], with [`IndexError::PathNotFound`] when
+    /// the library's root is not a directory (the message names no path), or
+    /// with [`IndexError::ScanInProgress`].
+    async fn begin_scan(
+        &self,
+        library_id: Uuid,
+        trigger: ScanTrigger,
+    ) -> Result<ScanTicket, IndexError>;
+
+    /// Run a registered scan to the end, returning its final progress. The
+    /// job reads `queued` until the library's lock is free.
+    async fn run_scan(&self, ticket: ScanTicket) -> Result<ScanProgress, IndexError>;
+
+    /// The latest scan job of `library_id` in this process, if any.
+    fn scan_job(&self, library_id: Uuid) -> Option<ScanJob>;
+
+    /// Follow `library_id`'s scan jobs.
+    fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>>;
+
+    /// Stop `library_id`'s scan before the library is deleted: ask an active
+    /// one to stop after the file it is on, then wait for it to finish -- as
+    /// [`CANCELLED`], unless it finished first -- for at most
+    /// [`SCAN_STOP_TIMEOUT`] on the injected clock. Returns whether no scan
+    /// of the library is still queued or running.
+    async fn stop_scan(&self, library_id: Uuid) -> bool;
+
+    /// Drop `library_id`'s lock and latest job once the library is deleted.
+    fn forget_library(&self, library_id: Uuid);
 }
 
 #[derive(Debug)]
@@ -480,15 +586,20 @@ pub struct LocalIndexService {
     sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
     divergence_policy: DivergencePolicy,
     clock: Arc<dyn Clock>,
+    id_generator: Arc<dyn IdGenerator>,
     missing_file_grace: Duration,
+    /// How long a file must go unwritten before it is hashed (issue #181).
+    settle_window: Duration,
     /// Whether [`LocalIndexService::backfill_identity_keys`] and then
     /// [`LocalIndexService::rekey_stale_titles`] have both succeeded in this
     /// process; until they have, no file classified by older rules is
-    /// reclassified. A lock rather than a flag so two overlapping scans
-    /// cannot both run the passes and report each other's keys as clashes,
-    /// and so a scan or watcher event that arrives while the passes run waits
-    /// for their outcome.
-    identity_passes_succeeded: tokio::sync::Mutex<bool>,
+    /// reclassified. The passes run only while holding the coordinator's
+    /// catalog gate exclusively, so two callers never run them at once, and
+    /// no scan or reconcile classifies a file while they move keys.
+    identity_passes_succeeded: AtomicBool,
+    /// Serialises every scan and reconcile of a library, and gates them
+    /// against the identity passes.
+    scans: ScanCoordinator,
 }
 
 impl LocalIndexService {
@@ -519,8 +630,11 @@ impl LocalIndexService {
             sidecar_repo: None,
             divergence_policy: DivergencePolicy::default(),
             clock: Arc::new(RealClock),
+            id_generator: Arc::new(UuidGenerator),
             missing_file_grace: DEFAULT_MISSING_FILE_GRACE,
-            identity_passes_succeeded: tokio::sync::Mutex::new(false),
+            settle_window: Duration::ZERO,
+            identity_passes_succeeded: AtomicBool::new(false),
+            scans: ScanCoordinator::new(),
         }
     }
 
@@ -528,6 +642,24 @@ impl LocalIndexService {
     /// the grace period is measured against. Defaults to [`RealClock`].
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Override where scan-job ids come from. Defaults to [`UuidGenerator`].
+    pub fn with_id_generator(mut self, id_generator: Arc<dyn IdGenerator>) -> Self {
+        self.id_generator = id_generator;
+        self
+    }
+
+    /// Hash a file only once it has gone `window` without a write, measured
+    /// from its modification time against the injected clock (issue #181):
+    /// a file still being copied in is left alone -- a scan counts it as
+    /// deferred, a watcher event retries it once the window has passed --
+    /// rather than hashed and probed while partial. A file that changes
+    /// while it is hashed is deferred the same way. Zero, the default, hashes
+    /// every file on sight.
+    pub fn with_settle_window(mut self, window: Duration) -> Self {
+        self.settle_window = window;
         self
     }
 
@@ -938,7 +1070,17 @@ impl LocalIndexService {
 
     /// Process a NEW media file to add it to the library. The caller has
     /// already established that the [`PathPolicy`] calls `path` media.
-    async fn process_new_file(&self, path: &Path, library: &Library) -> Result<bool, IndexError> {
+    ///
+    /// Stat, settle, hash, probe, classify, write -- in that order. A file
+    /// still being written is left alone and nothing is written for it
+    /// ([`FileOutcome::Deferred`]). Every file is hashed before it is probed,
+    /// so a row whose probe fails still carries its real hash and takes part
+    /// in duplicate detection like any other.
+    async fn process_new_file(
+        &self,
+        path: &Path,
+        library: &Library,
+    ) -> Result<FileOutcome, IndexError> {
         info!("Processing new file: {}", path.display());
 
         let (size, mtime) = read_fs_meta(path).map_err(|e| {
@@ -946,17 +1088,34 @@ impl LocalIndexService {
             IndexError::PathNotFound(format!("Could not read file metadata: {e}"))
         })?;
 
-        // Extract metadata first.
+        if let Settle::Unsettled { retry_after } =
+            settle_state(self.clock.now(), mtime, self.settle_window)
+        {
+            debug!(path = %path.display(), "a new file is still being written; deferring it");
+            return Ok(FileOutcome::Deferred(retry_after));
+        }
+
+        let hash = self.hash_settled(path, size, mtime).await.map_err(|e| {
+            error!(path = %path.display(), error = %e, "Failed to hash file");
+            IndexError::PathNotFound(format!("Hash failed: {}", e))
+        })?;
+        let Some(hash) = hash else {
+            debug!(path = %path.display(), "a new file changed while it was hashed; deferring it");
+            return Ok(FileOutcome::Deferred(self.settle_window));
+        };
+
         let metadata = match self.media_info_service.get_video_metadata(path).await {
             Ok(m) => m,
             Err(e) => {
                 warn!("Failed to extract metadata for {}: {}", path.display(), e);
-                // Never classified: version 0 until a probe succeeds.
-                self.file_repo
+                // Never classified: version 0 until a probe succeeds, which
+                // a later visit retries (see `reconcile_existing_file`).
+                let file = self
+                    .file_repo
                     .create(CreateMediaFile {
                         library_id: library.id,
                         path: path.to_path_buf(),
-                        hash: 0,
+                        hash,
                         size_bytes: size,
                         mtime,
                         mime_type: None,
@@ -967,28 +1126,14 @@ impl LocalIndexService {
                         classifier_version: 0,
                     })
                     .await?;
-                return Ok(true);
+                self.check_and_report_duplicate(&file).await;
+                return Ok(FileOutcome::Added);
             }
         };
 
-        let hash = self
-            .hash_service
-            .hash_async(path.to_path_buf())
-            .await
-            .map_err(|e| {
-                error!(path = %path.display(), error = %e, "Failed to hash file");
-                IndexError::PathNotFound(format!("Hash failed: {}", e))
-            })?;
-
         let duration = Duration::from_secs_f64(metadata.duration_seconds());
-        let tags = ContainerTags::from_tags(
-            metadata
-                .metadata
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str())),
-        );
         let content = self
-            .classify_media_content_with(path, library, Some(duration), &tags)
+            .classify_media_content_with(path, library, Some(duration), &container_tags(&metadata))
             .await?;
         let status = if content.is_some() {
             FileStatus::Known
@@ -1016,7 +1161,29 @@ impl LocalIndexService {
         self.insert_media_streams(file.id, &metadata).await?;
         self.check_and_report_duplicate(&file).await;
         self.check_and_report_runtime_divergence(&file).await;
-        Ok(true)
+        Ok(FileOutcome::Added)
+    }
+
+    /// Hash `path`, which a stat just before measured at `size` and `mtime`.
+    ///
+    /// With a settle window, the file is stat'ed again afterwards: `None`
+    /// when it changed while it was read, since the hash then describes no
+    /// version of the file that ever existed whole.
+    async fn hash_settled(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime: Option<DateTime<Utc>>,
+    ) -> std::io::Result<Option<u64>> {
+        let hash = self.hash_service.hash_async(path.to_path_buf()).await?;
+        if self.settle_window.is_zero() {
+            return Ok(Some(hash));
+        }
+        let after = read_fs_meta(path)?;
+        if after != (size, mtime) {
+            return Ok(None);
+        }
+        Ok(Some(hash))
     }
 
     /// Clear `missing_since` on a row whose path is back on disk, returning
@@ -1043,13 +1210,22 @@ impl LocalIndexService {
     /// `reclassify` is set -- the identity passes have succeeded (see
     /// [`Self::identity_passes_done`]); until then the row keeps its title
     /// and its version, and a later scan reclassifies it.
+    ///
+    /// A video file whose probe has never succeeded (a container whose index
+    /// was not written yet, a file probed mid-copy) is probed again on every
+    /// visit, changed or not, and classified the first time a probe
+    /// succeeds. It is rehashed only if its size or modification time moved,
+    /// or it was never hashed.
+    ///
+    /// A changed file is hashed only once it has settled; until then it is
+    /// [`FileOutcome::Deferred`] and its row is left as it is.
     async fn reconcile_existing_file(
         &self,
         existing: &MediaFile,
         path: &Path,
         library: &Library,
         reclassify: bool,
-    ) -> Result<(), IndexError> {
+    ) -> Result<FileOutcome, IndexError> {
         if reclassify && awaits_reclassification(existing) {
             self.reclassify_existing(existing, path, library).await?;
         }
@@ -1059,27 +1235,49 @@ impl LocalIndexService {
             Err(e) => {
                 // A transient stat failure must not delete or corrupt the row.
                 warn!("Failed to stat {}: {}", path.display(), e);
-                return Ok(());
+                return Ok(FileOutcome::Unchanged);
             }
         };
 
-        // Cheap gate: only a size or mtime change warrants a rehash.
-        if size == existing.size_bytes && mtime == existing.mtime {
+        let moved = size != existing.size_bytes || mtime != existing.mtime;
+        // Only a file the path policy calls media -- a video file -- is
+        // reconciled at all, so nothing else is ever probed here.
+        let unprobed = existing.duration.is_none();
+
+        // Cheap gate: only a size or mtime change warrants a rehash, and
+        // only an unprobed file a re-probe.
+        if !moved && !unprobed {
             record_file_outcome("unchanged");
-            return Ok(());
+            return Ok(FileOutcome::Unchanged);
         }
 
-        // Rehash to confirm the content actually changed.
-        let new_hash = match self.hash_service.hash_async(path.to_path_buf()).await {
-            Ok(h) => h,
-            Err(e) => {
-                warn!("Failed to hash {}: {}", path.display(), e);
-                record_file_outcome("failed");
-                return Ok(());
+        if moved
+            && let Settle::Unsettled { retry_after } =
+                settle_state(self.clock.now(), mtime, self.settle_window)
+        {
+            debug!(path = %path.display(), "a changed file is still being written; deferring it");
+            return Ok(FileOutcome::Deferred(retry_after));
+        }
+
+        let new_hash = if moved || existing.hash == 0 {
+            // Rehash to confirm the content actually changed.
+            match self.hash_settled(path, size, mtime).await {
+                Ok(Some(h)) => h,
+                Ok(None) => {
+                    debug!(path = %path.display(), "a file changed while it was hashed; deferring it");
+                    return Ok(FileOutcome::Deferred(self.settle_window));
+                }
+                Err(e) => {
+                    warn!("Failed to hash {}: {}", path.display(), e);
+                    record_file_outcome("failed");
+                    return Ok(FileOutcome::Failed);
+                }
             }
+        } else {
+            existing.hash
         };
 
-        if new_hash == existing.hash {
+        if new_hash == existing.hash && !unprobed {
             // Content unchanged (e.g. mtime bumped by `touch`): refresh size/mtime.
             self.file_repo
                 .update(UpdateMediaFile {
@@ -1087,40 +1285,57 @@ impl LocalIndexService {
                     hash: None,
                     size_bytes: Some(size),
                     mtime,
-                    mime_type: None,
-                    duration: None,
-                    container_format: None,
+                    probe: ProbeUpdate::Keep,
                     content: None,
                     status: None,
                 })
                 .await?;
             record_file_outcome("unchanged");
-            return Ok(());
+            return Ok(FileOutcome::Unchanged);
         }
 
-        self.reconcile_changed_file(existing, path, size, mtime, new_hash)
+        let changed = self
+            .reprobe_file(existing, path, library, size, mtime, new_hash)
             .await?;
-        record_file_outcome("changed");
-        Ok(())
+        if changed {
+            record_file_outcome("changed");
+            Ok(FileOutcome::Changed)
+        } else {
+            record_file_outcome("unchanged");
+            Ok(FileOutcome::Unchanged)
+        }
     }
 
-    /// Apply a confirmed content change: refresh hash, metadata and streams.
-    /// The file's movie/episode classification is intentionally left unchanged
-    /// since the path (and therefore the inferred title) has not moved -- and
-    /// so is its status when it has none: a file with no movie or episode
-    /// (one the path could not classify, or whose first probe failed) stays
-    /// `Unknown`, which is all the `files` CHECK allows it to be. A row whose
-    /// probe failed is classified by the next scan's reclassification, now
-    /// that it has a runtime.
-    async fn reconcile_changed_file(
+    /// Probe `existing` again -- its content changed to `new_hash`, or its
+    /// last probe failed -- and bring its row in line, returning whether the
+    /// row changed.
+    ///
+    /// A successful probe replaces the file's metadata and streams. A row
+    /// with no movie or episode (one whose first probe failed, or whose path
+    /// named no title) is then classified from its path, as a new file would
+    /// be; one with a title keeps it, since the path -- and so the inferred
+    /// title -- has not moved.
+    ///
+    /// A failed probe of a file whose content changed keeps its title and is
+    /// marked `Changed`; one with no title stays `Unknown`, which is all the
+    /// `files` CHECK allows it to be. Either way its streams and probe
+    /// results are cleared ([`ProbeUpdate::Clear`]): they described the old
+    /// content, and a row with no duration is probed again on every visit. A
+    /// failed probe of a file whose content did not change writes nothing:
+    /// the next visit tries again.
+    async fn reprobe_file(
         &self,
         existing: &MediaFile,
         path: &Path,
+        library: &Library,
         size: u64,
         mtime: Option<DateTime<Utc>>,
         new_hash: u64,
-    ) -> Result<(), IndexError> {
-        info!("File content changed, reconciling: {}", path.display());
+    ) -> Result<bool, IndexError> {
+        let content_changed = new_hash != existing.hash;
+        if content_changed {
+            info!("File content changed, reconciling: {}", path.display());
+        }
 
         match self.media_info_service.get_video_metadata(path).await {
             Ok(metadata) => {
@@ -1129,28 +1344,65 @@ impl LocalIndexService {
                 self.insert_media_streams(existing.id, &metadata).await?;
 
                 let duration = Duration::from_secs_f64(metadata.duration_seconds());
-                let status = if existing.content.is_some() {
-                    FileStatus::Known
-                } else {
-                    FileStatus::Unknown
-                };
-                let updated = self
+                let mut updated = self
                     .file_repo
                     .update(UpdateMediaFile {
                         id: existing.id,
                         hash: Some(new_hash),
                         size_bytes: Some(size),
                         mtime,
-                        mime_type: Some(format!("video/{}", metadata.format_name)),
-                        duration: Some(duration),
-                        container_format: Some(metadata.format_name.clone()),
+                        probe: ProbeUpdate::Set {
+                            mime_type: format!("video/{}", metadata.format_name),
+                            duration,
+                            container_format: metadata.format_name.clone(),
+                        },
                         content: None,
-                        status: Some(status),
+                        status: Some(if existing.content.is_some() {
+                            FileStatus::Known
+                        } else {
+                            FileStatus::Unknown
+                        }),
                     })
                     .await?;
+                if existing.content.is_none() {
+                    // Classified as a new file is: the path, the NFOs beside
+                    // it, and the tags this probe just read (issue #184).
+                    let content = self
+                        .classify_media_content_with(
+                            path,
+                            library,
+                            Some(duration),
+                            &container_tags(&metadata),
+                        )
+                        .await?;
+                    let status = if content.is_some() {
+                        FileStatus::Known
+                    } else {
+                        FileStatus::Unknown
+                    };
+                    updated = self
+                        .file_repo
+                        .set_classification(
+                            existing.id,
+                            FileClassification {
+                                content,
+                                status,
+                                classifier_version: CLASSIFIER_VERSION,
+                            },
+                        )
+                        .await?;
+                }
                 self.check_and_report_duplicate(&updated).await;
                 self.check_and_report_runtime_divergence(&updated).await;
-                Ok(())
+                Ok(true)
+            }
+            Err(e) if !content_changed => {
+                debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "a file whose probe failed before still does not probe"
+                );
+                Ok(false)
             }
             Err(e) => {
                 warn!(
@@ -1163,6 +1415,10 @@ impl LocalIndexService {
                 } else {
                     FileStatus::Unknown
                 };
+                // The old content's streams and probe results describe a
+                // file that is gone. Cleared, the row reads as unprobed, so
+                // every later visit probes it again until a probe succeeds.
+                self.stream_repo.delete_by_file_id(existing.id).await?;
                 let updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -1170,16 +1426,14 @@ impl LocalIndexService {
                         hash: Some(new_hash),
                         size_bytes: Some(size),
                         mtime,
-                        mime_type: None,
-                        duration: None,
-                        container_format: None,
+                        probe: ProbeUpdate::Clear,
                         content: None,
                         status: Some(status),
                     })
                     .await?;
                 self.check_and_report_duplicate(&updated).await;
                 self.check_and_report_runtime_divergence(&updated).await;
-                Ok(())
+                Ok(true)
             }
         }
     }
@@ -2084,9 +2338,37 @@ impl LocalIndexService {
     /// logged, reported to the administrator, and retried by the next caller;
     /// until one succeeds, files classified by older rules keep their titles
     /// while new and changed files are indexed as usual.
+    ///
+    /// The passes run holding the catalog gate exclusively (issue #181), so
+    /// this waits for every running scan and reconcile to let go of it, and
+    /// none classifies a file -- or finds or creates a title by its key --
+    /// until the passes are done. Never call it while holding a
+    /// [`ScanGuard`](crate::services::scan::ScanGuard).
     async fn identity_passes_done(&self) -> bool {
-        let mut done = self.identity_passes_succeeded.lock().await;
-        if *done {
+        if self.identity_passes_succeeded.load(Ordering::Acquire) {
+            return true;
+        }
+        let exclusive = self.scans.exclusive_catalog().await;
+        self.run_identity_passes(exclusive).await
+    }
+
+    /// [`Self::identity_passes_done`] for a watcher event, which never waits:
+    /// `false` when a scan or reconcile holds the catalog gate. The file then
+    /// keeps its classification until a later visit.
+    async fn identity_passes_done_now(&self) -> bool {
+        if self.identity_passes_succeeded.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some(exclusive) = self.scans.try_exclusive_catalog() else {
+            return false;
+        };
+        self.run_identity_passes(exclusive).await
+    }
+
+    /// Run the identity passes under `_exclusive`, unless another caller ran
+    /// them to success while this one waited for the gate.
+    async fn run_identity_passes(&self, _exclusive: CatalogExclusive) -> bool {
+        if self.identity_passes_succeeded.load(Ordering::Acquire) {
             return true;
         }
         let failure = match self.backfill_identity_keys().await {
@@ -2097,7 +2379,11 @@ impl LocalIndexService {
             Err(e) => Some(("backfill", e)),
         };
         match failure {
-            None => *done = true,
+            None => {
+                self.identity_passes_succeeded
+                    .store(true, Ordering::Release);
+                true
+            }
             Some((pass, e)) => {
                 error!(pass, error = %e, "identity key pass failed; reclassification held");
                 let _ = self
@@ -2113,9 +2399,9 @@ impl LocalIndexService {
                         Some(serde_json::json!({ "pass": pass, "error": e.to_string() })),
                     )
                     .await;
+                false
             }
         }
-        *done
     }
 
     /// Scan every library. Used for the startup scan and the periodic backstop.
@@ -2124,36 +2410,90 @@ impl LocalIndexService {
     /// The identity passes run once, before any library is scanned (see
     /// [`Self::identity_passes_done`]); if they fail, every library is still
     /// scanned, without reclassifying files classified by older rules.
-    pub async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
+    ///
+    /// A library whose scan job is already queued or running -- an
+    /// administrator's scan, say -- is skipped: that scan covers it.
+    pub async fn scan_all_libraries(&self, trigger: ScanTrigger) -> Result<u32, IndexError> {
         let reclassify = self.identity_passes_done().await;
 
         let libraries = self.library_repo.find_all().await?;
-        let mut total_added = 0;
+        let mut total_added: u64 = 0;
         for library in libraries {
-            match self
-                .scan_one_library(library.id.to_string(), reclassify)
-                .await
-            {
-                Ok(added) => total_added += added,
+            let ticket = match self.begin_scan(library.id, trigger).await {
+                Ok(ticket) => ticket,
+                Err(IndexError::ScanInProgress) => {
+                    info!(
+                        library_id = %library.id,
+                        "a scan of this library is already queued or running; skipping it"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    error!("Scan failed for library {}: {}", library.id, e);
+                    continue;
+                }
+            };
+            match self.run_registered_scan(ticket, reclassify).await {
+                Ok(progress) => total_added += progress.added,
                 Err(e) => error!("Scan failed for library {}: {}", library.id, e),
             }
         }
-        Ok(total_added)
+        Ok(u32::try_from(total_added).unwrap_or(u32::MAX))
+    }
+
+    /// Register a `trigger` scan of `library_id` and run it to the end on the
+    /// caller's task. For the background tasks, which have nothing to answer
+    /// before the scan runs.
+    pub async fn scan_now(
+        &self,
+        library_id: Uuid,
+        trigger: ScanTrigger,
+    ) -> Result<ScanProgress, IndexError> {
+        let ticket = self.begin_scan(library_id, trigger).await?;
+        self.run_scan(ticket).await
     }
 
     /// Reconcile a single path in response to a filesystem-watcher event.
+    ///
+    /// Never waits for the library: while a scan job is queued or running
+    /// for it, or another reconcile holds it, the event is handed back
+    /// [`ReconcileOutcome::Deferred`] untouched -- as is an event for a file
+    /// still being written (see [`Self::with_settle_window`]). The caller
+    /// retries it after the delay the outcome names.
     pub async fn reconcile_path(
         &self,
         library_id: Uuid,
         path: PathBuf,
         kind: FsEventKind,
-    ) -> Result<(), IndexError> {
+    ) -> Result<ReconcileOutcome, IndexError> {
         // Ignore events for libraries that no longer exist.
         let Some(library) = self.library_repo.find_by_id(library_id).await? else {
-            return Ok(());
+            return Ok(ReconcileOutcome::Done);
         };
 
         let path_str = path.to_string_lossy().to_string();
+
+        // Only a file awaiting reclassification needs the identity passes;
+        // asking for any other would retry a failing pass on every watcher
+        // event. They hold the catalog gate exclusively, so they are asked
+        // for before this event takes the gate itself.
+        let reclassify = match self.file_repo.find_by_path(&path_str).await? {
+            Some(existing) if awaits_reclassification(&existing) => {
+                self.identity_passes_done_now().await
+            }
+            _ => false,
+        };
+
+        let Some(_guard) = self.scans.try_acquire_for_reconcile(library_id) else {
+            debug!(
+                path = %path.display(),
+                %library_id,
+                "the library is being scanned; deferring the event"
+            );
+            return Ok(ReconcileOutcome::Deferred {
+                retry_after: LIBRARY_BUSY_RETRY,
+            });
+        };
 
         // Only a stat that says "no such file" means the path is gone. Any
         // other failure (EACCES from an unsearchable parent, a transient EIO
@@ -2174,7 +2514,7 @@ impl LocalIndexService {
                         error = %err,
                         "could not stat a changed path; leaving its row as it is"
                     );
-                    return Ok(());
+                    return Ok(ReconcileOutcome::Done);
                 }
             }
         };
@@ -2207,7 +2547,7 @@ impl LocalIndexService {
                     root = %library.root_path.display(),
                     "library root is unavailable; ignoring the removal"
                 );
-                return Ok(());
+                return Ok(ReconcileOutcome::Done);
             }
             if let Some(file) = self.file_repo.find_by_path(&path_str).await?
                 && file.missing_since.is_none()
@@ -2217,7 +2557,7 @@ impl LocalIndexService {
                     .mark_missing(vec![file.id], self.clock.now())
                     .await?;
             }
-            return Ok(());
+            return Ok(ReconcileOutcome::Done);
         }
 
         // A file the policy keeps out of the library is not indexed. One that
@@ -2232,60 +2572,274 @@ impl LocalIndexService {
                     .mark_missing(vec![file.id], self.clock.now())
                     .await?;
             }
-            return Ok(());
+            return Ok(ReconcileOutcome::Done);
         }
 
-        match self.file_repo.find_by_path(&path_str).await? {
+        let outcome = match self.file_repo.find_by_path(&path_str).await? {
             Some(existing) => {
                 self.restore_if_missing(&existing).await?;
-                // Only a file awaiting reclassification needs the identity
-                // passes; asking for any other would retry a failing pass on
-                // every watcher event.
-                let reclassify =
-                    awaits_reclassification(&existing) && self.identity_passes_done().await;
                 self.reconcile_existing_file(&existing, &path, &library, reclassify)
-                    .await
+                    .await?
             }
             None => {
-                if self.process_new_file(&path, &library).await? {
+                let outcome = self.process_new_file(&path, &library).await?;
+                if outcome == FileOutcome::Added {
                     record_file_outcome("new");
                     self.attach_adjacent_sidecars(&library, &path).await?;
                 }
-                Ok(())
+                outcome
+            }
+        };
+        Ok(match outcome {
+            FileOutcome::Deferred(retry_after) => ReconcileOutcome::Deferred { retry_after },
+            FileOutcome::Added
+            | FileOutcome::Changed
+            | FileOutcome::Unchanged
+            | FileOutcome::Failed => ReconcileOutcome::Done,
+        })
+    }
+
+    /// Tell the administrator a library's root is missing or not a directory.
+    async fn report_root_unavailable(&self, library: &Library) {
+        warn!(
+            root = %library.root_path.display(),
+            library_id = %library.id,
+            "library root is not a directory"
+        );
+        self.notification_service.publish(AdminEvent::error(
+            EventCategory::LibraryScan,
+            format!(
+                "Library '{}' root path does not exist or is not a directory: {}",
+                library.name,
+                library.root_path.display()
+            ),
+            Some(library.id.to_string()),
+            Some(library.name.clone()),
+        ));
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Error,
+                AdminLogCategory::LibraryScan,
+                format!(
+                    "Library scan failed: root path does not exist or is not a directory for \"{}\"",
+                    library.name
+                ),
+                Some(serde_json::json!({
+                    "library_id": library.id.to_string(),
+                    "path": library.root_path
+                })),
+            )
+            .await;
+    }
+
+    /// Publish one scan-progress event (FR-208).
+    fn publish_scan_event(
+        &self,
+        library: &Library,
+        job_id: Uuid,
+        phase: ScanPhase,
+        progress: ScanProgress,
+    ) {
+        let name = &library.name;
+        let message = match phase {
+            ScanPhase::Started => format!("Scanning '{name}'"),
+            ScanPhase::Progress => match progress.total {
+                Some(total) => {
+                    format!("Scanning '{name}': {} of {total} files", progress.processed)
+                }
+                None => format!("Scanning '{name}'"),
+            },
+            ScanPhase::Completed => format!("Scan of '{name}' finished"),
+            ScanPhase::Failed => format!("Scan of '{name}' failed"),
+        };
+        let library_id = Some(library.id.to_string());
+        let library_name = Some(name.clone());
+        let event = match phase {
+            ScanPhase::Failed => AdminEvent::error(
+                EventCategory::ScanProgress,
+                message,
+                library_id,
+                library_name,
+            ),
+            ScanPhase::Started | ScanPhase::Progress | ScanPhase::Completed => AdminEvent::info(
+                EventCategory::ScanProgress,
+                message,
+                library_id,
+                library_name,
+            ),
+        };
+        self.notification_service
+            .publish(event.with_scan(ScanEvent {
+                job_id,
+                phase,
+                progress,
+            }));
+    }
+
+    /// Run a registered scan: wait for the library's lock, then scan it,
+    /// keeping the job and the progress events current.
+    async fn run_registered_scan(
+        &self,
+        ticket: ScanTicket,
+        reclassify: bool,
+    ) -> Result<ScanProgress, IndexError> {
+        let library_id = ticket.library_id();
+        let _guard = self.scans.acquire_for_scan(library_id).await;
+        ticket.start();
+
+        let (library, result) = match self.library_repo.find_by_id(library_id).await {
+            Ok(Some(library)) => {
+                self.publish_scan_event(
+                    &library,
+                    ticket.job_id(),
+                    ScanPhase::Started,
+                    ScanProgress::default(),
+                );
+                let result = self.scan_one_library(&library, &ticket, reclassify).await;
+                (Some(library), result)
+            }
+            Ok(None) => (None, Err(IndexError::LibraryNotFound)),
+            Err(e) => (None, Err(IndexError::from(e))),
+        };
+
+        match result {
+            Ok(progress) => {
+                ticket.succeed(progress);
+                if let Some(library) = &library {
+                    self.publish_scan_event(
+                        library,
+                        ticket.job_id(),
+                        ScanPhase::Completed,
+                        progress,
+                    );
+                }
+                Ok(progress)
+            }
+            Err(e) => {
+                let progress = ticket.job().progress;
+                ticket.fail(e.job_failure());
+                if let Some(library) = &library {
+                    self.publish_scan_event(library, ticket.job_id(), ScanPhase::Failed, progress);
+                }
+                Err(e)
             }
         }
     }
+}
+
+/// The error a scan of a library whose root is not a directory ends in. Its
+/// message names no path (NFR-108).
+fn root_unavailable() -> IndexError {
+    IndexError::PathNotFound("Library root path does not exist or is not a directory".to_string())
 }
 
 #[async_trait::async_trait]
 impl IndexService for LocalIndexService {
-    /// Scan one library -- the administrator's scan. The identity passes run
-    /// first if they have not succeeded yet, and until they have, files
-    /// classified by older rules are not reclassified (see
-    /// [`LocalIndexService::identity_passes_done`]).
-    async fn scan_library(&self, library_id: String) -> Result<u32, IndexError> {
+    /// The root is checked here as well as when the scan runs, so an
+    /// administrator asking for a scan of an unmounted root is told at once.
+    async fn begin_scan(
+        &self,
+        library_id: Uuid,
+        trigger: ScanTrigger,
+    ) -> Result<ScanTicket, IndexError> {
+        let library = self
+            .library_repo
+            .find_by_id(library_id)
+            .await?
+            .ok_or(IndexError::LibraryNotFound)?;
+        if !library.root_path.is_dir() {
+            self.report_root_unavailable(&library).await;
+            return Err(root_unavailable());
+        }
+        let job = ScanJob {
+            id: self.id_generator.new_id(),
+            library_id,
+            trigger,
+            state: ScanState::Queued,
+            queued_at: self.clock.now(),
+            started_at: None,
+            finished_at: None,
+            progress: ScanProgress::default(),
+            failure: None,
+        };
+        Ok(self.scans.register(job, self.clock.clone())?)
+    }
+
+    /// The identity passes run first if they have not succeeded yet, and
+    /// until they have, files classified by older rules are not reclassified
+    /// (see [`LocalIndexService::identity_passes_done`]).
+    async fn run_scan(&self, ticket: ScanTicket) -> Result<ScanProgress, IndexError> {
         let reclassify = self.identity_passes_done().await;
-        self.scan_one_library(library_id, reclassify).await
+        self.run_registered_scan(ticket, reclassify).await
+    }
+
+    fn scan_job(&self, library_id: Uuid) -> Option<ScanJob> {
+        self.scans.job(library_id)
+    }
+
+    fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>> {
+        self.scans.subscribe(library_id)
+    }
+
+    async fn stop_scan(&self, library_id: Uuid) -> bool {
+        if !self.scans.cancel(library_id) {
+            return true;
+        }
+        // Subscribed after the cancel: `wait_for` reads the current job
+        // first, so a scan that finished in between is seen as finished.
+        let mut jobs = self.scans.subscribe(library_id);
+        let finished = async move {
+            // An error is a closed channel: the slot is gone, and its job
+            // with it. Either way nothing of this library's is running.
+            let _ = jobs
+                .wait_for(|job| !job.as_ref().is_some_and(|job| job.state.is_active()))
+                .await;
+        };
+        tokio::select! {
+            () = finished => true,
+            () = self.clock.sleep(SCAN_STOP_TIMEOUT) => false,
+        }
+    }
+
+    fn forget_library(&self, library_id: Uuid) {
+        self.scans.forget(library_id);
+    }
+}
+
+#[cfg(test)]
+impl LocalIndexService {
+    /// The administrator's scan, run to the end on the caller's task and
+    /// reported as the number of files it added: the shape the tests of the
+    /// scan itself were written against before scans became jobs.
+    pub(crate) async fn scan_library(&self, library_id: String) -> Result<u32, IndexError> {
+        let library_id = Uuid::parse_str(&library_id).map_err(|_| IndexError::InvalidId)?;
+        let progress = self.scan_now(library_id, ScanTrigger::Manual).await?;
+        Ok(u32::try_from(progress.added).expect("a test scan adds few files"))
     }
 }
 
 impl LocalIndexService {
-    /// Scan one library, reclassifying files classified by older rules only
-    /// when `reclassify` is set.
+    /// Scan one library under a registered job, reclassifying files
+    /// classified by older rules only when `reclassify` is set. The caller
+    /// holds the library's lock and the catalog gate.
     async fn scan_one_library(
         &self,
-        library_id: String,
+        library: &Library,
+        ticket: &ScanTicket,
         reclassify: bool,
-    ) -> Result<u32, IndexError> {
-        let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| IndexError::InvalidId)?;
+    ) -> Result<ScanProgress, IndexError> {
+        let lib_uuid = library.id;
+        let library_id = lib_uuid.to_string();
         let start_time = self.clock.now();
+        let mut progress = ScanProgress::default();
+        let mut throttle = ProgressThrottle::new(PROGRESS_EVENT_INTERVAL);
 
-        // Fetch Library
-        let library = self
-            .library_repo
-            .find_by_id(lib_uuid)
-            .await?
-            .ok_or(IndexError::LibraryNotFound)?;
+        // Cancelled while it waited for the library -- its library is being
+        // deleted -- so there is nothing to scan.
+        if ticket.is_cancelled() {
+            return Err(IndexError::Cancelled);
+        }
 
         info!(
             "Scanning library: {} ({:?})",
@@ -2312,44 +2866,16 @@ impl LocalIndexService {
         // written only once every guard below has passed, so a refusal cannot
         // leave the library reading as "scanning" with no finish to follow.
         if !library.root_path.is_dir() {
-            warn!(
-                root = %library.root_path.display(),
-                library_id = %lib_uuid,
-                "library root is not a directory"
-            );
-            self.notification_service.publish(AdminEvent::error(
-                EventCategory::LibraryScan,
-                format!(
-                    "Library '{}' root path does not exist or is not a directory: {}",
-                    library.name,
-                    library.root_path.display()
-                ),
-                Some(lib_uuid.to_string()),
-                Some(library.name.clone()),
-            ));
-            let _ = self
-                .admin_log
-                .log(
-                    AdminLogLevel::Error,
-                    AdminLogCategory::LibraryScan,
-                    format!(
-                        "Library scan failed: root path does not exist or is not a directory for \"{}\"",
-                        library.name
-                    ),
-                    Some(serde_json::json!({
-                        "library_id": library_id,
-                        "path": library.root_path
-                    })),
-                )
-                .await;
-            return Err(IndexError::PathNotFound(
-                "Library root path does not exist or is not a directory".to_string(),
-            ));
+            self.report_root_unavailable(library).await;
+            return Err(root_unavailable());
         }
 
         // Phase 1: Fetch existing files from DB -- missing ones included, so a
         // path that comes back is matched to its old row (and id), and so the
         // empty-root guard below still counts a row that is already missing.
+        // Nothing else writes this library's rows while the scan holds its
+        // lock, so the snapshot -- `missing_since` stamps included -- stays
+        // true until phase 4 reads it.
         let existing_files = self
             .file_repo
             .find_all_by_library_including_missing(lib_uuid)
@@ -2435,42 +2961,73 @@ impl LocalIndexService {
             .update_scan_progress(lib_uuid, Some(start_time), None, None)
             .await?;
 
-        let mut added_count = 0;
-        let mut restored_count = 0u64;
+        progress.total = Some(walked_files.len() as u64);
+        ticket.record(progress);
 
         // Phase 3: Compare with DB, add new files
         for path in walked_files {
-            if let Some(existing_file) = existing_map.remove(&path) {
+            if ticket.is_cancelled() {
+                info!(library_id = %lib_uuid, "Scan cancelled");
+                return Err(IndexError::Cancelled);
+            }
+            let outcome = if let Some(existing_file) = existing_map.remove(&path) {
                 // Known file: bring it back if it was missing, then reconcile
                 // it against its current on-disk state.
                 let reconciled = match self.restore_if_missing(&existing_file).await {
                     Ok(restored) => {
                         if restored {
-                            restored_count += 1;
+                            progress.restored += 1;
                         }
-                        self.reconcile_existing_file(&existing_file, &path, &library, reclassify)
+                        self.reconcile_existing_file(&existing_file, &path, library, reclassify)
                             .await
                     }
                     Err(e) => Err(e),
                 };
-                if let Err(e) = reconciled {
-                    self.report_file_failure(lib_uuid, &library.name, &path, &e)
-                        .await;
-                }
-            } else {
-                // New file.
-                match self.process_new_file(&path, &library).await {
-                    Ok(true) => {
-                        added_count += 1;
-                        record_file_outcome("new");
-                    }
-                    Ok(false) => {}
+                match reconciled {
+                    Ok(outcome) => outcome,
                     Err(e) => {
                         self.report_file_failure(lib_uuid, &library.name, &path, &e)
                             .await;
+                        FileOutcome::Failed
                     }
                 }
+            } else {
+                // New file.
+                match self.process_new_file(&path, library).await {
+                    Ok(outcome) => {
+                        if outcome == FileOutcome::Added {
+                            record_file_outcome("new");
+                        }
+                        outcome
+                    }
+                    Err(e) => {
+                        self.report_file_failure(lib_uuid, &library.name, &path, &e)
+                            .await;
+                        FileOutcome::Failed
+                    }
+                }
+            };
+            match outcome {
+                FileOutcome::Added => progress.added += 1,
+                FileOutcome::Changed => progress.changed += 1,
+                FileOutcome::Unchanged => progress.unchanged += 1,
+                // Seen, so never marked missing: a file still being copied in
+                // is on disk. The watcher, or the next scan, comes back to it.
+                FileOutcome::Deferred(_) => progress.deferred += 1,
+                FileOutcome::Failed => progress.failed += 1,
             }
+            progress.processed += 1;
+            ticket.record(progress);
+            if throttle.ready(self.clock.monotonic()) {
+                self.publish_scan_event(library, ticket.job_id(), ScanPhase::Progress, progress);
+            }
+        }
+
+        // A library deleted during its last file is not reconciled against a
+        // walk of a root it no longer owns.
+        if ticket.is_cancelled() {
+            info!(library_id = %lib_uuid, "Scan cancelled");
+            return Err(IndexError::Cancelled);
         }
 
         // Phase 3b: What sits beside the media (issue #184). The NFOs edited
@@ -2478,12 +3035,12 @@ impl LocalIndexService {
         // recorded against the video that owns it. A failure here is the
         // scan's, like a failure to record a file: it is reported and the
         // scan goes on.
-        if let Err(e) = self.repin_changed_nfos(&library, &walked_nfos).await {
+        if let Err(e) = self.repin_changed_nfos(library, &walked_nfos).await {
             error!(library_id = %lib_uuid, error = %e, "re-applying changed NFOs failed");
         }
         if let Err(e) = self
             .reconcile_sidecars(
-                &library,
+                library,
                 &walked_media,
                 &walked_subtitles,
                 &failed_subtrees,
@@ -2513,6 +3070,9 @@ impl LocalIndexService {
         } = plan;
         let marked_count = self.file_repo.mark_missing(mark, now).await?;
         let purged_count = self.file_repo.purge_missing(purge).await?;
+        progress.marked_missing = marked_count;
+        progress.purged = purged_count;
+        ticket.record(progress);
         if marked_count > 0 {
             info!("Marked {} files missing from library", marked_count);
         }
@@ -2555,10 +3115,11 @@ impl LocalIndexService {
         // and so is kept; it is merely hidden from browse. Only a walk that
         // read the whole tree gets here: one that failed anywhere has told us
         // nothing reliable about what is on disk. `start_time` protects a
-        // title the watcher created while this scan ran, whose file row may
-        // not be written yet. It does not protect a title already orphaned
-        // before the scan began that the watcher is attaching a file to: that
-        // title can go under it, and the next scan re-indexes the file.
+        // title another library's scan or reconcile created while this scan
+        // ran, whose file row may not be written yet. It does not protect a
+        // title already orphaned before the scan began that another library
+        // is attaching a file to: that title can go under it, and the next
+        // scan of that library re-indexes the file.
         let titles_removed = if failed_subtrees.is_empty() && !unscoped_failure {
             self.movie_repo.delete_orphaned(start_time).await?
                 + self.show_repo.delete_orphaned(start_time).await?
@@ -2577,9 +3138,21 @@ impl LocalIndexService {
             .update_scan_progress(lib_uuid, None, Some(end_time), Some(total_files as i32))
             .await?;
 
+        let ScanProgress {
+            total: _,
+            processed: _,
+            added: added_count,
+            changed: _,
+            unchanged: _,
+            deferred: deferred_count,
+            failed: _,
+            marked_missing: _,
+            restored: restored_count,
+            purged: _,
+        } = progress;
         info!(
-            "Scan complete. Added: {}, Marked missing: {}, Restored: {}, Purged: {}, Total: {}",
-            added_count, marked_count, restored_count, purged_count, total_files
+            "Scan complete. Added: {}, Deferred: {}, Marked missing: {}, Restored: {}, Purged: {}, Total: {}",
+            added_count, deferred_count, marked_count, restored_count, purged_count, total_files
         );
 
         self.notification_service.publish(AdminEvent::info(
@@ -2603,6 +3176,7 @@ impl LocalIndexService {
                 Some(serde_json::json!({
                     "library_id": library_id,
                     "added": added_count,
+                    "deferred": deferred_count,
                     "marked_missing": marked_count,
                     "restored": restored_count,
                     "purged": purged_count,
@@ -2613,7 +3187,7 @@ impl LocalIndexService {
             )
             .await;
 
-        Ok(added_count)
+        Ok(progress)
     }
 }
 
@@ -2638,6 +3212,10 @@ mod identity_tests;
 #[cfg(test)]
 #[path = "index_inference_tests.rs"]
 mod inference_tests;
+
+#[cfg(test)]
+#[path = "index_scan_tests.rs"]
+mod scan_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3959,7 +4537,7 @@ mod tests {
             .process_new_file(&path, &test_library(lib_id, temp_dir.path()))
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert_eq!(result.unwrap(), FileOutcome::Added);
     }
 
     #[tokio::test]
@@ -4113,7 +4691,7 @@ mod tests {
             .process_new_file(&path, &test_library(lib_id, temp_dir.path()))
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert_eq!(result.unwrap(), FileOutcome::Added);
     }
 
     #[tokio::test]
@@ -4156,11 +4734,9 @@ mod tests {
         let io_error = std::fs::File::open(temp_dir.path().join("Vanished (2020).mkv.part"))
             .expect_err("that file was never created");
 
-        let mut mock_media_info = MockMediaInfoService::new();
-        mock_media_info
-            .expect_get_video_metadata()
-            .times(1)
-            .returning(|_| Ok(make_video_metadata()));
+        // No prober expectation: a file is hashed before it is probed, so a
+        // hash failure is reported without a probe.
+        let mock_media_info = MockMediaInfoService::new();
 
         let mut mock_hash = MockHashService::new();
         mock_hash
@@ -4528,18 +5104,19 @@ mod tests {
 
     /// The row a previous scan would have written for a file that is on disk
     /// and unchanged, so reconciling it takes the size-and-mtime fast path and
-    /// touches neither the hasher nor the prober.
+    /// touches neither the hasher nor the prober: hashed, and probed (a row
+    /// whose probe never succeeded is probed again on every visit).
     fn indexed_file_matching_disk(library_id: Uuid, path: &Path) -> MediaFile {
         let (size_bytes, mtime) = read_fs_meta(path).unwrap();
         MediaFile {
             id: Uuid::new_v4(),
             library_id,
             path: path.to_path_buf(),
-            hash: 0,
+            hash: 7,
             size_bytes,
             mtime,
             mime_type: None,
-            duration: None,
+            duration: Some(Duration::from_secs(60)),
             container_format: None,
             content: None,
             status: FileStatus::Known,
@@ -5012,7 +5589,9 @@ mod tests {
     #[tokio::test]
     async fn test_scan_library_media_extraction_failure() {
         // When media-info extraction fails, process_new_file still inserts the file
-        // with Unknown status and returns Ok(true), so added_count is incremented.
+        // with Unknown status, so added_count is incremented -- and with its
+        // real hash, taken before the probe, so the row takes part in
+        // duplicate detection rather than carrying the unhashed sentinel.
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let dir = TempDir::new().unwrap();
@@ -5026,6 +5605,11 @@ mod tests {
             .expect_get_video_metadata()
             .times(1)
             .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".to_string())));
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Ok(31337));
 
         let service = LocalIndexService::new(
             lib_repo.clone(),
@@ -5033,7 +5617,7 @@ mod tests {
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
+            Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
@@ -5045,6 +5629,11 @@ mod tests {
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].status, FileStatus::Unknown);
+        assert_eq!(
+            files[0].hash, 31337,
+            "the probe failure keeps the real hash"
+        );
+        assert_eq!(files[0].classifier_version, 0, "never classified");
     }
 
     #[tokio::test]
@@ -5069,8 +5658,8 @@ mod tests {
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
-            // Extraction fails before hashing, so the hash service is never hit.
-            Arc::new(MockHashService::new()),
+            // Every file is hashed before it is probed.
+            Arc::new(crate::services::hash::LocalHashService::default()),
             Arc::new(crate::services::media_info::LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
@@ -5097,11 +5686,8 @@ mod tests {
         let file_path = dir.path().join("problem.mp4");
         std::fs::write(&file_path, b"video data").unwrap();
 
-        let mut mock_media_info = MockMediaInfoService::new();
-        mock_media_info
-            .expect_get_video_metadata()
-            .times(1)
-            .returning(|_| Ok(make_video_metadata()));
+        // The hash fails first, so the file is never probed.
+        let mock_media_info = MockMediaInfoService::new();
 
         let mut mock_hash = MockHashService::new();
         mock_hash
@@ -5356,7 +5942,8 @@ mod tests {
             size_bytes: disk_meta.len(),
             mtime,
             mime_type: Some("video/mp4".to_string()),
-            duration: None,
+            // Probed: a row whose probe never succeeded is probed again.
+            duration: Some(Duration::from_secs(60)),
             container_format: Some("mp4".to_string()),
             content: None,
             status: FileStatus::Known,
@@ -5412,7 +5999,7 @@ mod tests {
             size_bytes: disk_meta.len(), // size matches
             mtime: None,                 // stale → suspected
             mime_type: Some("video/mp4".to_string()),
-            duration: None,
+            duration: Some(Duration::from_secs(60)),
             container_format: Some("mp4".to_string()),
             // A Known row is a movie's or an episode's file (the `files` CHECK).
             content: Some(MediaFileContent::Movie {
@@ -5813,7 +6400,10 @@ mod tests {
             Arc::new(NoOpAdminLogService),
         );
 
-        let total = service.scan_all_libraries().await.unwrap();
+        let total = service
+            .scan_all_libraries(ScanTrigger::Periodic)
+            .await
+            .unwrap();
         assert_eq!(total, 2);
     }
 

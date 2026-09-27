@@ -33,6 +33,31 @@ changes as they happen — or within a poll interval, for a library on a network
 Scanning and enrichment are independent: a scan makes files playable, and metadata arrives
 separately. See [Metadata and artwork](/operate/metadata/).
 
+### One scan at a time
+
+A scan is a job that runs in the background: asking for one returns at once, and the scan's
+progress — how many files it has handled of how many, and what became of them — streams to the
+admin page. A library is scanned by one job at a time, whatever started it: you, the scan at
+startup, or the periodic rescan. Asking for a scan while one is running is refused with
+[library-scan-in-progress](/reference/errors/#library-scan-in-progress); the periodic rescan simply
+skips a library that is already being scanned. While a scan runs, changes the watcher sees in that
+library wait for it to finish and are then picked up. Deleting a library while it is being scanned
+stops the scan after the file it is on and waits for it — up to 30 seconds — before the library is
+removed; the scan ends as cancelled.
+
+Beam keeps the latest scan of each library in memory. A restart forgets it — the library's *last
+scanned* time is kept — and a scan running when the server stops is not resumed; the next periodic
+rescan covers it.
+
+### Files still being copied in
+
+A file is indexed only once it has gone `BEAM_SCAN_SETTLE_SECS` (30 seconds by default) without
+being written to. A film being copied onto the share is written for as long as the copy runs, so
+it is left alone until the copy has finished: Beam does not read a half-copied file, and does not
+probe a container whose index is written last. It appears about half a minute after the copy
+finishes — the watcher comes back to it — and a scan that meets it mid-copy counts it as
+*deferred*, not failed or missing. Set `BEAM_SCAN_SETTLE_SECS=0` to index files on sight.
+
 ## Where a library can live
 
 Each library root must be **disjoint** from every other library and from Beam's data directory
@@ -429,7 +454,11 @@ one bad file never aborts it.
 
 A file Beam *can* read but cannot probe is **not** a failure. It is indexed with unknown status and
 counted as added, so a corrupt or truncated video shows up as an unplayable unknown file rather
-than in the scan's failure count.
+than in the scan's failure count. Every later scan tries to probe it again, and the first time a
+probe succeeds — the file was repaired, or finished copying — it is sorted into its movie or show
+like any new file, keeping its record. The same goes for a file that probed before but whose new
+content does not: it keeps its movie or show, is marked changed, and loses the old content's
+duration and streams until a later scan probes it successfully.
 
 <LinkCard
 	title="Indexing requirements"

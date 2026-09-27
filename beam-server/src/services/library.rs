@@ -6,10 +6,11 @@ use thiserror::Error;
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use crate::models::{Library, LibraryFile};
+use crate::models::{Library, LibraryFile, ScanJob};
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_domain::models::Library as DomainLibrary;
 use beam_index::services::index::{IndexError, IndexService};
+use beam_index::services::scan::ScanTrigger;
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
     /// Validates a *library root* at registration, returning the canonical
@@ -345,10 +346,20 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
         root_path: String,
     ) -> Result<Library, LibraryError>;
 
-    /// Scan a library for new content
-    async fn scan_library(&self, library_id: String) -> Result<u32, LibraryError>;
+    /// Start a scan of a library, returning its job as registered: queued.
+    /// The scan runs on a task of its own; follow it with
+    /// [`Self::get_scan`]. Fails with [`LibraryError::ScanInProgress`] while
+    /// a scan of the library is queued or running, and with
+    /// [`LibraryError::PathNotFound`] when its root is not a directory.
+    async fn start_scan(&self, library_id: Uuid) -> Result<ScanJob, LibraryError>;
 
-    /// Delete a library by ID
+    /// The latest scan of a library in this process: `None` when there has
+    /// been none since the server started.
+    async fn get_scan(&self, library_id: Uuid) -> Result<Option<ScanJob>, LibraryError>;
+
+    /// Delete a library by ID. A scan of it that is queued or running is
+    /// cancelled and waited for first (see [`IndexService::stop_scan`]), and
+    /// the indexer forgets the library's latest job after.
     async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError>;
 }
 
@@ -548,11 +559,29 @@ impl LibraryService for LocalLibraryService {
         })
     }
 
-    async fn scan_library(&self, library_id: String) -> Result<u32, LibraryError> {
-        self.index_service
-            .scan_library(library_id)
-            .await
-            .map_err(LibraryError::from)
+    async fn start_scan(&self, library_id: Uuid) -> Result<ScanJob, LibraryError> {
+        let ticket = self
+            .index_service
+            .begin_scan(library_id, ScanTrigger::Manual)
+            .await?;
+        let job = ticket.job();
+        // The request answers now; the scan runs as long as it runs. A task
+        // that dies unfinished fails the job as interrupted.
+        let index_service = self.index_service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = index_service.run_scan(ticket).await {
+                warn!(library_id = %library_id, error = %e, "library scan failed");
+            }
+        });
+        Ok(ScanJob::from(job))
+    }
+
+    async fn get_scan(&self, library_id: Uuid) -> Result<Option<ScanJob>, LibraryError> {
+        self.library_repo
+            .find_by_id(library_id)
+            .await?
+            .ok_or(LibraryError::LibraryNotFound)?;
+        Ok(self.index_service.scan_job(library_id).map(ScanJob::from))
     }
 
     async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError> {
@@ -564,7 +593,20 @@ impl LibraryService for LocalLibraryService {
             .await?
             .ok_or(LibraryError::LibraryNotFound)?;
 
+        // A scan stops after the file it is on and fails as cancelled. It is
+        // waited for, so it never writes files or titles for a library whose
+        // rows are going -- which would leave orphaned titles and fail the
+        // job as an internal error. A scan held on one file past the timeout
+        // does not hold the delete: whatever it then writes is refused with
+        // the library, or left for the orphan sweep.
+        if !self.index_service.stop_scan(lib_uuid).await {
+            warn!(
+                library_id = %lib_uuid,
+                "a scan of the library did not stop in time; deleting the library anyway"
+            );
+        }
         self.library_repo.delete(lib_uuid).await?;
+        self.index_service.forget_library(lib_uuid);
 
         self.notification_service.publish(AdminEvent::info(
             EventCategory::System,
@@ -595,6 +637,8 @@ pub enum LibraryError {
     PathOverlapsLibrary,
     #[error("Library path overlaps the server's data directory")]
     PathOverlapsDataDir,
+    #[error("A scan of this library is already queued or running")]
+    ScanInProgress,
 }
 
 impl From<IndexError> for LibraryError {
@@ -604,6 +648,11 @@ impl From<IndexError> for LibraryError {
             IndexError::LibraryNotFound => LibraryError::LibraryNotFound,
             IndexError::InvalidId => LibraryError::InvalidId,
             IndexError::PathNotFound(s) => LibraryError::PathNotFound(s),
+            IndexError::ScanInProgress => LibraryError::ScanInProgress,
+            // Unreachable: a cancelled scan is reported through its job,
+            // never by the call that starts it. An internal error rather
+            // than a plausible 4xx if that ever changes.
+            IndexError::Cancelled => LibraryError::Db(DbErr::Custom(e.to_string())),
         }
     }
 }

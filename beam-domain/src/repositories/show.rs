@@ -81,6 +81,10 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
         library_id: Uuid,
         show_id: Uuid,
     ) -> Result<(), DbErr>;
+    /// The season numbered `season_number` of `show_id`, inserting it only
+    /// if no such season exists yet.
+    ///
+    /// Atomic: concurrent calls for one pair all return the same row.
     async fn find_or_create_season(
         &self,
         show_id: Uuid,
@@ -441,14 +445,14 @@ pub mod in_memory {
             show_id: Uuid,
             season_number: u32,
         ) -> Result<Season, DbErr> {
+            // One lock for the lookup and the insert, as the Postgres
+            // `ON CONFLICT` is one statement.
+            let mut seasons = self.seasons.lock().unwrap();
+            if let Some(s) = seasons
+                .values()
+                .find(|s| s.show_id == show_id && s.season_number == season_number)
             {
-                let guard = self.seasons.lock().unwrap();
-                if let Some(s) = guard
-                    .values()
-                    .find(|s| s.show_id == show_id && s.season_number == season_number)
-                {
-                    return Ok(s.clone());
-                }
+                return Ok(s.clone());
             }
             let season = Season {
                 id: Uuid::new_v4(),
@@ -458,10 +462,7 @@ pub mod in_memory {
                 first_aired: None,
                 last_aired: None,
             };
-            self.seasons
-                .lock()
-                .unwrap()
-                .insert(season.id, season.clone());
+            seasons.insert(season.id, season.clone());
             Ok(season)
         }
 

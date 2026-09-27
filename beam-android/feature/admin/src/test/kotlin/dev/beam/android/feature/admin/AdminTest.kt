@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -61,8 +62,10 @@ class AdminTest {
         }
 
     @Test
-    fun `a scan reports how many files it added`() =
+    fun `a scan the server accepted says it started, not what it found`() =
         runTest {
+            // The server answers before the scan runs, so there is no count
+            // to report yet; claiming one would be claiming a finished scan.
             val admin = FakeAdminRepository()
             val viewModel = AdminViewModel(admin, FakeCatalogRepository())
             testScheduler.advanceUntilIdle()
@@ -74,11 +77,41 @@ class AdminTest {
             viewModel.scan(library.id)
             testScheduler.advanceUntilIdle()
 
+            assertEquals(listOf(library.id), admin.scanCalls)
+            val state = viewModel.state.value.valueOrNull!!
+            assertNull("the in-progress marker is cleared", state.scanningLibraryId)
+            val message = state.message
+            assertNotNull(message)
+            assertTrue(message!!.contains("started"))
+            assertFalse(message.contains("added"))
+        }
+
+    @Test
+    fun `a scan of a library already being scanned says so rather than reporting a failure`() =
+        runTest {
+            val admin = FakeAdminRepository()
+            val viewModel = AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+            val library =
+                viewModel.state.value.valueOrNull!!
+                    .libraries
+                    .first()
+
+            admin.failWith =
+                BeamException.Server(
+                    409u,
+                    false,
+                    "A scan of this library is already queued or running",
+                    "https://beam.justinchung.net/reference/errors/#library-scan-in-progress",
+                )
+            viewModel.scan(library.id)
+            testScheduler.advanceUntilIdle()
+
             val message =
                 viewModel.state.value.valueOrNull!!
                     .message
             assertNotNull(message)
-            assertTrue(message!!.contains("files added"))
+            assertTrue(message!!.contains("already running"))
         }
 
     @Test

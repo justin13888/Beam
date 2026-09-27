@@ -6,8 +6,10 @@
 //! below the repository traits.
 
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 use super::*;
+use crate::probe::metadata::MetadataError;
 use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
@@ -40,6 +42,8 @@ struct Harness {
     sidecar_repo: Arc<InMemorySidecarSubtitleRepository>,
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
     tags: Tags,
+    /// While set, every probe fails, as one of a file still being muxed.
+    probe_fails: Arc<AtomicBool>,
     service: LocalIndexService,
 }
 
@@ -72,8 +76,13 @@ impl Harness {
             .returning(move |_| Ok(next_hash.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let tags: Tags = Arc::default();
         let prober_tags = tags.clone();
+        let probe_fails = Arc::new(AtomicBool::new(false));
+        let prober_fails = probe_fails.clone();
         let mut prober = MockMediaInfoService::new();
         prober.expect_get_video_metadata().returning(move |path| {
+            if prober_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(MetadataError::UnknownError("not probeable yet".to_string()));
+            }
             Ok(VideoFileMetadata {
                 file_path: path.to_path_buf(),
                 metadata: prober_tags
@@ -122,6 +131,7 @@ impl Harness {
             sidecar_repo,
             admin_log_repo,
             tags,
+            probe_fails,
             service,
         }
     }
@@ -154,10 +164,18 @@ impl Harness {
     }
 
     async fn event(&self, rel: &str, kind: FsEventKind) {
+        assert_eq!(
+            self.event_outcome(rel, kind).await,
+            ReconcileOutcome::Done,
+            "the event for {rel} was reconciled, not deferred"
+        );
+    }
+
+    async fn event_outcome(&self, rel: &str, kind: FsEventKind) -> ReconcileOutcome {
         self.service
             .reconcile_path(self.library.id, self.root.join(rel), kind)
             .await
-            .unwrap();
+            .unwrap()
     }
 
     fn file(&self, rel: &str) -> MediaFile {
@@ -359,6 +377,35 @@ async fn container_tags_place_an_episode_the_path_could_not() {
     assert_eq!(show.identity_key.as_deref(), Some("the office|"));
 }
 
+/// A file whose first probe failed is classified when a later probe succeeds
+/// (issue #181) -- and by the tags that probe read, exactly as a new file
+/// would be, not by its path alone.
+#[tokio::test]
+async fn a_reprobe_that_succeeds_classifies_by_the_tags_it_read() {
+    let h = Harness::new().await;
+    h.video("The Office/The Dundies.m4v");
+    h.tag(
+        "The Office/The Dundies.m4v",
+        &[
+            ("show", "The Office"),
+            ("season_number", "2"),
+            ("episode_sort", "1"),
+        ],
+    );
+    h.probe_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    h.scan().await;
+    assert_eq!(h.file("The Office/The Dundies.m4v").content, None);
+
+    h.probe_fails
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    h.scan().await;
+
+    let (show, season, episode) = h.show_of("The Office/The Dundies.m4v");
+    assert_eq!((season, episode), (2, 1));
+    assert_eq!(show.identity_key.as_deref(), Some("the office|"));
+}
+
 #[tokio::test]
 async fn an_nfo_larger_than_beam_reads_is_ignored() {
     let h = Harness::new().await;
@@ -428,6 +475,89 @@ async fn an_edited_nfo_repins_its_movie_when_the_watcher_sees_it() {
         Some("tmdb:604"),
         "the edited NFO's id replaces the one it set"
     );
+}
+
+/// An NFO edited while a scan holds the library is not read under it: the
+/// event is handed back to retry (issue #181), and the retry -- once the
+/// library is free -- applies the edit rather than losing it.
+#[tokio::test]
+async fn an_nfo_event_while_the_library_is_held_is_deferred_and_applied_on_retry() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.scan().await;
+    h.write(
+        "Matrix/movie.nfo",
+        r#"<movie><uniqueid type="tmdb">604</uniqueid></movie>"#,
+    );
+
+    let held = h
+        .service
+        .scans
+        .try_acquire_for_reconcile(h.library.id)
+        .expect("the library is free");
+    assert_eq!(
+        h.event_outcome("Matrix/movie.nfo", FsEventKind::Modified)
+            .await,
+        ReconcileOutcome::Deferred {
+            retry_after: LIBRARY_BUSY_RETRY
+        }
+    );
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:603"),
+        "nothing is re-pinned while the library is held"
+    );
+
+    drop(held);
+    h.event("Matrix/movie.nfo", FsEventKind::Modified).await;
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:604")
+    );
+}
+
+/// A subtitle added or removed while a scan holds the library is deferred the
+/// same way, and recorded or forgotten by the retry.
+#[tokio::test]
+async fn a_subtitle_event_while_the_library_is_held_is_deferred_and_applied_on_retry() {
+    let h = Harness::new().await;
+    h.video("Movie/Movie.mkv");
+    h.scan().await;
+    h.write("Movie/Movie.fr.srt", "1");
+
+    let held = h
+        .service
+        .scans
+        .try_acquire_for_reconcile(h.library.id)
+        .expect("the library is free");
+    assert_eq!(
+        h.event_outcome("Movie/Movie.fr.srt", FsEventKind::Created)
+            .await,
+        ReconcileOutcome::Deferred {
+            retry_after: LIBRARY_BUSY_RETRY
+        }
+    );
+    assert!(h.subtitles_of("Movie/Movie.mkv").await.is_empty());
+    drop(held);
+    h.event("Movie/Movie.fr.srt", FsEventKind::Created).await;
+    assert_eq!(h.subtitles_of("Movie/Movie.mkv").await.len(), 1);
+
+    std::fs::remove_file(h.root.join("Movie/Movie.fr.srt")).unwrap();
+    let held = h
+        .service
+        .scans
+        .try_acquire_for_reconcile(h.library.id)
+        .expect("the library is free");
+    assert!(matches!(
+        h.event_outcome("Movie/Movie.fr.srt", FsEventKind::Removed)
+            .await,
+        ReconcileOutcome::Deferred { .. }
+    ));
+    assert_eq!(h.subtitles_of("Movie/Movie.mkv").await.len(), 1);
+    drop(held);
+    h.event("Movie/Movie.fr.srt", FsEventKind::Removed).await;
+    assert!(h.subtitles_of("Movie/Movie.mkv").await.is_empty());
 }
 
 #[tokio::test]

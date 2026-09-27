@@ -576,11 +576,10 @@ public final class FakeAdminRepository: AdminRepository, @unchecked Sendable {
         }
     }
 
-    public func scanLibrary(id libraryId: String) async throws -> UInt32 {
+    public func scanLibrary(id libraryId: String) async throws {
         try state.withLock { state in
             try state.check()
             state.scanned.append(libraryId)
-            return 7
         }
     }
 

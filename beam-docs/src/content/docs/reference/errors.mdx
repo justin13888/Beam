@@ -72,7 +72,8 @@ not this error — it returns an empty list.
 
 ### invalid-library-id
 
-**400.** The library id in the path is not a UUID.
+**400.** The library id in the path is not a UUID. The scan routes (`/v1/admin/libraries/{id}/scan`)
+take the id as a UUID and answer a malformed one with a plain `400` (`about:blank`) instead.
 
 ### library-path-not-found
 
@@ -112,6 +113,27 @@ how many video files are indexed, and the root. The Logs tab entry's message nam
 that count; the root is in the entry's **Details** (`path`), alongside `library_id` and
 `indexed_video_files`. Check the mount inside the container and rescan once the files are visible
 again. If you really did remove every video on purpose, delete the library instead.
+
+### library-scan-in-progress
+
+**409.** A scan of this library is already queued or running. A library is scanned by one job at a
+time, whatever started it: an administrator, the scan at startup, or the periodic rescan. The request
+starts nothing.
+
+**What to do.** Follow the running scan at `GET /v1/admin/libraries/{id}/scan`, or on the admin
+event stream's `scan_progress` events, and ask again once it has finished if you still need to. A
+scan that finishes picks up everything on disk when it walked the library; the file watcher picks up
+what changes after that.
+
+### scan-not-found
+
+**404.** The library exists, but it has not been scanned since the server started. Scan jobs are
+kept in memory, one per library — the latest — and a restart forgets them. This is not
+[library-not-found](#library-not-found): the library is there.
+
+**What to do.** Start a scan with `POST /v1/admin/libraries/{id}/scan` if you need one. When a
+library was last scanned is on the library itself (`last_scan_finished_at`), whatever the server has
+since forgotten about the job.
 
 ### library-path-outside-root
 

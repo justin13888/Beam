@@ -94,7 +94,10 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   1 MiB -- finds or creates a title by the provider id they pin before its identity key, and
   re-pins titles whose NFO a scan or the watcher finds edited) and `index_sidecars.rs` (records the
   text subtitles beside indexed videos as `sidecar_subtitles`, from the scan's walk and from
-  watcher events), both child modules of `index.rs` (FR-219, FR-220);
+  watcher events), both child modules of `index.rs` (FR-219, FR-220). Both run inside the
+  library's lock: a scan re-pins and reconciles subtitles as a phase of its job, after every file
+  has been settled, hashed and probed, and a watcher event for an NFO or a subtitle is handed back
+  `Deferred` while the library is held, like any other (FR-218);
   `watcher.rs`
   (`FsWatcher` trait, production `NotifyFsWatcher` — inotify on Linux, with a manual-mode
   `notify::PollWatcher` for roots `filesystem_probe.rs` (`statfs(2)`) classifies as a network
@@ -105,14 +108,18 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   testable. `runtime.rs` calls the watcher on the blocking pool; registers every watch before the
   startup scan starts, and holds the poller until that scan finishes, so the startup scan is the
   one scan a library polled from startup gets (the poller's first snapshot hides earlier changes)
-  and the background indexer schedules no single-library scan alongside it (an admin-triggered
-  scan can still overlap it; serialising every scan of a library is
-  [#181](https://github.com/justin13888/beam/issues/181)); scans a library once when it starts being polled
+  and the background indexer schedules no single-library scan alongside it; scans a library once when it starts being polled
   after startup; and on each maintenance cycle unwatches libraries that no longer exist and
   re-registers any the watcher no longer holds, asking the watcher rather than remembering what it
   registered; the watcher keeps one registration per root, so a
   library re-created at a deleted one's root owns its events; `watch_status.rs` records each library's watch mode for the
-  admin status); `enrichment/` (queue-driven async worker with retry/backoff and
+  admin status); `scan.rs` (`ScanCoordinator`: one lock per library that every scan — startup,
+  periodic, newly polled, administrator's — and every watcher reconcile takes, the latest
+  `ScanJob` per library in memory, and a catalog gate the identity-key passes hold exclusively while
+  every scan and reconcile holds it shared; a scan is `begin_scan` then `run_scan`, so the server
+  answers before it runs; a reconcile never waits, but is handed back `Deferred` and retried by
+  `runtime.rs` on the injected `Clock`; a file is hashed only once it has gone
+  `BEAM_SCAN_SETTLE_SECS` without a write; issue #181); `enrichment/` (queue-driven async worker with retry/backoff and
   candidate matching/scoring); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
   `notification.rs` (the latter two back the admin log and SSE progress events).
 - `providers/cameo.rs` — the `cameo`-backed `EnrichmentProvider` implementation hitting TMDB and

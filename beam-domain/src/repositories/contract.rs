@@ -574,7 +574,7 @@ macro_rules! file_repository_contract {
         use ::uuid::Uuid;
         use $crate::models::file::{
             CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent,
-            UpdateMediaFile,
+            ProbeUpdate, UpdateMediaFile,
         };
         use $crate::repositories::contract::fixture::FileRepositoryFixture;
 
@@ -631,6 +631,43 @@ macro_rules! file_repository_contract {
         fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
             ids.sort();
             ids
+        }
+
+        /// One row per path (issue #181): a second file at a path is refused
+        /// whatever its hash, and the first row is left as it was.
+        #[tokio::test]
+        async fn a_second_file_at_one_path_is_refused_whatever_its_hash() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let first = movie_file(&fixture, library).await;
+            let movie_entry_id = fixture.new_movie_entry(library).await;
+
+            let second = fixture
+                .repo()
+                .create(CreateMediaFile {
+                    library_id: library,
+                    path: first.path.clone(),
+                    hash: first.hash ^ 1,
+                    size_bytes: 2048,
+                    mtime: None,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: Some(MediaFileContent::Movie { movie_entry_id }),
+                    status: FileStatus::Known,
+                    classifier_version: 0,
+                })
+                .await;
+
+            assert!(second.is_err(), "a second row for a path must be refused");
+            let stored = fixture
+                .repo()
+                .find_by_path(&first.path.to_string_lossy())
+                .await
+                .unwrap()
+                .expect("the first row is still there");
+            assert_eq!(stored.id, first.id);
+            assert_eq!(stored.hash, first.hash);
         }
 
         #[tokio::test]
@@ -761,9 +798,7 @@ macro_rules! file_repository_contract {
                         hash: Some(unknown.hash + 1),
                         size_bytes: Some(2048),
                         mtime: None,
-                        mime_type: None,
-                        duration: None,
-                        container_format: None,
+                        probe: ProbeUpdate::Keep,
                         content: None,
                         status: Some(status),
                     })
@@ -791,6 +826,75 @@ macro_rules! file_repository_contract {
                 (stored.hash, stored.size_bytes, stored.classifier_version),
                 (unknown.hash, unknown.size_bytes, 0),
                 "a refused write changes nothing"
+            );
+        }
+
+        /// An update sets, keeps or clears a file's probe results -- MIME
+        /// type, duration and container format -- together, and clearing
+        /// them leaves the rest of the row as it was (issue #181: a failed
+        /// probe of changed content must not keep the old content's results).
+        #[tokio::test]
+        async fn an_update_sets_keeps_or_clears_the_probe_results_together() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+            let repo = fixture.repo();
+            let update = |probe: ProbeUpdate| UpdateMediaFile {
+                id: file.id,
+                hash: None,
+                size_bytes: None,
+                mtime: None,
+                probe,
+                content: None,
+                status: None,
+            };
+            let probe_of = |file: &MediaFile| {
+                (
+                    file.mime_type.clone(),
+                    file.duration,
+                    file.container_format.clone(),
+                )
+            };
+
+            let set = repo
+                .update(update(ProbeUpdate::Set {
+                    mime_type: "video/mp4".to_string(),
+                    duration: ::std::time::Duration::from_secs(90),
+                    container_format: "mp4".to_string(),
+                }))
+                .await
+                .expect("set the probe results");
+            let expected = (
+                Some("video/mp4".to_string()),
+                Some(::std::time::Duration::from_secs(90)),
+                Some("mp4".to_string()),
+            );
+            assert_eq!(probe_of(&set), expected);
+
+            let kept = repo
+                .update(update(ProbeUpdate::Keep))
+                .await
+                .expect("keep the probe results");
+            assert_eq!(probe_of(&kept), expected);
+
+            repo.update(update(ProbeUpdate::Clear))
+                .await
+                .expect("clear the probe results");
+            let cleared = repo
+                .find_by_id(file.id)
+                .await
+                .unwrap()
+                .expect("still present");
+            assert_eq!(probe_of(&cleared), (None, None, None));
+            assert_eq!(
+                (
+                    cleared.hash,
+                    cleared.size_bytes,
+                    cleared.status,
+                    cleared.content.clone()
+                ),
+                (file.hash, file.size_bytes, file.status, file.content.clone()),
+                "clearing the probe results touches nothing else"
             );
         }
 
@@ -1147,6 +1251,42 @@ macro_rules! show_repository_contract {
                 .unwrap()
                 .expect("the episode is readable by id");
             assert_eq!(stored.air_date, Some(aired.to_string()));
+        }
+
+        /// Episodes of one new season indexed at once -- two libraries'
+        /// scans -- share one season row rather than failing on the unique
+        /// index (issue #181).
+        #[tokio::test]
+        async fn concurrent_find_or_create_season_calls_share_one_row() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let show = repo
+                .find_or_create_by_identity(new_show("seasons"))
+                .await
+                .unwrap();
+
+            let call = || repo.find_or_create_season(show.id, 3);
+            let (a, b, c, d, e, f, g, h) = ::tokio::join!(
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call()
+            );
+            let ids: ::std::collections::HashSet<Uuid> = [a, b, c, d, e, f, g, h]
+                .into_iter()
+                .map(|season| season.expect("no call fails on the unique index").id)
+                .collect();
+
+            assert_eq!(ids.len(), 1, "every call returns the same season");
+            assert_eq!(
+                repo.find_seasons_by_show_id(show.id).await.unwrap().len(),
+                1,
+                "one row was inserted"
+            );
         }
 
         #[tokio::test]

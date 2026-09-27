@@ -46,7 +46,8 @@ role.
 | `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, recent scans, and the filesystem watcher's per-library mode (native, polling and why, unwatched) with the watch limit |
 | `/v1/admin/users` | GET | User accounts (limit/offset paged) |
 | `/v1/admin/users/{id}` | PATCH | Block or unblock an account |
-| `/v1/admin/libraries`, `/v1/admin/libraries/{id}`, `/v1/admin/libraries/{id}/scan` | POST, DELETE, POST | Library management and scan trigger |
+| `/v1/admin/libraries`, `/v1/admin/libraries/{id}` | POST, DELETE | Library management; deleting a library cancels its scan and waits for it to stop (at most 30 s on the injected clock) before its rows go, then forgets its latest scan job |
+| `/v1/admin/libraries/{id}/scan` | POST, GET | Start a scan: `202` with the scan job, queued, and the scan runs in the background; `409` `library-scan-in-progress` while one is queued or running. `GET` reads the latest job since the server started (`404` `scan-not-found` before one). `{id}` is a UUID (`format: uuid`); a malformed one is the path extractor's `400` `about:blank` |
 | `/v1/admin/media/{id}/refresh` | POST | Re-trigger enrichment for a title |
 | `/v1/admin/logs`, `/v1/admin/logs/count` | GET | Admin log view |
 | `/v1/admin/events` | GET | Recent admin events (JSON) |
@@ -207,5 +208,13 @@ Authentication resolves before the stream is committed — `AdminAuth` is an ext
 `403` is a normal response rather than an error arriving after a `200` is already on the wire.
 Standard `EventSource` reconnection semantics apply; the server does not replay missed events — a
 reconnecting client re-fetches current state via `GET /v1/admin/events` or the corresponding REST
-resource. SSE was chosen over WebSockets because the channel is strictly server-to-client — see
+resource.
+
+A running scan publishes `scan_progress` events (FR-208, FR-218): `started`, per-item `progress` at most
+once a second, then `completed` or `failed`, each carrying a `scan` object with the job id and the
+per-file counts. They are live state rather than history, so they go out on the stream only and are
+never kept in the recent-event snapshot `GET /v1/admin/events` returns — one scan of a large library
+would otherwise push every other event out of it. The job itself (`GET
+/v1/admin/libraries/{id}/scan`) holds every file's count, unthrottled. Scan jobs live in memory, the
+latest per library, and a restart forgets them. SSE was chosen over WebSockets because the channel is strictly server-to-client — see
 [ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md).

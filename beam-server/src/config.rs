@@ -108,6 +108,15 @@ pub struct ServerConfig {
     #[config(env = "BEAM_MISSING_FILE_GRACE_DAYS", default = 30)]
     pub missing_file_grace_days: u32,
 
+    /// How many seconds a file must go without a write before the indexer
+    /// hashes and probes it. A file still being copied into a library is
+    /// left alone until then -- the scan counts it as deferred, and a
+    /// watcher event retries it -- instead of being hashed again after every
+    /// burst of writes, and probed while its container index is missing.
+    /// `0` hashes every file on sight.
+    #[config(env = "BEAM_SCAN_SETTLE_SECS", default = 30)]
+    pub scan_settle_secs: u64,
+
     /// Whether to run the filesystem watcher for near-real-time index
     /// updates. When false, only the startup scan and periodic rescans run.
     #[config(env = "BEAM_WATCH_ENABLED", default = true)]
@@ -346,6 +355,7 @@ impl fmt::Debug for ServerConfig {
             scan_ignore,
             scan_interval_secs,
             missing_file_grace_days,
+            scan_settle_secs,
             watch_enabled,
             watch_debounce_ms,
             watch_poll_interval_secs,
@@ -394,6 +404,7 @@ impl fmt::Debug for ServerConfig {
             .field("scan_ignore", scan_ignore)
             .field("scan_interval_secs", scan_interval_secs)
             .field("missing_file_grace_days", missing_file_grace_days)
+            .field("scan_settle_secs", scan_settle_secs)
             .field("watch_enabled", watch_enabled)
             .field("watch_debounce_ms", watch_debounce_ms)
             .field("watch_poll_interval_secs", watch_poll_interval_secs)

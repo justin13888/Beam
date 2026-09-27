@@ -127,7 +127,8 @@ async fn seed_hevc_file(fixture: &Fixture) -> Uuid {
         .files
         .create(CreateMediaFile {
             library_id: Uuid::new_v4(),
-            path: PathBuf::from("/m/SECRET-TITLE (2001).mkv"),
+            // One row per path: a test that seeds two files gives each its own.
+            path: PathBuf::from(format!("/m/SECRET-TITLE (2001) {}.mkv", Uuid::new_v4())),
             hash: 1,
             size_bytes: 20_000_000_000,
             mtime: None,

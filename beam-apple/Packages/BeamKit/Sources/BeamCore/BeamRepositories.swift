@@ -209,7 +209,7 @@ public struct BeamRepositories: ServerRepository, CatalogRepository, PlaybackRep
         try await mapping { try await client.deleteLibrary(libraryId: libraryId) }
     }
 
-    public func scanLibrary(id libraryId: String) async throws -> UInt32 {
+    public func scanLibrary(id libraryId: String) async throws {
         try await mapping { try await client.scanLibrary(libraryId: libraryId) }
     }
 

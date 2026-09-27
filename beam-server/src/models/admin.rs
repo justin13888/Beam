@@ -6,6 +6,7 @@
 
 use beam_domain::models::admin_log::{AdminLog, AdminLogCategory, AdminLogLevel};
 use beam_index::services::notification::{AdminEvent, EventCategory, EventLevel};
+use beam_index::services::scan as index_scan;
 use beam_index::services::watch_status::{PollReason, WatchMode, WatchStatusSnapshot};
 use chrono::{DateTime, Utc};
 use kynos::Schema;
@@ -34,6 +35,9 @@ impl From<EventLevel> for AdminEventLevelDto {
 #[serde(rename_all = "snake_case")]
 pub enum AdminEventCategoryDto {
     LibraryScan,
+    /// A scan job's structured progress; the event carries `scan`. Sent on
+    /// the live stream only, never kept in the recent-event snapshot.
+    ScanProgress,
     System,
 }
 
@@ -41,6 +45,7 @@ impl From<EventCategory> for AdminEventCategoryDto {
     fn from(category: EventCategory) -> Self {
         match category {
             EventCategory::LibraryScan => AdminEventCategoryDto::LibraryScan,
+            EventCategory::ScanProgress => AdminEventCategoryDto::ScanProgress,
             EventCategory::System => AdminEventCategoryDto::System,
         }
     }
@@ -55,18 +60,226 @@ pub struct AdminEventDto {
     pub message: String,
     pub library_id: Option<String>,
     pub library_name: Option<String>,
+    /// The scan job a `scan_progress` event reports on; `null` on every
+    /// other category.
+    pub scan: Option<ScanEvent>,
 }
 
 impl From<AdminEvent> for AdminEventDto {
     fn from(event: AdminEvent) -> Self {
+        let AdminEvent {
+            id,
+            timestamp,
+            level,
+            category,
+            message,
+            library_id,
+            library_name,
+            scan,
+        } = event;
         Self {
-            id: event.id,
-            timestamp: event.timestamp,
-            level: event.level.into(),
-            category: event.category.into(),
-            message: event.message,
-            library_id: event.library_id,
-            library_name: event.library_name,
+            id,
+            timestamp,
+            level: level.into(),
+            category: category.into(),
+            message,
+            library_id,
+            library_name,
+            scan: scan.map(ScanEvent::from),
+        }
+    }
+}
+
+// ── Scan jobs (issue #181) ──────────────────────────────────────────────────
+
+/// What started a scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanTrigger {
+    /// An administrator asked for it.
+    Manual,
+    /// The scan of every library when the server starts.
+    Startup,
+    /// The periodic backstop rescan.
+    Periodic,
+    /// The library has just started being polled rather than watched.
+    NewlyPolled,
+}
+
+impl From<index_scan::ScanTrigger> for ScanTrigger {
+    fn from(trigger: index_scan::ScanTrigger) -> Self {
+        match trigger {
+            index_scan::ScanTrigger::Manual => ScanTrigger::Manual,
+            index_scan::ScanTrigger::Startup => ScanTrigger::Startup,
+            index_scan::ScanTrigger::Periodic => ScanTrigger::Periodic,
+            index_scan::ScanTrigger::NewlyPolled => ScanTrigger::NewlyPolled,
+        }
+    }
+}
+
+/// Where a scan job is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanState {
+    /// Waiting for the library -- another scan, or a watcher event, holds it.
+    Queued,
+    /// Walking the library.
+    Running,
+    /// Finished; `progress` is final.
+    Succeeded,
+    /// Stopped: `failure` says why.
+    Failed,
+}
+
+impl From<index_scan::ScanState> for ScanState {
+    fn from(state: index_scan::ScanState) -> Self {
+        match state {
+            index_scan::ScanState::Queued => ScanState::Queued,
+            index_scan::ScanState::Running => ScanState::Running,
+            index_scan::ScanState::Succeeded => ScanState::Succeeded,
+            index_scan::ScanState::Failed => ScanState::Failed,
+        }
+    }
+}
+
+/// A scan's per-file counts so far.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct ScanProgress {
+    /// Files the walk found to index; absent until the walk has finished.
+    pub total_count: Option<u64>,
+    /// Files handled so far, whatever became of them.
+    pub processed_count: u64,
+    /// Files indexed for the first time.
+    pub added_count: u64,
+    /// Indexed files whose content changed, or which probed at last.
+    pub changed_count: u64,
+    /// Indexed files found as they were.
+    pub unchanged_count: u64,
+    /// Files still being written, left for a later visit.
+    pub deferred_count: u64,
+    /// Files that could not be processed.
+    pub failed_count: u64,
+    /// Files no longer on disk, newly marked missing.
+    pub marked_missing_count: u64,
+    /// Missing files that came back.
+    pub restored_count: u64,
+    /// Files missing for the whole grace period, removed.
+    pub purged_count: u64,
+}
+
+impl From<index_scan::ScanProgress> for ScanProgress {
+    fn from(progress: index_scan::ScanProgress) -> Self {
+        let index_scan::ScanProgress {
+            total,
+            processed,
+            added,
+            changed,
+            unchanged,
+            deferred,
+            failed,
+            marked_missing,
+            restored,
+            purged,
+        } = progress;
+        Self {
+            total_count: total,
+            processed_count: processed,
+            added_count: added,
+            changed_count: changed,
+            unchanged_count: unchanged,
+            deferred_count: deferred,
+            failed_count: failed,
+            marked_missing_count: marked_missing,
+            restored_count: restored,
+            purged_count: purged,
+        }
+    }
+}
+
+/// One scan of one library. A library has at most one queued or running
+/// scan; the latest is kept until the server restarts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct ScanJob {
+    pub id: uuid::Uuid,
+    pub library_id: uuid::Uuid,
+    pub trigger: ScanTrigger,
+    pub state: ScanState,
+    pub queued_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub progress: ScanProgress,
+    /// Why a failed scan failed. Names no filesystem path.
+    pub failure: Option<String>,
+}
+
+impl From<index_scan::ScanJob> for ScanJob {
+    fn from(job: index_scan::ScanJob) -> Self {
+        let index_scan::ScanJob {
+            id,
+            library_id,
+            trigger,
+            state,
+            queued_at,
+            started_at,
+            finished_at,
+            progress,
+            failure,
+        } = job;
+        Self {
+            id,
+            library_id,
+            trigger: trigger.into(),
+            state: state.into(),
+            queued_at,
+            started_at,
+            finished_at,
+            progress: progress.into(),
+            failure,
+        }
+    }
+}
+
+/// Which moment of a scan an event reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanPhase {
+    Started,
+    /// Sent at most once a second while the scan walks the library.
+    Progress,
+    Completed,
+    Failed,
+}
+
+impl From<index_scan::ScanPhase> for ScanPhase {
+    fn from(phase: index_scan::ScanPhase) -> Self {
+        match phase {
+            index_scan::ScanPhase::Started => ScanPhase::Started,
+            index_scan::ScanPhase::Progress => ScanPhase::Progress,
+            index_scan::ScanPhase::Completed => ScanPhase::Completed,
+            index_scan::ScanPhase::Failed => ScanPhase::Failed,
+        }
+    }
+}
+
+/// The scan job a `scan_progress` event reports on (FR-208).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct ScanEvent {
+    pub job_id: uuid::Uuid,
+    pub phase: ScanPhase,
+    pub progress: ScanProgress,
+}
+
+impl From<index_scan::ScanEvent> for ScanEvent {
+    fn from(event: index_scan::ScanEvent) -> Self {
+        let index_scan::ScanEvent {
+            job_id,
+            phase,
+            progress,
+        } = event;
+        Self {
+            job_id,
+            phase: phase.into(),
+            progress: progress.into(),
         }
     }
 }
@@ -134,11 +347,6 @@ impl From<AdminLog> for AdminLogEntryDto {
 pub struct CreateLibraryRequest {
     pub name: String,
     pub root_path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct ScanLibraryResponse {
-    pub added: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Schema)]
@@ -398,6 +606,7 @@ mod tests {
             message: "scan finished".to_string(),
             library_id: Some("lib-1".to_string()),
             library_name: Some("Movies".to_string()),
+            scan: None,
         };
         let dto = AdminEventDto::from(event.clone());
         assert_eq!(dto.id, "evt-1");
