@@ -86,9 +86,12 @@ strength. Each requirement is independently testable. See `product.md` for narra
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
   changes made before polling began are not missed (for a library polled from startup, the startup
-  scan is that scan: it MUST start only after every watch is registered, and no single-library scan
-  may run alongside it); a deleted library MUST stop being watched; the
-  admin status MUST report each library's watch mode and whether the watch limit has been reached.
+  scan is that scan: the background indexer MUST register every watch before the startup scan
+  starts, and MUST schedule no single-library scan alongside it); a deleted library MUST stop being
+  watched; the admin status MUST report each library's watch mode and whether the watch limit has
+  been reached. Serialising *every* scan of a library -- admin-triggered, periodic and
+  watcher-initiated alike -- is not required here; it is
+  [#181](https://github.com/justin13888/beam/issues/181)'s scope.
 
 ## FR-3xx — Metadata Enrichment
 

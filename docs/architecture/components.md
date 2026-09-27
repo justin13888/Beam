@@ -91,7 +91,9 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   testable. `runtime.rs` calls the watcher on the blocking pool; registers every watch before the
   startup scan starts, and holds the poller until that scan finishes, so the startup scan is the
   one scan a library polled from startup gets (the poller's first snapshot hides earlier changes)
-  and no single-library scan runs alongside it; scans a library once when it starts being polled
+  and the background indexer schedules no single-library scan alongside it (an admin-triggered
+  scan can still overlap it; serialising every scan of a library is
+  [#181](https://github.com/justin13888/beam/issues/181)); scans a library once when it starts being polled
   after startup; and on each maintenance cycle unwatches libraries that no longer exist and
   re-registers any the watcher no longer holds, asking the watcher rather than remembering what it
   registered; the watcher keeps one registration per root, so a
