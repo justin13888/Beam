@@ -40,11 +40,15 @@ impl beam_domain::repositories::contract::fixture::ShowRepositoryFixture for PgF
             .expect("seed a library")
     }
 
-    async fn new_unkeyed_show(&self, title: &str) -> Uuid {
+    async fn new_unkeyed_show(
+        &self,
+        title: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Uuid {
         use sea_orm::{ActiveModelTrait, Set};
 
         let id = Uuid::new_v4();
-        let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+        let now: chrono::DateTime<chrono::FixedOffset> = created_at.into();
         beam_entity::show::ActiveModel {
             id: Set(id),
             title: Set(title.to_string()),

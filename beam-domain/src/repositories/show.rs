@@ -30,7 +30,9 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// what lets two episodes of a new show be indexed at once without the
     /// second failing on, or duplicating, the first's show.
     async fn find_or_create_by_identity(&self, create: CreateShow) -> Result<Show, DbErr>;
-    /// Every show with no identity key, for the indexer's backfill.
+    /// Every show with no identity key, for the indexer's backfill, oldest
+    /// first (`created_at`, then `id`), so of two legacy duplicates the
+    /// backfill keys the original.
     async fn find_unkeyed(&self) -> Result<Vec<Show>, DbErr>;
     /// Give the keyless show `show_id` the key `identity_key`. Returns
     /// `false`, changing nothing, when the show does not exist, already has a
@@ -248,14 +250,16 @@ pub mod in_memory {
         }
 
         async fn find_unkeyed(&self) -> Result<Vec<Show>, DbErr> {
-            Ok(self
+            let mut unkeyed: Vec<_> = self
                 .shows
                 .lock()
                 .unwrap()
                 .values()
                 .filter(|s| s.identity_key.is_none())
                 .cloned()
-                .collect())
+                .collect();
+            unkeyed.sort_by_key(|s| (s.created_at, s.id));
+            Ok(unkeyed)
         }
 
         async fn assign_identity_key(
@@ -512,8 +516,12 @@ pub mod in_memory_fixture {
             Uuid::new_v4()
         }
 
-        async fn new_unkeyed_show(&self, title: &str) -> Uuid {
-            let now = chrono::Utc::now();
+        async fn new_unkeyed_show(
+            &self,
+            title: &str,
+            created_at: chrono::DateTime<chrono::Utc>,
+        ) -> Uuid {
+            let now = created_at;
             let show = Show {
                 id: Uuid::new_v4(),
                 title: title.to_string(),

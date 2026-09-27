@@ -39,7 +39,8 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     /// Atomic: concurrent calls for one key all return the same row.
     async fn find_or_create_by_identity(&self, create: CreateMovie) -> Result<Movie, DbErr>;
     /// Every movie with no identity key -- rows that predate the key, for the
-    /// indexer's backfill.
+    /// indexer's backfill -- oldest first (`created_at`, then `id`), so of two
+    /// legacy duplicates the backfill keys the original.
     async fn find_unkeyed(&self) -> Result<Vec<Movie>, DbErr>;
     /// Give the keyless movie `movie_id` the key `identity_key`. Returns
     /// `false`, changing nothing, when the movie does not exist, already has a
@@ -244,14 +245,16 @@ pub mod in_memory {
         }
 
         async fn find_unkeyed(&self) -> Result<Vec<Movie>, DbErr> {
-            Ok(self
+            let mut unkeyed: Vec<_> = self
                 .movies
                 .lock()
                 .unwrap()
                 .values()
                 .filter(|m| m.identity_key.is_none())
                 .cloned()
-                .collect())
+                .collect();
+            unkeyed.sort_by_key(|m| (m.created_at, m.id));
+            Ok(unkeyed)
         }
 
         async fn assign_identity_key(
@@ -396,8 +399,12 @@ pub mod in_memory_fixture {
             Uuid::new_v4()
         }
 
-        async fn new_unkeyed_movie(&self, title: &str) -> Uuid {
-            let now = chrono::Utc::now();
+        async fn new_unkeyed_movie(
+            &self,
+            title: &str,
+            created_at: chrono::DateTime<chrono::Utc>,
+        ) -> Uuid {
+            let now = created_at;
             let movie = Movie {
                 id: Uuid::new_v4(),
                 title: title.to_string(),

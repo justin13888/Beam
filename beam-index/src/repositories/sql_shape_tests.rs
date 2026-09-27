@@ -812,6 +812,28 @@ mod title_identity {
         }
     }
 
+    /// The backfill reads keyless titles oldest first, so of two legacy
+    /// duplicates the original -- not whichever the planner returns first --
+    /// takes the key.
+    #[tokio::test]
+    async fn find_unkeyed_reads_keyless_titles_oldest_first() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies.find_unkeyed().await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows.find_unkeyed().await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        for (statement, table) in [(&sql[0], "movies"), (&sql[1], "shows")] {
+            assert_filters(statement, table, "identity_key", "IS NULL");
+            assert_contains(
+                statement,
+                &format!(r#"ORDER BY "{table}"."created_at" ASC, "{table}"."id" ASC"#),
+            );
+        }
+    }
+
     /// Orphan deletion walks down from the file rows -- entries (episodes)
     /// before titles -- counts any file row, soft-deleted or not, and binds
     /// the caller's cutoff to every step that has a `created_at`.

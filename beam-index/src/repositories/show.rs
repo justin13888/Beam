@@ -132,10 +132,13 @@ impl ShowRepository for SqlShowRepository {
 
     async fn find_unkeyed(&self) -> Result<Vec<Show>, DbErr> {
         use beam_entity::show;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
+        // Oldest first: of two legacy duplicates, the original takes the key.
         let models = show::Entity::find()
             .filter(show::Column::IdentityKey.is_null())
+            .order_by_asc(show::Column::CreatedAt)
+            .order_by_asc(show::Column::Id)
             .all(self.db.as_ref())
             .await?;
         Ok(models.into_iter().map(Show::from).collect())
@@ -176,10 +179,12 @@ impl ShowRepository for SqlShowRepository {
 
         let cutoff: sea_orm::prelude::DateTimeWithTimeZone = created_before.into();
         // Episodes no file row references, then seasons left empty, then
-        // shows left with no season. `seasons` carries no `created_at`: a
-        // season is only ever empty for the moment between the indexer
-        // creating it and creating its first episode, and a season caught in
-        // that moment is recreated by the next scan.
+        // shows left with no season. `seasons` carries no `created_at`, so
+        // this step alone has no cutoff: a season is only ever empty for the
+        // moment between the indexer creating it and creating its first
+        // episode, and a season the watcher creates in that moment is deleted
+        // under it. The watcher's episode insert then fails for that one file,
+        // and the next scan recreates the season and indexes it.
         self.db
             .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,

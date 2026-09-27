@@ -41,11 +41,15 @@ impl beam_domain::repositories::contract::fixture::MovieRepositoryFixture for Pg
             .expect("seed a library")
     }
 
-    async fn new_unkeyed_movie(&self, title: &str) -> Uuid {
+    async fn new_unkeyed_movie(
+        &self,
+        title: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Uuid {
         use sea_orm::{ActiveModelTrait, Set};
 
         let id = Uuid::new_v4();
-        let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+        let now: chrono::DateTime<chrono::FixedOffset> = created_at.into();
         beam_entity::movie::ActiveModel {
             id: Set(id),
             title: Set(title.to_string()),

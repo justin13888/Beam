@@ -100,9 +100,14 @@ pub mod fixture {
         /// A library that exists as far as the backing store is concerned.
         async fn new_library(&self) -> Uuid;
 
-        /// A show titled `title` with no identity key -- a row from before
-        /// keys existed, which the trait itself can no longer create.
-        async fn new_unkeyed_show(&self, title: &str) -> Uuid;
+        /// A show titled `title`, created at `created_at`, with no identity
+        /// key -- a row from before keys existed, which the trait itself can
+        /// no longer create.
+        async fn new_unkeyed_show(
+            &self,
+            title: &str,
+            created_at: ::chrono::DateTime<::chrono::Utc>,
+        ) -> Uuid;
     }
 
     /// Everything the [`crate::movie_repository_contract`] suite needs from a
@@ -119,8 +124,13 @@ pub mod fixture {
         /// A library that exists as far as the backing store is concerned.
         async fn new_library(&self) -> Uuid;
 
-        /// A movie titled `title` with no identity key.
-        async fn new_unkeyed_movie(&self, title: &str) -> Uuid;
+        /// A movie titled `title`, created at `created_at`, with no identity
+        /// key.
+        async fn new_unkeyed_movie(
+            &self,
+            title: &str,
+            created_at: ::chrono::DateTime<::chrono::Utc>,
+        ) -> Uuid;
     }
 }
 
@@ -1214,7 +1224,7 @@ macro_rules! show_repository_contract {
             let fixture = $setup().await;
             let repo = fixture.repo();
             let title = format!("Legacy Show {}", Uuid::new_v4());
-            let legacy = fixture.new_unkeyed_show(&title).await;
+            let legacy = fixture.new_unkeyed_show(&title, ::chrono::Utc::now()).await;
             let parsed = CreateShow::new(title.clone(), None);
 
             assert!(
@@ -1254,11 +1264,43 @@ macro_rules! show_repository_contract {
         }
 
         #[tokio::test]
+        async fn unkeyed_shows_are_listed_oldest_first() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            // Whole seconds: Postgres keeps microseconds, the double keeps
+            // nanoseconds, and the contract must not depend on either.
+            let base = ::chrono::DateTime::from_timestamp(1_600_000_000, 0).unwrap();
+            let title = format!("Legacy Show {}", Uuid::new_v4());
+            // Inserted newest first, so insertion order is not the answer.
+            let newest = fixture
+                .new_unkeyed_show(&title, base + ::chrono::Duration::days(2))
+                .await;
+            let oldest = fixture.new_unkeyed_show(&title, base).await;
+            let middle = fixture
+                .new_unkeyed_show(&title, base + ::chrono::Duration::days(1))
+                .await;
+
+            let listed: Vec<Uuid> = repo
+                .find_unkeyed()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .filter(|id| [newest, oldest, middle].contains(id))
+                .collect();
+            assert_eq!(
+                listed,
+                vec![oldest, middle, newest],
+                "of legacy duplicates, the original comes first"
+            );
+        }
+
+        #[tokio::test]
         async fn an_unkeyed_show_is_not_matched_and_cannot_take_a_held_key() {
             let fixture = $setup().await;
             let repo = fixture.repo();
             let title = format!("Duplicate Show {}", Uuid::new_v4());
-            let legacy = fixture.new_unkeyed_show(&title).await;
+            let legacy = fixture.new_unkeyed_show(&title, ::chrono::Utc::now()).await;
 
             let keyed = repo
                 .find_or_create_by_identity(CreateShow::new(title.clone(), None))
@@ -1554,7 +1596,9 @@ macro_rules! movie_repository_contract {
             let fixture = $setup().await;
             let repo = fixture.repo();
             let create = parsed("Legacy", Some(1999));
-            let legacy = fixture.new_unkeyed_movie(&create.title).await;
+            let legacy = fixture
+                .new_unkeyed_movie(&create.title, ::chrono::Utc::now())
+                .await;
 
             assert!(
                 repo.find_unkeyed()
@@ -1592,11 +1636,45 @@ macro_rules! movie_repository_contract {
         }
 
         #[tokio::test]
+        async fn unkeyed_movies_are_listed_oldest_first() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            // Whole seconds: Postgres keeps microseconds, the double keeps
+            // nanoseconds, and the contract must not depend on either.
+            let base = ::chrono::DateTime::from_timestamp(1_600_000_000, 0).unwrap();
+            let title = format!("Legacy Movie {}", Uuid::new_v4());
+            // Inserted newest first, so insertion order is not the answer.
+            let newest = fixture
+                .new_unkeyed_movie(&title, base + ::chrono::Duration::days(2))
+                .await;
+            let oldest = fixture.new_unkeyed_movie(&title, base).await;
+            let middle = fixture
+                .new_unkeyed_movie(&title, base + ::chrono::Duration::days(1))
+                .await;
+
+            let listed: Vec<Uuid> = repo
+                .find_unkeyed()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|m| m.id)
+                .filter(|id| [newest, oldest, middle].contains(id))
+                .collect();
+            assert_eq!(
+                listed,
+                vec![oldest, middle, newest],
+                "of legacy duplicates, the original comes first"
+            );
+        }
+
+        #[tokio::test]
         async fn an_unkeyed_movie_is_not_matched_and_cannot_take_a_held_key() {
             let fixture = $setup().await;
             let repo = fixture.repo();
             let create = parsed("Duplicate", Some(2001));
-            let legacy = fixture.new_unkeyed_movie(&create.title).await;
+            let legacy = fixture
+                .new_unkeyed_movie(&create.title, ::chrono::Utc::now())
+                .await;
 
             let keyed = repo
                 .find_or_create_by_identity(create.clone())

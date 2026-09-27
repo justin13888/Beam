@@ -152,10 +152,13 @@ impl MovieRepository for SqlMovieRepository {
 
     async fn find_unkeyed(&self) -> Result<Vec<Movie>, DbErr> {
         use beam_entity::movie;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
+        // Oldest first: of two legacy duplicates, the original takes the key.
         let models = movie::Entity::find()
             .filter(movie::Column::IdentityKey.is_null())
+            .order_by_asc(movie::Column::CreatedAt)
+            .order_by_asc(movie::Column::Id)
             .all(self.db.as_ref())
             .await?;
         Ok(models.into_iter().map(Movie::from).collect())
