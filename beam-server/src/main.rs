@@ -85,9 +85,14 @@ async fn main() -> Result<()> {
     let probe: std::sync::Arc<dyn beam_server::services::health::DependencyProbe> =
         std::sync::Arc::new(beam_server::services::health::DbProbe::new(db.clone()));
 
+    // One clock for the whole process: the services and the state read time
+    // through the same seam.
+    let clock: std::sync::Arc<dyn beam_domain::services::Clock> =
+        std::sync::Arc::new(beam_domain::services::RealClock);
+
     // Initialize App Services and State
     let (services, index_service, enrichment_service) =
-        beam_server::state::AppServices::new(&config, db)
+        beam_server::state::AppServices::new(&config, db, clock.clone())
             .await
             .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
 
@@ -127,7 +132,13 @@ async fn main() -> Result<()> {
         None
     };
 
-    let state = beam_server::state::AppState::new(config.clone(), services, probe, metrics_handle);
+    let state = beam_server::state::AppState::with_clock(
+        config.clone(),
+        services,
+        probe,
+        clock,
+        metrics_handle,
+    );
 
     // `build` is where Kynos checks that every operation can be described and
     // that no two interceptors contribute the same header or status. A router
