@@ -36,7 +36,7 @@ Cookie-backed sessions with hash-at-rest credentials and two-tier expiry. See
 |---|---|---|---|
 | `id` | UUID | no | PK; stable internal identifier for listing/revoking a session without re-exposing its credential |
 | `user_id` | UUID | no | FK → `users.id`, `ON DELETE CASCADE` |
-| `token_hash` | TEXT | no | unique; SHA-256 of the opaque session token — the raw token is never stored, only ever held by the browser in the `beam_session` cookie |
+| `token_hash` | TEXT | no | unique; SHA-256 of the opaque session token — the raw token is never stored, only ever held by the client as the `beam_session` cookie |
 | `device_hash` | TEXT | no | best-effort device fingerprint for the session list |
 | `ip` | TEXT | no | best-effort, for user/admin visibility only, not an auth decision input |
 | `created_at` | TIMESTAMPTZ | no | |
@@ -59,6 +59,24 @@ consumed atomically (a `state` value can be exchanged at most once) when the cal
 | `redirect_path` | TEXT | yes | post-login destination; sanitized to same-origin-relative before storage |
 | `created_at` | TIMESTAMPTZ | no | |
 | `expires_at` | TIMESTAMPTZ | no | indexed, for sweeping abandoned logins |
+
+### `device_auths`
+An in-flight OAuth 2.0 device authorization grant (FR-111,
+[ADR-0017](decisions/ADR-0017-device-authorization-grant.md)): created by `POST /v1/auth/device`,
+polled through `POST /v1/auth/device/token`, and deleted when the flow ends (approved, denied, or
+expired). Expired rows are swept whenever a new flow starts.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `handle_hash` | TEXT | no | PK; SHA-256 of the opaque device handle the client polls with — the handle itself is never stored |
+| `device_code` | TEXT | no | the IdP's device code; server-side only, never sent to the client |
+| `user_code` | TEXT | no | the code the user enters at the IdP |
+| `verification_uri` | TEXT | no | |
+| `verification_uri_complete` | TEXT | yes | the verification URI with the code filled in, when the IdP offers one |
+| `interval_secs` | INTEGER | no | minimum seconds between polls; grows by 5 on every `slow_down` |
+| `next_poll_at` | TIMESTAMPTZ | no | earliest instant the next poll may reach the IdP; moved by a conditional `UPDATE`, so concurrent polls claim a flow once |
+| `created_at` | TIMESTAMPTZ | no | |
+| `expires_at` | TIMESTAMPTZ | no | indexed, for the sweep; at most 30 minutes after creation |
 
 ## Library / catalog tables
 

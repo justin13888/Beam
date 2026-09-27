@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::{
+    device_auth_store::{DeviceAuthStore, SqlDeviceAuthStore},
     oidc::{DiscoveredOidcClient, NotConfiguredOidcClient, OidcClient},
     pending_auth_store::{PendingAuthStore, SqlPendingAuthStore},
     repository::{SqlUserRepository, UserRepository},
@@ -155,6 +156,8 @@ pub struct AppServices {
     pub session_store: Arc<dyn SessionStore>,
     pub oidc_client: Arc<dyn OidcClient>,
     pub pending_auth_store: Arc<dyn PendingAuthStore>,
+    /// In-flight device logins for clients with no browser (ADR-0017).
+    pub device_auth_store: Arc<dyn DeviceAuthStore>,
     pub oidc_config: OidcRuntimeConfig,
     /// How the filesystem watcher observes each library. Written by the
     /// background indexing runtime (`main` hands it this instance), read by
@@ -235,6 +238,9 @@ impl AppServices {
         let pending_auth_store: Arc<dyn PendingAuthStore> =
             Arc::new(SqlPendingAuthStore::new(db.clone()));
 
+        let device_auth_store: Arc<dyn DeviceAuthStore> =
+            Arc::new(SqlDeviceAuthStore::with_clock(db.clone(), clock.clone()));
+
         // Real discovered client when issuer/client_id/client_secret are all
         // configured and discovery succeeds; a clear "not configured" error
         // otherwise (login is simply unavailable, never a panic).
@@ -243,6 +249,7 @@ impl AppServices {
                 config.oidc_issuer.as_deref().unwrap_or_default(),
                 config.oidc_client_id.as_deref().unwrap_or_default(),
                 config.oidc_client_secret.as_deref().unwrap_or_default(),
+                config.oidc_client_auth_method,
                 &config.oidc_redirect_url(),
                 config
                     .oidc_scopes
@@ -380,6 +387,7 @@ impl AppServices {
             session_store,
             oidc_client,
             pending_auth_store,
+            device_auth_store,
             oidc_config,
             watch_status: Arc::new(WatchStatus::new()),
         };

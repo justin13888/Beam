@@ -7,9 +7,11 @@ requirements (referenced below as FR-xxx).
 ## NFR-1xx — Security
 
 - **NFR-101**: The server MUST support exactly one authentication mechanism: OIDC via the
-  backend-for-frontend pattern (FR-101–FR-110,
+  backend-for-frontend pattern (FR-101–FR-111,
   [ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)). No alternate auth mechanism
-  (password, API key, bearer token issued to the browser) is offered as a login path.
+  (password, API key, bearer token issued to the browser) is offered as a login path. The device
+  authorization grant (FR-111) is not an alternate mechanism: it is the same OIDC identity, verified
+  by the server, minting the same session.
 - **NFR-102**: No bearer token, session token, or other credential MUST ever appear in a URL, query
   string, or Referer-visible location, for any endpoint including streaming and download (FR-504).
 - **NFR-103**: The session cookie MUST be `httpOnly` and `SameSite=Lax` (FR-103). The web application
@@ -19,19 +21,27 @@ requirements (referenced below as FR-xxx).
   with an insecure session cookie.
 - **NFR-104**: All state-mutating requests (non-GET methods) MUST be validated against the `Origin`
   and/or `Referer` header by the server, in addition to `SameSite=Lax` cookie behavior, as defense in
-  depth against CSRF. Requests with a missing or mismatched `Origin`/`Referer` on a mutating request
-  MUST be rejected.
+  depth against CSRF. A mutating request whose `Origin` (or, absent that, `Referer`) is present and
+  does not match an allowed origin, or cannot be parsed, MUST be rejected. A mutating request
+  carrying *neither* header MUST be allowed: browsers always send `Origin` on a non-GET request, so
+  its absence marks a non-browser client (a native app sends neither), and `SameSite=Lax` is what
+  keeps the cookie off a cross-site browser request. (Amended for
+  [#151](https://github.com/justin13888/beam/issues/151) to state the rule as implemented; see
+  [ADR-0017](../architecture/decisions/ADR-0017-device-authorization-grant.md) D151-4.)
 - **NFR-105**: Every admin-only mutation (library CRUD, rescan trigger, re-enrich trigger, log
   access) MUST be authorized against the admin role at the server, independent of any client-side UI
   gating (FR-601–FR-607). Authentication alone MUST NOT be treated as sufficient authorization.
 - **NFR-106**: The server's indexer and streaming/download paths MUST treat configured library root
   paths as read-only. The server process SHOULD run with filesystem permissions that make write
   access to library roots impossible, not merely avoided by convention (FR-202).
-- **NFR-107**: Authentication-related endpoints (login initiation, callback, session refresh) SHOULD
-  be subject to rate limiting or an equivalent abuse-resistance mechanism. Enforced since
-  [#69](https://github.com/justin13888/beam/issues/69) via in-process token buckets on the auth
-  endpoints (`/v1/auth/login`, `/v1/auth/callback`) and the browse/search endpoint (`GET /v1/media`),
-  keyed per client IP. Streaming and download paths are deliberately excluded (a player legitimately
+- **NFR-107**: Authentication-related endpoints (login initiation, callback, device login, session
+  refresh) SHOULD be subject to rate limiting or an equivalent abuse-resistance mechanism. Enforced
+  since [#69](https://github.com/justin13888/beam/issues/69) via in-process token buckets on the
+  auth endpoints (`/v1/auth/login`, `/v1/auth/callback`, `/v1/auth/device`), on device-login polls
+  (`/v1/auth/device/token`, a class of its own because a waiting device polls every few seconds),
+  and on the browse/search endpoint (`GET /v1/media`), keyed per client IP. Each device login is
+  additionally paced by its own poll interval, so no client can reach the IdP through Beam faster
+  than RFC 8628 allows. Streaming and download paths are deliberately excluded (a player legitimately
   bursts range requests). Tunable and switchable via the `BEAM_RATE_LIMIT_*` variables.
 - **NFR-108**: The domain API MUST NOT expose raw filesystem paths, database primary keys of internal
   infrastructure tables, or other implementation details capable of enabling path traversal or
@@ -171,21 +181,21 @@ requirements (referenced below as FR-xxx).
   so that a native client (see [#78](https://github.com/justin13888/beam/issues/78)) can consume the
   same API. This holds for the catalog, playback and administrative surfaces. An administrative view
   that *displays* a configured library root is not a client constructing one, and is permitted under
-  the operational exemption in NFR-108. It does *not* hold for authentication — see NFR-605.
-- **NFR-605**: Authentication currently requires a browser context, and a native client MUST NOT be
-  described as needing no server changes on that account. `beam-server` reads exactly one credential,
-  the `beam_session` cookie, and `sanitize_redirect_path` accepts only same-origin relative paths, so
-  the OIDC provider cannot redirect to a custom scheme a native app could intercept. `beam-android`
-  therefore lifts the cookie out of an in-app WebView, and `beam-apple` lifts the same cookie out of
-  a `WKWebView`. A native token mint — an endpoint issuing a credential to a client that can prove an
-  OIDC exchange without a browser — SHOULD replace this; until it exists, this is a recorded
-  limitation rather than a property of the design. See
-  [ADR-0012](../architecture/decisions/ADR-0012-native-client-rust-core.md).
-  On a platform with **no web view at all** the "should" above is a hard prerequisite rather than an
-  improvement: tvOS has no `WKWebView`, so a tvOS client cannot authenticate under the current
-  server by any means. The native token mint is therefore a blocker for the tvOS remainder of
-  [#66](https://github.com/justin13888/beam/issues/66) and for
-  [#65](https://github.com/justin13888/beam/issues/65), not a nicety. See
+  the operational exemption in NFR-108. Authentication needs the IdP to offer the device
+  authorization grant on platforms with no browser — see NFR-605.
+- **NFR-605**: A native client MUST be able to authenticate without a browser wherever the
+  configured IdP offers the OAuth 2.0 device authorization grant (FR-111,
+  [ADR-0017](../architecture/decisions/ADR-0017-device-authorization-grant.md)). The server mints the same opaque `beam_session` credential it gives a
+  browser, and the client presents it as that cookie; no client holds an IdP token. On a phone
+  `beam-android` still lifts the cookie out of an in-app WebView and offers device sign-in as a
+  secondary action; without a usable browser it signs in this way first and falls back to the
+  WebView when the server answers `501` (the IdP does not offer the grant); `beam-apple` still lifts it out of a
+  `WKWebView`. The browser redirect stays same-origin only — `sanitize_redirect_path` accepts only
+  relative paths, so the IdP never redirects to a custom scheme. On a platform with **no web view
+  at all** (tvOS, Android TV — [#66](https://github.com/justin13888/beam/issues/66),
+  [#65](https://github.com/justin13888/beam/issues/65)) the device grant is the only way in, so
+  those clients depend on an IdP that offers it; the server no longer blocks them. See
+  [ADR-0012](../architecture/decisions/ADR-0012-native-client-rust-core.md) and
   [ADR-0013](../architecture/decisions/ADR-0013-apple-client-two-engines.md).
 - **NFR-602**: Business logic in the service layer MUST remain isolated from web-framework types
   (HTTP requests/responses/extractors); such logic MUST be reachable and testable without going

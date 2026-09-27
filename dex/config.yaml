@@ -30,6 +30,26 @@ staticClients:
     name: "Beam"
     redirectURIs:
       - "http://localhost:8000/v1/auth/callback"
+      # Dex's own step in the device authorization grant (ADR-0017): after a
+      # user enters the code at /dex/device, Dex completes an internal
+      # authorization-code round-trip to this relative URI, which it matches
+      # literally. Without it a device login cannot be approved -- Dex
+      # answers "Unregistered redirect_uri".
+      #
+      # Known Dex bug (dexidp/dex#4571, open against v2.44+, seen on v2.45.1):
+      # with the issuer on a sub-path, as here (/dex), Dex redirects the
+      # approving browser to /device/callback without the /dex prefix, which
+      # 404s. Approving a dev device login in a browser therefore needs the
+      # address bar edited to /dex/device/callback?... once; Beam's side of
+      # the flow is unaffected.
+      #
+      # Known Dex limit (ADR-0017 D151-9): Dex's device endpoint reads the
+      # client secret from the form only. Sent HTTP Basic, it records an empty
+      # secret and approval fails at /dex/device/callback with "Invalid client
+      # credentials.". `mise run dev:up` therefore runs Beam with
+      # BEAM_OIDC_CLIENT_AUTH_METHOD=client_secret_post against this Dex; a
+      # host-run server pointed here needs the same.
+      - "/device/callback"
 
 enablePasswordDB: true
 staticPasswords:

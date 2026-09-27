@@ -277,6 +277,9 @@ fn make_test_state_with_data_dir(
         session_store: session_store.clone(),
         oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
         pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
+        device_auth_store: Arc::new(
+            beam_auth::utils::device_auth_store::in_memory::InMemoryDeviceAuthStore::default(),
+        ),
         oidc_config: OidcRuntimeConfig {
             web_url: "http://localhost:5173".to_string(),
             cookie_secure: false,
