@@ -29,6 +29,7 @@ use beam_domain::repositories::{
     MovieRepository, ShowRepository,
 };
 use beam_domain::services::{Clock, RealClock};
+use beam_domain::utils::filename::{ParsedFilename, parse_media_filename};
 use beam_domain::utils::identity::title_identity_key;
 use beam_domain::utils::media_path::{
     CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, UnclassifiableReason,
@@ -332,6 +333,27 @@ fn show_key(inference: &MediaInference) -> Option<String> {
         MediaInference::Episode(episode) => Some(episode.series.identity_key()),
         MediaInference::Movie(_) | MediaInference::Unclassifiable(_) => None,
     }
+}
+
+/// Whether a show identity key names a season folder (`season 05|`): the
+/// key of a husk, the show a build before issue #182 named after the season
+/// folder its episodes sat in. Read from a key, never from the display
+/// title, which enrichment rewrites.
+fn is_season_folder_husk_key(key: &str) -> bool {
+    let title = key.split_once('|').map_or(key, |(title, _)| title);
+    season_folder_number(title).is_some()
+}
+
+/// The key a build before issue #182 derived for the show of the episode at
+/// `path`: its parent folder's parse, whatever that folder was.
+fn legacy_show_key(path: &Path) -> String {
+    let folder = path
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let ParsedFilename { title, year, .. } = parse_media_filename(&folder);
+    title_identity_key(&title, year)
 }
 
 /// Records one processed-file outcome on the
@@ -1417,10 +1439,11 @@ impl LocalIndexService {
     /// (2021)` once merged under one title -- or whose key another title
     /// already holds -- the duplicate the old title lookup created -- is left
     /// keyless and named in an admin warning: it stays browsable, is never
-    /// matched, and new files of it go to the keyed title. A show whose
-    /// stored title is a season-folder name is left keyless without a
-    /// warning: it is a husk the scan's reclassification empties and orphan
-    /// cleanup retires (issue #182).
+    /// matched, and new files of it go to the keyed title. A show the rules
+    /// before issue #182 named after a season folder -- the name those rules
+    /// read from every one of its files' folders is a season folder's -- is
+    /// left keyless without a warning: it is a husk
+    /// the scan's reclassification empties and orphan cleanup retires.
     async fn backfill_identity_keys(&self) -> Result<IdentityBackfill, IndexError> {
         let mut report = IdentityBackfill::default();
 
@@ -1435,7 +1458,9 @@ impl LocalIndexService {
         // display title enrichment may have rewritten -- are what it is keyed
         // by. Read once per library rather than once per title.
         let mut entry_paths: HashMap<Uuid, Vec<MediaInference>> = HashMap::new();
-        let mut episode_paths: HashMap<Uuid, Vec<MediaInference>> = HashMap::new();
+        // Beside each episode file's inference, the key the rules before
+        // issue #182 derived from it, which says whether its show is a husk.
+        let mut episode_paths: HashMap<Uuid, Vec<(MediaInference, String)>> = HashMap::new();
         for library in self.library_repo.find_all().await? {
             for file in self
                 .file_repo
@@ -1451,7 +1476,7 @@ impl LocalIndexService {
                     Some(MediaFileContent::Episode { episode_id, .. }) => episode_paths
                         .entry(episode_id)
                         .or_default()
-                        .push(inferred()),
+                        .push((inferred(), legacy_show_key(&file.path))),
                     None => {}
                 }
             }
@@ -1486,24 +1511,36 @@ impl LocalIndexService {
         }
 
         for show in shows {
+            let mut keys = std::collections::BTreeSet::new();
+            let mut legacy_keys = std::collections::BTreeSet::new();
+            for season in self.show_repo.find_seasons_by_show_id(show.id).await? {
+                for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                    for (inferred, legacy_key) in
+                        episode_paths.get(&episode.id).into_iter().flatten()
+                    {
+                        keys.extend(show_key(inferred));
+                        legacy_keys.insert(legacy_key.as_str());
+                    }
+                }
+            }
             // A show named after a season folder (`Season 05`) is the husk a
             // build before issue #182 made by naming shows after the file's
             // parent folder. Keying it with its files' key would hand it the
             // real series' key, and reclassification would then move every
             // file of the series onto the husk. Left keyless, it is never
             // matched: reclassification moves its files to the series they
-            // name, and orphan cleanup retires it.
-            if season_folder_number(&show.title).is_some() {
+            // name, and orphan cleanup retires it. It is known by the name
+            // those rules gave its files -- every one a season folder's --
+            // not by its display title, which enrichment may have replaced;
+            // with no file row, by the key its stored title would take.
+            let husk = if legacy_keys.is_empty() {
+                is_season_folder_husk_key(&title_identity_key(&show.title, show.year))
+            } else {
+                legacy_keys.iter().all(|key| is_season_folder_husk_key(key))
+            };
+            if husk {
                 debug!(show_id = %show.id, title = %show.title, "not keying a season-folder husk");
                 continue;
-            }
-            let mut keys = std::collections::BTreeSet::new();
-            for season in self.show_repo.find_seasons_by_show_id(show.id).await? {
-                for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
-                    for inferred in episode_paths.get(&episode.id).into_iter().flatten() {
-                        keys.extend(show_key(inferred));
-                    }
-                }
             }
             let key = match keys.len() {
                 0 => title_identity_key(&show.title, show.year),
@@ -1586,7 +1623,7 @@ impl LocalIndexService {
     /// older), takes the key, and receives the other's files -- its entries,
     /// or its seasons and episodes, found or created on the survivor -- and
     /// the other, left with no file, is retired by the scan's orphan cleanup.
-    /// A show named after a season folder (`Season 05`) is released instead,
+    /// A show keyed after a season folder (`season 05|`) is released instead,
     /// never rekeyed, for the reason the backfill leaves one keyless.
     async fn rekey_stale_titles(&self) -> Result<IdentityRekey, IndexError> {
         let mut report = IdentityRekey::default();
@@ -1749,8 +1786,13 @@ impl LocalIndexService {
             }
             // A husk (see `backfill_identity_keys`): released, so the scan's
             // reclassification moves its files to the series they name and
-            // orphan cleanup retires it.
-            if season_folder_number(&show.title).is_some() {
+            // orphan cleanup retires it. Known by its stored key, which
+            // enrichment never rewrites, not by its display title.
+            if show
+                .identity_key
+                .as_deref()
+                .is_some_and(is_season_folder_husk_key)
+            {
                 self.show_repo
                     .rekey(show.id, None, CLASSIFIER_VERSION)
                     .await?;

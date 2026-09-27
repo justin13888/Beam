@@ -157,8 +157,11 @@ unless the filename names another show, else the filename
 [#182](https://github.com/justin13888/beam/issues/182) took the immediate parent, so a
 `Show/Season 01/` layout keyed a show as `season 01|`; the first scan under the current rules
 reclassifies those files onto the correctly keyed show (see `classifier_version` under `files`) and
-the emptied husk is retired below. The identity backfill never keys a show whose stored title is a
-season-folder name: holding its files' key, the husk would capture the series' files instead. The year is part of the key, so a remake is a separate title.
+the emptied husk is retired below. The identity backfill never keys such a husk — a show every one
+of whose files the old parent-folder rule names after a season folder (with no file row, one whose
+stored title keys to a season-folder name) — since holding its files' key, the husk would capture
+the series' files instead. Husks are recognised by their files or stored key, never by the display
+title, which enrichment may have replaced. The year is part of the key, so a remake is a separate title.
 
 **Find-or-create** is one `INSERT ... ON CONFLICT (identity_key) DO NOTHING` followed by a read by
 key, against the unique index `idx_movies_identity_key` / `idx_shows_identity_key`. There is no
@@ -197,7 +200,8 @@ rules read the two as one title: the one with provider ids survives (else the ol
 key, and receives the other's files — its entries found or created on the survivor per library and
 edition, its episodes per season and number, so both shows' files of one episode become sources
 of one episode — and the other, now keyless and fileless, is deleted by the scan's orphan cleanup.
-A show whose stored title is a season-folder name is released (key set to NULL) instead, as the
+A show whose stored key's title part is a season-folder name (`season 05|`) is released (key set to
+NULL) instead, as the
 backfill leaves one keyless. A title whose files derive no key of its kind keeps its key and
 version and is looked at again on the next start; one whose files derive several keeps its key and
 is named in an admin-log warning. Rekeys and merges are listed in an admin-log entry.

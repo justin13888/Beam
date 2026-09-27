@@ -984,9 +984,16 @@ async fn scanning_every_library_backfills_first_so_a_legacy_title_takes_its_next
 /// season folder has no key yet. The backfill must leave it keyless -- its
 /// files derive the real series' key, and a husk holding that key would
 /// capture every file of the series when the scan reclassifies them -- so
-/// the series gets its own show and the husk is retired.
+/// the series gets its own show and the husk is retired. A husk a provider
+/// has matched since -- its display title now the provider's -- is still one.
 #[tokio::test]
 async fn an_unkeyed_season_folder_husk_is_retired_not_given_its_series_key() {
+    for enriched in [false, true] {
+        an_unkeyed_husk_is_retired(enriched).await;
+    }
+}
+
+async fn an_unkeyed_husk_is_retired(enriched: bool) {
     let h = Harness::purging_at_once().await;
     let husk = h
         .legacy_show(
@@ -997,6 +1004,9 @@ async fn an_unkeyed_season_folder_husk_is_retired_not_given_its_series_key() {
             ],
         )
         .await;
+    if enriched {
+        h.enrich_show(husk, 999).await;
+    }
     h.write("Show X/Season 01/Show.X.S01E01.mkv");
 
     h.service.scan_all_libraries().await.unwrap();
@@ -1005,6 +1015,7 @@ async fn an_unkeyed_season_folder_husk_is_retired_not_given_its_series_key() {
     assert_ne!(show.id, husk, "the husk is retired, not adopted");
     assert_eq!(show.title, "Show X");
     assert_eq!(show.identity_key.as_deref(), Some("show x|"));
+    assert_eq!(show.tmdb_id, None, "the husk's match does not carry over");
     let files = h.file_repo.files.lock().unwrap().clone();
     assert_eq!(files.len(), 3);
     for file in files.values() {
@@ -1256,9 +1267,17 @@ async fn a_title_whose_files_are_all_missing_is_rederived_from_them() {
 
 /// A husk a build between #183 and #182 keyed (`season 05|`) is released,
 /// not handed its series' key: the series gets its own show and the husk is
-/// retired, as for a keyless husk.
+/// retired, as for a keyless husk. It is known by its key, so a husk a
+/// provider has matched since -- its display title now the provider's -- is
+/// still released, and its match does not pass to the series.
 #[tokio::test]
 async fn a_keyed_season_folder_husk_is_released_not_rekeyed() {
+    for enriched in [false, true] {
+        a_keyed_husk_is_released(enriched).await;
+    }
+}
+
+async fn a_keyed_husk_is_released(enriched: bool) {
     let h = Harness::keeping_missing_files().await;
     let husk = h
         .keyed_show(
@@ -1268,13 +1287,17 @@ async fn a_keyed_season_folder_husk_is_released_not_rekeyed() {
             chrono::Utc::now() - chrono::Duration::days(30),
         )
         .await;
+    if enriched {
+        h.enrich_show(husk, 999).await;
+    }
 
     h.service.scan_all_libraries().await.unwrap();
 
     let show = h.only_show();
-    assert_ne!(show.id, husk);
+    assert_ne!(show.id, husk, "enriched: {enriched}");
     assert_eq!(show.title, "Show X");
     assert_eq!(show.identity_key.as_deref(), Some("show x|"));
+    assert_eq!(show.tmdb_id, None, "the husk's match does not carry over");
 }
 
 /// A title whose files now name two titles keeps its old key -- there is no
