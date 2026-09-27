@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -115,19 +116,19 @@ pub struct BackgroundIndexingConfig {
 /// abort them instead of losing the handles.
 #[derive(Debug)]
 pub struct BackgroundIndexingTasks {
-    pub startup_scan: JoinHandle<()>,
     /// `None` when the watcher is disabled.
     pub watch_consumer: Option<JoinHandle<()>>,
     /// Drives the watcher's polled libraries. `None` when the watcher is
     /// disabled.
     pub watch_poller: Option<JoinHandle<()>>,
+    /// Registers the watches, runs the startup scan, then rescans every
+    /// library once per interval.
     pub periodic_maintenance: JoinHandle<()>,
 }
 
 impl BackgroundIndexingTasks {
     /// Stop every task. Used by tests and by a graceful shutdown.
     pub fn abort(&self) {
-        self.startup_scan.abort();
         if let Some(handle) = &self.watch_consumer {
             handle.abort();
         }
@@ -174,18 +175,9 @@ pub fn spawn_background_indexing_with(
     clock: Arc<dyn Clock>,
     config: BackgroundIndexingConfig,
 ) -> BackgroundIndexingTasks {
-    // Startup scan, spawned so the caller's server can start accepting
-    // requests without waiting for it.
-    let startup_scan = {
-        let indexer = indexer.clone();
-        tokio::spawn(async move {
-            info!("Running startup library scan...");
-            match indexer.scan_all_libraries().await {
-                Ok(n) => info!("Startup scan complete: {n} file(s) added"),
-                Err(e) => error!("Startup scan failed: {e}"),
-            }
-        })
-    };
+    // Sent by the maintenance task once the startup scan has finished; the
+    // poller waits for it. Dropped unused when the watcher is disabled.
+    let (startup_scan_done, startup_scan_finished) = oneshot::channel();
 
     let watch_consumer = watcher.clone().map(|watcher| {
         tokio::spawn(run_watch_consumer(
@@ -202,6 +194,7 @@ pub fn spawn_background_indexing_with(
             indexer.clone(),
             clock.clone(),
             Duration::from_secs(config.watch_poll_interval_secs),
+            startup_scan_finished,
         ))
     });
 
@@ -210,10 +203,10 @@ pub fn spawn_background_indexing_with(
         watcher,
         clock,
         Duration::from_secs(config.scan_interval_secs),
+        startup_scan_done,
     ));
 
     BackgroundIndexingTasks {
-        startup_scan,
         watch_consumer,
         watch_poller,
         periodic_maintenance,
@@ -266,6 +259,12 @@ async fn run_watch_consumer(
 /// Poll the watcher's polled libraries once per `interval`, and reconcile
 /// every library the poll moved off its native watch.
 ///
+/// Nothing is polled until the startup scan has finished. A library demoted
+/// during it would otherwise be scanned alongside it -- the same files hashed
+/// twice, and the two scans racing to insert the same rows. Waiting loses no
+/// change: whatever the poller's snapshot has not reported yet, the first
+/// poll does.
+///
 /// The poll runs on the blocking pool: a watch-limit demotion walks the
 /// library's tree to take the poller's snapshot, and the watcher's calls into
 /// `notify` wait on its threads.
@@ -274,7 +273,11 @@ async fn run_watch_poller(
     indexer: Arc<dyn BackgroundIndexer>,
     clock: Arc<dyn Clock>,
     interval: Duration,
+    startup_scan_finished: oneshot::Receiver<()>,
 ) {
+    // A dropped sender means the maintenance task is gone (aborted or
+    // panicked); polling on beats leaving the polled libraries unwatched.
+    let _ = startup_scan_finished.await;
     loop {
         clock.sleep(interval).await;
         let demoted = {
@@ -306,27 +309,60 @@ async fn reconcile_newly_polled(indexer: &dyn BackgroundIndexer, library_id: Uui
     }
 }
 
-/// Periodically rescan every library as a backstop for events the watcher
-/// missed, and register watches for libraries created since startup.
+/// Register the watches and run the startup scan, then periodically rescan
+/// every library as a backstop for events the watcher missed, and bring the
+/// watches in line with the libraries created or deleted since.
+///
+/// The watches are registered *before* the startup scan, and the scan runs
+/// here rather than in a task of its own. A polled library's changes are
+/// measured against a snapshot taken when it is registered, so registering
+/// first means the startup scan covers everything that snapshot misses, and
+/// the library needs no scan of its own. Registering alongside the scan
+/// instead scanned each polled library twice at once: its files hashed twice
+/// over the network, and the two scans racing to insert the same rows.
+///
+/// `startup_scan_done` is sent once the startup scan has finished, to release
+/// the poller.
 async fn run_periodic_maintenance(
     indexer: Arc<dyn BackgroundIndexer>,
     watcher: Option<Arc<dyn FsWatcher>>,
     clock: Arc<dyn Clock>,
     interval: Duration,
+    startup_scan_done: oneshot::Sender<()>,
 ) {
-    let mut watched: HashSet<Uuid> = HashSet::new();
-    loop {
-        if let Some(watcher) = &watcher {
-            refresh_watches(watcher, indexer.as_ref(), &mut watched).await;
-        }
+    if let Some(watcher) = &watcher {
+        refresh_watches(watcher, indexer.as_ref(), NewlyPolled::CoveredByStartupScan).await;
+    }
 
+    info!("Running startup library scan...");
+    match indexer.scan_all_libraries().await {
+        Ok(n) => info!("Startup scan complete: {n} file(s) added"),
+        Err(e) => error!("Startup scan failed: {e}"),
+    }
+    // Nobody is listening only when the watcher is disabled.
+    let _ = startup_scan_done.send(());
+
+    loop {
         clock.sleep(interval).await;
 
         match indexer.scan_all_libraries().await {
             Ok(n) => info!("Periodic rescan complete: {n} file(s) added"),
             Err(e) => error!("Periodic rescan failed: {e}"),
         }
+
+        if let Some(watcher) = &watcher {
+            refresh_watches(watcher, indexer.as_ref(), NewlyPolled::Scan).await;
+        }
     }
+}
+
+/// What [`refresh_watches`] does with a library it registers as polled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NewlyPolled {
+    /// Scan it once (see [`reconcile_newly_polled`]).
+    Scan,
+    /// Leave it: the startup scan, which has not started yet, covers it.
+    CoveredByStartupScan,
 }
 
 /// Bring the watches in line with the libraries that exist: stop watching
@@ -337,14 +373,19 @@ async fn run_periodic_maintenance(
 /// maintenance cycle. Deleted libraries are unwatched first, so a library
 /// re-created at a deleted one's root is registered after the old watch is
 /// gone. A library that comes back polled is scanned once (see
-/// [`reconcile_newly_polled`]).
+/// [`reconcile_newly_polled`]) unless `newly_polled` says the startup scan
+/// covers it.
+///
+/// What is already watched is asked of the watcher, not remembered here: the
+/// watcher drops a registration on its own when it cannot move a library to
+/// the poller, and a copy kept here would never register that library again.
 ///
 /// The watcher calls run on the blocking pool: registering a library walks
 /// its tree, natively or to take the poller's snapshot.
 async fn refresh_watches(
     watcher: &Arc<dyn FsWatcher>,
     indexer: &dyn BackgroundIndexer,
-    watched: &mut HashSet<Uuid>,
+    newly_polled: NewlyPolled,
 ) {
     let libraries = match indexer.library_repo().find_all().await {
         Ok(libraries) => libraries,
@@ -355,11 +396,11 @@ async fn refresh_watches(
     };
 
     let live: HashSet<Uuid> = libraries.iter().map(|library| library.id).collect();
+    let watched: HashSet<Uuid> = watcher.registered_libraries().into_iter().collect();
     let deleted: Vec<Uuid> = watched.difference(&live).copied().collect();
     for library_id in deleted {
-        // Forgotten whatever the outcome: the watcher drops its registration
-        // before it calls into the backend, so there is nothing to retry.
-        watched.remove(&library_id);
+        // Not retried whatever the outcome: the watcher drops its
+        // registration before it calls into the backend.
         let watcher = watcher.clone();
         match tokio::task::spawn_blocking(move || watcher.unwatch_library(library_id)).await {
             Ok(Ok(())) => info!(%library_id, "Stopped watching a deleted library"),
@@ -380,17 +421,16 @@ async fn refresh_watches(
         };
         match registration {
             Ok(Ok(mode)) => {
-                watched.insert(library.id);
                 info!(
                     "Watching library '{}' at {} ({mode:?})",
                     library.name,
                     library.root_path.display()
                 );
-                if matches!(mode, WatchMode::Polling(_)) {
+                if matches!(mode, WatchMode::Polling(_)) && newly_polled == NewlyPolled::Scan {
                     reconcile_newly_polled(indexer, library.id).await;
                 }
             }
-            // Not recorded as watched, so the next maintenance cycle retries.
+            // Not registered, so the next maintenance cycle retries.
             Ok(Err(e)) => warn!("Failed to watch library '{}': {e}", library.name),
             Err(e) => error!("Watching library '{}' failed: {e}", library.name),
         }

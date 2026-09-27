@@ -65,6 +65,13 @@ pub trait FsWatcher: Send + Sync + std::fmt::Debug {
     /// means -- and the poller's snapshot, taken now, includes them, so the
     /// caller reconciles each one once.
     fn poll_once(&self) -> Vec<Uuid>;
+    /// Every library currently registered, natively or with the poller.
+    ///
+    /// The watcher drops a registration on its own -- when a library it
+    /// could not move to the poller, or a library superseded by another at
+    /// the same root -- so this, not the caller's memory of what it
+    /// registered, is what the caller brings in line with the libraries.
+    fn registered_libraries(&self) -> Vec<Uuid>;
     /// Await the next event. Returns `None` once the watcher is closed.
     async fn next_event(&self) -> Option<FsEvent>;
 }
@@ -513,6 +520,13 @@ impl FsWatcher for NotifyFsWatcher {
         demoted
     }
 
+    fn registered_libraries(&self) -> Vec<Uuid> {
+        lock(&self.shared.libraries)
+            .iter()
+            .map(|library| library.id)
+            .collect()
+    }
+
     async fn next_event(&self) -> Option<FsEvent> {
         self.receiver.lock().await.recv().await
     }
@@ -542,6 +556,9 @@ pub mod in_memory {
         modes: std::sync::Mutex<std::collections::HashMap<Uuid, WatchMode>>,
         /// What the next `poll_once` reports as demoted.
         demotions: std::sync::Mutex<Vec<Uuid>>,
+        /// What the next `poll_once` deregisters without reporting, as a
+        /// demotion that fails does.
+        failed_demotions: std::sync::Mutex<Vec<Uuid>>,
     }
 
     impl InMemoryFsWatcher {
@@ -554,6 +571,7 @@ pub mod in_memory {
                 polls: std::sync::atomic::AtomicUsize::new(0),
                 modes: std::sync::Mutex::new(std::collections::HashMap::new()),
                 demotions: std::sync::Mutex::new(Vec::new()),
+                failed_demotions: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -565,6 +583,12 @@ pub mod in_memory {
         /// Make the next `poll_once` report `library_id` as moved to polling.
         pub fn demote_on_next_poll(&self, library_id: Uuid) {
             self.demotions.lock().unwrap().push(library_id);
+        }
+
+        /// Make the next `poll_once` fail to demote `library_id`: it is
+        /// deregistered and not reported.
+        pub fn fail_demotion_on_next_poll(&self, library_id: Uuid) {
+            self.failed_demotions.lock().unwrap().push(library_id);
         }
 
         /// Push a synthetic event to the consumer.
@@ -609,7 +633,16 @@ pub mod in_memory {
 
         fn poll_once(&self) -> Vec<Uuid> {
             self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let failed = std::mem::take(&mut *self.failed_demotions.lock().unwrap());
+            self.watched
+                .lock()
+                .unwrap()
+                .retain(|id| !failed.contains(id));
             std::mem::take(&mut *self.demotions.lock().unwrap())
+        }
+
+        fn registered_libraries(&self) -> Vec<Uuid> {
+            self.watched_libraries()
         }
 
         async fn next_event(&self) -> Option<FsEvent> {
@@ -1044,6 +1077,33 @@ mod tests {
         watcher.poll_once();
 
         assert!(status.snapshot().libraries.is_empty());
+    }
+
+    /// The runtime re-registers whatever this omits, so it must name exactly
+    /// the libraries the watcher still holds: not one it unwatched, and not
+    /// one superseded by a library re-created at the same root.
+    #[tokio::test]
+    async fn the_registered_libraries_are_the_ones_still_watched() {
+        let (_dir, root) = canonical_tempdir();
+        let (_other_dir, other_root) = canonical_tempdir();
+        let (_third_dir, third_root) = canonical_tempdir();
+        let (watcher, _status) = notify_watcher(FilesystemKind::Local);
+        let kept = Uuid::new_v4();
+        let unwatched = Uuid::new_v4();
+        let superseded = Uuid::new_v4();
+        let successor = Uuid::new_v4();
+        watcher.watch_library(kept, &root).unwrap();
+        watcher.watch_library(unwatched, &other_root).unwrap();
+        watcher.watch_library(superseded, &third_root).unwrap();
+
+        watcher.unwatch_library(unwatched).unwrap();
+        watcher.watch_library(successor, &third_root).unwrap();
+
+        let mut registered = watcher.registered_libraries();
+        registered.sort();
+        let mut expected = vec![kept, successor];
+        expected.sort();
+        assert_eq!(registered, expected);
     }
 
     #[tokio::test]

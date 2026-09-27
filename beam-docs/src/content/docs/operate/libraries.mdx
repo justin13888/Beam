@@ -80,8 +80,12 @@ and Beam handles both by **polling** the affected library instead — walking it
 
 When a library starts being polled — when Beam first watches a network share, or moves a library
 past the watch limit — Beam scans it once, so files added before polling began (such as the new
-season whose folder could not get a watch) are not left waiting for the periodic rescan. A deleted
-library stops being watched or polled within one `BEAM_SCAN_INTERVAL_SECS`.
+season whose folder could not get a watch) are not left waiting for the periodic rescan. At
+startup, Beam sets up every watch before its startup scan begins, so that scan is the one a share
+polled from the start gets — it is not scanned twice — and polling begins once the startup scan
+has finished. A deleted library stops being watched or polled within one
+`BEAM_SCAN_INTERVAL_SECS`, and a library Beam could not move to polling is watched again within
+the same interval.
 
 The admin status endpoint (`GET /v1/admin/status`, field `watcher`) reports, for every library,
 whether it is watched natively, polled (and why), or not watched at all, together with the watch

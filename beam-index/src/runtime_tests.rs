@@ -29,6 +29,17 @@ struct RecordingIndexer {
     library_repo: Arc<InMemoryLibraryRepository>,
     /// When set, `scan_all_libraries` fails -- the loop must survive it.
     fail_scans: bool,
+    /// When set, `scan_all_libraries` holds until a permit is added, so a
+    /// test can act while a full scan is in progress.
+    scan_gate: Option<Arc<tokio::sync::Semaphore>>,
+    /// Full scans started and not yet finished.
+    scans_in_flight: AtomicU32,
+    /// Single-library scans that started while a full scan was in progress.
+    overlapping_library_scans: std::sync::Mutex<Vec<Uuid>>,
+    /// When set, each full scan records what this watcher had registered
+    /// when the scan started.
+    watcher: Option<Arc<InMemoryFsWatcher>>,
+    watched_at_scan_start: std::sync::Mutex<Vec<Vec<Uuid>>>,
 }
 
 impl RecordingIndexer {
@@ -42,6 +53,14 @@ impl RecordingIndexer {
 
     fn library_scans(&self) -> Vec<Uuid> {
         self.library_scans.lock().unwrap().clone()
+    }
+
+    fn overlapping_library_scans(&self) -> Vec<Uuid> {
+        self.overlapping_library_scans.lock().unwrap().clone()
+    }
+
+    fn watched_at_scan_start(&self) -> Vec<Vec<Uuid>> {
+        self.watched_at_scan_start.lock().unwrap().clone()
     }
 
     fn store(&self, library: &Library) {
@@ -64,7 +83,19 @@ impl RecordingIndexer {
 #[async_trait::async_trait]
 impl BackgroundIndexer for RecordingIndexer {
     async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
+        if let Some(watcher) = &self.watcher {
+            self.watched_at_scan_start
+                .lock()
+                .unwrap()
+                .push(watcher.watched_libraries());
+        }
+        self.scans_in_flight.fetch_add(1, Ordering::SeqCst);
         self.scans.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.scan_gate {
+            // Returned on drop, so once opened the gate stays open.
+            drop(gate.acquire().await.unwrap());
+        }
+        self.scans_in_flight.fetch_sub(1, Ordering::SeqCst);
         if self.fail_scans {
             return Err(IndexError::LibraryNotFound);
         }
@@ -72,6 +103,12 @@ impl BackgroundIndexer for RecordingIndexer {
     }
 
     async fn scan_library(&self, library_id: Uuid) -> Result<u32, IndexError> {
+        if self.scans_in_flight.load(Ordering::SeqCst) > 0 {
+            self.overlapping_library_scans
+                .lock()
+                .unwrap()
+                .push(library_id);
+        }
         self.library_scans.lock().unwrap().push(library_id);
         Ok(0)
     }
@@ -127,12 +164,16 @@ async fn the_startup_scan_runs_once_without_waiting_for_the_interval() {
 
     let tasks =
         spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(3600, 2000));
-    tasks.startup_scan.await.unwrap();
+    until("the startup scan", || indexer.scan_count() == 1).await;
+    until("the maintenance loop to sleep", || {
+        clock.waiter_count() == 1
+    })
+    .await;
 
     assert_eq!(
         indexer.scan_count(),
         1,
-        "the startup scan must not wait for the rescan interval"
+        "the startup scan must not wait for the rescan interval, and runs once"
     );
 
     tasks.periodic_maintenance.abort();
@@ -145,8 +186,8 @@ async fn the_periodic_rescan_fires_once_per_interval_and_not_before() {
 
     let tasks =
         spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(3600, 2000));
-    tasks.startup_scan.await.unwrap();
-    // The maintenance loop is now parked on its first sleep.
+    until("the startup scan", || indexer.scan_count() == 1).await;
+    // The maintenance loop then parks on its first sleep.
     until("the maintenance loop to sleep", || {
         clock.waiter_count() == 1
     })
@@ -181,7 +222,7 @@ async fn a_failing_rescan_does_not_stop_the_loop() {
 
     let tasks =
         spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(60, 2000));
-    tasks.startup_scan.await.unwrap();
+    until("the startup scan", || indexer.scan_count() == 1).await;
     until("the maintenance loop to sleep", || {
         clock.waiter_count() == 1
     })
@@ -417,13 +458,25 @@ async fn a_library_recreated_at_a_deleted_ones_root_is_watched_under_its_new_id(
     tasks.abort();
 }
 
+/// The startup scan waits for the watches, and nothing scans a single library
+/// alongside it (issue #186 review, D1).
+///
+/// A polled library's changes are measured against the snapshot taken when
+/// it is registered. Registering it before the startup scan starts means that
+/// scan covers everything the snapshot misses, so the library needs no scan of
+/// its own; registering it alongside the scan scanned it twice at once.
 #[tokio::test]
-async fn a_library_first_registered_as_polled_is_scanned_once() {
+async fn the_startup_scan_starts_after_the_watches_and_no_library_scan_overlaps_it() {
     use crate::services::watch_status::PollReason;
 
-    let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let indexer = Arc::new(RecordingIndexer {
+        scan_gate: Some(gate.clone()),
+        watcher: Some(watcher.clone()),
+        ..Default::default()
+    });
     let native = library("local", "/videos/local");
     let polled = library("share", "/mnt/share");
     indexer.store(&native);
@@ -434,20 +487,86 @@ async fn a_library_first_registered_as_polled_is_scanned_once() {
         indexer.clone(),
         Some(watcher.clone()),
         clock.clone(),
+        config(3600, 2000),
+    );
+    until("the startup scan to start", || indexer.scan_count() == 1).await;
+
+    let mut watched_at_start = indexer.watched_at_scan_start()[0].clone();
+    watched_at_start.sort();
+    let mut expected = vec![native.id, polled.id];
+    expected.sort();
+    assert_eq!(
+        watched_at_start, expected,
+        "every library is registered before the startup scan starts"
+    );
+
+    // While the startup scan runs, the native library hits the watch limit and
+    // a poll interval passes: the demotion must wait for the scan.
+    watcher.demote_on_next_poll(native.id);
+    clock.advance(Duration::from_secs(300));
+    assert_eq!(
+        watcher.poll_count(),
+        0,
+        "nothing is polled during the startup scan"
+    );
+
+    gate.add_permits(1);
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    clock.advance(Duration::from_secs(300));
+    until("the demoted library's scan", || {
+        indexer.library_scans() == vec![native.id]
+    })
+    .await;
+
+    assert_eq!(
+        indexer.overlapping_library_scans(),
+        Vec::<Uuid>::new(),
+        "no single-library scan ran alongside the startup scan"
+    );
+    assert_eq!(
+        indexer.library_scans(),
+        vec![native.id],
+        "the library polled from the start is covered by the startup scan"
+    );
+
+    tasks.abort();
+}
+
+#[tokio::test]
+async fn a_library_registered_as_polled_after_startup_is_scanned_once() {
+    use crate::services::watch_status::PollReason;
+
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
         config(60, 2000),
     );
+    until("the maintenance loop and the poller to sleep", || {
+        clock.waiter_count() == 2
+    })
+    .await;
+
+    let polled = library("share", "/mnt/share");
+    indexer.store(&polled);
+    watcher.register_as(polled.id, WatchMode::Polling(PollReason::NetworkFilesystem));
+    clock.advance(Duration::from_secs(60));
     until("the polled library's scan", || {
         indexer.library_scans() == vec![polled.id]
     })
     .await;
-    until("the maintenance loop and the poller to sleep", || {
+    until("the maintenance loop to re-park", || {
         clock.waiter_count() == 2
     })
     .await;
 
     // A later cycle registers nothing new, so nothing is scanned again.
     clock.advance(Duration::from_secs(60));
-    until("the periodic rescan", || indexer.scan_count() == 2).await;
+    until("the next periodic rescan", || indexer.scan_count() == 3).await;
     until("the maintenance loop to re-park", || {
         clock.waiter_count() == 2
     })
@@ -457,6 +576,43 @@ async fn a_library_first_registered_as_polled_is_scanned_once() {
         vec![polled.id],
         "only the polled library, and only once"
     );
+
+    tasks.abort();
+}
+
+/// A library the watcher drops because it could not move it to the poller is
+/// registered again on the next cycle, not left unwatched until a restart
+/// (issue #186 review, D2).
+#[tokio::test]
+async fn a_library_whose_demotion_failed_is_watched_again_next_cycle() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let lost = library("big", "/videos/big");
+    indexer.store(&lost);
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(600, 2000),
+    );
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    assert_eq!(watcher.watched_libraries(), vec![lost.id]);
+
+    watcher.fail_demotion_on_next_poll(lost.id);
+    clock.advance(Duration::from_secs(300));
+    until("the failed demotion to deregister it", || {
+        watcher.watched_libraries().is_empty()
+    })
+    .await;
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+
+    clock.advance(Duration::from_secs(300));
+    until("the next maintenance cycle to watch it again", || {
+        watcher.watched_libraries() == vec![lost.id]
+    })
+    .await;
 
     tasks.abort();
 }
@@ -664,11 +820,11 @@ mod local_index_service_adapter {
             clock.clone(),
             config(3600, 2000),
         );
-        tasks.startup_scan.await.unwrap();
         until("the library to be watched", || {
             watcher.watched_libraries() == vec![library.id]
         })
         .await;
+        // The poller sleeps only once the startup scan has finished.
         until("both loops to sleep", || clock.waiter_count() == 2).await;
 
         // Created while the native watch could not see it.
@@ -776,8 +932,7 @@ async fn aborting_stops_every_spawned_task() {
     tasks.abort();
 
     until("every task to stop", || {
-        tasks.startup_scan.is_finished()
-            && tasks.periodic_maintenance.is_finished()
+        tasks.periodic_maintenance.is_finished()
             && tasks
                 .watch_consumer
                 .as_ref()
@@ -807,6 +962,9 @@ async fn the_watcher_is_polled_once_per_poll_interval_and_not_before() {
     until("both loops to sleep", || clock.waiter_count() == 2).await;
 
     clock.advance(Duration::from_secs(299));
+    // Let the poller run: had 299 seconds woken it, it would poll and park
+    // again, so waiting for it to be parked orders the check after any poll.
+    until("the poller to be parked", || clock.waiter_count() == 2).await;
     assert_eq!(
         watcher.poll_count(),
         0,
