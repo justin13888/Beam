@@ -92,7 +92,7 @@ features = [
 ]
 
 [build-dependencies]
-spargen = "0.4.0"
+spargen = "0.5.0"
 
 [dev-dependencies]
 # Real certificates, so the trust tests exercise the actual DER parsing and

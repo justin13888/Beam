@@ -201,6 +201,12 @@ impl std::str::FromStr for MediaTypeFilter {
     }
 }
 
+// Each is read from a query parameter, so each is one string value on the wire.
+// Kynos asks for the opt-in because it cannot see that from the schema alone.
+impl kynos::schema::ParamValue for MediaSortField {}
+impl kynos::schema::ParamValue for SortOrder {}
+impl kynos::schema::ParamValue for MediaTypeFilter {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

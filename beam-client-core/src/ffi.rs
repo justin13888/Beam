@@ -2918,7 +2918,7 @@ mod tests {
         let missing = Arc::new(CannedBackend::answering(
             404,
             "application/problem+json",
-            r#"{"type":"about:blank","status":404,"detail":"no such title"}"#,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404,"detail":"no such title"}"#,
         ));
         client
             .use_transport(
@@ -3045,7 +3045,7 @@ mod tests {
     async fn a_progress_sample_the_server_refuses_is_dropped() {
         let (client, _) = client_answering(
             400,
-            r#"{"type":"https://beam.justinchung.net/reference/errors/#validation","status":400,"detail":"position_secs must be finite"}"#,
+            r#"{"type":"about:blank","status":400,"detail":"position_secs must be finite"}"#,
         )
         .await;
 
@@ -3070,7 +3070,7 @@ mod tests {
     async fn a_failed_call_carries_its_own_problem_document_into_the_error() {
         let (client, _) = client_answering(
             404,
-            r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404,"detail":"Source video file not found"}"#,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404,"detail":"Media not found"}"#,
         )
         .await;
 
@@ -3082,9 +3082,8 @@ mod tests {
         assert_eq!(
             error,
             BeamError::NotFound {
-                detail: "Source video file not found".to_owned(),
-                code: "https://beam.justinchung.net/reference/errors/#source-file-missing"
-                    .to_owned(),
+                detail: "Media not found".to_owned(),
+                code: "https://beam.justinchung.net/reference/errors/#media-not-found".to_owned(),
             }
         );
     }

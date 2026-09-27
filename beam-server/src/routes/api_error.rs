@@ -674,7 +674,7 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
         if user.is_admin {
             Ok(())
         } else {
-            Err(AuthRejection::Forbidden)
+            Err(AuthRejection::forbidden())
         }
     }
 }

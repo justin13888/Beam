@@ -42,7 +42,7 @@ futures-core = "0.3.32"
 # subtree -- 3.1 has no way to describe a sequential body, so Kynos gates the
 # whole subtree on it rather than describe a stream inaccurately. Confined to
 # `beam-server`: no other crate may depend on this.
-kynos = { version = "0.1.0", features = [
+kynos = { version = "0.3.0", features = [
     "openapi32",
     "macros",
     "server",

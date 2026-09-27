@@ -17,7 +17,7 @@
 mod tests {
     use std::collections::BTreeSet;
 
-    use kynos::openapi::SpecVersion;
+    use kynos::openapi::{SpecError, SpecVersion};
 
     use crate::routes::create_router;
 
@@ -40,7 +40,17 @@ mod tests {
             .collect()
     }
 
-    /// The router describes itself, with nothing merely tolerated.
+    /// The schemas Beam leaves unconstrained on purpose, by location.
+    ///
+    /// Each is an `Unchecked<_>` whose field documents why no schema is true of
+    /// it. Kynos reports every one as a warning so that none is taken silently;
+    /// listing them here is what makes adding another a reviewed change rather
+    /// than a new warning nobody reads.
+    const UNCHECKED_SCHEMAS: [&str; 1] =
+        ["#/components/schemas/AdminLogEntryDto/properties/details/anyOf/0"];
+
+    /// The router describes itself, with nothing merely tolerated beyond the
+    /// waivers in [`UNCHECKED_SCHEMAS`].
     ///
     /// `validate` reports every violation including warnings: a duplicated
     /// `operationId`, two paths differing only in the name of a variable, a
@@ -53,9 +63,21 @@ mod tests {
             .validate()
             .expect("the router is describable");
 
+        let (unchecked, other): (Vec<_>, Vec<_>) = violations
+            .into_iter()
+            .partition(|violation| violation.error == SpecError::UncheckedSchema);
+
         assert!(
-            violations.is_empty(),
-            "the router describes itself with violations: {violations:#?}"
+            other.is_empty(),
+            "the router describes itself with violations: {other:#?}"
+        );
+        assert_eq!(
+            unchecked
+                .iter()
+                .map(|violation| violation.location.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(UNCHECKED_SCHEMAS),
+            "the unconstrained schemas are exactly the ones waived on purpose"
         );
     }
 

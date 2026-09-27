@@ -21,7 +21,10 @@ pub mod tags;
 // globs, and Kynos's own convention is that every item has one canonical path,
 // so they are gone rather than disambiguated.
 
+use kynos::middleware::catch_panic::Propagate;
+use kynos::middleware::cors::Cors;
 use kynos::middleware::rate_limit::RateLimit;
+use kynos::middleware::stack::Cons;
 use kynos::openapi::Info;
 use kynos::prelude::*;
 use kynos::router::docs::Docs;
@@ -42,6 +45,18 @@ mod contract_tests;
 #[path = "taxonomy_tests.rs"]
 mod taxonomy_tests;
 
+/// The interceptors the groups inside [`rest_routes`] carry, innermost last.
+///
+/// Kynos carries every scope's interceptors in the router's type, so that
+/// mounting one that collides with another covering the same operation fails
+/// to compile rather than at startup. Written out rather than inferred: a new
+/// rate-limited group is then a compile error here, next to the list it joins,
+/// instead of a return type that silently widens.
+pub type RestScopes = Cons<RateLimit<BeamRateLimit>, Cons<RateLimit<BeamRateLimit>, ()>>;
+
+/// [`RestScopes`] beneath the two interceptors [`create_router`] wraps `/v1` in.
+pub type ServedScopes = Cons<middleware::EnforceSameOrigin, Cons<Cors, RestScopes>>;
+
 /// Every `/v1` operation, as one table.
 ///
 /// Grouped by tag rather than mounted flat. Every route here also carries a
@@ -60,7 +75,7 @@ mod taxonomy_tests;
 /// One `mount` per module rather than one list: `routes!` builds a tuple, and
 /// the arity runs out well before Beam's operation count. Grouping by module is
 /// what the split would have been anyway.
-pub fn rest_routes() -> Router<AppState> {
+pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
     Router::new()
         .group(
             Group::new("/")
@@ -167,7 +182,7 @@ pub fn rest_routes() -> Router<AppState> {
 /// and Kynos copies a nested router's interceptors onto that router's own
 /// operations only -- which is what we want: a scrape target has no session to
 /// forge, and a cross-origin reader of `/openapi` has nothing to steal.
-pub fn create_router() -> Router<AppState> {
+pub fn create_router() -> Router<AppState, Propagate, (), ServedScopes> {
     Router::new()
         .info(Info::new("Beam Server API", "1.0.0"))
         .nest(
