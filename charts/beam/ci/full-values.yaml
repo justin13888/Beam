@@ -1,8 +1,12 @@
-# Every optional server feature on, secrets from existing Secrets, and
-# libraries on three source kinds the chart forces read-only (a claim, NFS and
-# a CSI driver) plus a hostPath, which has no readOnly field.
+# Every optional server feature on, secrets from existing Secrets, media
+# readable through a supplemental group, and libraries on three source kinds
+# the chart forces read-only (a claim, NFS and a CSI driver) plus a hostPath,
+# which has no readOnly field and whose type the chart pins to Directory.
 server:
   publicUrl: https://beam.example.test
+  podSecurityContext:
+    supplementalGroups:
+      - 1500
   extraAllowedOrigins:
     - https://other.example.test
   cookieSecure: true
@@ -42,7 +46,6 @@ libraries:
     volume:
       hostPath:
         path: /srv/media/local
-        type: Directory
 persistence:
   data:
     existingClaim: beam-data

@@ -47,6 +47,16 @@ server:
   # finishes draining before the kubelet's SIGKILL.
   shutdownTimeoutSeconds: 30
   logLevel: "beam_server=info,tower_http=info"
+  # The server pod runs as the image's user: uid 1000, gid 1000 (with fsGroup
+  # 1000 for /data). That is fixed, not a value -- the image owns /data as
+  # 1000. Library media must therefore be readable by uid 1000, by gid 1000,
+  # by one of these supplemental groups, or by everyone. A NAS export that
+  # grants read to a group, say `media` with gid 1500, needs that gid here:
+  #   supplementalGroups: [1500]
+  # Libraries are mounted read-only and the kubelet never changes their
+  # ownership, so the media's own permissions are what decide.
+  podSecurityContext:
+    supplementalGroups: []
   # Any other beam-server setting (docs/operations/configuration.md), as
   # NAME: "value". Names the chart manages itself are rejected by the schema.
   env: {}
@@ -91,8 +101,13 @@ tmdb:
 # with a readOnly field (persistentVolumeClaim, nfs, csi, iscsi, rbd, cephfs,
 # ...) is forced to readOnly: true, which also keeps the kubelet from
 # applying the pod's fsGroup to your media. hostPath and image volumes are
-# accepted too; kinds that cannot be read-only media (emptyDir, ephemeral,
-# gitRepo, configMap, ...) are refused by the schema.
+# accepted too; a hostPath is always `type: Directory` (the chart sets it, and
+# refuses any other type), so a mistyped path fails the pod instead of the
+# kubelet creating an empty directory for Beam to index. An `image` volume
+# needs a cluster with the ImageVolume feature (see the Kubernetes guide).
+# Kinds that cannot be read-only media (emptyDir, ephemeral, gitRepo,
+# configMap, ...) are refused by the schema. The pod reads media as uid 1000,
+# gid 1000 and server.podSecurityContext.supplementalGroups.
 #
 # libraries:
 #   - name: movies

@@ -77,6 +77,18 @@
           "description": "BEAM_SHUTDOWN_TIMEOUT_SECS; the pod's terminationGracePeriodSeconds is derived from it."
         },
         "logLevel": { "type": "string" },
+        "podSecurityContext": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "supplementalGroups": {
+              "type": "array",
+              "description": "Extra gids the server pod runs with, so library media readable by a group (a NAS `media` group) can be read. The uid and gid stay the image's 1000. Group 0 is refused: it is root's group, and reading media never needs it.",
+              "uniqueItems": true,
+              "items": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+            }
+          }
+        },
         "env": {
           "type": "object",
           "description": "Extra beam-server settings. The names the chart sets itself are refused, so an override cannot fight a managed value or break an invariant (library mounts, data dir, bind port).",
@@ -95,7 +107,7 @@
                 "BEAM_AUTO_MIGRATE",
                 "BEAM_ENABLE_METRICS",
                 "BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR",
-              "BEAM_SHUTDOWN_TIMEOUT_SECS",
+                "BEAM_SHUTDOWN_TIMEOUT_SECS",
                 "BEAM_OIDC_ISSUER",
                 "BEAM_OIDC_CLIENT_ID",
                 "BEAM_OIDC_CLIENT_SECRET",
@@ -192,6 +204,19 @@
             "minProperties": 1,
             "maxProperties": 1,
             "additionalProperties": { "type": "object" },
+            "properties": {
+              "hostPath": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                  "path": { "$ref": "#/definitions/nonEmptyString" },
+                  "type": {
+                    "const": "Directory",
+                    "description": "Always Directory; the chart sets it when omitted. The default (\"\") skips the check, and the create types would make an empty library out of a mistyped path."
+                  }
+                }
+              }
+            },
             "propertyNames": {
               "enum": [
                 "awsElasticBlockStore",

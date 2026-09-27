@@ -1390,7 +1390,7 @@ done
 '''
 
 [tasks."check:chart-invariants"]
-description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, an ingress that exposes only the API, a forwarded-for trust that needs the ingress, and a grace period longer than the drain"
+description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, an ingress that exposes only the API, a forwarded-for trust that needs the ingress, a grace period longer than the drain, and the image's user with the configured supplemental groups"
 # The properties Beam's design depends on that neither the schema nor
 # kubeconform can see, asserted over what the chart actually renders for every
 # scenario in ci/ -- never over the templates' text:
@@ -1405,7 +1405,10 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #      check:compose-invariants keeps for compose. A readOnly source is also
 #      what stops the kubelet applying the pod's fsGroup (a recursive chgrp)
 #      to the media. The chart must refuse a library whose source can be
-#      neither.
+#      neither. A hostPath library renders `type: Directory` whatever the
+#      scenario gave, and the chart refuses any other type: the default ("")
+#      skips the check and the create types would have the kubelet make an
+#      empty library out of a mistyped path.
 #   3. The /data volume is not also mounted under /videos, and BEAM_VIDEO_DIR
 #      and BEAM_DATA_DIR are the paths the mounts use.
 #   4. Every container has a read-only root filesystem and no privilege
@@ -1423,6 +1426,10 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #   9. The server pod's terminationGracePeriodSeconds is longer than
 #      BEAM_SHUTDOWN_TIMEOUT_SECS, so the kubelet's SIGKILL never cuts a drain
 #      short.
+#  10. The server pod runs as the image's user (uid and gid 1000, which own
+#      /data in the image) and with exactly the supplemental groups the
+#      scenario sets in server.podSecurityContext.supplementalGroups -- the
+#      one way to let it read media a group can read.
 #
 # The directory argument points the gate at a copy of the chart; that is how
 # its negative cases are exercised without editing the tracked one.
@@ -1452,10 +1459,13 @@ if ! helm template beam "$chart" -f "$base" > /dev/null 2>&1; then
 fi
 for source in '{"emptyDir":{}}' '{"ephemeral":{"volumeClaimTemplate":{"spec":{}}}}' \
   '{"gitRepo":{"repository":"https://example.test/media.git"}}' \
-  '{"vsphereVolume":{"volumePath":"[ds] media"}}' '{"configMap":{"name":"media"}}'; do
+  '{"vsphereVolume":{"volumePath":"[ds] media"}}' '{"configMap":{"name":"media"}}' \
+  '{"hostPath":{"path":"/srv/media","type":"DirectoryOrCreate"}}' \
+  '{"hostPath":{"path":"/srv/media","type":""}}' \
+  '{"hostPath":{"path":"/srv/media","type":"File"}}'; do
   if helm template beam "$chart" -f "$base" \
     --set-json "libraries=[{\"name\":\"media\",\"volume\":$source}]" > /dev/null 2>&1; then
-    echo "FAIL  the chart renders a library on $source, which cannot be mounted read-only"
+    echo "FAIL  the chart renders a library on $source, which cannot be mounted read-only as existing media"
     status=1
   else
     echo "ok    the chart refuses a library on $source"
@@ -1516,6 +1526,14 @@ for (const scenario of scenarios.sort()) {
       check(
         readOnlyByNature.has(kind) || source[kind]?.readOnly === true,
         `${tag} ${kind} volume ${m.name} behind ${m.mountPath} is ${readOnlyByNature.has(kind) ? "a kind with no readOnly field that the kubelet never chowns" : "readOnly at the source"}`,
+      );
+  }
+  for (const m of libraryMounts) {
+    const hostPath = volumes.get(m.name)?.hostPath;
+    if (hostPath !== undefined)
+      check(
+        hostPath.type === "Directory",
+        `${tag} hostPath volume ${m.name} behind ${m.mountPath} has type Directory (got ${JSON.stringify(hostPath.type)})`,
       );
   }
   for (const library of values.libraries ?? [])
@@ -1587,6 +1605,19 @@ for (const scenario of scenarios.sort()) {
   check(
     Number.isInteger(drain) && Number.isInteger(grace) && grace > drain,
     `${tag} terminationGracePeriodSeconds (${grace}) outlasts BEAM_SHUTDOWN_TIMEOUT_SECS (${JSON.stringify(env.get("BEAM_SHUTDOWN_TIMEOUT_SECS"))})`,
+  );
+
+  // 10.
+  const podSecurity = pod.securityContext ?? {};
+  check(
+    podSecurity.runAsUser === 1000 && podSecurity.runAsGroup === 1000,
+    `${tag} the server pod runs as the image user 1000:1000 (got ${JSON.stringify(podSecurity.runAsUser)}:${JSON.stringify(podSecurity.runAsGroup)})`,
+  );
+  const wantGroups = values.server?.podSecurityContext?.supplementalGroups ?? [];
+  const gotGroups = podSecurity.supplementalGroups ?? [];
+  check(
+    JSON.stringify(gotGroups) === JSON.stringify(wantGroups),
+    `${tag} the server pod has the supplemental groups the values set (want ${JSON.stringify(wantGroups)}, got ${JSON.stringify(gotGroups)})`,
   );
 }
 process.exit(status);

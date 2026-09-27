@@ -13,8 +13,9 @@ version: 0.1.0 # x-release-please-version
 appVersion: "0.1.0" # x-release-please-version
 # startupProbe, seccompProfile and fsGroupChangePolicy are all GA well before
 # this; 1.29 is the oldest release still inside upstream's support window when
-# the chart was written. `helm:template` validates against the version pinned
-# in mise.toml.
+# the chart was written. `helm:template` (mise.toml) runs kubeconform against
+# this floor and against a current release, 1.29.0 and 1.37.0; raise its
+# `for kube in` list with this line.
 kubeVersion: ">=1.29.0-0"
 home: https://github.com/justin13888/beam
 sources:
