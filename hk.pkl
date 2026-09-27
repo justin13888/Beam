@@ -170,6 +170,13 @@ hooks {
                 glob = List("compose*.yaml", "mise.toml")
                 check = "mise run check:compose-invariants"
             }
+            // Seconds once kubeconform's schema cache is warm. mise.toml is in
+            // the glob because the three tasks, and the helm and kubeconform
+            // pins, live there. ci.yml's helm-chart job runs the same three.
+            ["helm-chart"] {
+                glob = List("charts/**", "mise.toml")
+                check = "mise run helm:lint && mise run helm:template && mise run check:chart-invariants"
+            }
             // A pure grep over the tracked .rs files -- milliseconds, and it catches
             // the one mistake that would silently corrupt every mutation-testing
             // result: a test double that cargo-mutants will mutate as if it were
