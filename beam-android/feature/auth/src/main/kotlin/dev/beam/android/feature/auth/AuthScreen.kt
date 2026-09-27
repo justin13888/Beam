@@ -53,6 +53,7 @@ public fun AuthRoute(
         onDeclineCertificate = viewModel::declineCertificate,
         onSessionCookie = viewModel::onSessionCookie,
         onSignInCancelled = viewModel::onSignInCancelled,
+        onDeviceLoginCancelled = viewModel::onDeviceLoginCancelled,
         onSignedIn = onSignedIn,
         modifier = modifier,
     )
@@ -72,6 +73,7 @@ internal fun AuthScreen(
     onSignInCancelled: () -> Unit,
     onSignedIn: () -> Unit,
     modifier: Modifier = Modifier,
+    onDeviceLoginCancelled: () -> Unit = {},
 ) {
     // A LaunchedEffect rather than a bare call: navigating from composition
     // fires again on every recomposition, and on configuration change it would
@@ -86,6 +88,30 @@ internal fun AuthScreen(
             onAccept = { onAcceptCertificate(trust) },
             onDecline = onDeclineCertificate,
         )
+    }
+
+    val devicePrompt = state.devicePrompt
+    if (devicePrompt != null) {
+        Column(
+            modifier = modifier.fillMaxSize().padding(BeamSpacing.Large),
+            verticalArrangement = Arrangement.spacedBy(BeamSpacing.Medium),
+        ) {
+            Text(
+                text = "Approve this device",
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            Text(
+                text = "On a phone or computer, open ${devicePrompt.verificationUri} and enter:",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                text = devicePrompt.userCode,
+                style = MaterialTheme.typography.displaySmall,
+            )
+            CircularProgressIndicator()
+            Button(onClick = onDeviceLoginCancelled) { Text("Cancel") }
+        }
+        return
     }
 
     val loginUrl = state.loginUrl

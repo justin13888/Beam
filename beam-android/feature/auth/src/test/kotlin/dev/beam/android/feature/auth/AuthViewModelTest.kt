@@ -17,6 +17,8 @@ import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.CertificateDetails
+import uniffi.beam_client_core.DeviceLoginStep
+import uniffi.beam_client_core.UserSummary
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AuthViewModelTest {
@@ -231,6 +233,91 @@ class AuthViewModelTest {
             assertNull(viewModel.state.value.error)
         }
 
+    @Test
+    fun `a server with the device grant shows a code instead of a browser`() =
+        runTest {
+            val servers =
+                FakeServerRepository().apply {
+                    deviceLogin = listOf(DeviceLoginStep.Waiting(5u, false))
+                }
+            val viewModel = AuthViewModel(servers)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.onAddressChange("beam.example.com")
+            viewModel.connect()
+            testScheduler.runCurrent()
+
+            val state = viewModel.state.value
+            assertEquals("BCDF-GHJK", state.devicePrompt?.userCode)
+            assertNull("the browser is the fallback, not the default", state.loginUrl)
+            viewModel.onDeviceLoginCancelled()
+        }
+
+    @Test
+    fun `polling waits the interval and signs in on approval`() =
+        runTest {
+            val servers =
+                FakeServerRepository().apply {
+                    deviceLogin =
+                        listOf(
+                            DeviceLoginStep.Waiting(10u, true),
+                            DeviceLoginStep.SignedIn(ADA),
+                        )
+                }
+            val viewModel = AuthViewModel(servers)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.onAddressChange("beam.example.com")
+            viewModel.connect()
+            testScheduler.runCurrent()
+
+            testScheduler.advanceTimeBy(5_001)
+            assertEquals("the first poll waits the prompt's interval", 1, servers.devicePolls)
+            testScheduler.advanceTimeBy(9_000)
+            assertEquals("a slow_down stretches the next wait", 1, servers.devicePolls)
+            testScheduler.advanceTimeBy(1_001)
+            assertEquals(2, servers.devicePolls)
+
+            assertTrue(viewModel.state.value.isSignedIn)
+            assertNull(viewModel.state.value.devicePrompt)
+        }
+
+    @Test
+    fun `a server without the device grant falls back to the browser`() =
+        runTest {
+            val viewModel = AuthViewModel(FakeServerRepository())
+            testScheduler.advanceUntilIdle()
+
+            viewModel.onAddressChange("beam.example.com")
+            viewModel.connect()
+            testScheduler.advanceUntilIdle()
+
+            assertNotNull(viewModel.state.value.loginUrl)
+            assertNull(viewModel.state.value.devicePrompt)
+            assertNull("falling back is not a failure", viewModel.state.value.error)
+        }
+
+    @Test
+    fun `a refused device login ends with an error the viewer can read`() =
+        runTest {
+            val servers =
+                FakeServerRepository().apply {
+                    deviceLogin = listOf(DeviceLoginStep.Waiting(5u, false))
+                }
+            val viewModel = AuthViewModel(servers)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.onAddressChange("beam.example.com")
+            viewModel.connect()
+            testScheduler.runCurrent()
+            servers.failWith = BeamException.Forbidden("refused", DENIED)
+            testScheduler.advanceUntilIdle()
+
+            assertNull(viewModel.state.value.devicePrompt)
+            assertNotNull(viewModel.state.value.error)
+            assertTrue(!viewModel.state.value.isSignedIn)
+        }
+
     private fun certificate() =
         CertificateDetails(
             sha256Fingerprint = FINGERPRINT,
@@ -247,5 +334,7 @@ class AuthViewModelTest {
 
     private companion object {
         const val FINGERPRINT = "AA:BB:CC:DD"
+        const val DENIED = "https://beam.justinchung.net/reference/errors/#device-login-denied"
+        val ADA = UserSummary("u-1", "Ada", null, false, null)
     }
 }

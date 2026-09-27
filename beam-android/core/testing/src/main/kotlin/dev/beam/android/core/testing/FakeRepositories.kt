@@ -17,6 +17,8 @@ import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.ContinueWatchingEntry
+import uniffi.beam_client_core.DeviceLoginPrompt
+import uniffi.beam_client_core.DeviceLoginStep
 import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
@@ -292,6 +294,57 @@ public class FakeServerRepository(
         }
         failWith?.let { throw it }
         return "https://beam.test/v1/auth/login?redirect=/"
+    }
+
+    /**
+     * What successive device-login polls answer, front first; the last one
+     * repeats. `null` models an identity provider without the device grant:
+     * starting answers the server's 501.
+     */
+    public var deviceLogin: List<DeviceLoginStep>? = null
+
+    /** How many times a device login was polled. */
+    public var devicePolls: Int = 0
+
+    override suspend fun startDeviceLogin(serverId: String): DeviceLoginPrompt {
+        failOnce?.let {
+            failOnce = null
+            throw it
+        }
+        failWith?.let { throw it }
+        if (deviceLogin == null) {
+            throw BeamException.Server(
+                501u,
+                false,
+                "no device grant",
+                "https://beam.justinchung.net/reference/errors/#device-login-unsupported",
+            )
+        }
+        return DeviceLoginPrompt(
+            deviceHandle = "handle-1",
+            userCode = "BCDF-GHJK",
+            verificationUri = "https://idp.test/device",
+            verificationUriComplete = null,
+            expiresInSecs = 600uL,
+            intervalSecs = 5u,
+        )
+    }
+
+    override suspend fun pollDeviceLogin(
+        serverId: String,
+        deviceHandle: String,
+    ): DeviceLoginStep {
+        failWith?.let { throw it }
+        val script = checkNotNull(deviceLogin) { "no device login was started" }
+        val step = script[minOf(devicePolls, script.lastIndex)]
+        devicePolls += 1
+        if (step is DeviceLoginStep.SignedIn) {
+            state.value =
+                state.value.map {
+                    if (it.id == serverId) it.copy(state = SessionState.Authenticated(step.user)) else it
+                }
+        }
+        return step
     }
 
     override suspend fun completeLogin(
