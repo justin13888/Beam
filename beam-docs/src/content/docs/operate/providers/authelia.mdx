@@ -50,8 +50,10 @@ authority.
            token_endpoint_auth_method: "client_secret_basic"
    ```
 
-   Beam always sends a PKCE `S256` challenge and authenticates to the token endpoint with HTTP
-   Basic, which is what `client_secret_basic` names.
+   Beam always sends a PKCE `S256` challenge. `token_endpoint_auth_method` is the one way Authelia
+   accepts Beam's secret, and Beam's `BEAM_OIDC_CLIENT_AUTH_METHOD` must name the same method.
+   Both default to HTTP Basic (`client_secret_basic`), so leave them as they are; if you change one,
+   change the other. Device sign-in authenticates the same way as browser sign-in.
 
 4. **Configure Beam.** The issuer is Authelia's root URL. Add `groups` to the requested scopes —
    Authelia only releases the `groups` claim when that scope is asked for:
@@ -69,6 +71,11 @@ authority.
    `<BEAM_SERVER_URL>/v1/me` in the same browser. It should show `"is_admin": true`.
 
 </Steps>
+
+**Signing in on a TV.** Add `urn:ietf:params:oauth:grant-type:device_code` to the client's
+`grant_types` if your Authelia version supports the device authorization grant, then check that the
+discovery document names a `device_authorization_endpoint` and restart Beam. See
+[Sign-in on a TV](/operate/identity-and-access/#sign-in-on-a-tv-or-another-device-without-a-browser).
 
 See [Identity and admin access](/operate/identity-and-access/) for how admin is recalculated and
 revoked, and [troubleshooting](/help/troubleshooting/#i-am-not-an-admin) if `is_admin` stays

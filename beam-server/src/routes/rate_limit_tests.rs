@@ -263,7 +263,7 @@ async fn retry_after_reflects_the_wait_for_a_whole_token() {
     );
 }
 
-/// The two classes exist only to name which config key supplies `per_minute`,
+/// The classes exist only to name which config key supplies `per_minute`,
 /// so the thing worth asserting is that each reads its own.
 #[tokio::test]
 async fn each_class_enforces_its_own_configured_ceiling() {
@@ -288,6 +288,23 @@ async fn each_class_enforces_its_own_configured_ceiling() {
         StatusCode::TOO_MANY_REQUESTS,
         "the search class must spend the search budget, not the auth one"
     );
+
+    let device_poll = harness(Class::DevicePoll, |config| {
+        config.rate_limit_auth_per_minute = 1_000;
+        config.rate_limit_search_per_minute = 1_000;
+        config.rate_limit_device_poll_per_minute = 1;
+    });
+    assert_eq!(
+        get(&device_poll.client, CLIENT).await.status(),
+        StatusCode::OK
+    );
+    let refused = get(&device_poll.client, CLIENT).await;
+    assert_eq!(
+        refused.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the device-poll class must spend its own budget"
+    );
+    assert_eq!(field(&refused, "x-ratelimit-limit"), 1);
 }
 
 #[tokio::test]

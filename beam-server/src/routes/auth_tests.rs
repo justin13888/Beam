@@ -188,6 +188,7 @@ mod tests {
             session_store: session_dyn,
             oidc_client: oidc_dyn,
             pending_auth_store,
+            device_auth_store: base.services.device_auth_store.clone(),
             oidc_config: config,
             watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
             telemetry: crate::routes::test_support::idle_library_report(),

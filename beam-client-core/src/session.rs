@@ -6,15 +6,20 @@
 //! happens server-side and the client's only credential is the opaque
 //! `beam_session` cookie.
 //!
-//! Getting that cookie onto a phone is the awkward part. `sanitize_redirect_path`
-//! in `beam-auth` accepts only same-origin relative paths, so the server
-//! cannot be asked to redirect to a custom scheme, and there is no native
-//! token endpoint. The flow therefore runs in an in-app browser and the
-//! cookie is lifted from its jar -- the foreign side's job. Everything after
-//! that point is here, and is a pure state machine so it can be tested
-//! exhaustively without a network or a WebView.
+//! There are two ways to obtain that value. The **device authorization
+//! grant** ([ADR-0017]) needs no browser: the server starts it, the user
+//! approves on another device, and polling hands the value back in a response
+//! body -- `BeamClient::start_device_login`/`poll_device_login`. Where the
+//! identity provider does not offer that grant, the browser flow remains:
+//! `sanitize_redirect_path` in `beam-server` accepts only same-origin relative
+//! paths, so the server cannot be asked to redirect to a custom scheme, and
+//! the cookie is lifted from an in-app browser's jar -- the foreign side's job.
+//! Either way, everything after "a credential was obtained" is here, and is a
+//! pure state machine so it can be tested exhaustively without a network or a
+//! WebView.
 //!
 //! [ADR-0003]: ../../../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md
+//! [ADR-0017]: ../../../docs/architecture/decisions/ADR-0017-device-authorization-grant.md
 
 use crate::trust::CertificateDetails;
 
@@ -32,6 +37,46 @@ pub struct UserSummary {
     pub is_admin: bool,
     /// Avatar URL, where the provider supplied one.
     pub avatar_url: Option<String>,
+}
+
+/// What to show while a device login waits for the user ([ADR-0017]).
+///
+/// [ADR-0017]: ../../../docs/architecture/decisions/ADR-0017-device-authorization-grant.md
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DeviceLoginPrompt {
+    /// The opaque handle to poll with. A secret: it is good for one session.
+    pub device_handle: String,
+    /// The code the user enters at `verification_uri`.
+    pub user_code: String,
+    /// Where the user approves, on any device with a browser.
+    pub verification_uri: String,
+    /// `verification_uri` with the code filled in, where the provider offers
+    /// one -- suitable for a QR code.
+    pub verification_uri_complete: Option<String>,
+    /// How long the user has to approve, in seconds.
+    pub expires_in_secs: u64,
+    /// How long to wait before the first poll, in seconds.
+    pub interval_secs: u32,
+}
+
+/// Where a device login stands after one poll.
+///
+/// The terminal failures -- denied, expired, an ended flow, a disabled
+/// account -- are errors rather than steps, because each ends the flow.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum DeviceLoginStep {
+    /// Not approved yet. Wait `interval_secs` before polling again.
+    Waiting {
+        /// The wait before the next poll, in seconds. It only ever grows.
+        interval_secs: u32,
+        /// Whether the server asked for a slower pace.
+        slow_down: bool,
+    },
+    /// Approved: the session is installed and persisted.
+    SignedIn {
+        /// Who the server says this is.
+        user: UserSummary,
+    },
 }
 
 /// The authentication state of one server.
@@ -60,7 +105,8 @@ pub enum SessionState {
 pub enum SessionEvent {
     /// The user began signing in.
     LoginStarted,
-    /// A `beam_session` cookie was lifted from the in-app browser.
+    /// A `beam_session` credential was obtained: lifted from the in-app
+    /// browser, or issued by a device login.
     CookieCaptured,
     /// `GET /v1/me` confirmed the cookie.
     IdentityConfirmed(Box<UserSummary>),

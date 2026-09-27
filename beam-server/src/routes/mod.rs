@@ -51,7 +51,7 @@ mod taxonomy_tests;
 /// to compile rather than at startup. Written out rather than inferred: a new
 /// rate-limited group is then a compile error here, next to the list it joins,
 /// instead of a return type that silently widens.
-pub type RestScopes = Cons<BeamLimiter, Cons<BeamLimiter, ()>>;
+pub type RestScopes = Cons<BeamLimiter, Cons<BeamLimiter, Cons<BeamLimiter, ()>>>;
 
 /// [`RestScopes`] beneath the two interceptors [`create_router`] wraps `/v1` in.
 pub type ServedScopes = Cons<middleware::EnforceSameOrigin, Cons<Cors, RestScopes>>;
@@ -120,13 +120,25 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             auth::oidc_list_sessions,
             auth::oidc_delete_session,
         ])
-        // The two operations that begin an OIDC flow, sharing one budget --
-        // which is what makes the auth class a class. Keyed by client only, so
-        // spending the budget on `login` also spends it for `callback`.
+        // The operations that begin an OIDC flow, sharing one budget -- which
+        // is what makes the auth class a class. Keyed by client only, so
+        // spending the budget on `login` also spends it for `callback` and for
+        // starting a device login.
         .group(
             Group::new("/")
-                .mount(kynos::routes![auth::oidc_login, auth::oidc_callback])
+                .mount(kynos::routes![
+                    auth::oidc_login,
+                    auth::oidc_callback,
+                    auth::start_device_login,
+                ])
                 .intercept(BeamRateLimit::interceptor(Class::Auth)),
+        )
+        // Device-login polls: frequent by design, so a budget of their own
+        // rather than the auth one (see `rate_limit`).
+        .group(
+            Group::new("/")
+                .mount(kynos::routes![auth::poll_device_login])
+                .intercept(BeamRateLimit::interceptor(Class::DevicePoll)),
         )
 }
 

@@ -242,13 +242,16 @@ pub fn classify(
             retry_after_secs: retry_after_secs.unwrap_or(60),
         },
         // 5xx is the server failing to handle a request it accepted, so the
-        // same request may well succeed later. Anything else reaching here is
-        // the request being refused -- 415 and 422 are declared on three
-        // in-client operations -- and resending it unchanged fails the same
-        // way. Decided once, here, so no client has to guess.
+        // same request may well succeed later -- except 501, which says the
+        // server does not offer what was asked for at all (a device login
+        // against an identity provider without the grant) and will say so
+        // every time. Anything else reaching here is the request being
+        // refused -- 410 and 415 and 422 among them -- and resending it
+        // unchanged fails the same way. Decided once, here, so no client has
+        // to guess.
         other => BeamError::Server {
             status: other,
-            retryable: other >= 500,
+            retryable: other >= 500 && other != 501,
             detail,
             code,
         },
@@ -421,9 +424,8 @@ mod canned {
     /// client actually put on the wire -- the `Cookie` header above all.
     #[derive(Debug)]
     pub(crate) struct CannedBackend {
-        status: u16,
-        content_type: &'static str,
-        body: &'static str,
+        /// The answers still to give, in order. The last one repeats.
+        answers: Mutex<Vec<(u16, &'static str, &'static str)>>,
         recorded: Mutex<Vec<RecordedRequest>>,
     }
 
@@ -442,10 +444,15 @@ mod canned {
             content_type: &'static str,
             body: &'static str,
         ) -> Self {
+            Self::answering_in_turn(vec![(status, content_type, body)])
+        }
+
+        /// A backend answering successive requests with successive
+        /// `(status, content type, body)` triples, the last repeating.
+        pub(crate) fn answering_in_turn(answers: Vec<(u16, &'static str, &'static str)>) -> Self {
+            assert!(!answers.is_empty(), "a backend needs something to say");
             Self {
-                status,
-                content_type,
-                body,
+                answers: Mutex::new(answers),
                 recorded: Mutex::new(Vec::new()),
             }
         }
@@ -466,10 +473,18 @@ mod canned {
                     url: request.url().clone(),
                     headers: request.headers().clone(),
                 });
+            let (status, content_type, body) = {
+                let mut answers = self.answers.lock().expect("canned answers");
+                if answers.len() > 1 {
+                    answers.remove(0)
+                } else {
+                    answers[0]
+                }
+            };
             let response = ::http::Response::builder()
-                .status(self.status)
-                .header("content-type", self.content_type)
-                .body(self.body.to_owned())
+                .status(status)
+                .header("content-type", content_type)
+                .body(body.to_owned())
                 .expect("a canned response is well-formed");
             Box::pin(async move { Ok(reqwest::Response::from(response)) })
         }
@@ -1136,7 +1151,10 @@ mod tests {
                 "{status} should arrive retryable, got {error:?}"
             );
         }
-        for status in [415_u16, 418, 422] {
+        // 410 is a device login that expired and 501 a server whose identity
+        // provider offers no device login: polling or starting again with the
+        // same request can only get the same answer.
+        for status in [410_u16, 415, 418, 422, 501] {
             let error = classify(status, None, None);
             assert!(
                 matches!(

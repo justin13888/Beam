@@ -61,9 +61,18 @@ the `beam_session` cookie, and `sanitize_redirect_path` accepts only same-origin
 so the OIDC provider cannot redirect to a custom scheme a native app could intercept. A Custom Tab's
 cookie jar is not readable by the app, which would leave the credential somewhere the app can never
 see it. Lifting the cookie out of a WebView is the only flow the server supports as it stands. The
-core exposes an `AuthStrategy` seam so a native token mint can replace it without the screens
-changing. This falsifies NFR-601's claim that a native client needs no server changes; a
-corresponding NFR is added.
+seam a native mint replaces it behind is `BeamClient::complete_login` in `beam-client-core`
+(`ffi.rs`) and the `SessionEvent` machine in `session.rs`: everything after "a credential was
+obtained" is shared, so a new way of obtaining one does not touch the screens that use it. This
+falsifies NFR-601's claim that a native client needs no server changes; a corresponding NFR is
+added.
+
+*Amended for [#151](https://github.com/justin13888/beam/issues/151):* this paragraph once named an
+`AuthStrategy` seam, which never existed in code; the seam is the one described above. The native
+mint now exists -- the OAuth 2.0 device authorization grant,
+[ADR-0017](ADR-0017-device-authorization-grant.md). The core exposes it as
+`start_device_login`/`poll_device_login`, sharing `adopt_session` with `complete_login`. On
+Android a phone keeps its WebView sign-in as the default and offers device sign-in as a secondary "Sign in with a code" action; device sign-in is the default only where there is no usable browser (a TV, or no WebView).
 
 **Trust is decided by the user, once, per certificate.** Self-hosted servers on a LAN routinely
 present a self-signed certificate, so "the platform trust store said no" cannot be the end of the
@@ -104,8 +113,9 @@ Offline downloads are in scope for the Android client, which
 [#67](https://github.com/justin13888/beam/issues/67) had explicitly excluded as "its own project".
 This is a deliberate widening, recorded here so it is a decision rather than an oversight.
 
-The WebView auth flow is a liability recorded as such. It is the only flow the current server
-supports, it works, and it is fenced behind a seam. A native mint is tracked separately.
+The WebView auth flow is a liability recorded as such. It works, and it is fenced behind a seam.
+The native mint it waited for is [ADR-0017](ADR-0017-device-authorization-grant.md); the WebView
+remains only as the fallback for an IdP that does not offer the device grant.
 
 Hardware decoder behaviour is not verified by CI. The emulator has software decoders only, so HEVC,
 AV1, HDR and audio passthrough are exercised only against those -- which is precisely the case the

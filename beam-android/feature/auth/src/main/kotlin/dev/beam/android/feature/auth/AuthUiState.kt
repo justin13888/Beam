@@ -1,6 +1,7 @@
 package dev.beam.android.feature.auth
 
 import uniffi.beam_client_core.CertificateDetails
+import uniffi.beam_client_core.DeviceLoginPrompt
 import uniffi.beam_client_core.ServerSummary
 
 /** Where the sign-in flow has got to. */
@@ -18,6 +19,11 @@ public data class AuthUiState(
      * would not accept.
      */
     val pendingTrust: PendingTrust? = null,
+    /**
+     * The code to show while a device login waits for approval elsewhere.
+     * Set instead of [loginUrl] whenever the server offers the device grant.
+     */
+    val devicePrompt: DeviceLoginPrompt? = null,
     /** The URL to open in the sign-in browser, once a server is reachable. */
     val loginUrl: String? = null,
     /** The server being signed in to. */

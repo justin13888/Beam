@@ -21,7 +21,9 @@ use crate::progress::{
     ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress, ThrottleDecision,
 };
 use crate::servers::{ServerRecord, normalize_base_url, server_id_for};
-use crate::session::{SessionEffect, SessionEvent, SessionState, UserSummary};
+use crate::session::{
+    DeviceLoginPrompt, DeviceLoginStep, SessionEffect, SessionEvent, SessionState, UserSummary,
+};
 use crate::transport::{ABOUT_BLANK, FailureKind, SessionMiddleware, TransportFailure, classify};
 use crate::upnext::{UpNextSeason, next_playable_episode};
 use secrecy::{ExposeSecret, SecretString};
@@ -460,6 +462,89 @@ impl BeamClient {
         server_id: String,
         session_cookie: String,
     ) -> Result<UserSummary, BeamError> {
+        self.adopt_session(&server_id, session_cookie).await
+    }
+
+    /// Begin signing in without a browser, by the OAuth 2.0 device
+    /// authorization grant (ADR-0017).
+    ///
+    /// Show the prompt's user code and verification address, then call
+    /// [`Self::poll_device_login`] every `interval_secs` until it signs in or
+    /// fails. The pacing is the caller's: the core has no timer, and the
+    /// server refuses a poll that comes too soon anyway.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Server`] with status 501, not retryable, when the
+    /// server's identity provider does not offer the grant -- the cue to fall
+    /// back to [`Self::login_url`] and [`Self::complete_login`].
+    pub async fn start_device_login(
+        &self,
+        server_id: String,
+    ) -> Result<DeviceLoginPrompt, BeamError> {
+        let client = self.client_for(&server_id)?;
+        let started = self
+            .send(&server_id, client.start_device_login(None))
+            .await?
+            .into_inner();
+        Ok(DeviceLoginPrompt {
+            device_handle: started.device_handle,
+            user_code: started.user_code,
+            verification_uri: started.verification_uri,
+            verification_uri_complete: started.verification_uri_complete,
+            expires_in_secs: u64::try_from(started.expires_in_secs).unwrap_or(0),
+            interval_secs: u32::try_from(started.interval_secs).unwrap_or(u32::MAX),
+        })
+    }
+
+    /// Poll a device login once.
+    ///
+    /// On approval the issued credential goes through exactly what a lifted
+    /// cookie does -- installed, confirmed against `/v1/me`, persisted -- so a
+    /// device session and a browser one are indistinguishable afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Every error ends the flow except a retryable one: [`BeamError::Forbidden`]
+    /// when the user refused (or the account is disabled),
+    /// [`BeamError::Server`] with status 410 when the code expired, and
+    /// [`BeamError::BadRequest`] when the handle names no open flow.
+    pub async fn poll_device_login(
+        &self,
+        server_id: String,
+        device_handle: String,
+    ) -> Result<DeviceLoginStep, BeamError> {
+        let client = self.client_for(&server_id)?;
+        let body = crate::api::types::DeviceLoginPoll { device_handle };
+        let answer = self
+            .send(&server_id, client.poll_device_login(None, &body))
+            .await?
+            .into_inner();
+        match answer {
+            crate::api::PollDeviceLoginResponse::Status202(pending) => {
+                Ok(DeviceLoginStep::Waiting {
+                    interval_secs: u32::try_from(pending.interval_secs).unwrap_or(u32::MAX),
+                    slow_down: pending.status == crate::api::types::DeviceLoginWait::SlowDown,
+                })
+            }
+            crate::api::PollDeviceLoginResponse::Status200(complete) => {
+                let user = self
+                    .adopt_session(&server_id, complete.session_token)
+                    .await?;
+                Ok(DeviceLoginStep::SignedIn { user })
+            }
+        }
+    }
+
+    /// Take a `beam_session` value the server issued, however it was
+    /// obtained, and make it this server's session: install it, confirm it
+    /// against `/v1/me`, and persist it only once confirmed.
+    async fn adopt_session(
+        &self,
+        server_id: &str,
+        session_cookie: String,
+    ) -> Result<UserSummary, BeamError> {
+        let server_id = server_id.to_owned();
         let captured = SecretString::from(session_cookie.clone());
 
         let effects = self.apply(&server_id, SessionEvent::LoginStarted)?;
@@ -2617,6 +2702,194 @@ mod tests {
             "the refused cookie is not on the client"
         );
         assert!(!storage.has_secret(&format!("session/{id}")));
+    }
+
+    const DEVICE_START: &str = r#"{"device_handle":"handle-1","user_code":"BCDF-GHJK",
+        "verification_uri":"https://idp.test/device",
+        "verification_uri_complete":"https://idp.test/device?user_code=BCDF-GHJK",
+        "expires_in_secs":600,"interval_secs":5}"#;
+
+    const DEVICE_APPROVED: &str = r#"{"session_token":"issued-value","session_expires_in_secs":5184000,
+        "user":{"id":"u-1","display_name":"Ada","is_admin":false}}"#;
+
+    /// A registered, signed-out server over `backend`.
+    async fn device_client(
+        backend: CannedBackend,
+    ) -> (
+        Arc<BeamClient>,
+        String,
+        Arc<CannedBackend>,
+        Arc<InMemoryKeyValueStore>,
+    ) {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let id = client
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added")
+            .id;
+        let backend = Arc::new(backend);
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        (client, id, backend, storage)
+    }
+
+    /// Starting needs no session: a device with no browser has none yet.
+    #[tokio::test]
+    async fn a_device_login_starts_signed_out_and_carries_the_prompt_through() {
+        let (client, id, backend, _) = device_client(CannedBackend::answering(
+            200,
+            "application/json",
+            DEVICE_START,
+        ))
+        .await;
+
+        let prompt = client
+            .start_device_login(id.clone())
+            .await
+            .expect("the canned start is a prompt");
+
+        assert_eq!(
+            prompt,
+            DeviceLoginPrompt {
+                device_handle: "handle-1".to_owned(),
+                user_code: "BCDF-GHJK".to_owned(),
+                verification_uri: "https://idp.test/device".to_owned(),
+                verification_uri_complete: Some(
+                    "https://idp.test/device?user_code=BCDF-GHJK".to_owned()
+                ),
+                expires_in_secs: 600,
+                interval_secs: 5,
+            }
+        );
+        let recorded = backend.recorded();
+        assert_eq!(recorded[0].method, reqwest::Method::POST);
+        assert_eq!(recorded[0].url.path(), "/v1/auth/device");
+        assert!(
+            recorded[0].headers.get(reqwest::header::ORIGIN).is_none(),
+            "a native client sends no Origin, which the server's CSRF check allows"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_poll_is_waiting_and_says_whether_to_slow_down() {
+        for (body, slow_down) in [
+            (
+                r#"{"status":"authorization_pending","interval_secs":5}"#,
+                false,
+            ),
+            (r#"{"status":"slow_down","interval_secs":10}"#, true),
+        ] {
+            let (client, id, _, storage) =
+                device_client(CannedBackend::answering(202, "application/json", body)).await;
+
+            let step = client
+                .poll_device_login(id.clone(), "handle-1".to_owned())
+                .await
+                .expect("a 202 is a step, not an error");
+
+            assert_eq!(
+                step,
+                DeviceLoginStep::Waiting {
+                    interval_secs: if slow_down { 10 } else { 5 },
+                    slow_down,
+                }
+            );
+            assert!(!storage.has_secret(&format!("session/{id}")));
+        }
+    }
+
+    /// An approval becomes this server's session exactly as a lifted cookie
+    /// does: installed, confirmed, persisted -- and then sent.
+    #[tokio::test]
+    async fn an_approved_device_login_installs_and_persists_the_issued_credential() {
+        let (client, id, backend, storage) = device_client(CannedBackend::answering_in_turn(vec![
+            (200, "application/json", DEVICE_APPROVED),
+            (200, "application/json", ME),
+        ]))
+        .await;
+
+        let step = client
+            .poll_device_login(id.clone(), "handle-1".to_owned())
+            .await
+            .expect("approved");
+
+        let DeviceLoginStep::SignedIn { user } = step else {
+            panic!("expected a signed-in step, got {step:?}");
+        };
+        assert_eq!(user.id, "u-1");
+        assert!(matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::Authenticated { .. }
+        ));
+        assert!(
+            storage.has_secret(&format!("session/{id}")),
+            "the issued credential survives a restart"
+        );
+
+        let recorded = backend.recorded();
+        assert_eq!(recorded[0].url.path(), "/v1/auth/device/token");
+        assert!(
+            cookies_of(&recorded[0]).is_empty(),
+            "the poll itself carries no session"
+        );
+        assert_eq!(recorded[1].url.path(), "/v1/me");
+        assert_eq!(cookies_of(&recorded[1]), vec!["beam_session=issued-value"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_device_login_is_forbidden_and_stores_nothing() {
+        let (client, id, _, storage) = device_client(CannedBackend::answering(
+            403,
+            "application/problem+json",
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#device-login-denied","status":403,"detail":"refused"}"#,
+        ))
+        .await;
+
+        let error = client
+            .poll_device_login(id.clone(), "handle-1".to_owned())
+            .await
+            .expect_err("a denial ends the flow");
+
+        assert!(
+            matches!(&error, BeamError::Forbidden { code, .. } if code.ends_with("#device-login-denied")),
+            "{error:?}"
+        );
+        assert!(matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::LoggedOut
+        ));
+        assert!(!storage.has_secret(&format!("session/{id}")));
+    }
+
+    /// The fallback cue: a server whose identity provider has no device
+    /// grant says so with a 501 that no retry will change.
+    #[tokio::test]
+    async fn an_unsupported_device_login_is_a_permanent_501() {
+        let (client, id, _, _) = device_client(CannedBackend::answering(
+            501,
+            "application/problem+json",
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#device-login-unsupported","status":501,"detail":"no grant"}"#,
+        ))
+        .await;
+
+        let error = client
+            .start_device_login(id)
+            .await
+            .expect_err("unsupported");
+
+        assert!(
+            matches!(
+                &error,
+                BeamError::Server { status: 501, retryable: false, code, .. }
+                    if code.ends_with("#device-login-unsupported")
+            ),
+            "{error:?}"
+        );
     }
 
     /// Signing out everywhere ends this device's session too, credential
