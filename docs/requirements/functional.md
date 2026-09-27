@@ -61,6 +61,15 @@ strength. Each requirement is independently testable. See `product.md` for narra
   without requiring a server restart or manual configuration file edit.
 - **FR-210**: A library scan MUST complete (or fail) independently of metadata enrichment; enrichment
   MUST NOT block or extend the scan's completion.
+- **FR-211**: A file the indexer can no longer find on disk MUST be soft-deleted rather than
+  removed: its row is kept, stamped `missing_since`, and excluded from browse, search, detail
+  sources and streaming; if the path reappears the row MUST be restored under the same id, so its
+  playback progress survives a transient absence (an unmounted NAS, USB disk or bind mount). A row
+  MUST be purged only by a scan that walked the library without error and found the file still
+  missing after the configurable grace period (`BEAM_MISSING_FILE_GRACE_DAYS`, measured with the
+  injected `Clock`). A walk error MUST leave the rows beneath the unreadable path untouched and be
+  reported through the admin log, and a watcher removal while the library root is unavailable MUST
+  change nothing.
 
 ## FR-3xx — Metadata Enrichment
 

@@ -105,8 +105,9 @@ can index — no file with one of the [indexed extensions](/operate/libraries/#w
 anywhere beneath it — while the library still has video files indexed. The `detail` reads `Library
 root contains no video files but video files are indexed; refusing to reconcile`. An unmounted
 volume usually leaves its mount point behind empty, or holding only files such as `.not_mounted`,
-`.DS_Store` or `Thumbs.db`, and believing that walk would delete every indexed file from the
-catalogue, so Beam refuses the scan and changes nothing. The admin notification names the library,
+`.DS_Store` or `Thumbs.db`, and believing that walk would mark every indexed file missing — and,
+once the grace period ran out, purge them with everyone's progress — so Beam refuses the scan and
+changes nothing. The admin notification names the library,
 how many video files are indexed, and the root. The Logs tab entry's message names the library and
 that count; the root is in the entry's **Details** (`path`), alongside `library_id` and
 `indexed_video_files`. Check the mount inside the container and rescan once the files are visible
