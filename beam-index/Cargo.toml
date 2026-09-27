@@ -56,9 +56,11 @@ mockall = "0.15.0"
 sea-orm = { workspace = true, features = ["mock"] }
 tempfile = "3.27.0"
 
-# Independent source for the filesystem magic numbers the probe classifies.
+# Independent sources for the filesystem magic numbers the probe classifies:
+# libc's constants, and the kernel's `linux/magic.h` for the ones libc lacks.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2"
+linux-raw-sys = "0.12"
 
 [features]
 # Opt-in tier: runs the shared repository contracts against a real Postgres.

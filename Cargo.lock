@@ -675,6 +675,7 @@ dependencies = [
  "ffmpeg-next",
  "futures",
  "libc",
+ "linux-raw-sys",
  "metrics",
  "metrics-util",
  "mockall",
