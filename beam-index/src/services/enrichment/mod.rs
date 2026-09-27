@@ -1055,7 +1055,12 @@ mod tests {
             .find_or_create_by_identity(CreateMovie::new(title.to_string(), None, None))
             .await
             .unwrap();
-        assert!(movie_repo.set_pinned_ref(movie.id, &pin).await.unwrap());
+        assert!(
+            movie_repo
+                .set_pinned_ref(movie.id, &pin, beam_domain::models::PinSource::Nfo)
+                .await
+                .unwrap()
+        );
         state_repo
             .ensure_pending(EnrichmentTargetId::Movie(movie.id))
             .await
@@ -1219,7 +1224,11 @@ mod tests {
             .unwrap();
         assert!(
             show_repo
-                .set_pinned_ref(show.id, &ProviderPin::Tmdb(1399))
+                .set_pinned_ref(
+                    show.id,
+                    &ProviderPin::Tmdb(1399),
+                    beam_domain::models::PinSource::Nfo
+                )
                 .await
                 .unwrap()
         );

@@ -158,6 +158,7 @@ fn make_movie() -> Movie {
         title: "Test Movie".to_owned(),
         identity_key: None,
         pinned_ref: None,
+        pin_source: None,
         title_localized: None,
         description: None,
         year: None,

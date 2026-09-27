@@ -1909,7 +1909,7 @@ macro_rules! show_repository_contract {
 
         #[tokio::test]
         async fn a_pin_finds_the_show_pinned_to_it_before_one_matched_to_its_id() {
-            use $crate::models::pin::ProviderPin;
+            use $crate::models::pin::{PinSource, ProviderPin};
             let fixture = $setup().await;
             let repo = fixture.repo();
             let pin = ProviderPin::Tmdb(603);
@@ -1947,7 +1947,11 @@ macro_rules! show_repository_contract {
                 .find_or_create_by_identity(new_show("Pinned"))
                 .await
                 .unwrap();
-            assert!(repo.set_pinned_ref(pinned.id, &pin).await.unwrap());
+            assert!(
+                repo.set_pinned_ref(pinned.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
             assert_eq!(
                 repo.find_by_pin(&pin).await.unwrap().map(|t| t.id),
                 Some(pinned.id),
@@ -1973,7 +1977,7 @@ macro_rules! show_repository_contract {
 
         #[tokio::test]
         async fn one_pin_pins_one_show_and_a_show_can_be_repinned() {
-            use $crate::models::pin::ProviderPin;
+            use $crate::models::pin::{PinSource, ProviderPin};
             let fixture = $setup().await;
             let repo = fixture.repo();
             let a = repo
@@ -1986,9 +1990,16 @@ macro_rules! show_repository_contract {
                 .unwrap();
             let pin = ProviderPin::Anilist(5114);
 
-            assert!(repo.set_pinned_ref(a.id, &pin).await.unwrap());
             assert!(
-                !repo.set_pinned_ref(b.id, &pin).await.unwrap(),
+                repo.set_pinned_ref(a.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(b.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
                 "another show holds the pin"
             );
             assert_eq!(
@@ -1996,12 +2007,14 @@ macro_rules! show_repository_contract {
                 None
             );
             assert!(
-                repo.set_pinned_ref(a.id, &pin).await.unwrap(),
+                repo.set_pinned_ref(a.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
                 "pinning a show to its own pin again is no clash"
             );
 
             assert!(
-                repo.set_pinned_ref(a.id, &ProviderPin::Tmdb(1))
+                repo.set_pinned_ref(a.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
                     .await
                     .unwrap()
             );
@@ -2016,12 +2029,14 @@ macro_rules! show_repository_contract {
                 "a new pin replaces the old"
             );
             assert!(
-                repo.set_pinned_ref(b.id, &pin).await.unwrap(),
+                repo.set_pinned_ref(b.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
                 "a released pin is free"
             );
             assert!(
                 !repo
-                    .set_pinned_ref(Uuid::new_v4(), &ProviderPin::Tvdb(7))
+                    .set_pinned_ref(Uuid::new_v4(), &ProviderPin::Tvdb(7), PinSource::Nfo)
                     .await
                     .unwrap(),
                 "no show, no pin"
@@ -2029,8 +2044,60 @@ macro_rules! show_repository_contract {
         }
 
         #[tokio::test]
+        async fn an_nfo_pin_never_replaces_an_administrators_pin_of_a_show() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let title = repo
+                .find_or_create_by_identity(new_show("Pinned"))
+                .await
+                .unwrap();
+            let stored = |title: Option<_>| {
+                title.map(|t: $crate::models::Show| (t.pinned_ref, t.pin_source))
+            };
+
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:1".to_string()), Some(PinSource::Nfo))),
+                "the pin is recorded with who set it"
+            );
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(2), PinSource::Admin)
+                    .await
+                    .unwrap(),
+                "an administrator replaces an NFO's pin"
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(title.id, &ProviderPin::Tmdb(3), PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "an NFO never replaces an administrator's pin"
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:2".to_string()), Some(PinSource::Admin)))
+            );
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(4), PinSource::Admin)
+                    .await
+                    .unwrap(),
+                "an administrator replaces their own pin"
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:4".to_string()), Some(PinSource::Admin)))
+            );
+        }
+
+        #[tokio::test]
         async fn enrichment_never_rewrites_a_shows_pin() {
-            use $crate::models::pin::ProviderPin;
+            use $crate::models::pin::{PinSource, ProviderPin};
             let fixture = $setup().await;
             let repo = fixture.repo();
             let title = repo
@@ -2038,9 +2105,13 @@ macro_rules! show_repository_contract {
                 .await
                 .unwrap();
             assert!(
-                repo.set_pinned_ref(title.id, &ProviderPin::Imdb("tt0113277".to_string()))
-                    .await
-                    .unwrap()
+                repo.set_pinned_ref(
+                    title.id,
+                    &ProviderPin::Imdb("tt0113277".to_string()),
+                    PinSource::Nfo
+                )
+                .await
+                .unwrap()
             );
             repo.apply_enrichment(
                 title.id,
@@ -2711,7 +2782,7 @@ macro_rules! movie_repository_contract {
 
         #[tokio::test]
         async fn a_pin_finds_the_movie_pinned_to_it_before_one_matched_to_its_id() {
-            use $crate::models::pin::ProviderPin;
+            use $crate::models::pin::{PinSource, ProviderPin};
             let fixture = $setup().await;
             let repo = fixture.repo();
             let pin = ProviderPin::Tmdb(603);
@@ -2749,7 +2820,11 @@ macro_rules! movie_repository_contract {
                 .find_or_create_by_identity(new_movie("Pinned"))
                 .await
                 .unwrap();
-            assert!(repo.set_pinned_ref(pinned.id, &pin).await.unwrap());
+            assert!(
+                repo.set_pinned_ref(pinned.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
             assert_eq!(
                 repo.find_by_pin(&pin).await.unwrap().map(|t| t.id),
                 Some(pinned.id),
@@ -2775,7 +2850,7 @@ macro_rules! movie_repository_contract {
 
         #[tokio::test]
         async fn one_pin_pins_one_movie_and_a_movie_can_be_repinned() {
-            use $crate::models::pin::ProviderPin;
+            use $crate::models::pin::{PinSource, ProviderPin};
             let fixture = $setup().await;
             let repo = fixture.repo();
             let a = repo
@@ -2788,9 +2863,16 @@ macro_rules! movie_repository_contract {
                 .unwrap();
             let pin = ProviderPin::Anilist(5114);
 
-            assert!(repo.set_pinned_ref(a.id, &pin).await.unwrap());
             assert!(
-                !repo.set_pinned_ref(b.id, &pin).await.unwrap(),
+                repo.set_pinned_ref(a.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(b.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
                 "another movie holds the pin"
             );
             assert_eq!(
@@ -2798,12 +2880,14 @@ macro_rules! movie_repository_contract {
                 None
             );
             assert!(
-                repo.set_pinned_ref(a.id, &pin).await.unwrap(),
+                repo.set_pinned_ref(a.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
                 "pinning a movie to its own pin again is no clash"
             );
 
             assert!(
-                repo.set_pinned_ref(a.id, &ProviderPin::Tmdb(1))
+                repo.set_pinned_ref(a.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
                     .await
                     .unwrap()
             );
@@ -2818,12 +2902,14 @@ macro_rules! movie_repository_contract {
                 "a new pin replaces the old"
             );
             assert!(
-                repo.set_pinned_ref(b.id, &pin).await.unwrap(),
+                repo.set_pinned_ref(b.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
                 "a released pin is free"
             );
             assert!(
                 !repo
-                    .set_pinned_ref(Uuid::new_v4(), &ProviderPin::Tvdb(7))
+                    .set_pinned_ref(Uuid::new_v4(), &ProviderPin::Tvdb(7), PinSource::Nfo)
                     .await
                     .unwrap(),
                 "no movie, no pin"
@@ -2831,8 +2917,60 @@ macro_rules! movie_repository_contract {
         }
 
         #[tokio::test]
+        async fn an_nfo_pin_never_replaces_an_administrators_pin_of_a_movie() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let title = repo
+                .find_or_create_by_identity(new_movie("Pinned"))
+                .await
+                .unwrap();
+            let stored = |title: Option<_>| {
+                title.map(|t: $crate::models::Movie| (t.pinned_ref, t.pin_source))
+            };
+
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:1".to_string()), Some(PinSource::Nfo))),
+                "the pin is recorded with who set it"
+            );
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(2), PinSource::Admin)
+                    .await
+                    .unwrap(),
+                "an administrator replaces an NFO's pin"
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(title.id, &ProviderPin::Tmdb(3), PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "an NFO never replaces an administrator's pin"
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:2".to_string()), Some(PinSource::Admin)))
+            );
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(4), PinSource::Admin)
+                    .await
+                    .unwrap(),
+                "an administrator replaces their own pin"
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:4".to_string()), Some(PinSource::Admin)))
+            );
+        }
+
+        #[tokio::test]
         async fn enrichment_never_rewrites_a_movies_pin() {
-            use $crate::models::pin::ProviderPin;
+            use $crate::models::pin::{PinSource, ProviderPin};
             let fixture = $setup().await;
             let repo = fixture.repo();
             let title = repo
@@ -2840,9 +2978,13 @@ macro_rules! movie_repository_contract {
                 .await
                 .unwrap();
             assert!(
-                repo.set_pinned_ref(title.id, &ProviderPin::Imdb("tt0113277".to_string()))
-                    .await
-                    .unwrap()
+                repo.set_pinned_ref(
+                    title.id,
+                    &ProviderPin::Imdb("tt0113277".to_string()),
+                    PinSource::Nfo
+                )
+                .await
+                .unwrap()
             );
             repo.apply_enrichment(
                 title.id,

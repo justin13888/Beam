@@ -64,8 +64,10 @@ in this order:
    enrichment state. A match carrying no id of that provider cannot be checked, and is kept.
 
 Pinning a title, or editing the NFO to pin it to another id, queues it for enrichment again with
-its old match discarded. Re-running enrichment for a pinned title (a rematch) discards its match,
-never its pin: the NFO stays the source of truth.
+its old match discarded. Re-running enrichment for a pinned title (a rematch) discards its match
+and keeps its pin. A pin an administrator sets by matching a title by hand takes precedence over
+any NFO: no NFO — edited, or beside a new file — replaces it, so correcting a title never means
+editing a file in your library.
 
 ## Re-running enrichment
 

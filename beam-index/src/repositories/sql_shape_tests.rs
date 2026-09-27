@@ -849,6 +849,7 @@ mod title_identity {
             title: "Amelie".to_string(),
             identity_key: Some("amelie|2001".to_string()),
             pinned_ref: None,
+            pin_source: None,
             identity_key_version: 1,
             title_localized: None,
             description: None,
@@ -875,6 +876,7 @@ mod title_identity {
             title: "Shogun".to_string(),
             identity_key: Some("shogun|".to_string()),
             pinned_ref: None,
+            pin_source: None,
             identity_key_version: 1,
             title_localized: None,
             description: None,
@@ -1185,35 +1187,87 @@ mod title_identity {
         }
     }
 
-    /// Pinning sets the pin on the one row, refusing a pin another row -- not
-    /// the row itself -- holds.
+    /// Pinning sets the pin and who set it on the one row, refusing a pin
+    /// another row -- not the row itself -- holds; an NFO's pin also refuses
+    /// a row an administrator pinned (FR-312), and an administrator's does not.
     #[tokio::test]
     async fn set_pinned_ref_updates_one_row_and_checks_only_other_rows_for_the_pin() {
-        use beam_domain::models::ProviderPin;
+        use beam_domain::models::{PinSource, ProviderPin};
 
         let db = connection(empty_mock());
         let movies = SqlMovieRepository::new(db.clone());
-        let _ = movies
-            .set_pinned_ref(Uuid::from_u128(91), &ProviderPin::Tmdb(603))
-            .await;
         let shows = SqlShowRepository::new(db.clone());
-        let _ = shows
-            .set_pinned_ref(Uuid::from_u128(92), &ProviderPin::Tvdb(81189))
-            .await;
+        for source in [PinSource::Nfo, PinSource::Admin] {
+            let _ = movies
+                .set_pinned_ref(Uuid::from_u128(91), &ProviderPin::Tmdb(603), source)
+                .await;
+            let _ = shows
+                .set_pinned_ref(Uuid::from_u128(92), &ProviderPin::Tvdb(81189), source)
+                .await;
+        }
         drop((movies, shows));
 
         let sql = statements(db);
-        for (statement, table, id, stored) in [
-            (&sql[0], "movies", Uuid::from_u128(91), "tmdb:603"),
-            (&sql[1], "shows", Uuid::from_u128(92), "tvdb:81189"),
+        for (statement, table, id, stored, source) in [
+            (
+                &sql[0],
+                "movies",
+                Uuid::from_u128(91),
+                "tmdb:603",
+                PinSource::Nfo,
+            ),
+            (
+                &sql[1],
+                "shows",
+                Uuid::from_u128(92),
+                "tvdb:81189",
+                PinSource::Nfo,
+            ),
+            (
+                &sql[2],
+                "movies",
+                Uuid::from_u128(91),
+                "tmdb:603",
+                PinSource::Admin,
+            ),
+            (
+                &sql[3],
+                "shows",
+                Uuid::from_u128(92),
+                "tvdb:81189",
+                PinSource::Admin,
+            ),
         ] {
             assert!(statement.sql.starts_with("UPDATE"), "{}", statement.sql);
             assert_contains(statement, r#""pinned_ref" = $1"#);
+            assert_contains(statement, r#""pin_source" = $2"#);
             assert_filters(statement, table, "id", "=");
             assert_contains(statement, "NOT EXISTS");
             assert_contains(statement, r#""other"."pinned_ref" = "#);
             assert_contains(statement, r#""other"."id" <> "#);
             let values = bound_values(statement);
+            assert!(
+                values[1].contains(source.as_str()),
+                "the source set: {values:?}"
+            );
+            match source {
+                PinSource::Nfo => {
+                    assert_filters(statement, table, "pin_source", "IS NULL");
+                    assert_filters(statement, table, "pin_source", "<>");
+                    assert_eq!(
+                        values.iter().filter(|v| v.contains("admin")).count(),
+                        1,
+                        "an administrator's pin is the one an NFO may not replace: {values:?}"
+                    );
+                }
+                PinSource::Admin => assert!(
+                    !statement
+                        .sql
+                        .contains(&format!(r#""{table}"."pin_source" <>"#)),
+                    "an administrator replaces any pin: {}",
+                    statement.sql
+                ),
+            }
             assert_eq!(
                 values.iter().filter(|v| v.contains(stored)).count(),
                 2,

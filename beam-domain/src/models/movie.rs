@@ -20,6 +20,9 @@ pub struct Movie {
     /// names it joins this movie. Stored as [`crate::models::pin::ProviderPin`]'s
     /// `"provider:id"` form. Never touched by enrichment.
     pub pinned_ref: Option<String>,
+    /// Who set `pinned_ref`: `None` exactly when the title is not pinned.
+    /// An NFO never replaces an administrator's pin (FR-312).
+    pub pin_source: Option<crate::models::pin::PinSource>,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<u32>,
@@ -105,6 +108,10 @@ impl From<beam_entity::movie::Model> for Movie {
             title: model.title,
             identity_key: model.identity_key,
             pinned_ref: model.pinned_ref,
+            pin_source: model
+                .pin_source
+                .as_deref()
+                .and_then(crate::models::pin::PinSource::parse),
             title_localized: model.title_localized,
             description: model.description,
             year: model.year.map(|y| y as u32),
@@ -151,6 +158,7 @@ mod entity_conversion_tests {
             title: "Arrival".to_string(),
             identity_key: Some("arrival|2016".to_string()),
             pinned_ref: None,
+            pin_source: None,
             identity_key_version: 1,
             title_localized: None,
             description: None,

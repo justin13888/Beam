@@ -8,6 +8,9 @@ use sea_orm_migration::prelude::*;
 ///   NFO names the same id joins the same title. Unique, so one id pins one
 ///   title; nullable, and Postgres lets any number of `NULL`s share a unique
 ///   index.
+/// - `movies.pin_source` and `shows.pin_source`: who set the pin, `nfo` or
+///   `admin` -- `NULL` exactly when `pinned_ref` is. An NFO re-read never
+///   replaces an administrator's pin (FR-312).
 /// - `sidecar_subtitles`: a text subtitle file beside a video, recorded as a
 ///   subtitle of that video (decision D184-1: its own table, not a
 ///   `media_streams` row, whose `stream_index` is the container's and whose
@@ -28,6 +31,13 @@ impl MigrationTrait for Migration {
                 .await?;
             db.execute_unprepared(&format!(
                 "CREATE UNIQUE INDEX idx_{table}_pinned_ref ON {table} (pinned_ref)"
+            ))
+            .await?;
+            db.execute_unprepared(&format!(
+                "ALTER TABLE {table} ADD COLUMN pin_source TEXT \
+                     CONSTRAINT {table}_pin_source CHECK (pin_source IN ('nfo', 'admin')), \
+                 ADD CONSTRAINT {table}_pin_has_source \
+                     CHECK ((pinned_ref IS NULL) = (pin_source IS NULL))"
             ))
             .await?;
         }
@@ -72,10 +82,12 @@ impl MigrationTrait for Migration {
 
         db.execute_unprepared("DROP TABLE sidecar_subtitles")
             .await?;
-        // Dropping a column drops the index on it.
+        // Dropping a column drops the index and the constraints on it.
         for table in ["shows", "movies"] {
-            db.execute_unprepared(&format!("ALTER TABLE {table} DROP COLUMN pinned_ref"))
-                .await?;
+            db.execute_unprepared(&format!(
+                "ALTER TABLE {table} DROP COLUMN pin_source, DROP COLUMN pinned_ref"
+            ))
+            .await?;
         }
 
         Ok(())

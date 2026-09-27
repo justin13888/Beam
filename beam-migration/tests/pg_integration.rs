@@ -962,11 +962,12 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
     let seed = [
         "INSERT INTO libraries (id, name, root_path, created_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
-        "INSERT INTO movies (id, title, identity_key, pinned_ref, created_at, updated_at) VALUES \
+        "INSERT INTO movies (id, title, identity_key, pinned_ref, pin_source, created_at, \
+                             updated_at) VALUES \
          ('00000000-0000-0000-0000-00000000000b', 'The Matrix', 'the matrix|1999', 'tmdb:603', \
-          now(), now()), \
-         ('00000000-0000-0000-0000-00000000000c', 'Heat', 'heat|1995', NULL, now(), now()), \
-         ('00000000-0000-0000-0000-00000000000d', 'Alien', 'alien|1979', NULL, now(), now())",
+          'nfo', now(), now()), \
+         ('00000000-0000-0000-0000-00000000000c', 'Heat', 'heat|1995', NULL, NULL, now(), now()), \
+         ('00000000-0000-0000-0000-00000000000d', 'Alien', 'alien|1979', NULL, NULL, now(), now())",
         "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) VALUES \
          ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', \
           '00000000-0000-0000-0000-00000000000b', NULL, true, now())",
@@ -985,9 +986,24 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
 
     for (refused, why) in [
         (
-            "UPDATE movies SET pinned_ref = 'tmdb:603' \
+            "UPDATE movies SET pinned_ref = 'tmdb:603', pin_source = 'admin' \
               WHERE id = '00000000-0000-0000-0000-00000000000c'",
             "one provider id pins one movie",
+        ),
+        (
+            "UPDATE movies SET pinned_ref = 'tmdb:949' \
+              WHERE id = '00000000-0000-0000-0000-00000000000c'",
+            "a pin says who set it",
+        ),
+        (
+            "UPDATE movies SET pin_source = 'nfo' \
+              WHERE id = '00000000-0000-0000-0000-00000000000d'",
+            "no source without a pin",
+        ),
+        (
+            "UPDATE movies SET pinned_ref = 'tmdb:949', pin_source = 'user' \
+              WHERE id = '00000000-0000-0000-0000-00000000000c'",
+            "a pin is set by an NFO or an administrator",
         ),
         (
             "INSERT INTO sidecar_subtitles (id, file_id, library_id, path, format, size_bytes, \
@@ -1007,7 +1023,8 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
         assert!(db.execute_unprepared(refused).await.is_err(), "{why}");
     }
     db.execute_unprepared(
-        "UPDATE movies SET pinned_ref = NULL WHERE id = '00000000-0000-0000-0000-00000000000b'",
+        "UPDATE movies SET pinned_ref = NULL, pin_source = NULL \
+          WHERE id = '00000000-0000-0000-0000-00000000000b'",
     )
     .await
     .expect("any number of titles may be unpinned");
@@ -1029,7 +1046,8 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
             "SELECT (table_name || '.' || column_name)::text AS v \
                FROM information_schema.columns \
               WHERE table_schema = current_schema() \
-                AND (column_name = 'pinned_ref' OR table_name = 'sidecar_subtitles')"
+                AND (column_name IN ('pinned_ref', 'pin_source') \
+                     OR table_name = 'sidecar_subtitles')"
         )
         .await
         .is_empty(),

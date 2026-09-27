@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
-use beam_domain::models::ProviderPin;
 use beam_domain::models::{CreateMovie, CreateMovieEntry, Movie, MovieEntry, MovieSearchQuery};
+use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::providers::enrichment::MovieEnrichment;
 use beam_domain::repositories::MovieRepository;
 
@@ -299,18 +299,36 @@ impl MovieRepository for SqlMovieRepository {
         Ok(model.map(Movie::from))
     }
 
-    async fn set_pinned_ref(&self, movie_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr> {
+    async fn set_pinned_ref(
+        &self,
+        movie_id: Uuid,
+        pin: &ProviderPin,
+        source: PinSource,
+    ) -> Result<bool, DbErr> {
         use beam_entity::movie;
         use sea_orm::sea_query::{Alias, Expr, ExprTrait, Query};
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
 
         let stored = pin.to_ref_string();
         let other = Alias::new("other");
         // As in `rekey`: `NOT EXISTS` answers the ordinary clash, the unique
         // index a concurrent one.
-        let result = movie::Entity::update_many()
+        let mut update = movie::Entity::update_many()
             .col_expr(movie::Column::PinnedRef, Expr::value(Some(stored.clone())))
-            .filter(movie::Column::Id.eq(movie_id))
+            .col_expr(
+                movie::Column::PinSource,
+                Expr::value(Some(source.as_str().to_string())),
+            )
+            .filter(movie::Column::Id.eq(movie_id));
+        if source == PinSource::Nfo {
+            // An NFO never replaces an administrator's pin (FR-312).
+            update = update.filter(
+                Condition::any()
+                    .add(movie::Column::PinSource.is_null())
+                    .add(movie::Column::PinSource.ne(PinSource::Admin.as_str())),
+            );
+        }
+        let result = update
             .filter(Expr::not_exists(
                 Query::select()
                     .expr(Expr::val(1))

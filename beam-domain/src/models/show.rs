@@ -18,6 +18,9 @@ pub struct Show {
     /// The provider id a `tvshow.nfo` pins this show to (issue #184); see
     /// [`crate::models::movie::Movie::pinned_ref`].
     pub pinned_ref: Option<String>,
+    /// Who set `pinned_ref`: `None` exactly when the title is not pinned.
+    /// An NFO never replaces an administrator's pin (FR-312).
+    pub pin_source: Option<crate::models::pin::PinSource>,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<u32>,
@@ -111,6 +114,10 @@ impl From<beam_entity::show::Model> for Show {
             title: model.title,
             identity_key: model.identity_key,
             pinned_ref: model.pinned_ref,
+            pin_source: model
+                .pin_source
+                .as_deref()
+                .and_then(crate::models::pin::PinSource::parse),
             title_localized: model.title_localized,
             description: model.description,
             year: model.year.map(|y| y as u32),

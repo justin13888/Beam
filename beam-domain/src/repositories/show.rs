@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::pin::ProviderPin;
+use crate::models::pin::{PinSource, ProviderPin};
 use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show, ShowSearchQuery};
 use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 
@@ -65,10 +65,17 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// `imdb_id`, `tvdb_id` or `anilist_id`). A file whose NFO names `pin`
     /// joins this show whatever its path is keyed as.
     async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Show>, DbErr>;
-    /// Pin `show_id` to `pin`, replacing any pin it had. Returns `false`,
-    /// changing nothing, when the show does not exist or another show
-    /// is already pinned to `pin`.
-    async fn set_pinned_ref(&self, show_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr>;
+    /// Pin `show_id` to `pin`, set by `source`, replacing any pin it had --
+    /// except that an NFO's pin never replaces an administrator's (FR-312).
+    /// Returns `false`, changing nothing, when the show does not exist, another
+    /// show is already pinned to `pin`, or `source` is an NFO and the show is
+    /// pinned by an administrator.
+    async fn set_pinned_ref(
+        &self,
+        show_id: Uuid,
+        pin: &ProviderPin,
+        source: PinSource,
+    ) -> Result<bool, DbErr>;
     /// Delete every episode created before `created_before` that no file row
     /// references, then every season left with no episode, then every show
     /// created before `created_before` left with no season, returning how many
@@ -273,6 +280,7 @@ pub mod in_memory {
                 title,
                 identity_key: Some(identity_key),
                 pinned_ref: None,
+                pin_source: None,
                 title_localized: None,
                 description: None,
                 year,
@@ -398,7 +406,12 @@ pub mod in_memory {
                 .cloned())
         }
 
-        async fn set_pinned_ref(&self, show_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr> {
+        async fn set_pinned_ref(
+            &self,
+            show_id: Uuid,
+            pin: &ProviderPin,
+            source: PinSource,
+        ) -> Result<bool, DbErr> {
             let stored = pin.to_ref_string();
             let mut shows = self.shows.lock().unwrap();
             if shows
@@ -408,8 +421,14 @@ pub mod in_memory {
                 return Ok(false);
             }
             match shows.get_mut(&show_id) {
+                Some(title)
+                    if source == PinSource::Nfo && title.pin_source == Some(PinSource::Admin) =>
+                {
+                    Ok(false)
+                }
                 Some(title) => {
                     title.pinned_ref = Some(stored);
+                    title.pin_source = Some(source);
                     Ok(true)
                 }
                 None => Ok(false),
@@ -658,6 +677,7 @@ pub mod in_memory_fixture {
                 title: title.to_string(),
                 identity_key: None,
                 pinned_ref: None,
+                pin_source: None,
                 title_localized: None,
                 description: None,
                 year: None,

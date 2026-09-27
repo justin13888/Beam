@@ -106,7 +106,8 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `title` | TEXT | no | the **display** title: the filename parse until enrichment replaces it with the provider's. Never used to find the movie |
 | `identity_key` | TEXT | yes | unique — what the indexer matches a file to this movie by; see *Title identity* below. NULL only on a row that predates the column and could not be backfilled |
 | `identity_key_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that derived `identity_key`. A key an older version derived is re-derived from the title's files (*Rekey* below); `0` marks keys stored before versions existed |
-| `pinned_ref` | TEXT | yes | unique — the provider id an NFO beside the media pins the movie to, as `"provider:id"` (`tmdb:603`, `imdb:tt0133093`; `beam_domain::models::pin::ProviderPin`). A file whose NFO names it joins this movie before any key is consulted, and enrichment fetches the movie by it (issue #184). Never written by enrichment; NULL when no NFO pins the movie |
+| `pinned_ref` | TEXT | yes | unique — the provider id an NFO beside the media pins the movie to, as `"provider:id"` (`tmdb:603`, `imdb:tt0133093`; `beam_domain::models::pin::ProviderPin`). A file whose NFO names it joins this movie before any key is consulted, and enrichment fetches the movie by it (issue #184). Never written by enrichment; NULL when the movie is not pinned |
+| `pin_source` | TEXT | yes | who set `pinned_ref`: `nfo` or `admin` (a `CHECK` holds it to these, and to being NULL exactly when `pinned_ref` is). An NFO never replaces an `admin` pin (FR-312) |
 | `title_localized` | TEXT | yes | |
 | `description` | TEXT | yes | |
 | `year` | INTEGER | yes | |
@@ -129,7 +130,7 @@ has the same.
 ### `shows`
 Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `identity_key` (unique,
 nullable — as for movies), `identity_key_version` (as for movies), `pinned_ref` (unique, nullable —
-as for movies, pinned by a `tvshow.nfo`), `title_localized`, `description`, `year`, `poster_url`,
+as for movies, pinned by a `tvshow.nfo`), `pin_source` (as for movies), `title_localized`, `description`, `year`, `poster_url`,
 `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id` (each unique, nullable),
 `created_at`, `updated_at`.
 

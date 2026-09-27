@@ -7,10 +7,10 @@
 
 use std::io::Read;
 
-use beam_domain::models::ProviderPin;
 use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::models::movie::Movie;
 use beam_domain::models::show::Show;
+use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::utils::nfo::{MAX_NFO_BYTES, Nfo, NfoKind, parse_nfo};
 
 use super::*;
@@ -123,15 +123,18 @@ pub(super) enum PinConflict {
 }
 
 impl LocalIndexService {
-    /// Pin the title `target` -- currently pinned to `current`, matched to
-    /// the ids `carried` -- to `pin`. A title newly pinned, or re-pinned, is
-    /// queued for re-enrichment with its old match cleared, so the next pass
-    /// fetches it by the pin. `source` is the NFO or video the pin came from,
-    /// for the administrator.
+    /// Pin the title `target` -- currently pinned to `current` by
+    /// `current_source`, matched to the ids `carried` -- to the NFO's `pin`.
+    /// A title newly pinned, or re-pinned, is queued for re-enrichment with
+    /// its old match cleared, so the next pass fetches it by the pin. An
+    /// administrator's pin is never replaced (FR-312). `source` is the NFO or
+    /// video the pin came from, for the administrator.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn apply_pin(
         &self,
         target: EnrichmentTargetId,
         current: Option<&str>,
+        current_source: Option<PinSource>,
         carried: bool,
         pin: &ProviderPin,
         conflict: PinConflict,
@@ -140,6 +143,15 @@ impl LocalIndexService {
         let stored = pin.to_ref_string();
         match current {
             Some(current) if current == stored => return Ok(()),
+            Some(current) if current_source == Some(PinSource::Admin) => {
+                info!(
+                    path = %source.display(),
+                    pinned = current,
+                    nfo = %stored,
+                    "an administrator pinned this title; the NFO's pin is not applied"
+                );
+                return Ok(());
+            }
             Some(current) if conflict == PinConflict::Keep => {
                 warn!(
                     path = %source.display(),
@@ -169,15 +181,26 @@ impl LocalIndexService {
             _ => {}
         }
         let (id, pinned) = match target {
-            EnrichmentTargetId::Movie(id) => (id, self.movie_repo.set_pinned_ref(id, pin).await?),
-            EnrichmentTargetId::Show(id) => (id, self.show_repo.set_pinned_ref(id, pin).await?),
+            EnrichmentTargetId::Movie(id) => (
+                id,
+                self.movie_repo
+                    .set_pinned_ref(id, pin, PinSource::Nfo)
+                    .await?,
+            ),
+            EnrichmentTargetId::Show(id) => (
+                id,
+                self.show_repo
+                    .set_pinned_ref(id, pin, PinSource::Nfo)
+                    .await?,
+            ),
         };
         if !pinned {
             warn!(
                 path = %source.display(),
                 title = %id,
                 pin = %stored,
-                "another title is already pinned to this id; not pinned"
+                "another title is already pinned to this id, or an administrator pinned \
+                 this one; not pinned"
             );
             return Ok(());
         }
@@ -220,6 +243,7 @@ impl LocalIndexService {
             self.apply_pin(
                 EnrichmentTargetId::Movie(movie.id),
                 movie.pinned_ref.as_deref(),
+                movie.pin_source,
                 carried,
                 pin,
                 PinConflict::Keep,
@@ -261,6 +285,7 @@ impl LocalIndexService {
             self.apply_pin(
                 EnrichmentTargetId::Show(show.id),
                 show.pinned_ref.as_deref(),
+                show.pin_source,
                 carried,
                 pin,
                 PinConflict::Keep,
@@ -325,6 +350,7 @@ impl LocalIndexService {
                 self.apply_pin(
                     EnrichmentTargetId::Show(show.id),
                     show.pinned_ref.as_deref(),
+                    show.pin_source,
                     carried,
                     &pin,
                     PinConflict::Replace,
@@ -364,6 +390,7 @@ impl LocalIndexService {
             self.apply_pin(
                 EnrichmentTargetId::Movie(movie.id),
                 movie.pinned_ref.as_deref(),
+                movie.pin_source,
                 carried,
                 &pin,
                 PinConflict::Replace,

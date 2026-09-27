@@ -62,6 +62,37 @@ impl std::fmt::Display for ProviderPin {
     }
 }
 
+/// Who pinned a title (FR-312). An administrator's pin is a decision about
+/// the title made in Beam, so no NFO re-read ever replaces it; an NFO's pin
+/// is replaced by an edit of the NFO it came from, or by an administrator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PinSource {
+    /// Read from a Kodi `.nfo` beside the media (issue #184).
+    Nfo,
+    /// Set by an administrator's manual match (issue #185).
+    Admin,
+}
+
+impl PinSource {
+    /// Every source, for exhaustive checks.
+    pub const ALL: [PinSource; 2] = [PinSource::Nfo, PinSource::Admin];
+
+    /// How the source is stored (`pin_source`, held to these by a `CHECK`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PinSource::Nfo => "nfo",
+            PinSource::Admin => "admin",
+        }
+    }
+
+    /// The source a stored `pin_source` names.
+    pub fn parse(stored: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|source| source.as_str() == stored)
+    }
+}
+
 /// A provider's numeric id: all digits, and not zero (no provider issues `0`).
 pub(crate) fn positive(text: &str) -> Option<u32> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
@@ -108,6 +139,16 @@ mod tests {
             "603",
         ] {
             assert_eq!(ProviderPin::parse(stored), None, "{stored:?}");
+        }
+    }
+
+    #[test]
+    fn every_pin_source_reads_back_from_its_stored_form_and_nothing_else_does() {
+        for source in PinSource::ALL {
+            assert_eq!(PinSource::parse(source.as_str()), Some(source));
+        }
+        for stored in ["", "NFO", "Admin", "user", "nfo "] {
+            assert_eq!(PinSource::parse(stored), None, "{stored:?}");
         }
     }
 

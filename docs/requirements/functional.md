@@ -266,7 +266,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   that id at full confidence, with no search; else a search as usual, whose match MUST be left
   unmatched, with the reason recorded, when it carries a different id of the pinned provider.
   Pinning a title, or re-pinning it, MUST queue it for enrichment with its stored match cleared; a
-  rematch MUST clear the match and never the pin.
+  rematch MUST clear the match and keep the pin. A pin MUST record who set it, an NFO or an
+  administrator: an administrator's manual match
+  ([#185](https://github.com/justin13888/beam/issues/185)) sets an administrator's pin, which takes
+  precedence over any NFO's and which no NFO -- re-read, edited, or named by a new file -- replaces,
+  so an administrator never has to edit a file in a library to correct Beam.
 
 ## FR-4xx — Browse, Search & Detail
 

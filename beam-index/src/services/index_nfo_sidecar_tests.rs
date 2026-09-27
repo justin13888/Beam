@@ -477,6 +477,41 @@ async fn an_edited_nfo_repins_its_movie_when_the_watcher_sees_it() {
     );
 }
 
+/// An administrator's pin is a decision made in Beam: no NFO -- edited, or
+/// named by a new file -- replaces it (FR-312).
+#[tokio::test]
+async fn an_nfo_never_replaces_an_administrators_pin() {
+    use beam_domain::models::PinSource;
+    use beam_domain::models::ProviderPin;
+    use beam_domain::repositories::MovieRepository;
+
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.scan().await;
+    let movie = h.movie_of("Matrix/matrix.mkv");
+    assert!(
+        h.movie_repo
+            .set_pinned_ref(movie.id, &ProviderPin::Tmdb(624860), PinSource::Admin)
+            .await
+            .unwrap()
+    );
+
+    h.write(
+        "Matrix/movie.nfo",
+        r#"<movie><uniqueid type="tmdb">604</uniqueid></movie>"#,
+    );
+    h.event("Matrix/movie.nfo", FsEventKind::Modified).await;
+    h.scan().await;
+
+    let movie = h.movie_of("Matrix/matrix.mkv");
+    assert_eq!(
+        (movie.pinned_ref.as_deref(), movie.pin_source),
+        (Some("tmdb:624860"), Some(PinSource::Admin)),
+        "the administrator's pin stands"
+    );
+}
+
 /// An NFO edited while a scan holds the library is not read under it: the
 /// event is handed back to retry (issue #181), and the retry -- once the
 /// library is free -- applies the edit rather than losing it.

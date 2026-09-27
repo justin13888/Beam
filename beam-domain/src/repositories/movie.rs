@@ -4,7 +4,7 @@ use sea_orm::DbErr;
 use uuid::Uuid;
 
 use crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry, MovieSearchQuery};
-use crate::models::pin::ProviderPin;
+use crate::models::pin::{PinSource, ProviderPin};
 use crate::providers::enrichment::MovieEnrichment;
 
 /// Persistence for movies and their entries.
@@ -78,10 +78,17 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     /// `imdb_id`, `tvdb_id` or `anilist_id`). A file whose NFO names `pin`
     /// joins this movie whatever its path is keyed as.
     async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Movie>, DbErr>;
-    /// Pin `movie_id` to `pin`, replacing any pin it had. Returns `false`,
-    /// changing nothing, when the movie does not exist or another movie
-    /// is already pinned to `pin`.
-    async fn set_pinned_ref(&self, movie_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr>;
+    /// Pin `movie_id` to `pin`, set by `source`, replacing any pin it had --
+    /// except that an NFO's pin never replaces an administrator's (FR-312).
+    /// Returns `false`, changing nothing, when the movie does not exist, another
+    /// movie is already pinned to `pin`, or `source` is an NFO and the movie is
+    /// pinned by an administrator.
+    async fn set_pinned_ref(
+        &self,
+        movie_id: Uuid,
+        pin: &ProviderPin,
+        source: PinSource,
+    ) -> Result<bool, DbErr>;
     /// Delete every movie entry created before `created_before` that no file
     /// row references, then every movie created before `created_before` left
     /// with no entry, returning how many movies went. A file row that is only
@@ -270,6 +277,7 @@ pub mod in_memory {
                 title,
                 identity_key: Some(identity_key),
                 pinned_ref: None,
+                pin_source: None,
                 title_localized: None,
                 description: None,
                 year,
@@ -399,7 +407,12 @@ pub mod in_memory {
                 .cloned())
         }
 
-        async fn set_pinned_ref(&self, movie_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr> {
+        async fn set_pinned_ref(
+            &self,
+            movie_id: Uuid,
+            pin: &ProviderPin,
+            source: PinSource,
+        ) -> Result<bool, DbErr> {
             let stored = pin.to_ref_string();
             let mut movies = self.movies.lock().unwrap();
             if movies
@@ -409,8 +422,14 @@ pub mod in_memory {
                 return Ok(false);
             }
             match movies.get_mut(&movie_id) {
+                Some(title)
+                    if source == PinSource::Nfo && title.pin_source == Some(PinSource::Admin) =>
+                {
+                    Ok(false)
+                }
                 Some(title) => {
                     title.pinned_ref = Some(stored);
+                    title.pin_source = Some(source);
                     Ok(true)
                 }
                 None => Ok(false),
@@ -565,6 +584,7 @@ pub mod in_memory_fixture {
                 title: title.to_string(),
                 identity_key: None,
                 pinned_ref: None,
+                pin_source: None,
                 title_localized: None,
                 description: None,
                 year: None,

@@ -25,6 +25,9 @@ pub struct Model {
     /// NFO pins it.
     #[sea_orm(unique)]
     pub pinned_ref: Option<String>,
+    /// Who set `pinned_ref`: `nfo` or `admin` (a `CHECK` holds it to these),
+    /// `NULL` exactly when `pinned_ref` is.
+    pub pin_source: Option<String>,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<i32>,
