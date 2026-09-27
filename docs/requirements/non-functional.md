@@ -175,9 +175,10 @@ requirements (referenced below as FR-xxx).
 - **NFR-503**: The server MUST NOT send usage or library data anywhere unless the operator names a
   destination (`BEAM_TELEMETRY_URL`); there is no default collector. What it then sends MUST be
   aggregate only -- counts, codec and container distributions, size ranges, the server version --
-  and MUST NOT contain a title, path, library or user name, file hash, or any identifier of the
-  server, its users or its install, so no two reports can be linked. Playback progress and history
-  never leave the server
+  with every count reported as a coarse range, never exactly. It MUST contain no identifier: no
+  title, path, library or user name, file hash, or identifier of the server, its users or its
+  install. Reports are not guaranteed unlinkable: a stable, distinctive shape may still let a
+  collector correlate one server's reports. Playback progress and history never leave the server
   ([ADR-0019](../architecture/decisions/ADR-0019-telemetry-posture.md)).
 
 ## NFR-6xx — Extensibility

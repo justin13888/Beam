@@ -1,10 +1,11 @@
 //! The coarsening the anonymous library report applies (issue #93, ADR-0019).
 //!
-//! Everything here decides how much a report *cannot* say. Sizes are never
-//! reported exactly -- a file's size falls into one of a few
-//! [`FileSizeBucket`]s, and the library's total into one of a few
-//! [`TotalSizeBucket`]s -- and every free-form label (a container or codec
-//! name) passes through [`normalize_label`] before it can leave the process.
+//! Everything here decides how much a report *cannot* say. No number is
+//! reported exactly -- a count falls into one of a few orders of magnitude
+//! ([`CountBucket`]), a file's size into one of a few [`FileSizeBucket`]s, and
+//! the library's total into one of a few [`TotalSizeBucket`]s -- and every
+//! free-form label (a container or codec name) passes through
+//! [`normalize_label`] before it can leave the process.
 //!
 //! Pure functions and constants only: the SQL repository generates its
 //! histogram from [`FileSizeBucket::ALL`], and the in-memory double buckets
@@ -23,6 +24,73 @@ pub const UNKNOWN_LABEL: &str = "unknown";
 /// longest legitimate values (`mov,mp4,m4a,3gp,3g2,mj2` is 23 characters);
 /// anything past this is not a name FFmpeg produced.
 pub const MAX_LABEL_LEN: usize = 48;
+
+/// The order of magnitude a count falls into -- how a report says how many of
+/// anything there are.
+///
+/// A report carries no exact count: `4_812` episodes and `4_813` read alike,
+/// so a week's additions do not make one server's reports trivially line up
+/// with each other (NFR-503). Each bucket covers `[lower_bound, next bucket's
+/// lower bound)`; the last is open-ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CountBucket {
+    None,
+    From1To9,
+    From10To99,
+    From100To999,
+    From1000To9999,
+    AtLeast10000,
+}
+
+impl CountBucket {
+    /// The one table the buckets are read from: each bucket in declaration
+    /// order, the smallest count it holds, and its stable wire name.
+    const TABLE: [(Self, u64, &'static str); 6] = [
+        (Self::None, 0, "none"),
+        (Self::From1To9, 1, "from_1_to_9"),
+        (Self::From10To99, 10, "from_10_to_99"),
+        (Self::From100To999, 100, "from_100_to_999"),
+        (Self::From1000To9999, 1_000, "from_1000_to_9999"),
+        (Self::AtLeast10000, 10_000, "at_least_10000"),
+    ];
+
+    /// Every bucket, smallest first.
+    pub const ALL: [Self; Self::TABLE.len()] = {
+        let mut all = [Self::None; Self::TABLE.len()];
+        let mut index = 0;
+        while index < all.len() {
+            all[index] = Self::TABLE[index].0;
+            index += 1;
+        }
+        all
+    };
+
+    /// The smallest count this bucket holds.
+    pub const fn lower_bound(self) -> u64 {
+        Self::TABLE[self as usize].1
+    }
+
+    /// The first count past this bucket; `None` for the last.
+    pub fn upper_bound(self) -> Option<u64> {
+        Self::TABLE
+            .get(self as usize + 1)
+            .map(|(_, lower_bound, _)| *lower_bound)
+    }
+
+    /// The bucket `count` falls into.
+    pub fn of(count: u64) -> Self {
+        Self::ALL
+            .into_iter()
+            .rev()
+            .find(|bucket| count >= bucket.lower_bound())
+            .unwrap_or(Self::None)
+    }
+
+    /// The bucket's stable wire name.
+    pub const fn as_str(self) -> &'static str {
+        Self::TABLE[self as usize].2
+    }
+}
 
 /// The size range one file falls into.
 ///
@@ -251,6 +319,63 @@ mod tests {
         assert_eq!(TotalSizeBucket::of(u64::MAX), TotalSizeBucket::AtLeast50Tib);
     }
 
+    /// The table is indexed by discriminant, so its rows must be in
+    /// declaration order -- a row out of place would give a bucket another
+    /// bucket's bound and name.
+    #[test]
+    fn the_count_table_is_in_declaration_order() {
+        for (index, bucket) in CountBucket::ALL.into_iter().enumerate() {
+            assert_eq!(bucket as usize, index, "{bucket:?}");
+        }
+    }
+
+    #[test]
+    fn every_count_boundary_opens_its_bucket() {
+        for window in CountBucket::ALL.windows(2) {
+            let (below, above) = (window[0], window[1]);
+            let bound = above.lower_bound();
+            assert!(bound > below.lower_bound(), "{above:?} is above {below:?}");
+            assert_eq!(CountBucket::of(bound), above, "{bound} opens {above:?}");
+            assert_eq!(
+                CountBucket::of(bound - 1),
+                below,
+                "{bound} - 1 is still {below:?}"
+            );
+            assert_eq!(below.upper_bound(), Some(bound));
+        }
+        assert_eq!(
+            CountBucket::ALL[0].lower_bound(),
+            0,
+            "every count has a bucket"
+        );
+        assert_eq!(CountBucket::of(u64::MAX), CountBucket::AtLeast10000);
+        assert_eq!(CountBucket::AtLeast10000.upper_bound(), None);
+    }
+
+    /// Nothing and something are never one bucket: a report says whether a
+    /// codec occurs at all, whatever else it coarsens.
+    #[test]
+    fn zero_is_a_bucket_of_its_own() {
+        assert_eq!(CountBucket::ALL[0].upper_bound(), Some(1));
+        assert_ne!(CountBucket::of(0), CountBucket::of(1));
+    }
+
+    /// The wire name says what the bucket holds, so a collector reading
+    /// `from_10_to_99` knows the bounds without this source. Derived from
+    /// the bounds, not restated.
+    #[test]
+    fn each_count_name_spells_its_bounds() {
+        for bucket in CountBucket::ALL {
+            let lower = bucket.lower_bound();
+            let expected = match bucket.upper_bound() {
+                Some(1) => "none".to_string(),
+                Some(upper) => format!("from_{lower}_to_{}", upper - 1),
+                None => format!("at_least_{lower}"),
+            };
+            assert_eq!(bucket.as_str(), expected);
+        }
+    }
+
     /// Wire names are what a collector groups by, so two buckets sharing one
     /// would silently merge their counts.
     #[test]
@@ -259,6 +384,7 @@ mod tests {
             .iter()
             .map(|b| b.as_str())
             .chain(TotalSizeBucket::ALL.iter().map(|b| b.as_str()))
+            .chain(CountBucket::ALL.iter().map(|b| b.as_str()))
             .collect();
         let mut unique = names.clone();
         unique.sort_unstable();
@@ -309,6 +435,14 @@ mod tests {
     }
 
     proptest! {
+        /// Every count lands in the one bucket whose bounds hold it.
+        #[test]
+        fn a_count_is_inside_its_bucket(count in any::<u64>()) {
+            let bucket = CountBucket::of(count);
+            prop_assert!(bucket.lower_bound() <= count);
+            prop_assert!(bucket.upper_bound().is_none_or(|upper| count < upper));
+        }
+
         /// Whatever reaches the report, no path separator, whitespace or
         /// quote survives, and the result is never empty.
         #[test]

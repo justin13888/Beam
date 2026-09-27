@@ -10,11 +10,18 @@
 //!
 //! The shape follows the OTLP protobuf-JSON mapping: camelCase field names,
 //! 64-bit integers as decimal strings, attributes as `{key, value}` pairs.
+//!
+//! The report has no exact number to give, so no point carries one: every
+//! point's value is `1`, and its range is an attribute -- `count_bucket` for a
+//! count, `size_bucket` for the total size. A collector counts servers per
+//! range by summing the `1`s.
+
+use std::borrow::Cow;
 
 use chrono::{NaiveTime, TimeZone, Utc};
 use serde::Serialize;
 
-use crate::models::telemetry::{LibraryReport, LibraryReportCount};
+use crate::models::telemetry::{LibraryCountBucket, LibraryReport, LibraryReportCount};
 
 /// The `Content-Type` of an OTLP/HTTP JSON request.
 pub const OTLP_JSON_CONTENT_TYPE: &str = "application/json";
@@ -24,6 +31,13 @@ const SERVICE_NAME: &str = "beam-server";
 
 /// The instrumentation scope the gauges belong to.
 const SCOPE_NAME: &str = "beam.library_report";
+
+/// The attribute a point's count range is carried in.
+const COUNT_BUCKET: &str = "count_bucket";
+
+/// The unit of every gauge: each point is the dimensionless `1` of "this
+/// server is in this range".
+const UNIT: &str = "1";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,15 +100,15 @@ struct KeyValue<'a> {
 #[derive(Serialize)]
 enum AnyValue<'a> {
     #[serde(rename = "stringValue")]
-    String(&'a str),
+    String(Cow<'a, str>),
     #[serde(rename = "intValue")]
     Int(String),
 }
 
-fn text<'a>(key: &'static str, value: &'a str) -> KeyValue<'a> {
+fn text<'a>(key: &'static str, value: impl Into<Cow<'a, str>>) -> KeyValue<'a> {
     KeyValue {
         key,
-        value: AnyValue::String(value),
+        value: AnyValue::String(value.into()),
     }
 }
 
@@ -112,13 +126,21 @@ impl<'a> Points<'a> {
         }
     }
 
-    fn point(mut self, attributes: Vec<KeyValue<'a>>, value: u64) -> Self {
+    /// A point meaning "in this range": the value is always `1`, and the
+    /// range is among `attributes`.
+    fn point(mut self, attributes: Vec<KeyValue<'a>>) -> Self {
         self.points.push(NumberDataPoint {
             attributes,
             time_unix_nano: self.time_unix_nano.to_string(),
-            as_int: value.to_string(),
+            as_int: "1".to_string(),
         });
         self
+    }
+
+    /// A point for a count, its range in `count_bucket`.
+    fn counted(self, mut attributes: Vec<KeyValue<'a>>, count: LibraryCountBucket) -> Self {
+        attributes.push(text(COUNT_BUCKET, wire_name(&count)));
+        self.point(attributes)
     }
 
     fn named(
@@ -129,21 +151,16 @@ impl<'a> Points<'a> {
     ) -> Self {
         counts.iter().fold(self, |points, count| {
             let mut attributes = extra();
-            attributes.push(text(key, &count.name));
-            points.point(attributes, count.count)
+            attributes.push(text(key, count.name.as_str()));
+            points.counted(attributes, count.count)
         })
     }
 
-    fn gauge(
-        self,
-        name: &'static str,
-        unit: &'static str,
-        description: &'static str,
-    ) -> Metric<'a> {
+    fn gauge(self, name: &'static str, description: &'static str) -> Metric<'a> {
         Metric {
             name,
             description,
-            unit,
+            unit: UNIT,
             gauge: Gauge {
                 data_points: self.points,
             },
@@ -151,8 +168,8 @@ impl<'a> Points<'a> {
     }
 }
 
-/// Serialises a string-keyed enum value, e.g. a size bucket, to its wire
-/// name.
+/// Serialises a string-keyed enum value, e.g. a size or count bucket, to its
+/// wire name.
 fn wire_name(value: &impl Serialize) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(name)) => name,
@@ -187,81 +204,75 @@ pub fn encode_otlp_json(report: &LibraryReport) -> Vec<u8> {
         .unwrap_or_default()
         .to_string();
     let at = time_unix_nano.as_str();
-    let size_names: Vec<String> = file_sizes
-        .iter()
-        .map(|size| wire_name(&size.bucket))
-        .collect();
-    let total_size = wire_name(total_size);
 
     let metrics = vec![
-        Points::new(at).point(Vec::new(), *libraries).gauge(
+        Points::new(at).counted(Vec::new(), *libraries).gauge(
             "beam.library.libraries",
-            "{library}",
-            "Registered libraries.",
+            "Registered libraries, as a range.",
         ),
         Points::new(at)
-            .point(vec![text("media_type", "movie")], titles.movies)
-            .point(vec![text("media_type", "show")], titles.shows)
+            .counted(vec![text("media_type", "movie")], titles.movies)
+            .counted(vec![text("media_type", "show")], titles.shows)
             .gauge(
                 "beam.library.titles",
-                "{title}",
-                "Titles with at least one present file.",
+                "Titles with at least one present file, as a range.",
             ),
-        Points::new(at).point(Vec::new(), *seasons).gauge(
+        Points::new(at).counted(Vec::new(), *seasons).gauge(
             "beam.library.seasons",
-            "{season}",
-            "Seasons with at least one present episode file.",
+            "Seasons with at least one present episode file, as a range.",
         ),
-        Points::new(at).point(Vec::new(), *episodes).gauge(
+        Points::new(at).counted(Vec::new(), *episodes).gauge(
             "beam.library.episodes",
-            "{episode}",
-            "Episodes with a present file.",
+            "Episodes with a present file, as a range.",
         ),
         Points::new(at)
-            .point(vec![text("content_type", "movie")], files.movie)
-            .point(vec![text("content_type", "episode")], files.episode)
-            .point(
+            .counted(vec![text("content_type", "movie")], files.movie)
+            .counted(vec![text("content_type", "episode")], files.episode)
+            .counted(
                 vec![text("content_type", "unclassified")],
                 files.unclassified,
             )
             .gauge(
                 "beam.library.files",
-                "{file}",
-                "Present files by content type.",
+                "Present files by content type, as a range.",
             ),
-        Points::new(at).named("container", containers, Vec::new).gauge(
-            "beam.library.files.by_container",
-            "{file}",
-            "Present files by container.",
-        ),
+        Points::new(at)
+            .named("container", containers, Vec::new)
+            .gauge(
+                "beam.library.files.by_container",
+                "Present files by container, as a range.",
+            ),
         file_sizes
             .iter()
-            .zip(&size_names)
-            .fold(Points::new(at), |points, (size, name)| {
-                points.point(vec![text("size_bucket", name)], size.count)
+            .fold(Points::new(at), |points, size| {
+                points.counted(
+                    vec![text("size_bucket", wire_name(&size.bucket))],
+                    size.count,
+                )
             })
             .gauge(
                 "beam.library.files.by_size",
-                "{file}",
-                "Present files by size range.",
+                "Present files by size range, as a range.",
             ),
         Points::new(at)
-            .named("codec", &codecs.video, || vec![text("stream_type", "video")])
-            .named("codec", &codecs.audio, || vec![text("stream_type", "audio")])
+            .named("codec", &codecs.video, || {
+                vec![text("stream_type", "video")]
+            })
+            .named("codec", &codecs.audio, || {
+                vec![text("stream_type", "audio")]
+            })
             .named("codec", &codecs.subtitle, || {
                 vec![text("stream_type", "subtitle")]
             })
             .gauge(
                 "beam.library.streams",
-                "{stream}",
-                "Streams of present files by type and codec.",
+                "Streams of present files by type and codec, as a range.",
             ),
         Points::new(at)
-            .point(vec![text("size_bucket", &total_size)], 1)
+            .point(vec![text("size_bucket", wire_name(total_size))])
             .gauge(
                 "beam.library.total_size",
-                "1",
-                "Always 1; the size_bucket attribute is the range the server's indexed bytes fall into.",
+                "The range the server's indexed bytes fall into.",
             ),
     ];
 
@@ -270,7 +281,7 @@ pub fn encode_otlp_json(report: &LibraryReport) -> Vec<u8> {
             resource: Resource {
                 attributes: vec![
                     text("service.name", SERVICE_NAME),
-                    text("service.version", server_version),
+                    text("service.version", server_version.as_str()),
                     KeyValue {
                         key: "beam.report.schema_version",
                         value: AnyValue::Int(schema_version.to_string()),
@@ -302,6 +313,8 @@ mod tests {
     use super::*;
     use crate::services::telemetry::library_report::build_library_report;
 
+    /// Counts spread over every count range, so a point found under the
+    /// wrong range's attribute cannot pass for the right one.
     fn report() -> LibraryReport {
         let mut file_sizes = FileSizeHistogram::default();
         for size in [1, GIB, 5 * GIB, 60 * GIB] {
@@ -310,16 +323,19 @@ mod tests {
         build_library_report(
             &LibraryShape {
                 libraries: 2,
-                movies: 3,
+                movies: 30,
                 shows: 4,
-                seasons: 5,
-                episodes: 6,
+                seasons: 0,
+                episodes: 600,
                 files: FilesByContentType {
-                    movie: 7,
-                    episode: 8,
-                    unclassified: 9,
+                    movie: 70,
+                    episode: 8_000,
+                    unclassified: 90_000,
                 },
-                containers: vec![NamedCount::new("matroska,webm", 10)],
+                containers: vec![
+                    NamedCount::new("matroska,webm", 10),
+                    NamedCount::new("mov,mp4,m4a,3gp,3g2,mj2", 1),
+                ],
                 video_codecs: vec![NamedCount::new("H264", 11)],
                 audio_codecs: vec![NamedCount::new("aac", 12)],
                 subtitle_codecs: vec![NamedCount::new("subrip", 13)],
@@ -376,73 +392,114 @@ mod tests {
         points.get(&(name.to_string(), key)).copied()
     }
 
+    /// Every range in the report is one point, found by its attributes and
+    /// its `count_bucket`, and every point's value is the `1` of "in this
+    /// range" -- never a count.
     #[test]
-    fn every_number_in_the_report_is_a_point() {
+    fn every_range_in_the_report_is_a_point_of_one() {
         let report = report();
         let (_, points) = decode(&encode_otlp_json(&report));
+        let bucket = |count: &LibraryCountBucket| wire_name(count);
 
-        assert_eq!(at(&points, "beam.library.libraries", &[]), Some(2));
-        assert_eq!(
-            at(&points, "beam.library.titles", &[("media_type", "movie")]),
-            Some(3)
+        assert!(
+            points.values().all(|value| *value == 1),
+            "no exact number: {points:?}"
         );
-        assert_eq!(
-            at(&points, "beam.library.titles", &[("media_type", "show")]),
-            Some(4)
-        );
-        assert_eq!(at(&points, "beam.library.seasons", &[]), Some(5));
-        assert_eq!(at(&points, "beam.library.episodes", &[]), Some(6));
-        for (content_type, count) in [("movie", 7), ("episode", 8), ("unclassified", 9)] {
+        let has = |name: &str, attributes: &[(&str, &str)]| {
             assert_eq!(
-                at(
-                    &points,
-                    "beam.library.files",
-                    &[("content_type", content_type)]
-                ),
-                Some(count)
+                at(&points, name, attributes),
+                Some(1),
+                "{name} {attributes:?}"
+            );
+        };
+        has(
+            "beam.library.libraries",
+            &[("count_bucket", &bucket(&report.libraries))],
+        );
+        has(
+            "beam.library.titles",
+            &[
+                ("media_type", "movie"),
+                ("count_bucket", &bucket(&report.titles.movies)),
+            ],
+        );
+        has(
+            "beam.library.titles",
+            &[
+                ("media_type", "show"),
+                ("count_bucket", &bucket(&report.titles.shows)),
+            ],
+        );
+        has(
+            "beam.library.seasons",
+            &[("count_bucket", &bucket(&report.seasons))],
+        );
+        has(
+            "beam.library.episodes",
+            &[("count_bucket", &bucket(&report.episodes))],
+        );
+        for (content_type, count) in [
+            ("movie", &report.files.movie),
+            ("episode", &report.files.episode),
+            ("unclassified", &report.files.unclassified),
+        ] {
+            has(
+                "beam.library.files",
+                &[
+                    ("content_type", content_type),
+                    ("count_bucket", &bucket(count)),
+                ],
             );
         }
-        assert_eq!(
-            at(
-                &points,
+        for container in &report.containers {
+            has(
                 "beam.library.files.by_container",
-                &[("container", "matroska,webm")]
-            ),
-            Some(10)
-        );
-        for (stream_type, codec, count) in [
-            ("video", "h264", 11),
-            ("audio", "aac", 12),
-            ("subtitle", "subrip", 13),
-        ] {
-            assert_eq!(
-                at(
-                    &points,
-                    "beam.library.streams",
-                    &[("stream_type", stream_type), ("codec", codec)]
-                ),
-                Some(count)
+                &[
+                    ("container", &container.name),
+                    ("count_bucket", &bucket(&container.count)),
+                ],
             );
+        }
+        for (stream_type, counts) in [
+            ("video", &report.codecs.video),
+            ("audio", &report.codecs.audio),
+            ("subtitle", &report.codecs.subtitle),
+        ] {
+            for codec in counts {
+                has(
+                    "beam.library.streams",
+                    &[
+                        ("stream_type", stream_type),
+                        ("codec", &codec.name),
+                        ("count_bucket", &bucket(&codec.count)),
+                    ],
+                );
+            }
         }
         for size in &report.file_sizes {
-            assert_eq!(
-                at(
-                    &points,
-                    "beam.library.files.by_size",
-                    &[("size_bucket", &wire_name(&size.bucket))]
-                ),
-                Some(size.count)
+            has(
+                "beam.library.files.by_size",
+                &[
+                    ("size_bucket", &wire_name(&size.bucket)),
+                    ("count_bucket", &bucket(&size.count)),
+                ],
             );
         }
-        assert_eq!(
-            at(
-                &points,
-                "beam.library.total_size",
-                &[("size_bucket", &wire_name(&report.total_size))]
-            ),
-            Some(1)
+        has(
+            "beam.library.total_size",
+            &[("size_bucket", &wire_name(&report.total_size))],
         );
-        let expected_points = 1 + 2 + 1 + 1 + 3 + 1 + report.file_sizes.len() + 3 + 1;
+        let expected_points = 1
+            + 2
+            + 1
+            + 1
+            + 3
+            + report.containers.len()
+            + report.file_sizes.len()
+            + report.codecs.video.len()
+            + report.codecs.audio.len()
+            + report.codecs.subtitle.len()
+            + 1;
         assert_eq!(points.len(), expected_points, "no point beyond the report");
     }
 

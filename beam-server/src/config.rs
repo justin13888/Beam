@@ -290,8 +290,9 @@ pub struct ServerConfig {
     /// ADR-0019): an OTLP/HTTP metrics endpoint, used exactly as given --
     /// usually ending `/v1/metrics`. **Unset -- the default -- sends nothing,
     /// ever**; there is no built-in collector. The report holds aggregate
-    /// counts only (titles, files, containers, codecs, size buckets, server
-    /// version) and never a title, path, name or identifier. An admin can see
+    /// counts only, each as a coarse range (titles, files, containers,
+    /// codecs, size buckets, server version), and never a title, path, name
+    /// or identifier. An admin can see
     /// the exact bytes at `GET /v1/admin/telemetry/library` before opting in.
     /// Must be an `http` or `https` URL with a host; an empty value is unset.
     /// Credentials for the collector go in the URL: a query token, or

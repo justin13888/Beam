@@ -25,14 +25,23 @@ There is no Beam-run collector compiled in, so opting in means naming a recipien
 that sends data somewhere the operator did not pick. An invalid URL fails startup rather than being
 ignored: an operator who set it meant to opt in.
 
-**Aggregate only, and nothing that identifies.** The report is counts and distributions: libraries;
-live movies and shows, seasons and episodes; present files by content type and by container; streams
-by type and codec; files by size range; the server's total indexed size as a range; the Beam version.
-There is no title, path, library name, user, file hash, host name, instance id or install id. Two
-reports from one server cannot be linked to each other by anything in them. Exact counts are kept --
-they are what makes the report useful -- but sizes are bucketed, and every free-form label is
-lowercased and stripped to `[a-z0-9_.,+-]` before it can leave the process, so a path separator
-cannot ride out in a codec name. The timestamp is the UTC day, not the instant of sending.
+**Aggregate only, coarse, and nothing that identifies.** The report is counts and distributions:
+libraries; live movies and shows, seasons and episodes; present files by content type and by
+container; streams by type and codec; files by size range; the server's total indexed size as a
+range; the Beam version. There is no title, path, library name, user, file hash, host name, instance
+id or install id. No number is reported exactly: every count is an order of magnitude (`none`,
+`from_1_to_9`, `from_10_to_99`, `from_100_to_999`, `from_1000_to_9999`, `at_least_10000`, read from
+one table, `CountBucket`, in `beam-domain/src/utils/telemetry.rs`), and sizes are ranges too -- which
+is the "coarse" shape #93 asked for, and still says which codecs and containers occur and at what
+scale. Every free-form label is lowercased and stripped to `[a-z0-9_.,+-]` before it can leave the
+process, so a path separator cannot ride out in a codec name. The timestamp is the UTC day, not the
+instant of sending.
+
+What this does **not** promise is that reports are unlinkable. A report contains no identifier and
+its counts are bucketed, but a server whose shape is distinctive and stable -- an unusual codec, a
+rare mix of ranges -- sends much the same report every week, and a collector may correlate those
+reports, with each other or with the source IP. Operators are told so; the recipient is theirs to
+choose.
 
 **Preview before send.** `GET /v1/admin/telemetry/library` returns the report and the exact request
 body that would be sent, byte for byte, with the collector's origin and the schedule. The payload is
@@ -41,6 +50,9 @@ request. An admin can read it before deciding to opt in, and audit it after.
 
 **OTLP/HTTP JSON, hand-written.** The body is an OTLP `ExportMetricsServiceRequest` of gauges in the
 protobuf-JSON mapping, so any OpenTelemetry collector ingests it with no Beam-specific receiver.
+Having no exact number to give, every point's value is `1` and its range is an attribute
+(`count_bucket`, or `size_bucket` for the total size): a collector counts servers per range by
+summing.
 It is encoded by a hundred lines in `beam-server/src/services/telemetry/otlp.rs` rather than by the
 OpenTelemetry SDK: one request a week of a dozen gauges does not need a periodic reader, exporter and
 runtime, and a batching SDK cannot promise that what the preview shows is what goes on the wire.
@@ -59,6 +71,12 @@ never part of any report. The report reads the library's shape, not its use.
 ## Consequences
 
 - NFR-503 records the privacy rule; FR-608 the admin preview.
+- Every server's report carries the same resource attributes (`service.name`, `service.version`,
+  `beam.report.schema_version`) and nothing that tells servers apart -- that is the point. An OTLP
+  backend identifies a series by its resource and point attributes, so it may merge reports from
+  different servers into one series, the latest overwriting the rest. A collector that wants one
+  row per report should keep each export request as it arrives (a file or log exporter), or add a
+  per-request attribute of its own on receipt; Beam will not add one.
 - A new report field, or a change in a field's meaning, raises `schema_version` and is a change to
   this ADR's list above -- the list is the contract with operators, and the operator docs repeat it.
 - Beam gains one more outbound HTTP client (`ReqwestTelemetrySink` in `beam-index`, beside the
@@ -82,6 +100,9 @@ never part of any report. The report reads the library's shape, not its use.
   collector an operator may already run.
 - **The OpenTelemetry SDK.** Rejected as above: machinery for a stream Beam does not have, and it
   breaks the byte-for-byte preview.
+- **Exact counts.** Rejected: an exact episode count held steady week to week makes one server's
+  reports line up trivially, and #93 asked for a coarse shape. The orders of magnitude keep what
+  the report is for -- which formats occur, at what scale.
 - **An install identifier, for de-duplication.** Rejected: it turns a set of anonymous snapshots into
   a per-server history. Duplicates across a restart are prevented by the recorded last-send time
   instead.

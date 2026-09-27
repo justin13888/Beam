@@ -20,7 +20,7 @@ use beam_domain::repositories::{
     FileRepository, LibraryRepository, MediaStreamRepository, MovieRepository,
 };
 use beam_domain::services::TestClock;
-use beam_domain::utils::telemetry::GIB;
+use beam_domain::utils::telemetry::{CountBucket, GIB};
 use chrono::{TimeZone, Utc};
 use kynos::http::StatusCode;
 use kynos::prelude::*;
@@ -252,12 +252,16 @@ async fn the_preview_counts_the_library_and_names_nothing_in_it() {
     );
     assert_eq!(body["content_type"], "application/json");
     let report = &body["report"];
-    assert_eq!(report["libraries"], 1);
-    assert_eq!(report["titles"]["movies"], 1);
-    assert_eq!(report["files"]["movie"], 1);
+    // One of each, reported as the range one falls into.
+    let one = CountBucket::of(1).as_str();
+    let none = CountBucket::of(0).as_str();
+    assert_eq!(report["libraries"], one);
+    assert_eq!(report["titles"]["movies"], one);
+    assert_eq!(report["titles"]["shows"], none);
+    assert_eq!(report["files"]["movie"], one);
     assert_eq!(
         report["codecs"]["video"],
-        serde_json::json!([{ "name": "h264", "count": 1 }])
+        serde_json::json!([{ "name": "h264", "count": one }])
     );
     assert_eq!(report["generated_on"], "2026-09-27");
     let whole = body.to_string();
@@ -311,7 +315,11 @@ async fn without_a_destination_the_preview_says_so_and_nothing_is_sent() {
     assert_eq!(body["destination_configured"], false);
     assert_eq!(body["destination_origin"], Value::Null);
     assert_eq!(body["next_send_at"], Value::Null);
-    assert_eq!(body["report"]["libraries"], 1, "the preview still works");
+    assert_eq!(
+        body["report"]["libraries"],
+        CountBucket::of(1).as_str(),
+        "the preview still works"
+    );
     fixture
         .clock
         .advance(Duration::from_secs(30 * 24 * 60 * 60));

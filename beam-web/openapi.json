@@ -10232,17 +10232,25 @@
           "watcher"
         ]
       },
+      "LibraryCountBucket": {
+        "type": "string",
+        "enum": [
+          "none",
+          "from_1_to_9",
+          "from_10_to_99",
+          "from_100_to_999",
+          "from_1000_to_9999",
+          "at_least_10000"
+        ],
+        "description": "The order of magnitude a count falls into. A report never carries an exact\ncount."
+      },
       "LibraryReportTitles": {
         "properties": {
           "movies": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64"
+            "$ref": "#/components/schemas/LibraryCountBucket"
           },
           "shows": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64"
+            "$ref": "#/components/schemas/LibraryCountBucket"
           }
         },
         "type": "object",
@@ -10255,19 +10263,13 @@
       "LibraryReportFiles": {
         "properties": {
           "movie": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64"
+            "$ref": "#/components/schemas/LibraryCountBucket"
           },
           "episode": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64"
+            "$ref": "#/components/schemas/LibraryCountBucket"
           },
           "unclassified": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64"
+            "$ref": "#/components/schemas/LibraryCountBucket"
           }
         },
         "type": "object",
@@ -10285,9 +10287,7 @@
             "description": "A container or codec name, lowercased, as FFmpeg names it; `unknown`\nwhen the prober could not name it."
           },
           "count": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64"
+            "$ref": "#/components/schemas/LibraryCountBucket"
           }
         },
         "type": "object",
@@ -10344,9 +10344,7 @@
             "$ref": "#/components/schemas/LibraryFileSizeBucket"
           },
           "count": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64"
+            "$ref": "#/components/schemas/LibraryCountBucket"
           }
         },
         "type": "object",
@@ -10386,23 +10384,17 @@
             "description": "The UTC day the report describes. A day rather than an instant, so the\nmoment of sending says nothing about when the server is running."
           },
           "libraries": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64"
+            "$ref": "#/components/schemas/LibraryCountBucket"
           },
           "titles": {
             "$ref": "#/components/schemas/LibraryReportTitles"
           },
           "seasons": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64",
+            "$ref": "#/components/schemas/LibraryCountBucket",
             "description": "Seasons with at least one present episode file."
           },
           "episodes": {
-            "type": "integer",
-            "minimum": 0.0,
-            "format": "uint64",
+            "$ref": "#/components/schemas/LibraryCountBucket",
             "description": "Episodes with a present file."
           },
           "files": {
@@ -10444,7 +10436,7 @@
           "file_sizes",
           "total_size"
         ],
-        "description": "The anonymous library report: what a server holds, in aggregate."
+        "description": "The anonymous library report: what a server holds, in aggregate, every\nnumber as a range."
       },
       "LibraryTelemetryPreview": {
         "properties": {

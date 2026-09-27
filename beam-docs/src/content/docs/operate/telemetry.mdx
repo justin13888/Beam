@@ -16,7 +16,8 @@ report on means naming where it goes.
 
 ## What is in it
 
-Counts and ranges only:
+Ranges only. No number in the report is exact: every "how many" is one of `none`, `from_1_to_9`,
+`from_10_to_99`, `from_100_to_999`, `from_1000_to_9999` or `at_least_10000`.
 
 - how many libraries, movies, shows, seasons and episodes
 - how many files are movies, episodes or unclassified
@@ -29,8 +30,13 @@ Counts and ranges only:
 ## What is never in it
 
 No title, file name, path, library name or description. No user, no session, no playback progress
-or history. No file hash, host name, IP-derived value, or install or server identifier — so two
-reports from the same server cannot be linked to each other by anything they contain.
+or history. No file hash, host name, IP-derived value, or install or server identifier, and no exact
+count.
+
+That does not make reports unlinkable. If your libraries have a distinctive shape — an unusual codec,
+a rare mix of ranges — that stays the same from week to week, the collector may be able to tell that
+a run of reports came from one server, especially alongside the address they arrive from. Choose a
+collector you would trust with that.
 
 ## See it before you turn it on
 

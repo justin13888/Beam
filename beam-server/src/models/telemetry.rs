@@ -1,11 +1,14 @@
 //! The anonymous library report (issue #93, ADR-0019), as an admin previews
 //! it.
 //!
-//! Every field is an aggregate. There is deliberately nothing here that could
-//! name a title, a path, a user or this server: no identifier of any kind, so
-//! two reports from one server cannot even be linked to each other.
+//! Every field is an aggregate, and every number is a range. There is
+//! deliberately nothing here that could name a title, a path, a user or this
+//! server: no identifier of any kind, and no exact count. That is not a promise
+//! that two reports cannot be linked -- a distinctive enough shape, held
+//! steady from week to week, may still let a collector correlate them
+//! (ADR-0019).
 
-use beam_domain::utils::telemetry::{FileSizeBucket, TotalSizeBucket};
+use beam_domain::utils::telemetry::{CountBucket, FileSizeBucket, TotalSizeBucket};
 use chrono::{DateTime, NaiveDate, Utc};
 use kynos::Schema;
 use serde::Serialize;
@@ -14,28 +17,66 @@ use serde::Serialize;
 /// removed or changes meaning, so a collector can tell reports apart.
 pub const LIBRARY_REPORT_SCHEMA_VERSION: u32 = 1;
 
+/// The order of magnitude a count falls into. A report never carries an exact
+/// count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Schema)]
+pub enum LibraryCountBucket {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "from_1_to_9")]
+    From1To9,
+    #[serde(rename = "from_10_to_99")]
+    From10To99,
+    #[serde(rename = "from_100_to_999")]
+    From100To999,
+    #[serde(rename = "from_1000_to_9999")]
+    From1000To9999,
+    #[serde(rename = "at_least_10000")]
+    AtLeast10000,
+}
+
+impl From<CountBucket> for LibraryCountBucket {
+    fn from(bucket: CountBucket) -> Self {
+        match bucket {
+            CountBucket::None => Self::None,
+            CountBucket::From1To9 => Self::From1To9,
+            CountBucket::From10To99 => Self::From10To99,
+            CountBucket::From100To999 => Self::From100To999,
+            CountBucket::From1000To9999 => Self::From1000To9999,
+            CountBucket::AtLeast10000 => Self::AtLeast10000,
+        }
+    }
+}
+
+impl LibraryCountBucket {
+    /// The bucket `count` falls into.
+    pub fn of(count: u64) -> Self {
+        CountBucket::of(count).into()
+    }
+}
+
 /// How many of one named thing a library holds.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Schema)]
 pub struct LibraryReportCount {
     /// A container or codec name, lowercased, as FFmpeg names it; `unknown`
     /// when the prober could not name it.
     pub name: String,
-    pub count: u64,
+    pub count: LibraryCountBucket,
 }
 
 /// Live titles by kind.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Schema)]
 pub struct LibraryReportTitles {
-    pub movies: u64,
-    pub shows: u64,
+    pub movies: LibraryCountBucket,
+    pub shows: LibraryCountBucket,
 }
 
 /// Present files by what the indexer classified them as.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Schema)]
 pub struct LibraryReportFiles {
-    pub movie: u64,
-    pub episode: u64,
-    pub unclassified: u64,
+    pub movie: LibraryCountBucket,
+    pub episode: LibraryCountBucket,
+    pub unclassified: LibraryCountBucket,
 }
 
 /// Streams of present files, per codec.
@@ -80,7 +121,7 @@ impl From<FileSizeBucket> for LibraryFileSizeBucket {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Schema)]
 pub struct LibraryReportFileSize {
     pub bucket: LibraryFileSizeBucket,
-    pub count: u64,
+    pub count: LibraryCountBucket,
 }
 
 /// The range the server's indexed bytes fall into. Never reported exactly.
@@ -110,7 +151,8 @@ impl From<TotalSizeBucket> for LibraryTotalSizeBucket {
     }
 }
 
-/// The anonymous library report: what a server holds, in aggregate.
+/// The anonymous library report: what a server holds, in aggregate, every
+/// number as a range.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Schema)]
 pub struct LibraryReport {
     /// This report's shape; see the operator documentation.
@@ -120,12 +162,12 @@ pub struct LibraryReport {
     /// The UTC day the report describes. A day rather than an instant, so the
     /// moment of sending says nothing about when the server is running.
     pub generated_on: NaiveDate,
-    pub libraries: u64,
+    pub libraries: LibraryCountBucket,
     pub titles: LibraryReportTitles,
     /// Seasons with at least one present episode file.
-    pub seasons: u64,
+    pub seasons: LibraryCountBucket,
     /// Episodes with a present file.
-    pub episodes: u64,
+    pub episodes: LibraryCountBucket,
     pub files: LibraryReportFiles,
     /// Present files per container, sorted by name.
     pub containers: Vec<LibraryReportCount>,
@@ -166,6 +208,12 @@ mod tests {
     /// domain's list, not restated.
     #[test]
     fn wire_bucket_names_are_the_domain_names() {
+        for bucket in CountBucket::ALL {
+            assert_eq!(
+                serde_json::to_value(LibraryCountBucket::from(bucket)).unwrap(),
+                bucket.as_str()
+            );
+        }
         for bucket in FileSizeBucket::ALL {
             assert_eq!(
                 serde_json::to_value(LibraryFileSizeBucket::from(bucket)).unwrap(),

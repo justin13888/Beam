@@ -1,8 +1,8 @@
 //! Turning a [`LibraryShape`] into the [`LibraryReport`] a collector receives.
 //!
 //! Pure: the same shape, version and day always give the same report. This is
-//! where the report is coarsened -- labels normalised, the total size
-//! bucketed -- so nothing downstream can leak more than it says.
+//! where the report is coarsened -- labels normalised, every count and the
+//! total size bucketed -- so nothing downstream can leak more than it says.
 
 use std::collections::BTreeMap;
 
@@ -11,20 +11,29 @@ use beam_domain::utils::telemetry::{TotalSizeBucket, normalize_label};
 use chrono::NaiveDate;
 
 use crate::models::telemetry::{
-    LIBRARY_REPORT_SCHEMA_VERSION, LibraryReport, LibraryReportCodecs, LibraryReportCount,
-    LibraryReportFileSize, LibraryReportFiles, LibraryReportTitles,
+    LIBRARY_REPORT_SCHEMA_VERSION, LibraryCountBucket, LibraryReport, LibraryReportCodecs,
+    LibraryReportCount, LibraryReportFileSize, LibraryReportFiles, LibraryReportTitles,
 };
 
-/// Normalises every name and merges the counts of names that normalise alike
-/// -- `H264` and `h264` are one codec -- sorted by name.
-fn normalized(counts: &[NamedCount]) -> Vec<LibraryReportCount> {
+/// Normalises every name and merges the exact counts of names that normalise
+/// alike -- `H264` and `h264` are one codec -- keyed, so sorted, by name.
+fn merged(counts: &[NamedCount]) -> BTreeMap<String, u64> {
     let mut merged: BTreeMap<String, u64> = BTreeMap::new();
     for NamedCount { name, count } in counts {
         *merged.entry(normalize_label(name)).or_insert(0) += count;
     }
     merged
+}
+
+/// [`merged`], each total then bucketed. Merged first: `H264` ×6 and `h264`
+/// ×5 are one codec with 11 streams, not two entries of `from_1_to_9`.
+fn normalized(counts: &[NamedCount]) -> Vec<LibraryReportCount> {
+    merged(counts)
         .into_iter()
-        .map(|(name, count)| LibraryReportCount { name, count })
+        .map(|(name, count)| LibraryReportCount {
+            name,
+            count: LibraryCountBucket::of(count),
+        })
         .collect()
 }
 
@@ -53,17 +62,17 @@ pub fn build_library_report(
         schema_version: LIBRARY_REPORT_SCHEMA_VERSION,
         server_version: server_version.to_string(),
         generated_on,
-        libraries: *libraries,
+        libraries: LibraryCountBucket::of(*libraries),
         titles: LibraryReportTitles {
-            movies: *movies,
-            shows: *shows,
+            movies: LibraryCountBucket::of(*movies),
+            shows: LibraryCountBucket::of(*shows),
         },
-        seasons: *seasons,
-        episodes: *episodes,
+        seasons: LibraryCountBucket::of(*seasons),
+        episodes: LibraryCountBucket::of(*episodes),
         files: LibraryReportFiles {
-            movie: files.movie,
-            episode: files.episode,
-            unclassified: files.unclassified,
+            movie: LibraryCountBucket::of(files.movie),
+            episode: LibraryCountBucket::of(files.episode),
+            unclassified: LibraryCountBucket::of(files.unclassified),
         },
         containers: normalized(containers),
         codecs: LibraryReportCodecs {
@@ -75,7 +84,7 @@ pub fn build_library_report(
             .iter()
             .map(|(bucket, count)| LibraryReportFileSize {
                 bucket: bucket.into(),
-                count,
+                count: LibraryCountBucket::of(count),
             })
             .collect(),
         total_size: TotalSizeBucket::of(*total_bytes).into(),
@@ -85,7 +94,7 @@ pub fn build_library_report(
 #[cfg(test)]
 mod tests {
     use beam_domain::models::library_shape::FilesByContentType;
-    use beam_domain::utils::telemetry::{FileSizeBucket, FileSizeHistogram, TIB};
+    use beam_domain::utils::telemetry::{FileSizeBucket, FileSizeHistogram, GIB, TIB};
     use proptest::prelude::*;
 
     use super::*;
@@ -99,9 +108,9 @@ mod tests {
     fn names_that_normalise_alike_are_one_entry() {
         let shape = LibraryShape {
             video_codecs: vec![
-                NamedCount::new("H264", 2),
+                NamedCount::new("H264", 6),
                 NamedCount::new("HEVC", 1),
-                NamedCount::new("h264", 3),
+                NamedCount::new("h264", 5),
             ],
             subtitle_codecs: vec![
                 NamedCount::new("Other(\"hdmv_pgs_subtitle\")", 1),
@@ -115,13 +124,14 @@ mod tests {
         assert_eq!(
             report.codecs.video,
             vec![
+                // 6 + 5: merged, then bucketed.
                 LibraryReportCount {
                     name: "h264".to_string(),
-                    count: 5
+                    count: LibraryCountBucket::of(11)
                 },
                 LibraryReportCount {
                     name: "hevc".to_string(),
-                    count: 1
+                    count: LibraryCountBucket::of(1)
                 },
             ]
         );
@@ -130,11 +140,11 @@ mod tests {
             vec![
                 LibraryReportCount {
                     name: "hdmv_pgs_subtitle".to_string(),
-                    count: 1
+                    count: LibraryCountBucket::of(1)
                 },
                 LibraryReportCount {
                     name: "unknown".to_string(),
-                    count: 4
+                    count: LibraryCountBucket::of(4)
                 },
             ]
         );
@@ -180,14 +190,60 @@ mod tests {
         let expected: Vec<LibraryFileSizeBucket> =
             FileSizeBucket::ALL.into_iter().map(Into::into).collect();
         assert_eq!(listed, expected);
-        assert_eq!(
-            report
-                .file_sizes
-                .iter()
-                .map(|size| size.count)
-                .collect::<Vec<_>>(),
-            vec![0, 0, 0, 1, 0, 0]
-        );
+        for size in &report.file_sizes {
+            let expected = if size.bucket == FileSizeBucket::From10To25Gib.into() {
+                1
+            } else {
+                0
+            };
+            assert_eq!(size.count, LibraryCountBucket::of(expected), "{size:?}");
+        }
+    }
+
+    /// Issue #93 asked for a coarse shape: no count leaves exactly. No count
+    /// here is a substring of anything else the report carries -- a bucket
+    /// name, the version, the day -- so any of them appearing is that count
+    /// leaking.
+    #[test]
+    fn no_count_is_reported_exactly() {
+        let counts = [
+            2_345u64, 3_456, 4_567, 5_678, 6_789, 23_456, 34_567, 45_678, 56_789, 67_892, 78_923,
+            89_234,
+        ];
+        let mut file_sizes = FileSizeHistogram::default();
+        for _ in 0..counts[11] {
+            file_sizes.record(GIB);
+        }
+        let shape = LibraryShape {
+            libraries: counts[0],
+            movies: counts[1],
+            shows: counts[2],
+            seasons: counts[3],
+            episodes: counts[4],
+            files: FilesByContentType {
+                movie: counts[5],
+                episode: counts[6],
+                unclassified: counts[7],
+            },
+            containers: vec![NamedCount::new("matroska,webm", counts[8])],
+            video_codecs: vec![NamedCount::new("h264", counts[9])],
+            audio_codecs: vec![NamedCount::new("aac", counts[10])],
+            subtitle_codecs: Vec::new(),
+            file_sizes,
+            total_bytes: 0,
+        };
+
+        let report = build_library_report(&shape, "1.2.3", day());
+        let json = serde_json::to_string(&report).unwrap();
+
+        for count in counts {
+            assert!(
+                !json.contains(&count.to_string()),
+                "{count} leaked into {json}"
+            );
+        }
+        assert_eq!(report.libraries, LibraryCountBucket::of(counts[0]));
+        assert_eq!(report.episodes, LibraryCountBucket::of(counts[4]));
     }
 
     proptest! {
@@ -199,16 +255,22 @@ mod tests {
         ) {
             let counts: Vec<NamedCount> =
                 names.iter().map(|(name, count)| NamedCount::new(name.clone(), *count)).collect();
-            let merged = normalized(&counts);
+            let totals = merged(&counts);
 
             let before: u64 = counts.iter().map(|c| c.count).sum();
-            let after: u64 = merged.iter().map(|c| c.count).sum();
+            let after: u64 = totals.values().sum();
             prop_assert_eq!(before, after);
-            let mut names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
-            let listed = names.clone();
-            names.sort_unstable();
-            names.dedup();
-            prop_assert_eq!(names, listed, "sorted, with no name twice");
+
+            // What is reported is exactly the merged totals, bucketed, in
+            // name order.
+            let reported = normalized(&counts);
+            let expected: Vec<(String, LibraryCountBucket)> = totals
+                .into_iter()
+                .map(|(name, count)| (name, LibraryCountBucket::of(count)))
+                .collect();
+            let listed: Vec<(String, LibraryCountBucket)> =
+                reported.into_iter().map(|c| (c.name, c.count)).collect();
+            prop_assert_eq!(listed, expected, "sorted, with no name twice");
         }
     }
 }
