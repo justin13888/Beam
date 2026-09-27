@@ -39,7 +39,9 @@ admin page. A library is scanned by one job at a time, whatever started it: you,
 startup, or the periodic rescan. Asking for a scan while one is running is refused with
 [library-scan-in-progress](/reference/errors/#library-scan-in-progress); the periodic rescan simply
 skips a library that is already being scanned. While a scan runs, changes the watcher sees in that
-library wait for it to finish and are then picked up.
+library wait for it to finish and are then picked up. Deleting a library while it is being scanned
+stops the scan after the file it is on and waits for it — up to 30 seconds — before the library is
+removed; the scan ends as cancelled.
 
 Beam keeps the latest scan of each library in memory. A restart forgets it — the library's *last
 scanned* time is kept — and a scan running when the server stops is not resumed; the next periodic

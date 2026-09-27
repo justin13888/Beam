@@ -205,6 +205,8 @@ struct TestFixture {
     /// Every file the indexer hashes takes one permit (see
     /// [`GatedHashService`]).
     hash_gate: Arc<tokio::sync::Semaphore>,
+    /// The indexer's clock: it moves only when a test advances it.
+    clock: Arc<beam_domain::services::TestClock>,
     /// Where the validator resolves every library root: a real, empty
     /// directory for a fixture from [`make_scan_test_state`], and a path
     /// that does not exist otherwise.
@@ -325,7 +327,11 @@ fn build_fixture(
     prober
         .expect_get_video_metadata()
         .returning(|_| Err(ProbeError::UnknownError("not a film".to_string())));
-    let index = Arc::new(LocalIndexService::new(
+    let clock = Arc::new(beam_domain::services::TestClock::starting_at(
+        chrono::Utc::now(),
+    ));
+    let index = Arc::new(
+        LocalIndexService::new(
         library_repo.clone(),
         file_repo.clone(),
         Arc::new(beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default()),
@@ -339,7 +345,9 @@ fn build_fixture(
         Arc::new(prober),
         notification.clone(),
         admin_log.clone(),
-    ));
+        )
+        .with_clock(clock.clone()),
+    );
 
     let library: Arc<dyn LibraryService> = Arc::new(LocalLibraryService::new(
         library_repo.clone(),
@@ -417,6 +425,7 @@ fn build_fixture(
         notification,
         index,
         hash_gate,
+        clock,
         library_root,
         _scratch: scratch,
     }
@@ -823,11 +832,13 @@ async fn a_second_scan_while_one_runs_is_409_and_starts_nothing() {
     wait_for_scan(&fixture, library_id, finished).await;
 }
 
-/// A library deleted while it is being scanned: 204, and the scan stops after
-/// the file it was on and fails as cancelled rather than reconciling a
-/// library that is gone.
+/// A library deleted while it is being scanned: the delete cancels the scan
+/// and waits, with the library still in place, until the scan has stopped
+/// after the file it was on and failed as cancelled -- never as an internal
+/// error from writing for a library that is gone. Then 204, and the library's
+/// latest job is forgotten with it.
 #[tokio::test]
-async fn deleting_a_library_mid_scan_cancels_the_scan() {
+async fn deleting_a_library_mid_scan_waits_for_the_cancelled_scan() {
     let fixture = make_scan_test_state(Gate::Closed);
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
@@ -843,21 +854,49 @@ async fn deleting_a_library_mid_scan_cancels_the_scan() {
         .await;
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
     wait_for_scan(&fixture, library_id, running).await;
+    let jobs = fixture.index.subscribe_scan(library_id);
 
-    let deleted = client
+    let delete = client
         .delete(&format!("/v1/admin/libraries/{}", created.id))
         .cookie("beam_session", &token)
-        .send()
-        .await;
-    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        .send();
+    let release = async {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // The delete has cancelled the scan and is waiting on its timeout.
+        while fixture.clock.waiter_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the delete never waited"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            fixture
+                .state
+                .services
+                .library_repo
+                .find_by_id(library_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "the library is kept while its scan runs"
+        );
+        fixture.open_gate();
+    };
+    let (deleted, ()) = tokio::join!(delete, release);
 
-    fixture.open_gate();
-    let done = wait_for_scan(&fixture, library_id, finished).await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let done = jobs.borrow().clone().expect("the scan's last job");
     assert_eq!(done.state, beam_index::services::ScanState::Failed);
     assert_eq!(done.failure.as_deref(), Some("cancelled"));
     assert!(
         done.progress.processed < 2,
         "the scan stopped before the second file"
+    );
+    assert_eq!(
+        fixture.index.scan_job(library_id),
+        None,
+        "the deleted library's job is forgotten"
     );
 }
 

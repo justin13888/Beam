@@ -358,7 +358,8 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     async fn get_scan(&self, library_id: Uuid) -> Result<Option<ScanJob>, LibraryError>;
 
     /// Delete a library by ID. A scan of it that is queued or running is
-    /// cancelled first.
+    /// cancelled and waited for first (see [`IndexService::stop_scan`]), and
+    /// the indexer forgets the library's latest job after.
     async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError>;
 }
 
@@ -592,10 +593,20 @@ impl LibraryService for LocalLibraryService {
             .await?
             .ok_or(LibraryError::LibraryNotFound)?;
 
-        // Stops after the file it is on, before it reconciles a library that
-        // is no longer there; its job fails as cancelled.
-        self.index_service.cancel_scan(lib_uuid);
+        // A scan stops after the file it is on and fails as cancelled. It is
+        // waited for, so it never writes files or titles for a library whose
+        // rows are going -- which would leave orphaned titles and fail the
+        // job as an internal error. A scan held on one file past the timeout
+        // does not hold the delete: whatever it then writes is refused with
+        // the library, or left for the orphan sweep.
+        if !self.index_service.stop_scan(lib_uuid).await {
+            warn!(
+                library_id = %lib_uuid,
+                "a scan of the library did not stop in time; deleting the library anyway"
+            );
+        }
         self.library_repo.delete(lib_uuid).await?;
+        self.index_service.forget_library(lib_uuid);
 
         self.notification_service.publish(AdminEvent::info(
             EventCategory::System,

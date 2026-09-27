@@ -359,7 +359,7 @@ async fn a_cancelled_scan_stops_and_fails_as_cancelled() {
     let scan = tokio::spawn(async move { service.run_scan(ticket).await });
     h.wait_for(state_is(ScanState::Running)).await;
 
-    assert!(h.service.cancel_scan(h.library.id));
+    assert!(h.service.scans.cancel(h.library.id));
     h.open_gate();
 
     assert!(matches!(scan.await.unwrap(), Err(IndexError::Cancelled)));
@@ -379,6 +379,130 @@ async fn a_cancelled_scan_stops_and_fails_as_cancelled() {
         None,
         "a cancelled scan does not read as finished"
     );
+}
+
+/// Wait -- yielding, never sleeping -- until `condition` holds. The deadline
+/// only bounds a hang; the `TestClock` never moves on its own, so this cannot
+/// stand in for an `advance`.
+async fn until(label: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("timed out waiting for: {label}");
+}
+
+/// Start a scan of the harness's library on a task of its own, held on its
+/// first file's hash, and wait until it is running.
+async fn a_scan_held_on_its_first_file(
+    h: &Harness,
+) -> tokio::task::JoinHandle<Result<ScanProgress, IndexError>> {
+    h.write("Heat (1995).mkv");
+    h.write("Ronin (1998).mkv");
+    h.close_gate();
+    let ticket = h
+        .service
+        .begin_scan(h.library.id, ScanTrigger::Manual)
+        .await
+        .unwrap();
+    let service = h.service.clone();
+    let scan = tokio::spawn(async move { service.run_scan(ticket).await });
+    h.wait_for(state_is(ScanState::Running)).await;
+    scan
+}
+
+/// Stopping a scan -- what deleting its library does first -- waits until
+/// the scan has finished as cancelled, so nothing of it runs once the
+/// library's rows go.
+#[tokio::test]
+async fn stopping_a_scan_waits_until_it_has_failed_as_cancelled() {
+    let h = Harness::settled().await;
+    let scan = a_scan_held_on_its_first_file(&h).await;
+
+    let service = h.service.clone();
+    let library_id = h.library.id;
+    let stop = tokio::spawn(async move { service.stop_scan(library_id).await });
+    until("the stop to wait on its timeout", || {
+        h.clock.waiter_count() == 1
+    })
+    .await;
+    assert!(!stop.is_finished(), "the scan is still on its first file");
+    assert_eq!(
+        h.service.scan_job(h.library.id).unwrap().state,
+        ScanState::Running
+    );
+
+    h.open_gate();
+
+    assert!(stop.await.unwrap(), "the scan stopped in time");
+    let job = h.service.scan_job(h.library.id).unwrap();
+    assert_eq!(
+        job.state,
+        ScanState::Failed,
+        "finished before the stop returned"
+    );
+    assert_eq!(job.failure.as_deref(), Some(CANCELLED));
+    assert!(matches!(scan.await.unwrap(), Err(IndexError::Cancelled)));
+}
+
+/// A scan that does not stop within [`SCAN_STOP_TIMEOUT`] of the injected
+/// clock is given up on, so a delete is never held for longer; it still
+/// fails as cancelled once it reaches the next file.
+#[tokio::test]
+async fn stopping_a_scan_gives_up_after_the_timeout() {
+    let h = Harness::settled().await;
+    let scan = a_scan_held_on_its_first_file(&h).await;
+
+    let service = h.service.clone();
+    let library_id = h.library.id;
+    let stop = tokio::spawn(async move { service.stop_scan(library_id).await });
+    until("the stop to wait on its timeout", || {
+        h.clock.waiter_count() == 1
+    })
+    .await;
+    h.clock.advance(SCAN_STOP_TIMEOUT - Duration::from_secs(1));
+    tokio::task::yield_now().await;
+    assert!(!stop.is_finished(), "not yet timed out");
+    h.clock.advance(Duration::from_secs(1));
+
+    assert!(!stop.await.unwrap(), "the scan was still running");
+    assert_eq!(
+        h.service.scan_job(h.library.id).unwrap().state,
+        ScanState::Running
+    );
+    h.open_gate();
+    assert!(matches!(scan.await.unwrap(), Err(IndexError::Cancelled)));
+}
+
+/// With no scan queued or running there is nothing to wait for.
+#[tokio::test]
+async fn stopping_an_idle_library_returns_at_once() {
+    let h = Harness::settled().await;
+    h.write("Heat (1995).mkv");
+    h.scan().await;
+
+    assert!(h.service.stop_scan(h.library.id).await);
+    assert_eq!(h.clock.waiter_count(), 0, "it never waited");
+    assert_eq!(
+        h.service.scan_job(h.library.id).unwrap().state,
+        ScanState::Succeeded,
+        "a finished job is left as it was"
+    );
+}
+
+/// A deleted library's slot goes: its latest job is no longer read back.
+#[tokio::test]
+async fn a_forgotten_library_has_no_latest_job() {
+    let h = Harness::settled().await;
+    h.scan().await;
+    assert!(h.service.scan_job(h.library.id).is_some());
+
+    h.service.forget_library(h.library.id);
+
+    assert_eq!(h.service.scan_job(h.library.id), None);
 }
 
 /// The backstop rescan of every library leaves a library an administrator's

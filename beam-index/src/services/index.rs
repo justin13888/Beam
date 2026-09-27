@@ -18,8 +18,9 @@ use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use crate::services::scan::{
-    CANCELLED, CatalogExclusive, ProgressThrottle, ScanCoordinator, ScanEvent, ScanInProgress,
-    ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, Settle, settle_state,
+    CANCELLED, CatalogExclusive, ProgressThrottle, SCAN_STOP_TIMEOUT, ScanCoordinator, ScanEvent,
+    ScanInProgress, ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, Settle,
+    settle_state,
 };
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
@@ -527,9 +528,15 @@ pub trait IndexService: Send + Sync + std::fmt::Debug {
     /// Follow `library_id`'s scan jobs.
     fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>>;
 
-    /// Ask `library_id`'s active scan to stop after the file it is on.
-    /// Returns whether one was running or queued.
-    fn cancel_scan(&self, library_id: Uuid) -> bool;
+    /// Stop `library_id`'s scan before the library is deleted: ask an active
+    /// one to stop after the file it is on, then wait for it to finish -- as
+    /// [`CANCELLED`], unless it finished first -- for at most
+    /// [`SCAN_STOP_TIMEOUT`] on the injected clock. Returns whether no scan
+    /// of the library is still queued or running.
+    async fn stop_scan(&self, library_id: Uuid) -> bool;
+
+    /// Drop `library_id`'s lock and latest job once the library is deleted.
+    fn forget_library(&self, library_id: Uuid);
 }
 
 #[derive(Debug)]
@@ -2691,8 +2698,28 @@ impl IndexService for LocalIndexService {
         self.scans.subscribe(library_id)
     }
 
-    fn cancel_scan(&self, library_id: Uuid) -> bool {
-        self.scans.cancel(library_id)
+    async fn stop_scan(&self, library_id: Uuid) -> bool {
+        if !self.scans.cancel(library_id) {
+            return true;
+        }
+        // Subscribed after the cancel: `wait_for` reads the current job
+        // first, so a scan that finished in between is seen as finished.
+        let mut jobs = self.scans.subscribe(library_id);
+        let finished = async move {
+            // An error is a closed channel: the slot is gone, and its job
+            // with it. Either way nothing of this library's is running.
+            let _ = jobs
+                .wait_for(|job| !job.as_ref().is_some_and(|job| job.state.is_active()))
+                .await;
+        };
+        tokio::select! {
+            () = finished => true,
+            () = self.clock.sleep(SCAN_STOP_TIMEOUT) => false,
+        }
+    }
+
+    fn forget_library(&self, library_id: Uuid) {
+        self.scans.forget(library_id);
     }
 }
 

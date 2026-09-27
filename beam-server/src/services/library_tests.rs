@@ -92,47 +92,72 @@ mod tests {
         assert!(matches!(result, Err(LibraryError::ScanInProgress)));
     }
 
-    /// Deleting a library cancels its scan first, so the scan never
-    /// reconciles a library that is gone.
+    /// Deleting a library stops its scan -- cancelled and waited for --
+    /// before the rows go, so the scan never writes for a library that is
+    /// gone, and forgets the library's scan slot after. The order is the
+    /// contract, so the calls are sequenced across both doubles.
     #[tokio::test]
-    async fn test_delete_library_returns_true() {
+    async fn deleting_a_library_stops_its_scan_first_and_forgets_it_after() {
+        let mut sequence = mockall::Sequence::new();
         let mut mock_library_repo = MockLibraryRepository::new();
         let mock_file_repo = MockFileRepository::new();
         let video_dir = PathBuf::from("/media/videos");
         let lib_id = Uuid::new_v4();
         let mut mock_index = MockIndexService::new();
-        mock_index
-            .expect_cancel_scan()
-            .times(1)
-            .withf(move |id| *id == lib_id)
-            .returning(|_| true);
 
         mock_library_repo
             .expect_find_by_id()
             .times(1)
-            .returning(move |_| {
-                Ok(Some(DomainLibrary {
-                    id: lib_id,
-                    name: "Movies".to_string(),
-                    root_path: PathBuf::from("/media/movies"),
-                    description: None,
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                    last_scan_started_at: None,
-                    last_scan_finished_at: None,
-                    last_scan_file_count: None,
-                }))
-            });
+            .in_sequence(&mut sequence)
+            .returning(move |_| Ok(Some(make_domain_library(lib_id, "Movies"))));
+        mock_index
+            .expect_stop_scan()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .withf(move |id| *id == lib_id)
+            .returning(|_| true);
+        mock_library_repo
+            .expect_delete()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .withf(move |id| *id == lib_id)
+            .returning(|_| Ok(()));
+        mock_index
+            .expect_forget_library()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .withf(move |id| *id == lib_id)
+            .return_const(());
 
+        let service = make_service(mock_library_repo, mock_file_repo, video_dir, mock_index);
+        let result = service.delete_library(lib_id.to_string()).await;
+        assert!(matches!(result, Ok(true)), "{result:?}");
+    }
+
+    /// A scan that does not stop in time does not hold the delete up.
+    #[tokio::test]
+    async fn a_scan_that_does_not_stop_in_time_does_not_block_the_delete() {
+        let mut mock_library_repo = MockLibraryRepository::new();
+        let lib_id = Uuid::new_v4();
+        let mut mock_index = MockIndexService::new();
+        mock_library_repo
+            .expect_find_by_id()
+            .returning(move |_| Ok(Some(make_domain_library(lib_id, "Movies"))));
+        mock_index.expect_stop_scan().returning(|_| false);
         mock_library_repo
             .expect_delete()
             .times(1)
             .returning(|_| Ok(()));
+        mock_index.expect_forget_library().times(1).return_const(());
 
-        let service = make_service(mock_library_repo, mock_file_repo, video_dir, mock_index);
+        let service = make_service(
+            mock_library_repo,
+            MockFileRepository::new(),
+            PathBuf::from("/media/videos"),
+            mock_index,
+        );
         let result = service.delete_library(lib_id.to_string()).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(matches!(result, Ok(true)), "{result:?}");
     }
 
     // ── create_library ────────────────────────────────────────────────────────────
@@ -726,7 +751,8 @@ mod tests {
         let notif_ref = Arc::clone(&notif);
         // No scan to cancel.
         let mut idle_index = MockIndexService::new();
-        idle_index.expect_cancel_scan().returning(|_| false);
+        idle_index.expect_stop_scan().returning(|_| true);
+        idle_index.expect_forget_library().return_const(());
 
         let service = LocalLibraryService::new(
             lib_repo,

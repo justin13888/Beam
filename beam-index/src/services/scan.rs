@@ -140,6 +140,11 @@ pub const INTERRUPTED: &str = "interrupted";
 /// The failure text of a cancelled job.
 pub const CANCELLED: &str = "cancelled";
 
+/// How long deleting a library waits for its cancelled scan to finish. A scan
+/// checks for cancellation between files, so this bounds the file it is on --
+/// a hash of a very large file over slow storage -- rather than the scan.
+pub const SCAN_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Everything the coordinator keeps for one library.
 #[derive(Debug)]
 struct LibrarySlot {
@@ -261,6 +266,13 @@ impl ScanCoordinator {
             slot.cancel.lock().store(true, Ordering::SeqCst);
         }
         active
+    }
+
+    /// Drop `library_id`'s slot -- its lock and latest job -- once the
+    /// library is gone. A ticket or guard still held keeps its own reference
+    /// and finishes against it; a later call for the library starts afresh.
+    pub fn forget(&self, library_id: Uuid) {
+        self.libraries.lock().remove(&library_id);
     }
 
     /// Take `library_id`'s lock and the catalog gate for a scan, waiting for
