@@ -344,6 +344,14 @@ fn is_season_folder_husk_key(key: &str) -> bool {
     season_folder_number(title).is_some()
 }
 
+/// Whether `file` was classified by older rules and is to be reclassified:
+/// a probed row below [`CLASSIFIER_VERSION`]. An unprobed row -- its probe
+/// failed -- was never classified, so there is nothing to reclassify.
+fn awaits_reclassification(file: &MediaFile) -> bool {
+    let probed = file.content.is_some() || file.duration.is_some();
+    file.classifier_version < CLASSIFIER_VERSION && probed
+}
+
 /// The key a build before issue #182 derived for the show of the episode at
 /// `path`: its parent folder's parse, whatever that folder was.
 fn legacy_show_key(path: &Path) -> String {
@@ -984,8 +992,7 @@ impl LocalIndexService {
         library: &Library,
         reclassify: bool,
     ) -> Result<(), IndexError> {
-        let probed = existing.content.is_some() || existing.duration.is_some();
-        if reclassify && existing.classifier_version < CLASSIFIER_VERSION && probed {
+        if reclassify && awaits_reclassification(existing) {
             self.reclassify_existing(existing, path, library).await?;
         }
 
@@ -2011,7 +2018,8 @@ impl LocalIndexService {
     /// identity keys, then the re-derivation of keys older rules derived.
     ///
     /// Every path that reclassifies a file -- a scan of every library, a scan
-    /// of one, a watcher event -- asks this first and reclassifies only on
+    /// of one, a watcher event for a file [awaiting
+    /// reclassification](awaits_reclassification) -- asks this first and reclassifies only on
     /// `true`, so a file is reclassified only once its title carries the key
     /// the current rules derive, and finds that title rather than leaving it
     /// with no file to be retired with its enrichment. A failed pass is
@@ -2158,7 +2166,11 @@ impl LocalIndexService {
         match self.file_repo.find_by_path(&path_str).await? {
             Some(existing) => {
                 self.restore_if_missing(&existing).await?;
-                let reclassify = self.identity_passes_done().await;
+                // Only a file awaiting reclassification needs the identity
+                // passes; asking for any other would retry a failing pass on
+                // every watcher event.
+                let reclassify =
+                    awaits_reclassification(&existing) && self.identity_passes_done().await;
                 self.reconcile_existing_file(&existing, &path, &library, reclassify)
                     .await
             }

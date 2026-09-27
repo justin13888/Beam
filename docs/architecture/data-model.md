@@ -187,8 +187,10 @@ So each key carries `identity_key_version`, and right after the backfill the ind
 every key older than `CLASSIFIER_VERSION` (`LocalIndexService::rekey_stale_titles`), before any
 file is reclassified. The two passes run once per process, under one lock
 (`LocalIndexService::identity_passes_done`), asked first by every path that reclassifies:
-`scan_all_libraries`, the administrator's `scan_library`, and a watcher event for a known file. A
-caller arriving while they run waits for them. Until both have succeeded, a file row an older
+`scan_all_libraries`, the administrator's `scan_library`, and a watcher event for a known file
+that awaits reclassification (probed, and classified by an older version); an event for any other
+file does not ask, so a failing pass is not retried on every event. A caller arriving while they
+run waits for them. Until both have succeeded, a file row an older
 version classified is not reclassified — it keeps its title and its version — while new and changed
 files are indexed as usual; a failed pass is logged, reported in an admin-log warning, and retried
 by the next caller. Reclassifying before the rekey would find no title by the file's new key,

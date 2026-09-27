@@ -1581,6 +1581,64 @@ async fn a_failed_rekey_pass_holds_reclassification_until_a_pass_succeeds() {
     );
 }
 
+/// A watcher event for a file with nothing to reclassify -- classified by
+/// the current rules, or never probed -- does not ask for the identity
+/// passes, so a failing pass is not retried, and reported again, on every
+/// event. The strict count is the point: the scan's attempt is the only one.
+#[tokio::test]
+async fn a_watcher_event_with_nothing_to_reclassify_does_not_retry_the_passes() {
+    use beam_domain::repositories::movie::MockMovieRepository;
+
+    let mut movies = MockMovieRepository::new();
+    movies.expect_find_unkeyed().returning(|| Ok(Vec::new()));
+    movies
+        .expect_find_keyed_before_version()
+        .times(1)
+        .returning(|_| Err(DbErr::Custom("connection reset".to_string())));
+    movies.expect_delete_orphaned().returning(|_| Ok(0));
+    let h = Harness::purging_at_once_with_movies(Arc::new(movies)).await;
+    const CURRENT: &str = "Severance/Season 1/Severance.S01E01.mkv";
+    h.write(CURRENT);
+    const UNPROBED: &str = "Severance/Season 1/Severance.S01E02.mkv";
+    let unprobed = h.write(UNPROBED);
+    let (size_bytes, mtime) = read_fs_meta(&unprobed).unwrap();
+    h.file_repo
+        .create(CreateMediaFile {
+            library_id: h.library.id,
+            path: unprobed,
+            hash: u64::MAX,
+            size_bytes,
+            mtime,
+            mime_type: Some("video/x-matroska".to_string()),
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Unknown,
+            classifier_version: 0,
+        })
+        .await
+        .unwrap();
+
+    h.service.scan_all_libraries().await.unwrap();
+    assert_eq!(h.file_version(CURRENT), CLASSIFIER_VERSION);
+    for rel in [CURRENT, UNPROBED, CURRENT] {
+        h.service
+            .reconcile_path(h.library.id, h.root.join(rel), FsEventKind::Modified)
+            .await
+            .unwrap();
+    }
+
+    let warnings = h
+        .admin_log_repo
+        .list(100, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.message.contains("current naming rules"))
+        .count();
+    assert_eq!(warnings, 1, "only the scan's failed pass is reported");
+}
+
 /// The administrator's scan of one library, arriving before any scan of
 /// every library, runs the identity passes itself before it reclassifies.
 #[tokio::test]
