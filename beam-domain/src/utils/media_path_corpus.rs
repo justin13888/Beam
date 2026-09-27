@@ -240,6 +240,22 @@ const CORPUS: &[(&str, &str)] = &[
         "unclassifiable season range",
     ),
     ("Season 1-2/Episode 1.mkv", "unclassifiable season range"),
+    // An absolute number is one the range need not name: it counts across
+    // every season, so the file is that episode of the show above. A number
+    // shaped like a year is no absolute number the folder names -- nor a
+    // film's year, in a series folder -- so it is left for the administrator.
+    (
+        "Naruto/Season 1-3/Naruto - 01.mkv",
+        "episode Naruto|- s1 e1 Absolute",
+    ),
+    (
+        "Naruto/Season 1-3/[SubsPlease] Naruto - 012 (1080p).mkv",
+        "episode Naruto|- s1 e12 Absolute",
+    ),
+    (
+        "One Piece/Season 1-2/One Piece - 1999.mkv",
+        "unclassifiable season range",
+    ),
     // A season pack: the text before the season token names the show when
     // there is no series folder, or when the folder above is a category.
     (
