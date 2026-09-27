@@ -515,3 +515,87 @@ async fn retention_prunes_at_start_and_then_daily() {
     until("the second pass to sleep", || clock.waiter_count() == 1).await;
     assert_eq!(kept(day(2026, 9, 1)).await, 1, "a day on, the 25th is gone");
 }
+
+/// NFR-205: a prune the store fails is logged and retried a day later, not
+/// the end of retention. A loop that returned on the error would stop
+/// expiring counts for the life of the process.
+#[tokio::test]
+async fn a_failed_prune_is_logged_and_the_next_pass_still_prunes() {
+    use std::sync::Mutex;
+
+    use beam_domain::repositories::playback_telemetry::MockPlaybackTelemetryRepository;
+    use sea_orm::DbErr;
+
+    let clock = Arc::new(TestClock::starting_at(
+        Utc.with_ymd_and_hms(2026, 9, 27, 12, 0, 0).unwrap(),
+    ));
+    let cutoffs: Arc<Mutex<Vec<NaiveDate>>> = Arc::default();
+    let mut repo = MockPlaybackTelemetryRepository::new();
+    repo.expect_prune_before().returning({
+        let cutoffs = cutoffs.clone();
+        move |cutoff| {
+            let mut cutoffs = cutoffs.lock().unwrap();
+            cutoffs.push(cutoff);
+            if cutoffs.len() == 1 {
+                Err(DbErr::Custom("connection reset".to_string()))
+            } else {
+                Ok(1)
+            }
+        }
+    });
+    let service = Arc::new(PlaybackTelemetryService::new(
+        PlaybackTelemetryConfig {
+            enabled: true,
+            retention_days: 2,
+        },
+        Arc::new(repo),
+        Arc::new(InMemoryFileRepository::default()),
+        Arc::new(InMemoryMediaStreamRepository::default()),
+        clock.clone(),
+    ));
+    // The test runtime is single-threaded, so the spawned loop logs through
+    // this thread's subscriber.
+    let logs: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer({
+                let logs = logs.clone();
+                move || LogWriter(logs.clone())
+            })
+            .finish(),
+    );
+
+    let running = service.clone();
+    tokio::spawn(async move { running.run_retention().await });
+    until("the failed pass to sleep", || clock.waiter_count() == 1).await;
+    assert_eq!(*cutoffs.lock().unwrap(), vec![day(2026, 9, 25)]);
+    let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains("could not prune playback telemetry")
+            && logged.contains("connection reset"),
+        "the failure is logged with its cause: {logged}"
+    );
+
+    clock.advance(PRUNE_INTERVAL);
+    until("the next pass to sleep", || clock.waiter_count() == 1).await;
+    assert_eq!(
+        *cutoffs.lock().unwrap(),
+        vec![day(2026, 9, 25), day(2026, 9, 26)],
+        "a day on, the loop prunes again at the next day's cutoff"
+    );
+}
+
+/// A `tracing` writer appending to a shared buffer.
+struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
