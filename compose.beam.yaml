@@ -32,6 +32,10 @@ services:
 
       - BEAM_ENABLE_METRICS=${BEAM_ENABLE_METRICS:-false}
 
+      # Opt-in anonymous library report (ADR-0019). Unset sends nothing,
+      # ever; set it to an OTLP/HTTP metrics endpoint you chose to opt in.
+      - BEAM_TELEMETRY_URL
+
       # Schema migrations apply automatically at startup; set to false for
       # operator-managed migrations via the beam-migration CLI.
       - BEAM_AUTO_MIGRATE=${BEAM_AUTO_MIGRATE:-true}

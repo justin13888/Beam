@@ -72,7 +72,7 @@ release this chart version belongs to.
 
 {{/*
 The Secret the chart creates for values given inline (database.url,
-oidc.clientSecret, tmdb.apiToken).
+oidc.clientSecret, tmdb.apiToken, telemetry.url).
 */}}
 {{- define "beam.secretName" -}}
 {{- include "beam.fullname" . }}

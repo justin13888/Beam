@@ -7,6 +7,7 @@ pub mod media_info;
 pub mod metadata;
 pub mod notification;
 pub mod playback;
+pub mod telemetry;
 
 // Re-export IndexService from beam-index (LocalIndexService now runs
 // in-process; there is no separate gRPC indexer service to wrap).

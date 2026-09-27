@@ -70,6 +70,8 @@ check_var "BEAM_VIDEO_DIR"
 check_var "BEAM_DATA_DIR"
 check_var "BEAM_AUTO_MIGRATE"
 check_var "BEAM_ENABLE_METRICS"
+# A collector URL may carry an ingest token, so its value is not echoed.
+check_secret "BEAM_TELEMETRY_URL"
 check_var "RUST_LOG"
 echo ""
 

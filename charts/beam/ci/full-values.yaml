@@ -25,6 +25,8 @@ oidc:
   adminValue: beam-admin
 tmdb:
   existingSecret: beam-tmdb
+telemetry:
+  existingSecret: beam-telemetry
 libraries:
   - name: movies
     volume:

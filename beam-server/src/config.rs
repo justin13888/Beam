@@ -285,6 +285,21 @@ pub struct ServerConfig {
     /// overwrites it. When off, the peer socket IP is used.
     #[config(env = "BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR", default = false)]
     pub rate_limit_trust_forwarded_for: bool,
+
+    /// Where to send the anonymous weekly library report (issue #93,
+    /// ADR-0019): an OTLP/HTTP metrics endpoint, used exactly as given --
+    /// usually ending `/v1/metrics`. **Unset -- the default -- sends nothing,
+    /// ever**; there is no built-in collector. The report holds aggregate
+    /// counts only, each as a coarse range (titles, files, containers,
+    /// codecs, size buckets, server version), and never a title, path, name
+    /// or identifier. An admin can see
+    /// the exact bytes at `GET /v1/admin/telemetry/library` before opting in.
+    /// Must be an `http` or `https` URL with a host; an empty value is unset.
+    /// Credentials for the collector go in the URL: a query token, or
+    /// userinfo, sent as a Basic `Authorization` header. Only the origin is
+    /// ever logged.
+    #[config(env = "BEAM_TELEMETRY_URL")]
+    pub telemetry_url: Option<String>,
 }
 
 /// Hand-written so the startup "Configuration loaded" log line can never
@@ -337,6 +352,7 @@ impl fmt::Debug for ServerConfig {
             rate_limit_search_per_minute,
             rate_limit_device_poll_per_minute,
             rate_limit_trust_forwarded_for,
+            telemetry_url,
         } = self;
         f.debug_struct("ServerConfig")
             .field("bind_address", bind_address)
@@ -388,6 +404,14 @@ impl fmt::Debug for ServerConfig {
                 "rate_limit_trust_forwarded_for",
                 rate_limit_trust_forwarded_for,
             )
+            // Origin only: a collector URL may carry an ingest token in its
+            // path or query, and the log line must not.
+            .field(
+                "telemetry_url",
+                &telemetry_url
+                    .as_deref()
+                    .map(|url| url_origin(url).unwrap_or_else(|| "<invalid>".to_string())),
+            )
             .finish()
     }
 }
@@ -422,6 +446,22 @@ fn redact_url_password(url: &str) -> String {
         &userinfo[..colon],
         &rest[at..]
     )
+}
+
+/// `scheme://host[:port]` of an `http`/`https` URL with a host, or `None`
+/// for anything else. The one parse both validation and redaction use, so a
+/// URL the server accepts is always one it can print safely.
+pub(crate) fn url_origin(raw: &str) -> Option<String> {
+    let uri: http::Uri = raw.parse().ok()?;
+    let scheme = uri.scheme_str()?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let host = uri.host().filter(|host| !host.is_empty())?;
+    Some(match uri.port_u16() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
 }
 
 /// Startup assessment of the cookie `Secure`-flag configuration; see
@@ -504,6 +544,18 @@ impl ServerConfig {
         std::time::Duration::from_secs(u64::from(self.missing_file_grace_days) * SECONDS_PER_DAY)
     }
 
+    /// What the anonymous library report is scheduled with (issue #93): the
+    /// collector, its printable origin, and where deliveries are recorded --
+    /// `BEAM_DATA_DIR/telemetry/library-report.json`.
+    pub fn library_report_config(&self) -> crate::services::telemetry::LibraryReportConfig {
+        crate::services::telemetry::LibraryReportConfig {
+            destination: self.telemetry_url.clone(),
+            destination_origin: self.telemetry_url.as_deref().and_then(url_origin),
+            state_path: self.data_dir.join("telemetry").join("library-report.json"),
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
     /// Whether enough OIDC configuration is present to attempt discovery.
     /// All three of issuer/client_id/client_secret are required together.
     pub fn oidc_configured(&self) -> bool {
@@ -556,6 +608,7 @@ impl ServerConfig {
         self.metadata_language = empty_to_none(self.metadata_language.take());
         self.oidc_admin_claim = empty_to_none(self.oidc_admin_claim.take());
         self.oidc_admin_value = empty_to_none(self.oidc_admin_value.take());
+        self.telemetry_url = empty_to_none(self.telemetry_url.take());
     }
 
     /// Validates scalar configuration values that confique's type-level
@@ -616,6 +669,17 @@ impl ServerConfig {
             return Err(ConfigError::InvalidValue(
                 "BEAM_OIDC_ADMIN_VALUE".to_string(),
                 "requires BEAM_OIDC_ADMIN_CLAIM to also be set".to_string(),
+            ));
+        }
+
+        // Refused rather than ignored: an operator who set this meant to opt
+        // in, and a report that silently never leaves is not what they chose.
+        if let Some(url) = &self.telemetry_url
+            && url_origin(url).is_none()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_TELEMETRY_URL".to_string(),
+                "must be an http or https URL with a host".to_string(),
             ));
         }
 
@@ -685,6 +749,78 @@ mod tests {
         // Non-secret fields stay visible for operator debugging.
         assert!(output.contains("beam.example.com"), "output: {output}");
         assert!(output.contains("beam-client"), "output: {output}");
+    }
+
+    /// An ingest token in a collector URL's path or query is a secret; the
+    /// origin is what an operator needs to see which collector is configured.
+    #[test]
+    fn debug_output_shows_only_the_telemetry_origin() {
+        let config = ServerConfig {
+            telemetry_url: Some(
+                "https://user:pw@collector.example:4318/v1/metrics?token=ingest-secret".to_string(),
+            ),
+            ..Default::default()
+        };
+        let output = format!("{config:?}");
+
+        assert!(
+            output.contains("https://collector.example:4318"),
+            "output: {output}"
+        );
+        for secret in ["ingest-secret", "v1/metrics", "user:pw"] {
+            assert!(!output.contains(secret), "{secret} leaked: {output}");
+        }
+    }
+
+    #[test]
+    fn a_telemetry_url_must_be_http_or_https_with_a_host() {
+        for accepted in [
+            "https://collector.example/v1/metrics",
+            "http://10.0.0.5:4318/v1/metrics",
+        ] {
+            let config = ServerConfig {
+                telemetry_url: Some(accepted.to_string()),
+                ..Default::default()
+            };
+            assert!(config.validate_values().is_ok(), "{accepted} is valid");
+        }
+        for refused in [
+            "ftp://collector.example/v1/metrics",
+            "collector.example/v1/metrics",
+            "https://",
+            "/v1/metrics",
+            "not a url",
+        ] {
+            let config = ServerConfig {
+                telemetry_url: Some(refused.to_string()),
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    config.validate_values(),
+                    Err(ConfigError::InvalidValue(field, _)) if field == "BEAM_TELEMETRY_URL"
+                ),
+                "{refused} must be refused"
+            );
+        }
+    }
+
+    /// `BEAM_TELEMETRY_URL=` in a compose file is off, not an invalid URL.
+    #[test]
+    fn a_blank_telemetry_url_is_off() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("videos")).unwrap();
+
+        let validated = ServerConfig {
+            video_dir: temp.path().join("videos"),
+            data_dir: temp.path().join("data"),
+            telemetry_url: Some("  ".to_string()),
+            ..Default::default()
+        }
+        .normalize_and_validate()
+        .expect("a blank URL is unset");
+
+        assert_eq!(validated.telemetry_url, None);
     }
 
     /// `BEAM_OIDC_CLIENT_AUTH_METHOD` takes exactly RFC 7591's

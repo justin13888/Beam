@@ -50,6 +50,7 @@ role.
 | `/v1/admin/logs`, `/v1/admin/logs/count` | GET | Admin log view |
 | `/v1/admin/events` | GET | Recent admin events (JSON) |
 | `/v1/admin/events/stream` | GET | Admin event stream (SSE) |
+| `/v1/admin/telemetry/library` | GET | The anonymous library report, and its exact OTLP request body, as it would be sent now -- sends nothing ([ADR-0019](decisions/ADR-0019-telemetry-posture.md)) |
 
 Three routes sit outside `/v1` and outside the client contract: `GET /metrics` (Prometheus text
 exposition, tagged `internal` — see `../operations/deployment.md`), `GET /openapi` (the Scalar UI)

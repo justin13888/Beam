@@ -144,7 +144,7 @@ documents every value, and `values.schema.json` rejects unknown ones.
 | `Deployment` (server) | One `beam-server` pod, `replicas: 1`, strategy `Recreate`. There is no replica value: the indexer and enrichment worker run in-process without leader election, and rate limits and the admin event stream are in memory. Non-root (the image's uid and gid 1000, fixed; extra gids through `server.podSecurityContext.supplementalGroups`), read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token. `terminationGracePeriodSeconds` is `server.shutdownTimeoutSeconds` (`BEAM_SHUTDOWN_TIMEOUT_SECS`, default 30) plus 15, so a stopping server always finishes its drain before the kubelet's SIGKILL. |
 | `Service` | `ClusterIP` on port 8000 by default. A `NodePort` or `LoadBalancer` type exposes the whole API port -- `/metrics` (with `metrics.enabled`) and `/openapi` included -- and lets clients bypass the ingress; `NOTES.txt` warns when it is set. |
 | `PersistentVolumeClaim` | `/data` (`BEAM_DATA_DIR`), 10Gi `ReadWriteOnce` by default, or `persistence.data.existingClaim`. Kept on uninstall (`helm.sh/resource-policy: keep`). `persistence.data.enabled: false` uses an `emptyDir`, lost whenever the pod is replaced. |
-| `Secret` | Only for secrets given inline (`database.url`, `oidc.clientSecret`, `tmdb.apiToken`); each also accepts an `existingSecret`. |
+| `Secret` | Only for secrets given inline (`database.url`, `oidc.clientSecret`, `tmdb.apiToken`, `telemetry.url`); each also accepts an `existingSecret`. |
 | `Ingress` | Optional. Routes `/v1` to the server and, with the web client enabled, `/` to it. `/metrics` and `/openapi` are never routed. |
 | `Deployment` + `Service` (web) | Optional; see below. |
 
