@@ -200,11 +200,14 @@ A three- or four-digit number such as `501` counts only in a season folder, and 
 leading digits are that folder's season: `Season 5/601.mkv` is not an episode. Outside a season
 folder, `Show.101.mkv` is a movie.
 
-Everything else is a **movie** — with three exceptions, each indexed without a title, as an unknown
+Everything else is a **movie** — with four exceptions, each indexed without a title, as an unknown
 file, with a warning in the admin log naming it:
 
 - a file **in a season folder** with no episode number (`Show/Season 01/Behind the Scenes.mkv`). It
   is clearly part of a show, and guessing it into a movie would invent a film;
+- a file **in a folder that is only a range of seasons** with no season and episode marker
+  (`Show/Season 1-2/Episode 1.mkv`). It is part of the show above, but the range cannot say which
+  season;
 - a fansub-style `<title> - <number>` that no folder names as a show — at the top of a library, or
   in a folder spelling the show differently (`Frieren (2023)/[SubsPlease] Sousou no Frieren - 12
   (1080p).mkv`). Read as a movie, a season would become dozens of films. Name the folder as the
@@ -270,7 +273,9 @@ A show is named by its **series folder**:
   `Breaking.Bad.S01-S05.COMPLETE.1080p`, `Breaking.Bad.S01-05`, `Breaking Bad Seasons 1-5` or
   `Breaking Bad Seasons 1 to 5` — is named by the text before the range (*Breaking Bad*). It is
   not a season folder: each file's own marker, or the `Season N` folder inside the pack, gives the
-  season.
+  season. A folder that is **only** a range — `Season 1-2`, `Seasons 1 to 10`, `Complete S01-S05`
+  — is a pack inside its series folder, which names the show and its year, as a season folder's
+  parent does: `Friends (1994)/Season 1-10/Friends.S03E05.mkv` is *Friends* (1994).
 - Otherwise the show is the folder the episode is in — unless the filename names a different show.
   `TV Shows/Breaking.Bad.S01E01.mkv` is *Breaking Bad*, not *TV Shows*; `Breaking Bad
   (2008)/Breaking.Bad.S01E01.mkv` is the folder's *Breaking Bad* (2008).

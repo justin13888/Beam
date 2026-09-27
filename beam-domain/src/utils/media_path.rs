@@ -96,6 +96,11 @@ pub enum UnclassifiableReason {
     /// of its own, and reading it as episode `n` would put two files on one
     /// episode.
     FractionalAbsoluteNumber { whole: u32, tenth: u32 },
+    /// The file sits in a folder that is nothing but a range of seasons
+    /// (`Season 1-2`), so it is an episode of the show above, but its name
+    /// carries no season and episode marker: the range cannot supply the
+    /// season a season folder would.
+    NoEpisodeMarkerInMultiSeasonFolder,
 }
 
 /// What a library path is.
@@ -223,6 +228,14 @@ fn title_of(text: &str) -> Option<TitleGuess> {
     (!title.is_empty()).then_some(TitleGuess { title, year })
 }
 
+/// Whether a folder is nothing but a range of seasons -- `Season 1-2`,
+/// `Seasons 1 to 10`, `Complete S01-S05` -- with no title before it: a
+/// multi-season pack inside the series folder above, which names the show.
+fn is_bare_season_range(name: &str) -> bool {
+    let name = name.trim();
+    season_range_start(name).is_some_and(|start| title_of(&name[..start]).is_none())
+}
+
 /// Whether two titles are the same title once identity-normalised.
 fn same_title(a: &str, b: &str) -> bool {
     normalize_title(a) == normalize_title(b)
@@ -274,20 +287,29 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
     let parent = dirs.last().map(String::as_str);
     let parent_season_folder = parent.and_then(season_folder);
     let parent_season = parent_season_folder.as_ref().map(|folder| folder.season);
+    // A folder of nothing but a season range (`Breaking Bad/Season 1-2/`)
+    // holds seasons of the show above it: a season folder whose season is
+    // unknown.
+    let parent_is_bare_range = parent.is_some_and(is_bare_season_range);
     let filename_series = (!parsed.title.is_empty()).then(|| TitleGuess {
         title: parsed.title.clone(),
         year: parsed.year,
     });
-    // The show the folders name. Above a season folder: the series folder
-    // (the season folder's parent), unless the season folder's own text
-    // before its season token names a different title -- a season pack
-    // under a category folder -- or there is no series folder. A series
-    // folder that is a box set of the filename's show (`Breaking Bad
-    // Complete Series`) names that show. Otherwise the parent folder.
-    let folder_series: Option<TitleGuess> = match &parent_season_folder {
-        Some(folder) => {
+    // The show the folders name. Above a season folder or a bare season
+    // range: the series folder (that folder's parent), unless the season
+    // folder's own text before its season token names a different title --
+    // a season pack under a category folder -- or there is no series
+    // folder. A series folder that is a box set of the filename's show
+    // (`Breaking Bad Complete Series`) names that show. Otherwise the parent
+    // folder.
+    let season_prefix: Option<&str> = match &parent_season_folder {
+        Some(folder) => Some(folder.prefix),
+        None => parent_is_bare_range.then_some(""),
+    };
+    let folder_series: Option<TitleGuess> = match season_prefix {
+        Some(season_prefix) => {
             let series_dir = dirs.len().checked_sub(2).and_then(|i| title_of(&dirs[i]));
-            match (series_dir, title_of(folder.prefix)) {
+            match (series_dir, title_of(season_prefix)) {
                 (Some(dir), Some(prefix)) if !same_title(&dir.title, &prefix.title) => Some(prefix),
                 (Some(dir), _) => match &filename_series {
                     Some(file) if is_box_set_of(&dir.title, &file.title) => Some(TitleGuess {
@@ -303,11 +325,12 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
     };
     let series = || -> TitleGuess {
         let chosen = match (
-            &parent_season_folder,
+            season_prefix,
             folder_series.clone(),
             filename_series.clone(),
         ) {
-            // A season folder's series is the folders' (unchanged by D182-C1).
+            // A season folder's series is the folders' (unchanged by D182-C1),
+            // and so is a bare season range's.
             (Some(_), Some(folder), _) => Some(folder),
             // Flat: the filename's series wins when it names another title
             // than the parent folder -- `TV Shows/Breaking.Bad.S01E01.mkv`
@@ -417,6 +440,11 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         }
         return MediaInference::Unclassifiable(
             UnclassifiableReason::NoEpisodeNumberInSeasonFolder { season },
+        );
+    }
+    if parent_is_bare_range {
+        return MediaInference::Unclassifiable(
+            UnclassifiableReason::NoEpisodeMarkerInMultiSeasonFolder,
         );
     }
 

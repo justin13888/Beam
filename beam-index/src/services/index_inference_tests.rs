@@ -394,6 +394,35 @@ async fn a_fractional_episode_number_is_kept_untitled_and_reported() {
     );
 }
 
+/// A file with no season and episode marker in a bare season-range folder
+/// is kept untitled and reported, not indexed as a movie, while a marked
+/// file beside it joins the series folder's show.
+#[tokio::test]
+async fn an_unmarked_file_in_a_season_range_folder_is_kept_untitled_and_reported() {
+    let h = Harness::new().await;
+    h.write("Breaking Bad (2008)/Season 1-2/Breaking.Bad.S02E01.mkv");
+    let rel = "Breaking Bad (2008)/Season 1-2/Episode 1.mkv";
+    h.write(rel);
+
+    h.scan().await;
+
+    let file = h.file(rel);
+    assert_eq!(file.status, FileStatus::Unknown);
+    assert!(file.content.is_none(), "{:?}", file.content);
+    assert!(h.movie_repo.movies.lock().unwrap().is_empty(), "no movie");
+    let shows = h.shows();
+    assert_eq!(shows.len(), 1, "{shows:?}");
+    assert_eq!(shows[0].title, "Breaking Bad");
+    assert_eq!(shows[0].year, Some(2008), "the series folder's year");
+    assert!(
+        h.warnings()
+            .await
+            .iter()
+            .any(|m| m.contains("multi-season folder") && m.contains(rel)),
+        "the administrator is told"
+    );
+}
+
 // ─── movies ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]

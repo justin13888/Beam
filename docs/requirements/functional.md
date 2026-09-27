@@ -67,7 +67,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
     lone `S01` with no episode after it (`S01`, a season pack's `Show.S02.1080p`), or `Specials`
     (season 0); a folder carrying a range of seasons (`S01-S05`, `S01-05`, `Season(s) 1-5`,
     `Seasons 1 to 5`, optionally after `Complete`) is a multi-season pack, not a season folder, and
-    the range ends the title it names (`Breaking.Bad.S01-S05.1080p` names *Breaking Bad*);
+    the range ends the title it names (`Breaking.Bad.S01-S05.1080p` names *Breaking Bad*); a
+    folder that is only a range (`Season 1-10`) names no title and is a pack inside its parent,
+    which names the show as a season folder's parent does;
   - a show in a season folder is named by its series folder (the season folder's parent), unless
     the season folder's own text before its season token names another title or there is no
     series folder, when that text names it; else by the filename; a series folder that is the
@@ -93,8 +95,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
     only release noise (never the library root's); each edition (a `{edition-...}` tag, or edition
     words such as `Director's Cut` or `Extended` after the title or its parenthesised year) of it in
     a library MUST be one `movie_entries` row however many copies exist;
-  - a file in a season folder with no episode number, a `<title> - <n>` name no folder names as a
-    show, and a fractional `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title
+  - a file in a season folder with no episode number, a file in a range-only folder with no season
+    and episode marker, a `<title> - <n>` name no folder names as a show, and a fractional
+    `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title
     (status `unknown`) and reported through the admin log, never guessed into a movie.
 
   Every row MUST record the version of these rules that classified it, and a scan MUST reclassify a

@@ -123,6 +123,11 @@ indexed without a title, and the admin log names it ("has no episode number"). B
 the folder says it is an episode, but not which one. Add an `SxxEyy` marker to its name, or move it
 out of the season folder (or into an `Extras` folder, which Beam skips), then rescan.
 
+A file in a folder that is only a range of seasons (`Season 1-2`, `Seasons 1 to 10`) needs a full
+`SxxEyy` marker: the range cannot say which season `Episode 1` belongs to. Such a file is indexed
+without a title and the admin log names it ("multi-season folder"). Add the marker, or move the file
+into its own `Season N` folder, then rescan.
+
 ## Two different films merged into one entry
 
 Movies are grouped by their cleaned title **and year**, so two films with the same name stay apart

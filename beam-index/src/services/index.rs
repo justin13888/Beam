@@ -777,6 +777,22 @@ impl LocalIndexService {
                     serde_json::json!({ "fractional_number": format!("{whole}.{tenth}") }),
                 )
             }
+            UnclassifiableReason::NoEpisodeMarkerInMultiSeasonFolder => {
+                warn!(
+                    path = %path.display(),
+                    "a file in a multi-season folder has no season and episode marker; indexed \
+                     without a title"
+                );
+                (
+                    format!(
+                        "A file in a multi-season folder of \"{}\" has no season and episode \
+                         marker, so it was indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "multi_season_folder": true }),
+                )
+            }
         };
         let mut metadata = serde_json::json!({
             "library_id": library.id.to_string(),

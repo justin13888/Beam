@@ -11,8 +11,8 @@ use super::*;
 
 /// `episode <series>|<year> s<season> e<first>[-<last>] [<title>] <numbering>
 /// [@<air date>] [!folder<n>]`, `movie <title>|<year> [ed=<edition>]`,
-/// `unclassifiable season <n>`, `unclassifiable absolute <n>`, or
-/// `unclassifiable fractional <n>.<d>`.
+/// `unclassifiable season <n>`, `unclassifiable absolute <n>`,
+/// `unclassifiable fractional <n>.<d>`, or `unclassifiable season range`.
 fn describe(inference: &MediaInference) -> String {
     fn year(year: Option<u32>) -> String {
         year.map_or_else(|| "-".to_string(), |y| y.to_string())
@@ -67,6 +67,9 @@ fn describe(inference: &MediaInference) -> String {
             whole,
             tenth,
         }) => format!("unclassifiable fractional {whole}.{tenth}"),
+        MediaInference::Unclassifiable(
+            UnclassifiableReason::NoEpisodeMarkerInMultiSeasonFolder,
+        ) => "unclassifiable season range".to_string(),
     }
 }
 
@@ -207,6 +210,36 @@ const CORPUS: &[(&str, &str)] = &[
         "Breaking.Bad.S01-S05.1080p.BluRay/Breaking.Bad.S03E01.mkv",
         "episode Breaking Bad|- s3 e1 Standard",
     ),
+    // A folder of nothing but a season range is a pack inside the series
+    // folder above it, which names the show and its year, as a season
+    // folder's parent does. A file there with no season and episode marker
+    // is an episode of that show the range cannot number, so it is
+    // unclassifiable, never a movie.
+    (
+        "Breaking Bad/Season 1-2/S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "Friends (1994)/Season 1-10/Friends.S03E05.mkv",
+        "episode Friends|1994 s3 e5 Standard",
+    ),
+    (
+        "Breaking Bad/Seasons 1 to 5/Breaking.Bad.S04E02.mkv",
+        "episode Breaking Bad|- s4 e2 Standard",
+    ),
+    (
+        "Breaking Bad/Complete S01-S05/Breaking.Bad.S02E03.mkv",
+        "episode Breaking Bad|- s2 e3 Standard",
+    ),
+    (
+        "Breaking Bad/Season 1-2/Episode 1.mkv",
+        "unclassifiable season range",
+    ),
+    (
+        "Breaking Bad/Seasons 1-2/01 - Pilot.mkv",
+        "unclassifiable season range",
+    ),
+    ("Season 1-2/Episode 1.mkv", "unclassifiable season range"),
     // A season pack: the text before the season token names the show when
     // there is no series folder, or when the folder above is a category.
     (
