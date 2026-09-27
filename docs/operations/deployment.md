@@ -60,6 +60,11 @@ one server process against one Postgres, so there is no concurrent-migrator coor
 about. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam-migration` CLI
 (`cargo run -p beam-migration -- up|down|status` with `DATABASE_URL` set).
 
+Pending migrations apply all-or-nothing, at startup and through `beam-migration up` alike: they
+run in one transaction, so if any migration in the batch fails, none of them is committed and the
+server exits with the error. The database stays at the schema the previous release expects, so
+rolling back to the previous image is safe after a failed upgrade.
+
 ## Deploying on a real server
 
 1. Copy `.env.example` to `.env` and edit it (full variable reference:

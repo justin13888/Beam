@@ -19,6 +19,9 @@ cargo run -p beam-migration -- down
 cargo run -p beam-migration -- status
 ```
 
+`up` applies the pending batch all-or-nothing, the same way `beam-server` does at startup
+(`up_all_or_nothing` in `src/lib.rs`): if any migration fails, none of the batch is committed.
+
 > Beam is pre-alpha: destructive migrations (dropping/altering columns without a backward-
 > compatible path) are acceptable for now -- see the migrations under `src/` for examples (e.g.
 > the OIDC cutover migration drops the `users.password_hash`/`username` columns outright).

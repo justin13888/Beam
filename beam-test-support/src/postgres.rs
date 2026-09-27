@@ -95,7 +95,7 @@ fn migrate_once() {
                     drop_stale_scoped_schemas(&db)
                         .await
                         .map_err(|e| format!("drop scoped schemas from an earlier run: {e}"))?;
-                    beam_migration::Migrator::up(&db, None)
+                    beam_migration::up_all_or_nothing::<beam_migration::Migrator, _>(&db, None)
                         .await
                         .map_err(|e| format!("apply migrations: {e}"))
                 })
@@ -225,12 +225,13 @@ impl ScopedSchema {
     }
 }
 
-/// Apply every migration to `db`.
+/// Apply every migration to `db`, through the same all-or-nothing path
+/// `beam-server` uses at startup.
 ///
 /// Re-exported through this crate so the test binaries do not each need
 /// `beam-migration` and `sea-orm-migration` in their own dev-dependencies.
 pub async fn migrate_up(db: &DatabaseConnection) -> Result<(), DbErr> {
-    beam_migration::Migrator::up(db, None).await
+    beam_migration::up_all_or_nothing::<beam_migration::Migrator, _>(db, None).await
 }
 
 /// Reverse every migration on `db`.
