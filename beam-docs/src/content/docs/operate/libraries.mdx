@@ -122,6 +122,10 @@ Movies are grouped by their **cleaned title**. Index two files that clean to the
 Beam treats them as two sources of one movie, and viewers get a picker labelled with each one's
 resolution and codec.
 
+Episodes are grouped by **show, season and episode number**. Two files in the same show folder that
+both parse as, say, `S01E01` — `Show.S01E01.1080p.mkv` beside `Show.S01E01.720p.mkv` — are two
+sources of one episode, with the same picker.
+
 This is how Beam serves constrained connections: put a smaller re-encode beside the original.
 It is also the fix when a file will not play in a browser — add an H.264/AAC MP4 version.
 
@@ -129,15 +133,13 @@ Two limits to know:
 
 - **The year is not part of the grouping key.** Two different films that clean to the same title
   will merge into one entry, whichever years they carry.
-- **Episodes cannot have multiple versions.** An episode is unique per show, season and episode
-  number, so a second file for the same episode fails to index and is recorded as a scan failure.
-  To change an episode's quality, replace the file.
+- **The first file names the episode.** An episode's title and runtime come from the first file
+  indexed for it (or from metadata enrichment since). A later version's filename never renames it.
 
 ## When a scan reports failures
 
 A file is recorded as failed when Beam cannot read its size, cannot hash it, or cannot store the
-result — a permissions problem, unreadable storage, or, for episodes, a second file for an episode
-that already exists. The rest of the scan continues regardless; one bad file never aborts it.
+result — a permissions problem or unreadable storage. The rest of the scan continues regardless; one bad file never aborts it.
 
 A file Beam *can* read but cannot probe is **not** a failure. It is indexed with unknown status and
 counted as added, so a corrupt or truncated video shows up as an unplayable unknown file rather

@@ -5,6 +5,10 @@
 Accepted. Settles the revisit condition [ADR-0004](ADR-0004-never-transcode.md) left open in
 [#75](https://github.com/justin13888/beam/issues/75); does not supersede it.
 
+The condition this decision set -- closing [#142](https://github.com/justin13888/beam/issues/142),
+so an episode can carry more than one file -- is met: the indexer now find-or-creates episodes, and
+a second file for an episode becomes a second source.
+
 ## Context
 
 ADR-0004 committed Beam to direct play and listed "no adaptive bitrate streaming (HLS/DASH)" among
