@@ -31,10 +31,12 @@ Scanning and enrichment are independent: a scan makes files playable, and metada
 separately. See [Metadata and artwork](/operate/metadata/).
 
 A scan removes files from the catalogue when they are gone from disk. The one exception is a root
-that holds **no files at all** while the library still has files indexed: that is what an
-unmounted volume looks like, so the scan is refused and nothing is removed — see
+that holds **no video files Beam can index** — none with an extension listed
+[below](#which-files-get-indexed) — while the library still has video files indexed. That is what an
+unmounted volume looks like, whether its mount point is left empty or holds only a sentinel or hidden
+file such as `.not_mounted` or `.DS_Store`, so the scan is refused and nothing is removed — see
 [Scan refused: library root is empty](/help/troubleshooting/#scan-refused-library-root-is-empty).
-To empty a library on purpose, delete the library.
+To remove every video from a library on purpose, delete the library.
 
 ## Which files get indexed
 

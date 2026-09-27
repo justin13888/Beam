@@ -69,18 +69,23 @@ Beam cannot start a sign-in flow.
 
 ## Scan refused: library root is empty
 
-The rescan failed with "Library root contains no files but files are indexed". Beam found the
-library's directory but not a single file beneath it, while the catalogue still lists that
-library's files. That is almost always a volume that is not mounted — an unmounted bind mount,
-dropped NFS or SMB share, or disk that failed to attach leaves an empty directory behind — so Beam
-refuses to reconcile rather than delete the whole catalogue for that library. Nothing was changed.
+The rescan failed with "Library root contains no video files but video files are indexed". Beam
+found the library's directory but no video files Beam can index anywhere beneath it — no file with
+one of the [indexed extensions](/operate/libraries/#which-files-get-indexed) — while the catalogue
+still lists video files for that library. That is almost always a volume that is not mounted: an
+unmounted bind mount, dropped NFS or SMB share, or disk that failed to attach leaves its mount point
+behind empty, or holding only files such as `.not_mounted`, `.DS_Store` or `Thumbs.db`. Beam refuses
+to reconcile rather than delete the library's whole catalogue. Nothing was changed.
 
 <Steps>
-1. Check the admin Logs tab: the refusal names the root path and how many files are indexed.
-2. From inside the container, confirm the path shows your media. If it is empty, fix the mount (see
+1. Check the admin Logs tab. The error entry names the library and how many video files are
+   indexed; expand its **Details** for the root path (`path`), the library id and the count
+   (`indexed_video_files`). The admin notification also names the root.
+2. From inside the container, confirm the path shows your media. If it does not, fix the mount (see
    [Your media directory](/install/#your-media-directory)) and restart the container if needed.
 3. Rescan once the files are visible.
-4. If you emptied the library deliberately, delete the library rather than rescanning it.
+4. If you removed every video from the library deliberately, delete the library rather than
+   rescanning it.
 </Steps>
 
 ## My TV show is called "Season 01"
