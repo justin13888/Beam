@@ -13,12 +13,28 @@ runs:
     # updates those .so files underneath a restored cache, the result is not a
     # build failure but a SIGSEGV the first time anything decodes -- ffprobe
     # keeps demuxing happily, which makes it look like the caller's bug.
+    #
+    # The version is read in a shell step because the `env` expression context
+    # holds only variables the workflow itself sets: ImageOS/ImageVersion are
+    # process environment on the runner, so `${{ env.ImageVersion }}` rendered
+    # empty and the key was the same on every image (#196). Failing when they
+    # are unset keeps that from silently recurring on a runner without them.
+    - name: Resolve runner image
+      id: image
+      shell: bash
+      run: |
+        if [ -z "${ImageOS:-}" ] || [ -z "${ImageVersion:-}" ]; then
+          echo "::error::ImageOS/ImageVersion unset; the FFmpeg cache key cannot tell runner images apart"
+          exit 1
+        fi
+        echo "id=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+
     - name: Cache FFmpeg 9.0 build
       id: cache-ffmpeg
       uses: actions/cache@v6
       with:
         path: /opt/ffmpeg
-        key: ffmpeg-9.0-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-v2
+        key: ffmpeg-9.0-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.id }}-v2
 
     # Plain apt-get, not awalsh128/cache-apt-pkgs-action: at v1.6.3 (its latest
     # tag) that action refreshes the package index only under nektos/act
