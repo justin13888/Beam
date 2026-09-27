@@ -91,7 +91,9 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   content: before a scan reconciles its walk it hashes the paths whose content may have moved, and
   the pure `content_matches` and `plan_content_moves` pair each with a row whose content has left
   its own path — a move, a rename, a swap, a rotation — relinking them all in one
-  `FileRepository::relink` and keeping aside, as missing, a row whose path is taken; a watcher event
+  `FileRepository::relink` and keeping aside, as missing, a row whose path is taken — unless the
+  row is a played one and the incoming row never played, a replace-by-rename, when the path keeps
+  its row and its new content is a change; a watcher event
   relinks a new file through the pure `choose_relink_candidate`, from the library's rows with that
   hash, and leaves one whose content matches a row that may have moved to the next scan (FR-221); a
   watcher event for a directory reconciles its subtree, reading only the rows beneath it; it also

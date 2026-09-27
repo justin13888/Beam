@@ -183,6 +183,12 @@ scan sorts them out; scan the library to have it done at once. If a file takes o
 whose contents are nowhere in the library any more, that old record is kept as missing, not
 deleted, and goes after the grace period like any other missing file.
 
+One exception keeps a common habit working: replacing a film you have been watching by renaming
+another file onto its name — a better copy downloaded beside it, say. When someone has played the
+file whose name is taken and nobody has played the file renamed onto it, Beam keeps the watched
+record at that name, with everyone's resume point, and treats the new contents as a change to it.
+The renamed file's own record is marked missing, like any file that is gone.
+
 What counts as the same file:
 
 - **The same contents, in the same library.** Beam compares a hash of the whole file and its size,

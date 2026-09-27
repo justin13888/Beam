@@ -350,13 +350,17 @@ index holds at the end; a path held by a row outside the call still fails the in
 whole call back. A row whose path a relink takes and whose content is nowhere is *displaced*: it
 keeps its id and is stamped missing (a first stamp is kept) at `<old path>.beam-displaced-<id>` —
 `displaced_path` — a name no scan indexes, having no video extension, and no other row can hold. It
-can still be relinked by content, and is purged after the grace period like any missing row. The
+can still be relinked by content, and is purged after the grace period like any missing row; a move
+of such a row is reported from the path it was displaced from (`displaced_from`, the inverse), since
+the displaced name never existed on disk. The
 watcher's candidates come from `find_by_library_and_hash_including_missing`, a reconcile read
 served by `idx_files_hash` and scoped to one library: a movie entry belongs to its library, so a
 file moved to another library is that library's new file. A row whose file is still at its path is
 never a candidate — the new path is a copy, and gets a row of its own. Ties between identical
 copies are broken by `PlaybackProgressRepository::last_played_at`, the latest `updated_at` of a
-file's `playback_progress` rows. The rows beneath a directory a watcher event names come from
+file's `playback_progress` rows. The same read declines a replace-by-rename: a relink that would
+displace a played row for a row never played is not made, so the path keeps its row, with its new
+content read as a change, and the other row is paired elsewhere or marked missing. The rows beneath a directory a watcher event names come from
 `find_beneath_including_missing`: one `LIKE` on `file_path` scoped to the library, with the
 directory's own `\`, `%` and `_` escaped and a trailing separator, so `S1` never matches `S10`.
 
