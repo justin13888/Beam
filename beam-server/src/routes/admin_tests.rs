@@ -235,6 +235,7 @@ fn make_test_state_with(
         library_repo.clone(),
         file_repo.clone(),
         PathBuf::from("/videos"),
+        PathBuf::from("/beam-data"),
         notification.clone(),
         Arc::new(mock_index),
         Arc::new(InMemoryPathValidator::success(PathBuf::from(
@@ -1234,4 +1235,46 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
         !messages.contains(&"server started"),
         "non-scan categories must be filtered out"
     );
+}
+
+// ── Library root conflicts (issue #186) ─────────────────────────────────────
+
+#[tokio::test]
+async fn registering_a_root_that_overlaps_an_existing_library_is_409_and_changes_nothing() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let create = || {
+        client
+            .post("/v1/admin/libraries")
+            .cookie("beam_session", &token)
+            .json(&CreateLibraryRequest {
+                name: "Movies".to_string(),
+                root_path: "movies".to_string(),
+            })
+            .send()
+    };
+    assert_eq!(create().await.status(), StatusCode::OK);
+
+    // The fixture's validator resolves every request to the same root.
+    let response = create().await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let problem: serde_json::Value = response.json();
+    assert_eq!(
+        problem["type"],
+        "https://beam.justinchung.net/reference/errors/#library-path-overlaps-library"
+    );
+    let detail = problem["detail"].as_str().unwrap_or_default();
+    assert!(
+        !detail.contains('/'),
+        "the detail names no path (NFR-108): {detail:?}"
+    );
+    let listed = client
+        .get("/v1/libraries")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json::<Vec<Library>>();
+    assert_eq!(listed.len(), 1, "the rejected library was not stored");
 }

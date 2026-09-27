@@ -327,12 +327,23 @@ impl AppServices {
             .await?,
         );
 
+        // Canonical, because library roots are compared against it component
+        // by component. `main` has already created it, so failing to resolve
+        // it is fatal rather than a check silently skipped.
+        let data_dir = config.data_dir.canonicalize().map_err(|e| {
+            eyre::eyre!(
+                "failed to resolve BEAM_DATA_DIR {}: {e}",
+                config.data_dir.display()
+            )
+        })?;
+
         let services = Self {
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
                 library_repo.clone(),
                 file_repo.clone(),
                 config.video_dir.clone(),
+                data_dir,
                 notification_service.clone(),
                 index_service.clone() as Arc<dyn IndexService>,
                 Arc::new(OsPathValidator),

@@ -155,6 +155,43 @@ pub mod in_memory {
 #[cfg(any(test, feature = "test-utils"))]
 pub use in_memory::{InMemoryPathValidator, InMemoryPathValidatorResult};
 
+/// What a candidate library root collides with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootConflict {
+    /// The candidate is, contains, or lies inside this existing library root.
+    Library(PathBuf),
+    /// The candidate is, contains, or lies inside the server's data directory.
+    DataDir,
+}
+
+/// Whether a candidate library root overlaps an existing library root or the
+/// data directory.
+///
+/// Overlap in either direction is a conflict. A root inside another library
+/// indexes the same files twice, as two libraries with two sets of rows and
+/// two watches; a root containing another does the same from the other side.
+/// A root holding the data directory would index Beam's own artwork cache and
+/// have Beam writing under a library root, which FR-202 forbids; a root inside
+/// the data directory is Beam's state, not media.
+///
+/// Every path must already be canonical: `Path::starts_with` compares whole
+/// components, so `/m/movies` does not contain `/m/movies2`, but it cannot see
+/// through a `..` or a symlink.
+pub fn find_root_conflict(
+    candidate: &Path,
+    existing: &[PathBuf],
+    data_dir: &Path,
+) -> Option<RootConflict> {
+    let overlaps = |other: &Path| candidate.starts_with(other) || other.starts_with(candidate);
+    if overlaps(data_dir) {
+        return Some(RootConflict::DataDir);
+    }
+    existing
+        .iter()
+        .find(|root| overlaps(root))
+        .map(|root| RootConflict::Library(root.clone()))
+}
+
 #[async_trait::async_trait]
 pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// Get all libraries by user ID
@@ -195,16 +232,21 @@ pub struct LocalLibraryService {
     library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
     file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
     video_dir: PathBuf,
+    /// The server's data directory, canonical. No library root may overlap it.
+    data_dir: PathBuf,
     notification_service: Arc<dyn NotificationService>,
     index_service: Arc<dyn IndexService>,
     path_validator: Arc<dyn PathValidator>,
 }
 
 impl LocalLibraryService {
+    /// `data_dir` must be canonical: it is compared component-wise against
+    /// canonical library roots.
     pub fn new(
         library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
         file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
         video_dir: PathBuf,
+        data_dir: PathBuf,
         notification_service: Arc<dyn NotificationService>,
         index_service: Arc<dyn IndexService>,
         path_validator: Arc<dyn PathValidator>,
@@ -213,6 +255,7 @@ impl LocalLibraryService {
             library_repo,
             file_repo,
             video_dir,
+            data_dir,
             notification_service,
             index_service,
             path_validator,
@@ -309,6 +352,39 @@ impl LibraryService for LocalLibraryService {
             .path_validator
             .validate_library_root(&requested_path, &self.video_dir)?;
 
+        // As with the validator, the rejections name no path (NFR-108); the
+        // log does.
+        let existing_roots: Vec<PathBuf> = self
+            .library_repo
+            .find_all()
+            .await?
+            .into_iter()
+            .map(|library| library.root_path)
+            .collect();
+        match find_root_conflict(&canonical_target, &existing_roots, &self.data_dir) {
+            None => {}
+            Some(RootConflict::DataDir) => {
+                warn!(
+                    requested = %canonical_target.display(),
+                    data_dir = %self.data_dir.display(),
+                    "library path overlaps the data directory"
+                );
+                return Err(LibraryError::PathOverlapsDataDir(
+                    "Library path overlaps the server's data directory".to_string(),
+                ));
+            }
+            Some(RootConflict::Library(existing)) => {
+                warn!(
+                    requested = %canonical_target.display(),
+                    existing = %existing.display(),
+                    "library path overlaps an existing library"
+                );
+                return Err(LibraryError::PathOverlapsLibrary(
+                    "Library path is, contains, or lies inside an existing library".to_string(),
+                ));
+            }
+        }
+
         let create = CreateLibrary {
             name: name.clone(),
             root_path: canonical_target,
@@ -386,6 +462,10 @@ pub enum LibraryError {
     PathNotFound(String),
     #[error("Library path is outside the permitted root: {0}")]
     PathOutsideRoot(String),
+    #[error("Library path overlaps an existing library: {0}")]
+    PathOverlapsLibrary(String),
+    #[error("Library path overlaps the data directory: {0}")]
+    PathOverlapsDataDir(String),
 }
 
 impl From<IndexError> for LibraryError {
