@@ -29,3 +29,5 @@ mod playback_telemetry;
 mod schema;
 #[path = "pg_integration/show_repository.rs"]
 mod show_repository;
+#[path = "pg_integration/sidecar_subtitle.rs"]
+mod sidecar_subtitle;

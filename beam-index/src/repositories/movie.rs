@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
+use beam_domain::models::ProviderPin;
 use beam_domain::models::{CreateMovie, CreateMovieEntry, Movie, MovieEntry, MovieSearchQuery};
 use beam_domain::providers::enrichment::MovieEnrichment;
 use beam_domain::repositories::MovieRepository;
@@ -266,6 +267,61 @@ impl MovieRepository for SqlMovieRepository {
             ));
         }
         match update.exec(self.db.as_ref()).await {
+            Ok(result) => Ok(result.rows_affected == 1),
+            Err(err) if is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Movie>, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+        let pinned = movie::Entity::find()
+            .filter(movie::Column::PinnedRef.eq(pin.to_ref_string()))
+            .one(self.db.as_ref())
+            .await?;
+        if let Some(pinned) = pinned {
+            return Ok(Some(Movie::from(pinned)));
+        }
+        let matched = match pin {
+            ProviderPin::Tmdb(id) => movie::Column::TmdbId.eq(*id as i32),
+            ProviderPin::Imdb(id) => movie::Column::ImdbId.eq(id.as_str()),
+            ProviderPin::Tvdb(id) => movie::Column::TvdbId.eq(*id as i32),
+            ProviderPin::Anilist(id) => movie::Column::AnilistId.eq(*id as i32),
+        };
+        let model = movie::Entity::find()
+            .filter(matched)
+            .order_by_asc(movie::Column::CreatedAt)
+            .order_by_asc(movie::Column::Id)
+            .one(self.db.as_ref())
+            .await?;
+        Ok(model.map(Movie::from))
+    }
+
+    async fn set_pinned_ref(&self, movie_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::sea_query::{Alias, Expr, ExprTrait, Query};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let stored = pin.to_ref_string();
+        let other = Alias::new("other");
+        // As in `rekey`: `NOT EXISTS` answers the ordinary clash, the unique
+        // index a concurrent one.
+        let result = movie::Entity::update_many()
+            .col_expr(movie::Column::PinnedRef, Expr::value(Some(stored.clone())))
+            .filter(movie::Column::Id.eq(movie_id))
+            .filter(Expr::not_exists(
+                Query::select()
+                    .expr(Expr::val(1))
+                    .from_as(movie::Entity, other.clone())
+                    .and_where(Expr::col((other.clone(), movie::Column::PinnedRef)).eq(stored))
+                    .and_where(Expr::col((other, movie::Column::Id)).ne(movie_id))
+                    .to_owned(),
+            ))
+            .exec(self.db.as_ref())
+            .await;
+        match result {
             Ok(result) => Ok(result.rows_affected == 1),
             Err(err) if is_unique_violation(&err) => Ok(false),
             Err(err) => Err(err),

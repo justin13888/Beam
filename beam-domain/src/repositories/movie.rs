@@ -4,6 +4,7 @@ use sea_orm::DbErr;
 use uuid::Uuid;
 
 use crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry, MovieSearchQuery};
+use crate::models::pin::ProviderPin;
 use crate::providers::enrichment::MovieEnrichment;
 
 /// Persistence for movies and their entries.
@@ -72,6 +73,15 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
         identity_key: Option<String>,
         version: u16,
     ) -> Result<bool, DbErr>;
+    /// The movie `pin` names (issue #184): the one pinned to it, else the
+    /// oldest one enrichment matched to that provider id (its `tmdb_id`,
+    /// `imdb_id`, `tvdb_id` or `anilist_id`). A file whose NFO names `pin`
+    /// joins this movie whatever its path is keyed as.
+    async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Movie>, DbErr>;
+    /// Pin `movie_id` to `pin`, replacing any pin it had. Returns `false`,
+    /// changing nothing, when the movie does not exist or another movie
+    /// is already pinned to `pin`.
+    async fn set_pinned_ref(&self, movie_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr>;
     /// Delete every movie entry created before `created_before` that no file
     /// row references, then every movie created before `created_before` left
     /// with no entry, returning how many movies went. A file row that is only
@@ -365,6 +375,46 @@ pub mod in_memory {
             movie.identity_key = identity_key;
             self.key_versions.lock().unwrap().insert(movie_id, version);
             Ok(true)
+        }
+
+        async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Movie>, DbErr> {
+            let stored = pin.to_ref_string();
+            let movies = self.movies.lock().unwrap();
+            if let Some(pinned) = movies
+                .values()
+                .find(|t| t.pinned_ref.as_deref() == Some(stored.as_str()))
+            {
+                return Ok(Some(pinned.clone()));
+            }
+            let matched = |t: &Movie| match pin {
+                ProviderPin::Tmdb(id) => t.tmdb_id == Some(*id),
+                ProviderPin::Imdb(id) => t.imdb_id.as_deref() == Some(id.as_str()),
+                ProviderPin::Tvdb(id) => t.tvdb_id == Some(*id),
+                ProviderPin::Anilist(id) => t.anilist_id == Some(*id),
+            };
+            Ok(movies
+                .values()
+                .filter(|t| matched(t))
+                .min_by_key(|t| (t.created_at, t.id))
+                .cloned())
+        }
+
+        async fn set_pinned_ref(&self, movie_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr> {
+            let stored = pin.to_ref_string();
+            let mut movies = self.movies.lock().unwrap();
+            if movies
+                .values()
+                .any(|t| t.id != movie_id && t.pinned_ref.as_deref() == Some(stored.as_str()))
+            {
+                return Ok(false);
+            }
+            match movies.get_mut(&movie_id) {
+                Some(title) => {
+                    title.pinned_ref = Some(stored);
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
         }
 
         async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {

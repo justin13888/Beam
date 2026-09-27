@@ -8,6 +8,7 @@ pub mod movie;
 pub mod playback_progress;
 pub mod playback_telemetry;
 pub mod show;
+pub mod sidecar_subtitle;
 pub mod stream;
 
 // SQL implementations
@@ -21,6 +22,7 @@ pub use movie::SqlMovieRepository;
 pub use playback_progress::SqlPlaybackProgressRepository;
 pub use playback_telemetry::SqlPlaybackTelemetryRepository;
 pub use show::SqlShowRepository;
+pub use sidecar_subtitle::SqlSidecarSubtitleRepository;
 pub use stream::SqlMediaStreamRepository;
 
 #[cfg(test)]

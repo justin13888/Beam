@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use crate::models::pin::ProviderPin;
 use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show, ShowSearchQuery};
 use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 
@@ -59,6 +60,15 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
         identity_key: Option<String>,
         version: u16,
     ) -> Result<bool, DbErr>;
+    /// The show `pin` names (issue #184): the one pinned to it, else the
+    /// oldest one enrichment matched to that provider id (its `tmdb_id`,
+    /// `imdb_id`, `tvdb_id` or `anilist_id`). A file whose NFO names `pin`
+    /// joins this show whatever its path is keyed as.
+    async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Show>, DbErr>;
+    /// Pin `show_id` to `pin`, replacing any pin it had. Returns `false`,
+    /// changing nothing, when the show does not exist or another show
+    /// is already pinned to `pin`.
+    async fn set_pinned_ref(&self, show_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr>;
     /// Delete every episode created before `created_before` that no file row
     /// references, then every season left with no episode, then every show
     /// created before `created_before` left with no season, returning how many
@@ -360,6 +370,46 @@ pub mod in_memory {
             show.identity_key = identity_key;
             self.key_versions.lock().unwrap().insert(show_id, version);
             Ok(true)
+        }
+
+        async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Show>, DbErr> {
+            let stored = pin.to_ref_string();
+            let shows = self.shows.lock().unwrap();
+            if let Some(pinned) = shows
+                .values()
+                .find(|t| t.pinned_ref.as_deref() == Some(stored.as_str()))
+            {
+                return Ok(Some(pinned.clone()));
+            }
+            let matched = |t: &Show| match pin {
+                ProviderPin::Tmdb(id) => t.tmdb_id == Some(*id),
+                ProviderPin::Imdb(id) => t.imdb_id.as_deref() == Some(id.as_str()),
+                ProviderPin::Tvdb(id) => t.tvdb_id == Some(*id),
+                ProviderPin::Anilist(id) => t.anilist_id == Some(*id),
+            };
+            Ok(shows
+                .values()
+                .filter(|t| matched(t))
+                .min_by_key(|t| (t.created_at, t.id))
+                .cloned())
+        }
+
+        async fn set_pinned_ref(&self, show_id: Uuid, pin: &ProviderPin) -> Result<bool, DbErr> {
+            let stored = pin.to_ref_string();
+            let mut shows = self.shows.lock().unwrap();
+            if shows
+                .values()
+                .any(|t| t.id != show_id && t.pinned_ref.as_deref() == Some(stored.as_str()))
+            {
+                return Ok(false);
+            }
+            match shows.get_mut(&show_id) {
+                Some(title) => {
+                    title.pinned_ref = Some(stored);
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
         }
 
         async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
