@@ -249,6 +249,7 @@ impl AppServices {
                 config.oidc_issuer.as_deref().unwrap_or_default(),
                 config.oidc_client_id.as_deref().unwrap_or_default(),
                 config.oidc_client_secret.as_deref().unwrap_or_default(),
+                config.oidc_client_auth_method,
                 &config.oidc_redirect_url(),
                 config
                     .oidc_scopes

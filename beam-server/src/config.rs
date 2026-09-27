@@ -1,3 +1,4 @@
+use beam_auth::utils::oidc::ClientAuthMethod;
 use confique::Config;
 use std::fmt;
 use std::path::PathBuf;
@@ -190,6 +191,17 @@ pub struct ServerConfig {
     #[config(env = "BEAM_OIDC_CLIENT_SECRET")]
     pub oidc_client_secret: Option<String>,
 
+    /// How Beam's client authenticates to the IdP, as its registration there
+    /// names it: `client_secret_basic` (HTTP Basic, the default) or
+    /// `client_secret_post` (the secret in the form body) -- RFC 7591's
+    /// `token_endpoint_auth_method` values. Applies to the authorization-code
+    /// exchange and both device-grant requests alike. An IdP accepts only the
+    /// method a client is registered with and publishes that nowhere, so it
+    /// is set here rather than guessed (ADR-0017). Any other value is a
+    /// startup error.
+    #[config(env = "BEAM_OIDC_CLIENT_AUTH_METHOD", default = "client_secret_basic")]
+    pub oidc_client_auth_method: ClientAuthMethod,
+
     /// Space-separated OIDC scopes requested at login.
     #[config(env = "BEAM_OIDC_SCOPES", default = "openid profile email")]
     pub oidc_scopes: String,
@@ -311,6 +323,7 @@ impl fmt::Debug for ServerConfig {
             oidc_issuer,
             oidc_client_id,
             oidc_client_secret,
+            oidc_client_auth_method,
             oidc_scopes,
             oidc_admin_claim,
             oidc_admin_value,
@@ -355,6 +368,7 @@ impl fmt::Debug for ServerConfig {
             .field("oidc_issuer", oidc_issuer)
             .field("oidc_client_id", oidc_client_id)
             .field("oidc_client_secret", &redact_option(oidc_client_secret))
+            .field("oidc_client_auth_method", oidc_client_auth_method)
             .field("oidc_scopes", oidc_scopes)
             .field("oidc_admin_claim", oidc_admin_claim)
             .field("oidc_admin_value", oidc_admin_value)
@@ -671,6 +685,59 @@ mod tests {
         // Non-secret fields stay visible for operator debugging.
         assert!(output.contains("beam.example.com"), "output: {output}");
         assert!(output.contains("beam-client"), "output: {output}");
+    }
+
+    /// `BEAM_OIDC_CLIENT_AUTH_METHOD` takes exactly RFC 7591's
+    /// `token_endpoint_auth_method` names for the two secret-based methods --
+    /// what an operator copies from the IdP's client registration. Anything
+    /// else, including a method Beam cannot speak, fails the load rather than
+    /// falling back to a method the IdP would refuse at the first login.
+    ///
+    /// Parsed through `str`'s `IntoDeserializer`, the path confique's env
+    /// source takes for an enum (and its declared default).
+    #[test]
+    fn the_client_auth_method_setting_accepts_only_the_rfc_7591_names() {
+        use serde::Deserialize as _;
+        use serde::de::IntoDeserializer as _;
+        use serde::de::value::{Error, StrDeserializer};
+
+        let parse = |raw: &str| {
+            let deserializer: StrDeserializer<'_, Error> = raw.into_deserializer();
+            ClientAuthMethod::deserialize(deserializer).ok()
+        };
+
+        for (raw, expected) in [
+            (
+                "client_secret_basic",
+                Some(ClientAuthMethod::ClientSecretBasic),
+            ),
+            (
+                "client_secret_post",
+                Some(ClientAuthMethod::ClientSecretPost),
+            ),
+            ("CLIENT_SECRET_POST", None),
+            ("basic", None),
+            ("post", None),
+            ("client_secret_jwt", None),
+            ("private_key_jwt", None),
+            ("none", None),
+            ("", None),
+        ] {
+            assert_eq!(parse(raw), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn debug_output_names_the_client_auth_method() {
+        let config = ServerConfig {
+            oidc_client_auth_method: ClientAuthMethod::ClientSecretPost,
+            ..config_with_secrets()
+        };
+        let output = format!("{config:?}");
+        assert!(
+            output.contains("oidc_client_auth_method: ClientSecretPost"),
+            "output: {output}"
+        );
     }
 
     #[test]
