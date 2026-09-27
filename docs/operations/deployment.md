@@ -63,7 +63,8 @@ about. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam
 Pending migrations apply all-or-nothing, at startup and through `beam-migration up` alike: they
 run in one transaction, so if any migration in the batch fails, none of them is committed and the
 server exits with the error. The database stays at the schema the previous release expects, so
-rolling back to the previous image is safe after a failed upgrade.
+rolling back to the previous image is safe after a failed upgrade. Only `up` is batched this way:
+`beam-migration down`, `fresh` and `refresh` still commit one migration at a time.
 
 ## Deploying on a real server
 

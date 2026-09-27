@@ -1,4 +1,5 @@
-use sea_orm_migration::MigratorTraitSelf;
+use std::marker::PhantomData;
+
 pub use sea_orm_migration::prelude::*;
 
 mod m20260209_000001_create_schema;
@@ -79,30 +80,45 @@ where
     }
 }
 
-/// [`Migrator`] as the `beam-migration` CLI drives it: the same migrations,
-/// except that `up` applies them through [`up_all_or_nothing`].
+/// `M` with `up` applied through [`up_all_or_nothing`]; every other command is
+/// `M`'s own.
 ///
-/// The CLI dispatches on [`MigratorTraitSelf`], whose blanket impl for every
-/// [`MigratorTrait`] calls sea-orm's per-migration `up` directly, so the CLI
-/// needs its own type to route `up` through the shared path. Every other
-/// command falls through to the trait defaults, which read the same migration
-/// list and table name.
-pub struct CliMigrator;
+/// The `beam-migration` CLI runs `AllOrNothing::<Migrator>`. The CLI dispatches
+/// on `MigratorTraitSelf`, whose blanket impl for every [`MigratorTrait`]
+/// forwards to the static `up`, so overriding `up` here is what routes
+/// `beam-migration up` through the shared path. `migrations` and
+/// `migration_table_name` delegate to `M`, so the ledger and the migration list
+/// are `M`'s. `down`, `fresh`, `refresh` and `reset` keep sea-orm's
+/// per-migration transactions: the trait defaults call its internal executor
+/// directly, not `up`.
+pub struct AllOrNothing<M>(PhantomData<fn() -> M>);
+
+impl<M> AllOrNothing<M> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M> Default for AllOrNothing<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
-impl MigratorTraitSelf for CliMigrator {
-    fn migrations(&self) -> Vec<Box<dyn MigrationTrait>> {
-        <Migrator as MigratorTrait>::migrations()
+impl<M: MigratorTrait> MigratorTrait for AllOrNothing<M> {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        M::migrations()
     }
 
-    fn migration_table_name(&self) -> sea_orm::DynIden {
-        <Migrator as MigratorTrait>::migration_table_name()
+    fn migration_table_name() -> sea_orm::DynIden {
+        M::migration_table_name()
     }
 
-    async fn up<'c, C>(&self, db: C, steps: Option<u32>) -> Result<(), DbErr>
+    async fn up<'c, C>(db: C, steps: Option<u32>) -> Result<(), DbErr>
     where
         C: IntoSchemaManagerConnection<'c>,
     {
-        up_all_or_nothing::<Migrator, C>(db, steps).await
+        up_all_or_nothing::<M, C>(db, steps).await
     }
 }

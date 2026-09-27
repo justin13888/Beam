@@ -11,7 +11,7 @@
 //! creates are invisible to every other test.
 #![cfg(feature = "pg-integration")]
 
-use beam_migration::up_all_or_nothing;
+use beam_migration::{AllOrNothing, up_all_or_nothing};
 use beam_test_support::postgres::{ScopedSchema, table_names};
 use sea_orm_migration::prelude::*;
 
@@ -133,6 +133,46 @@ async fn a_failing_migration_rolls_back_the_whole_pending_batch() {
     assert!(
         applied.is_empty(),
         "the ledger must record nothing from a failed batch, got {:?}",
+        applied
+            .iter()
+            .map(|migration| migration.name().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    scoped.drop_schema().await.expect("drop schema");
+}
+
+/// `beam-migration up` runs `AllOrNothing::<Migrator>` through `run_cli`, which
+/// calls `MigratorTraitSelf::up` on the value it is given. Driving the wrapper
+/// through that same entry point, over a release whose second migration fails,
+/// pins that the CLI's `up` is all-or-nothing and not sea-orm's per-migration
+/// default.
+#[tokio::test]
+async fn the_cli_migrator_rolls_back_the_whole_pending_batch() {
+    let scoped = ScopedSchema::create("atomic_cli")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+
+    let cli_migrator = AllOrNothing::<HalfBrokenRelease>::new();
+    let outcome = sea_orm_migration::MigratorTraitSelf::up(&cli_migrator, db, None).await;
+
+    assert!(
+        outcome.is_err(),
+        "the broken migration's error must reach the CLI, got {outcome:?}"
+    );
+    let tables = table_names(db, scoped.name()).await.expect("list tables");
+    assert!(
+        !tables.contains(&ALPHA_TABLE.to_string()),
+        "the CLI must not leave the migration before the failing one committed, got {tables:?}"
+    );
+    let applied = sea_orm_migration::MigratorTraitSelf::get_applied_migrations(&cli_migrator, db)
+        .await
+        .expect("read the migration ledger");
+    assert!(
+        applied.is_empty(),
+        "the ledger must record nothing from a failed CLI batch, got {:?}",
         applied
             .iter()
             .map(|migration| migration.name().to_string())
