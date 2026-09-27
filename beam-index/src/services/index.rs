@@ -1733,9 +1733,20 @@ impl LocalIndexService {
             self.movie_repo
                 .rekey(loser, None, CLASSIFIER_VERSION)
                 .await?;
-            self.movie_repo
-                .rekey(survivor, Some(key), CLASSIFIER_VERSION)
-                .await?;
+            if !self
+                .movie_repo
+                .rekey(survivor, Some(key.clone()), CLASSIFIER_VERSION)
+                .await?
+            {
+                // Another writer took the key in between: the survivor is
+                // still on its stale key, so moving files onto it would
+                // strand them there. Both keep their files; the loser,
+                // released, is never matched again.
+                warn!(%survivor, %loser, %key, "a movie merge lost its key to another writer");
+                settled.insert(survivor);
+                settled.insert(loser);
+                continue;
+            }
             for entry in self.movie_repo.find_entries_by_movie_id(loser).await? {
                 let MovieEntry {
                     id: entry_id,
@@ -1848,9 +1859,18 @@ impl LocalIndexService {
             self.show_repo
                 .rekey(loser, None, CLASSIFIER_VERSION)
                 .await?;
-            self.show_repo
-                .rekey(survivor, Some(key), CLASSIFIER_VERSION)
-                .await?;
+            if !self
+                .show_repo
+                .rekey(survivor, Some(key.clone()), CLASSIFIER_VERSION)
+                .await?
+            {
+                // As for a movie merge: files are never moved onto a
+                // survivor left on its stale key.
+                warn!(%survivor, %loser, %key, "a show merge lost its key to another writer");
+                settled.insert(survivor);
+                settled.insert(loser);
+                continue;
+            }
             for season in self.show_repo.find_seasons_by_show_id(loser).await? {
                 let target_season = self
                     .show_repo

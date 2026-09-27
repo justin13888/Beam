@@ -1231,6 +1231,102 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     );
 }
 
+/// If another writer takes the key between the merge releasing the loser and
+/// keying the survivor, the merge stops there: no file is moved onto a
+/// survivor left on its stale key.
+#[tokio::test]
+async fn a_merge_whose_survivor_loses_the_key_moves_no_file() {
+    use beam_domain::repositories::movie::MockMovieRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    let stale = h
+        .keyed_movie(
+            "Ocean's Eleven",
+            Some(2001),
+            "ocean s eleven|2001",
+            &["Ocean's Eleven (2001)/Ocean's Eleven (2001).mkv"],
+            chrono::Utc::now() - chrono::Duration::days(2),
+        )
+        .await;
+    let holder = h
+        .keyed_movie(
+            "Oceans Eleven",
+            Some(2001),
+            "oceans eleven|2001",
+            &["Oceans.Eleven.2001.1080p.mkv"],
+            chrono::Utc::now() - chrono::Duration::days(1),
+        )
+        .await;
+    let stale_row = h.movie_repo.find_by_id(stale).await.unwrap().unwrap();
+    let holder_row = h.movie_repo.find_by_id(holder).await.unwrap().unwrap();
+    let stale_entries = h.movie_repo.find_entries_by_movie_id(stale).await.unwrap();
+    let files_before = h.file_repo.files.lock().unwrap().clone();
+
+    // The movie repository as the pass sees it when a concurrent writer
+    // takes `oceans eleven|2001` after the loser is released.
+    let mut movies = MockMovieRepository::new();
+    movies.expect_find_unkeyed().returning(|| Ok(Vec::new()));
+    let listed = stale_row.clone();
+    movies
+        .expect_find_keyed_before_version()
+        .returning(move |_| Ok(vec![listed.clone()]));
+    movies
+        .expect_find_by_id()
+        .withf(move |id| *id == stale)
+        .returning(move |_| Ok(Some(stale_row.clone())));
+    movies
+        .expect_find_entries_by_movie_id()
+        .withf(move |id| *id == stale)
+        .times(1)
+        .returning(move |_| Ok(stale_entries.clone()));
+    movies
+        .expect_find_entries_by_movie_id()
+        .withf(move |id| *id != stale)
+        .never();
+    movies
+        .expect_find_by_identity_key()
+        .withf(|key| key == "oceans eleven|2001")
+        .returning(move |_| Ok(Some(holder_row.clone())));
+    movies
+        .expect_rekey()
+        .withf(|_, key, _| key.is_none())
+        .times(1)
+        .returning(|_, _, _| Ok(true));
+    movies
+        .expect_rekey()
+        .withf(|_, key, _| key.is_some())
+        .times(1)
+        .returning(|_, _, _| Ok(false));
+    movies.expect_find_or_create_entry().never();
+    movies.expect_ensure_library_association().never();
+    let service = LocalIndexService::new(
+        h.library_repo.clone(),
+        h.file_repo.clone(),
+        Arc::new(movies),
+        h.show_repo.clone(),
+        Arc::new(InMemoryMediaStreamRepository::default()),
+        Arc::new(MockHashService::new()),
+        Arc::new(MockMediaInfoService::new()),
+        Arc::new(InMemoryNotificationService::new()),
+        Arc::new(LocalAdminLogService::new(
+            h.admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+        )),
+    );
+
+    let report = service.rekey_stale_titles().await.unwrap();
+
+    assert!(report.merged_movies.is_empty(), "{report:?}");
+    let files_after = h.file_repo.files.lock().unwrap().clone();
+    for (id, before) in &files_before {
+        assert_eq!(
+            format!("{:?}", files_after[id].content),
+            format!("{:?}", before.content),
+            "{}",
+            before.path.display()
+        );
+    }
+}
+
 /// A title whose every file is away at upgrade is rekeyed from those
 /// files, so it is still found when they come back.
 #[tokio::test]
