@@ -337,7 +337,7 @@ pub struct WatcherStatus {
     /// natively again.
     pub watch_limit_reached: bool,
     /// The Linux per-user inotify watch limit (`fs.inotify.max_user_watches`),
-    /// absent where it cannot be read.
+    /// `null` where it cannot be read.
     pub watch_limit_count: Option<u64>,
     /// Every library, in the order the library list returns them.
     pub libraries: Vec<LibraryWatch>,

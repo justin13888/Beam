@@ -9316,7 +9316,7 @@
             ],
             "minimum": 0.0,
             "format": "uint64",
-            "description": "The Linux per-user inotify watch limit (`fs.inotify.max_user_watches`),\nabsent where it cannot be read."
+            "description": "The Linux per-user inotify watch limit (`fs.inotify.max_user_watches`),\n`null` where it cannot be read."
           },
           "libraries": {
             "items": {
