@@ -270,6 +270,11 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
+        Self::with_service(|service| service).await
+    }
+
+    /// A harness whose service `configure` finishes building.
+    async fn with_service(configure: impl FnOnce(LocalIndexService) -> LocalIndexService) -> Self {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("library");
         std::fs::create_dir_all(&root).unwrap();
@@ -306,6 +311,7 @@ impl Harness {
             )),
         )
         .with_clock(Arc::new(TestClock::starting_at(instant(0))));
+        let service = configure(service);
         Self {
             dir,
             root,
@@ -742,4 +748,86 @@ async fn an_unprobed_file_touched_is_hashed_once_not_on_every_visit() {
     h.scan().await;
     assert_eq!(h.hashes(), 2, "and not again");
     assert_eq!(h.probes(), 3, "while the probe is still retried");
+}
+
+/// An event for the library root itself is left to the scan: a root that
+/// reads as empty may be a volume that is not mounted, and only the scan's
+/// empty-root guard can tell. Nothing beneath it is marked missing.
+#[tokio::test]
+async fn a_directory_event_for_the_library_root_marks_nothing_missing() {
+    let h = Harness::new().await;
+    let heat = h.write("Heat (1995).mkv", "heat");
+    let ronin = h.write("Films/Ronin (1998).mkv", "ronin");
+    h.scan().await;
+
+    // What an unmounted volume leaves behind: its empty mount point.
+    std::fs::remove_file(&heat).unwrap();
+    std::fs::remove_dir_all(h.root.join("Films")).unwrap();
+    assert_eq!(
+        h.reconcile(&h.root, FsEventKind::Modified).await,
+        ReconcileOutcome::Done
+    );
+
+    h.present(&heat).await;
+    h.present(&ronin).await;
+}
+
+/// A directory event covering a file still being written is deferred as a
+/// whole, so the watcher comes back to the directory once the file has
+/// settled; the files that had settled are reconciled meanwhile.
+#[tokio::test]
+async fn a_directory_event_with_a_file_still_being_written_is_deferred() {
+    let now = Utc::now();
+    let window = Duration::from_secs(60);
+    let h = Harness::with_service(|service| {
+        service
+            .with_clock(Arc::new(TestClock::starting_at(now)))
+            .with_settle_window(window)
+    })
+    .await;
+    let settled = h.write("Show/S01/Show S01E01.mkv", "one");
+    let copying = h.write("Show/S01/Show S01E02.mkv", "two");
+    let set_mtime = |path: &Path, at: DateTime<Utc>| {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::from(at))
+            .unwrap();
+    };
+    set_mtime(&settled, now - chrono::TimeDelta::hours(1));
+    set_mtime(&copying, now);
+
+    let outcome = h
+        .reconcile(&h.root.join("Show/S01"), FsEventKind::Created)
+        .await;
+
+    assert_eq!(
+        outcome,
+        ReconcileOutcome::Deferred {
+            retry_after: window
+        }
+    );
+    h.present(&settled).await;
+    assert!(h.row(&copying).await.is_none(), "not indexed while written");
+}
+
+/// A watcher event's kind is a hint only. A file removed and written again
+/// within one debounce window arrives as a `Removed` event for a path that
+/// is there, and its row stays present.
+#[tokio::test]
+async fn a_removed_event_for_a_path_that_is_back_leaves_its_row_present() {
+    let h = Harness::new().await;
+    let path = h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    let before = h.present(&path).await;
+
+    std::fs::remove_file(&path).unwrap();
+    h.write("Heat (1995).mkv", "heat");
+    assert_eq!(
+        h.reconcile(&path, FsEventKind::Removed).await,
+        ReconcileOutcome::Done
+    );
+
+    assert_eq!(h.present(&path).await.id, before.id);
 }
