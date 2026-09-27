@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 56ac7d3a5b63cf0e72b5f6b18cb971e466d2f4ba4eb48fe8d1e12b9550487518 # shrinks to title = "🅐"
+cc a177231f6000007d8d39d49893ece8478cabb6b0e24fe82447798583b4d4dbdd # shrinks to a = [[6]], at_word = Index(0), at_letter = Index(0), replacement = 7, separators = (" ", " "), upper = (false, false), accent = (false, false)
