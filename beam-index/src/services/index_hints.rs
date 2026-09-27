@@ -228,8 +228,8 @@ fn located(path: PathBuf) -> Option<LocatedNfo> {
 pub(super) struct NfoFiles {
     /// `<stem>.nfo` beside the video, else `movie.nfo` in its folder.
     pub(super) file: Option<LocatedNfo>,
-    /// `tvshow.nfo` in its folder or the folder above -- the series folder
-    /// of a file in a season folder.
+    /// `tvshow.nfo` in its folder or, for a file in a season folder, in the
+    /// series folder above.
     pub(super) show: Option<LocatedNfo>,
 }
 
@@ -254,10 +254,21 @@ pub(super) fn locate_file_nfo(root: &Path, path: &Path) -> Option<LocatedNfo> {
         })
 }
 
-/// The `tvshow.nfo` describing the episodes in `dir`: in `dir`, else in the
-/// folder above.
+/// Whether the folder at `dir` is a season folder (`Season 01`, `Specials`),
+/// whose show's `tvshow.nfo` lives in the series folder above it.
+fn is_season_folder(dir: &Path) -> bool {
+    dir.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(season_folder_number)
+        .is_some()
+}
+
+/// The `tvshow.nfo` describing the episodes in `dir`: in `dir`, else -- only
+/// when `dir` is a season folder -- in the series folder above. The folder
+/// above a flat show's folder is a category folder (`TV/`), whose NFO would
+/// otherwise describe every show beneath it.
 pub(super) fn locate_show_nfo(root: &Path, dir: &Path) -> Option<LocatedNfo> {
-    [Some(dir), dir.parent()]
+    [Some(dir), dir.parent().filter(|_| is_season_folder(dir))]
         .into_iter()
         .flatten()
         .filter(|folder| below_root(root, folder))
@@ -274,13 +285,16 @@ pub(super) fn locate_nfos(root: &Path, path: &Path) -> NfoFiles {
 
 /// Whether the NFO at `nfo_path` could describe the video at `video`, by
 /// where the two are: a `tvshow.nfo` the videos in its folder and in the
-/// folders one level below it, any other NFO the videos in its own folder.
-/// Whether it *does* is [`locate_nfos`]'s to say.
+/// season folders directly below it, any other NFO the videos in its own
+/// folder. Whether it *does* is [`locate_nfos`]'s to say.
 pub(super) fn may_describe(nfo_path: &Path, video: &Path) -> bool {
     let (Some(dir), Some(video_dir)) = (nfo_path.parent(), video.parent()) else {
         return false;
     };
-    video_dir == dir || (is_tvshow_nfo(nfo_path) && video_dir.parent() == Some(dir))
+    video_dir == dir
+        || (is_tvshow_nfo(nfo_path)
+            && video_dir.parent() == Some(dir)
+            && is_season_folder(video_dir))
 }
 
 /// Whether `path` names a `tvshow.nfo`, in any case.

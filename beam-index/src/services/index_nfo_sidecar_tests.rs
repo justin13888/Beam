@@ -1231,6 +1231,43 @@ async fn a_tvshow_nfo_two_levels_above_an_episode_pins_no_show() {
     assert_eq!(h.show_pins(), vec![None]);
 }
 
+/// A category folder above flat show folders -- `TV/Lost/Lost.S01E01.mkv` --
+/// is not a series folder: the folder above an episode is looked in only when
+/// the episode's own folder is a season folder. So a `tvshow.nfo` there,
+/// found by the first scan, neither merges the shows beneath it into one
+/// title nor pins any of them.
+#[tokio::test]
+async fn a_tvshow_nfo_in_a_category_folder_above_flat_shows_describes_none_of_them() {
+    let h = Harness::new().await;
+    h.video("TV/Lost/Lost.S01E01.mkv");
+    h.video("TV/The Wire/The.Wire.S01E01.mkv");
+    h.write("TV/tvshow.nfo", &tmdb_show(1438));
+
+    h.scan().await;
+
+    let (lost, _, _) = h.show_of("TV/Lost/Lost.S01E01.mkv");
+    let (wire, _, _) = h.show_of("TV/The Wire/The.Wire.S01E01.mkv");
+    assert_ne!(lost.id, wire.id, "two shows, not one");
+    assert_eq!(lost.identity_key.as_deref(), Some("lost|"));
+    assert_eq!(h.show_pins(), vec![None, None]);
+}
+
+/// The same category `tvshow.nfo`, added after the flat shows beneath it were
+/// indexed, pins none of them -- by its watcher event or by a scan.
+#[tokio::test]
+async fn a_tvshow_nfo_added_to_a_category_folder_above_flat_shows_pins_none_of_them() {
+    let h = Harness::new().await;
+    h.video("TV/Lost/Lost.S01E01.mkv");
+    h.video("TV/The Wire/The.Wire.S01E01.mkv");
+    h.scan().await;
+
+    h.write("TV/tvshow.nfo", &tmdb_show(1438));
+    h.event("TV/tvshow.nfo", FsEventKind::Created).await;
+    h.scan().await;
+
+    assert_eq!(h.show_pins(), vec![None, None]);
+}
+
 /// `<stem>.nfo` wins over `movie.nfo` for the video it is named after, so a
 /// `movie.nfo` added beside it later re-pins nothing -- by scan or watcher.
 #[tokio::test]

@@ -200,8 +200,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   MUST be cleared rather than kept. At most one `files` row MAY exist per path.
 - **FR-219**: Classification (FR-204) MUST also read the Kodi-style NFO describing a file --
   `<stem>.nfo` beside it, else `movie.nfo` in its folder, and for an episode `tvshow.nfo` in its
-  folder or the folder above; never one at the library root -- and the file's container tags, in
-  the priority NFO, then path, then tags. An NFO's root (`<movie>`, or `<episodedetails>` with a
+  folder or, when that is a season folder, the series folder above; never one at the library root
+  or in a category folder above a show's own folder -- and the file's container tags, in the
+  priority NFO, then path, then tags. An NFO's root (`<movie>`, or `<episodedetails>` with a
   season and episode) decides whether the file is a movie or an episode; container tags (`show`,
   `season_number`, `episode_sort`, `title`, `date`/`year`) only fill what the path leaves open. An
   NFO or a tag MUST NOT change the identity key a title is matched by (FR-214), which stays the

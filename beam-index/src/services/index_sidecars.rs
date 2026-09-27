@@ -351,7 +351,11 @@ impl LocalIndexService {
             if hints::is_tvshow_nfo(&walked.path) {
                 indices.extend(by_grandparent.get(dir).into_iter().flatten().copied());
             }
-            let candidates: Vec<&MediaFile> = indices.into_iter().map(|i| &all[i]).collect();
+            let candidates: Vec<&MediaFile> = indices
+                .into_iter()
+                .map(|i| &all[i])
+                .filter(|file| hints::may_describe(&walked.path, &file.path))
+                .collect();
             self.reapply_nfo(library, &walked.path, record, &candidates)
                 .await?;
         }
