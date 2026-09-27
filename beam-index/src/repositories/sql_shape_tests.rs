@@ -1051,3 +1051,143 @@ mod title_identity {
         }
     }
 }
+
+mod playback_telemetry {
+    use super::*;
+    use beam_domain::models::playback_telemetry::test_utils::{
+        rebuffer_key, start_key, switch_key,
+    };
+    use beam_domain::repositories::PlaybackTelemetryRepository;
+    use beam_entity::{playback_rebuffer_count, playback_start_count, playback_switch_count};
+    use chrono::NaiveDate;
+    use sea_orm::{EntityName, EntityTrait, IdenStatic, Iterable, PrimaryKeyToColumn};
+
+    use crate::repositories::SqlPlaybackTelemetryRepository;
+
+    fn day() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 9, 27).unwrap()
+    }
+
+    /// The conflict target is the table's whole primary key -- read from the
+    /// entity rather than restated, so a key column added to the table and
+    /// forgotten in the upsert fails here. A target missing a key column has
+    /// no unique index behind it, and Postgres refuses the statement.
+    #[track_caller]
+    fn assert_conflicts_on_the_primary_key<E: EntityTrait>(statement: &Statement) {
+        let columns: Vec<String> = E::PrimaryKey::iter()
+            .map(|key| format!(r#""{}""#, key.into_column().as_str()))
+            .collect();
+        assert_contains(
+            statement,
+            &format!("ON CONFLICT ({}) DO UPDATE", columns.join(", ")),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_start_increments_its_row_in_one_statement() {
+        let db = connection(empty_mock());
+        let repo = SqlPlaybackTelemetryRepository::new(db.clone());
+        let _ = repo.record_start(day(), start_key()).await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1, "one upsert, never a read-modify-write");
+        assert_conflicts_on_the_primary_key::<playback_start_count::Entity>(&sql[0]);
+        assert_contains(&sql[0], r#""count" = "playback_start_counts"."count" + $"#);
+        assert_bound(&sql[0], "2026-09-27");
+    }
+
+    /// A rebuffer adds its duration to the total and one to the one bucket
+    /// it falls into -- and touches no other bucket on conflict.
+    #[tokio::test]
+    async fn a_rebuffer_increments_its_total_and_only_its_bucket() {
+        let db = connection(empty_mock());
+        let repo = SqlPlaybackTelemetryRepository::new(db.clone());
+        let _ = repo.record_rebuffer(day(), rebuffer_key(), 1_234).await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_conflicts_on_the_primary_key::<playback_rebuffer_count::Entity>(&sql[0]);
+        let table = "playback_rebuffer_counts";
+        assert_contains(&sql[0], &format!(r#""events" = "{table}"."events" + $"#));
+        assert_contains(
+            &sql[0],
+            &format!(r#""total_ms" = "{table}"."total_ms" + $"#),
+        );
+        assert_bound(&sql[0], "1234");
+        assert_contains(&sql[0], &format!(r#""s1_3" = "{table}"."s1_3" + $"#));
+        for other in ["lt_1s", "s3_10", "s10_30", "ge_30s"] {
+            assert!(
+                !sql[0]
+                    .sql
+                    .contains(&format!(r#""{other}" = "{table}"."{other}""#)),
+                "a 1.2 s rebuffer must not touch {other}:\n{}",
+                sql[0].sql
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_switch_increments_its_row_in_one_statement() {
+        let db = connection(empty_mock());
+        let repo = SqlPlaybackTelemetryRepository::new(db.clone());
+        let _ = repo.record_switch(day(), switch_key()).await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_conflicts_on_the_primary_key::<playback_switch_count::Entity>(&sql[0]);
+        assert_contains(&sql[0], r#""count" = "playback_switch_counts"."count" + $"#);
+    }
+
+    /// Pruning deletes from every table, strictly before the cutoff it is
+    /// given -- never the cutoff day itself.
+    #[tokio::test]
+    async fn pruning_deletes_strictly_earlier_days_from_every_table() {
+        let db = connection(empty_mock());
+        let repo = SqlPlaybackTelemetryRepository::new(db.clone());
+        let _ = repo.prune_before(day()).await;
+        drop(repo);
+
+        let sql = statements(db);
+        let tables: Vec<&str> = vec![
+            playback_start_count::Entity.table_name(),
+            playback_rebuffer_count::Entity.table_name(),
+            playback_switch_count::Entity.table_name(),
+        ];
+        assert_eq!(sql.len(), tables.len());
+        for (statement, table) in sql.iter().zip(tables) {
+            assert_contains(statement, &format!(r#"DELETE FROM "{table}""#));
+            assert_filters(statement, table, "day", "<");
+            assert_bound(statement, "2026-09-27");
+        }
+    }
+
+    /// Each read sums one table over the range it is given, both ends bound.
+    #[tokio::test]
+    async fn summarizing_reads_each_table_over_the_bound_range() {
+        let db = connection(empty_mock());
+        let repo = SqlPlaybackTelemetryRepository::new(db.clone());
+        let from = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        let _ = repo.summarize(from, day()).await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 3);
+        for (statement, table) in sql.iter().zip([
+            "playback_start_counts",
+            "playback_rebuffer_counts",
+            "playback_switch_counts",
+        ]) {
+            assert_contains(
+                statement,
+                &format!("FROM {table} WHERE day >= $1 AND day <= $2"),
+            );
+            assert_contains(statement, "GROUP BY");
+            let values = bound_values(statement);
+            assert!(values[0].contains("2026-08-01"), "{values:?}");
+            assert!(values[1].contains("2026-09-27"), "{values:?}");
+        }
+    }
+}
