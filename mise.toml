@@ -1764,6 +1764,16 @@ rc=0; curl -sS -o /dev/null -D - "$api_base/v1/auth/login" \
     | grep -iqF "location: $issuer" || rc=$?
 check "$rc" "GET /v1/auth/login redirects to the IdP at $authority"
 
+# The device grant (ADR-0017): Beam offers it only when discovery names a
+# device endpoint, so assert both that Dex advertises one and that the server,
+# having read it at startup, starts a device login -- a user code in the body.
+# `-X POST` with no body and no Origin, as a TV app sends it. The POST costs one
+# device_auths row, swept when it expires.
+rc=0; printf '%s' "$host_doc" | tr -d ' \t' | grep -qF '"device_authorization_endpoint":"' || rc=$?
+check "$rc" "discovery advertises a device_authorization_endpoint"
+rc=0; curl -fsS -X POST "$api_base/v1/auth/device" | tr -d ' \t' | grep -qF '"user_code":"' || rc=$?
+check "$rc" "POST /v1/auth/device starts a device login"
+
 # The negative: the default topology stays valid and IdP-free. A `depends_on`
 # naming the profile-gated dex service would break the first of these outright.
 rc=0; compose config -q || rc=$?

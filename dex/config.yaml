@@ -30,6 +30,11 @@ staticClients:
     name: "Beam"
     redirectURIs:
       - "http://localhost:8000/v1/auth/callback"
+      # Dex's own page for the device authorization grant (ADR-0017): after
+      # a user enters the code at /dex/device, Dex completes its internal
+      # authorization-code step here. Without it a device login cannot be
+      # approved -- Dex refuses the redirect.
+      - "http://dex.beam.localhost:5556/dex/device/callback"
 
 enablePasswordDB: true
 staticPasswords:
