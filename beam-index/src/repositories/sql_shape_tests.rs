@@ -114,6 +114,19 @@ mod playback_progress {
 
     use crate::repositories::SqlPlaybackProgressRepository;
 
+    /// The list reads join `files` on the progress row's file and keep only
+    /// present files, in the same statement that carries the `LIMIT`/`OFFSET`
+    /// or the `COUNT` -- so a missing file cannot take a slot in a page or in
+    /// the total (issue #179).
+    #[track_caller]
+    fn assert_joins_present_files(statement: &Statement) {
+        assert_contains(
+            statement,
+            r#"INNER JOIN "files" ON "playback_progress"."file_id" = "files"."id""#,
+        );
+        assert_contains(statement, r#""files"."missing_since" IS NULL"#);
+    }
+
     #[tokio::test]
     async fn upsert_targets_the_user_file_unique_index_and_updates_the_mutable_columns() {
         let db = connection(empty_mock());
@@ -165,6 +178,8 @@ mod playback_progress {
         drop(repo);
 
         let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_joins_present_files(&sql[0]);
         assert_filters(&sql[0], "playback_progress", "user_id", "=");
         assert_filters(&sql[0], "playback_progress", "completed", "=");
         assert_contains(&sql[0], r#"ORDER BY "playback_progress"."updated_at" DESC"#);
@@ -180,6 +195,8 @@ mod playback_progress {
         drop(repo);
 
         let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_joins_present_files(&sql[0]);
         assert_filters(&sql[0], "playback_progress", "user_id", "=");
         assert!(
             !sql[0].sql.contains(r#""playback_progress"."completed" ="#),
@@ -200,6 +217,8 @@ mod playback_progress {
         drop(repo);
 
         let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_joins_present_files(&sql[0]);
         assert_filters(&sql[0], "playback_progress", "user_id", "=");
         assert_bound(&sql[0], &user.to_string());
     }
@@ -231,6 +250,7 @@ mod file {
         let _ = repo.find_all_by_library(library).await;
         let _ = repo.find_by_movie_entry_id(entry).await;
         let _ = repo.find_by_episode_id(episode).await;
+        let _ = repo.find_all_by_library_including_missing(library).await;
         drop(repo);
 
         let sql = statements(db);
@@ -244,51 +264,131 @@ mod file {
         assert_bound(&sql[3], &entry.to_string());
         assert_filters(&sql[4], "files", "episode_id", "=");
         assert_bound(&sql[4], &episode.to_string());
+        assert_filters(&sql[5], "files", "library_id", "=");
+        assert_bound(&sql[5], &library.to_string());
+    }
+
+    /// The soft-delete split (issue #179): a visible read must exclude a
+    /// missing row, a reconcile read must not. Dropping the filter from a
+    /// visible read would put a file that is not on disk back in browse and
+    /// streaming; adding it to a reconcile read would make a returning path
+    /// index as a new file and orphan its playback progress.
+    #[tokio::test]
+    async fn visible_reads_exclude_missing_rows_and_reconcile_reads_include_them() {
+        let id = Uuid::from_u128(14);
+        let db = connection(
+            MockDatabase::new(DbBackend::Postgres)
+                .append_query_results((0..6).map(|_| Vec::<Row>::new()))
+                .append_query_results([vec![row([("num_items", Value::BigInt(Some(0)))])]])
+                .append_query_results((0..2).map(|_| Vec::<Row>::new())),
+        );
+        let repo = SqlFileRepository::new(db.clone());
+        let _ = repo.find_by_id(id).await;
+        let _ = repo.find_by_hash(1).await;
+        let _ = repo.find_all_by_library(id).await;
+        let _ = repo.find_by_movie_entry_id(id).await;
+        let _ = repo.find_by_episode_id(id).await;
+        let _ = repo.find_all_by_library_including_missing(id).await;
+        let _ = repo.count_all().await;
+        let _ = repo.find_by_path("/videos/a.mkv").await;
+        drop(repo);
+
+        let sql = statements(db);
+        let (visible, reconcile): (Vec<usize>, Vec<usize>) = (vec![0, 1, 2, 3, 4, 6], vec![5, 7]);
+        for i in visible {
+            assert_filters(&sql[i], "files", "missing_since", "IS NULL");
+        }
+        for i in reconcile {
+            // The column is always selected; what must be absent is a filter.
+            assert!(
+                !sql[i].sql.contains(r#""files"."missing_since" IS"#),
+                "a reconcile read must see missing rows, got:\n{}",
+                sql[i].sql
+            );
+        }
+        assert_filters(&sql[0], "files", "id", "=");
+        assert_bound(&sql[0], &id.to_string());
     }
 
     #[tokio::test]
-    async fn delete_by_ids_deletes_only_the_listed_rows() {
+    async fn mark_missing_stamps_only_the_listed_rows_not_already_missing() {
         let db = connection(empty_mock());
         let repo = SqlFileRepository::new(db.clone());
         let a = Uuid::from_u128(21);
         let b = Uuid::from_u128(22);
-        let _ = repo.delete_by_ids(vec![a, b]).await;
+        let _ = repo
+            .mark_missing(
+                vec![a, b],
+                chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            )
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1, "marking is a single UPDATE");
+        assert_contains(&sql[0], "UPDATE");
+        assert_contains(&sql[0], r#"SET "missing_since" = $1"#);
+        assert_filters(&sql[0], "files", "id", "IN");
+        assert_filters(&sql[0], "files", "missing_since", "IS NULL");
+        assert_bound(&sql[0], &a.to_string());
+        assert_bound(&sql[0], &b.to_string());
+        assert_bound(&sql[0], "2023-11-14");
+    }
+
+    #[tokio::test]
+    async fn restore_clears_the_stamp_on_exactly_one_row() {
+        let db = connection(empty_mock());
+        let repo = SqlFileRepository::new(db.clone());
+        let id = Uuid::from_u128(23);
+        let _ = repo.restore(id).await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_contains(&sql[0], "UPDATE");
+        assert_contains(&sql[0], r#"SET "missing_since" = $1"#);
+        assert_filters(&sql[0], "files", "id", "=");
+        assert_bound(&sql[0], &id.to_string());
+        assert!(
+            bound_values(&sql[0]).iter().any(|v| v.contains("None")),
+            "restore must bind NULL for missing_since, got {:?}",
+            bound_values(&sql[0])
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_missing_deletes_only_listed_rows_that_are_missing() {
+        let db = connection(empty_mock());
+        let repo = SqlFileRepository::new(db.clone());
+        let a = Uuid::from_u128(24);
+        let b = Uuid::from_u128(25);
+        let _ = repo.purge_missing(vec![a, b]).await;
         drop(repo);
 
         let sql = statements(db);
         assert_contains(&sql[0], "DELETE FROM");
         assert_filters(&sql[0], "files", "id", "IN");
+        assert_filters(&sql[0], "files", "missing_since", "IS NOT NULL");
         assert_bound(&sql[0], &a.to_string());
         assert_bound(&sql[0], &b.to_string());
     }
 
     #[tokio::test]
-    async fn delete_by_ids_with_an_empty_list_issues_no_statement() {
+    async fn empty_id_lists_issue_no_statement() {
         let db = connection(empty_mock());
         let repo = SqlFileRepository::new(db.clone());
-        let deleted = repo.delete_by_ids(Vec::new()).await.unwrap();
+        let marked = repo
+            .mark_missing(Vec::new(), chrono::Utc::now())
+            .await
+            .unwrap();
+        let purged = repo.purge_missing(Vec::new()).await.unwrap();
         drop(repo);
 
-        assert_eq!(deleted, 0);
+        assert_eq!((marked, purged), (0, 0));
         assert!(
             statements(db).is_empty(),
-            "an empty id list must not reach the database -- `DELETE ... IN ()` \
-             is either a syntax error or, worse, a full-table delete"
+            "an empty id list must not reach the database -- `... IN ()` is \
+             either a syntax error or, worse, matches every row"
         );
-    }
-
-    #[tokio::test]
-    async fn delete_removes_exactly_one_row_by_primary_key() {
-        let db = connection(empty_mock());
-        let repo = SqlFileRepository::new(db.clone());
-        let id = Uuid::from_u128(31);
-        let _ = repo.delete(id).await;
-        drop(repo);
-
-        let sql = statements(db);
-        assert_contains(&sql[0], "DELETE FROM");
-        assert_filters(&sql[0], "files", "id", "=");
-        assert_bound(&sql[0], &id.to_string());
     }
 }
 
@@ -351,6 +451,9 @@ mod library {
         assert_contains(&sql[0], r#"FROM "files""#);
         assert_filters(&sql[0], "files", "library_id", "=");
         assert_bound(&sql[0], &library.to_string());
+        // A missing file (issue #179) is not part of the library a scan
+        // reports.
+        assert_filters(&sql[0], "files", "missing_since", "IS NULL");
     }
 
     #[tokio::test]

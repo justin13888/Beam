@@ -75,7 +75,7 @@ one of the [indexed extensions](/operate/libraries/#which-files-get-indexed) —
 still lists video files for that library. That is almost always a volume that is not mounted: an
 unmounted bind mount, dropped NFS or SMB share, or disk that failed to attach leaves its mount point
 behind empty, or holding only files such as `.not_mounted`, `.DS_Store` or `Thumbs.db`. Beam refuses
-to reconcile rather than delete the library's whole catalogue. Nothing was changed.
+to reconcile rather than mark the library's whole catalogue missing. Nothing was changed.
 
 <Steps>
 1. Check the admin Logs tab. The error entry names the library and how many video files are
@@ -138,6 +138,25 @@ this is usually your browser lacking a codec rather than a fault. Try another br
 
 The catalogue has the file but the path does not exist. A bind mount is missing, the library
 moved, or the file was deleted outside Beam. Fix the mount, then rescan.
+
+## Titles or episodes have nothing to play after a disk went offline
+
+The titles are still listed, but their versions on that disk are gone from the source list, can't
+be streamed, and have left continue-watching and history. Beam hid the files it could no longer
+find rather than deleting them — see
+[When files go missing](/operate/libraries/#when-files-go-missing). Nothing, including anyone's
+resume point, is lost yet. (A title whose only file is missing stays listed with nothing to play;
+hiding it is tracked in [#183](https://github.com/justin13888/beam/issues/183).)
+
+<Steps>
+1. Bring the disk or share back, then rescan (or just wait: the watcher and the periodic rescan
+   restore files as they reappear at the same path).
+2. Do it within the grace period — 30 days unless `BEAM_MISSING_FILE_GRACE_DAYS` is set. A scan
+   after that removes the files, and everyone's progress on them, for good.
+3. If a scan reported that it **could not read** part of the library, the admin Logs tab has a
+   warning listing the folders or files (`failed_paths` in its **Details**). Files at or beneath
+   them were left alone; fix the permissions or the share and rescan.
+</Steps>
 
 ## Everything returns 429
 

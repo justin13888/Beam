@@ -40,6 +40,17 @@ impl PlaybackProgressFixture for PgFixture {
     async fn new_file(&self) -> FixtureUuid {
         seed::file(&self.db).await.expect("seed a file row")
     }
+
+    async fn mark_file_missing(&self, file_id: FixtureUuid) {
+        use beam_domain::repositories::FileRepository;
+        use beam_domain::services::Clock;
+        use beam_index::repositories::SqlFileRepository;
+
+        SqlFileRepository::new(self.db.clone())
+            .mark_missing(vec![file_id], self.clock.now())
+            .await
+            .expect("mark the file row missing");
+    }
 }
 
 async fn setup() -> PgFixture {

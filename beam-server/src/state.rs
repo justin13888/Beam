@@ -166,9 +166,15 @@ impl AppServices {
     /// `IndexService`/`MetadataService` trait objects stored on `library`/
     /// `metadata`. Test fixtures that only need an `AppServices` (not a real
     /// indexer) are unaffected by these extra return values.
+    ///
+    /// `clock` is the one the caller also hands [`AppState::with_clock`], so
+    /// every time-dependent service in the process -- the indexer's scan
+    /// stamps and missing-file grace, enrichment, the artwork cache -- reads
+    /// the same injected seam.
     pub async fn new(
         config: &ServerConfig,
         db: Arc<DatabaseConnection>,
+        clock: Arc<dyn Clock>,
     ) -> eyre::Result<(Self, Arc<LocalIndexService>, Arc<MetadataEnrichmentService>)> {
         let hash_config = HashConfig::default();
 
@@ -265,7 +271,9 @@ impl AppServices {
                 notification_service.clone(),
                 admin_log_service.clone(),
             )
+            .with_clock(clock.clone())
             .with_hash_unknown_files(config.hash_unknown_files)
+            .with_missing_file_grace(config.missing_file_grace())
             .with_enrichment_repo(enrichment_repo.clone()),
         );
 
@@ -279,7 +287,7 @@ impl AppServices {
                 genre_repo.clone(),
                 enrichment_provider,
                 admin_log_service.clone(),
-                Arc::new(RealClock),
+                clock.clone(),
             )
             .with_policy(EnrichmentPolicy {
                 batch_size: config.enrich_batch_size,
@@ -314,7 +322,7 @@ impl AppServices {
                     negative_ttl: Duration::from_secs(config.artwork_negative_ttl_secs),
                 },
                 artwork_fetcher,
-                Arc::new(RealClock),
+                clock.clone(),
             )
             .await?,
         );

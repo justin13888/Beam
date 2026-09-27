@@ -18,6 +18,23 @@ pub struct SqlPlaybackProgressRepository {
     clock: Arc<dyn Clock>,
 }
 
+/// A user's progress rows whose file is present: joined to `files` and
+/// restricted to `missing_since IS NULL` (issue #179). The list reads start
+/// here so the filter lands before `LIMIT`/`OFFSET` and inside `COUNT`, rather
+/// than after a page has already been cut.
+fn visible_rows_for(user_id: Uuid) -> sea_orm::Select<beam_entity::playback_progress::Entity> {
+    use beam_entity::{files, playback_progress};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+
+    playback_progress::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            playback_progress::Relation::Files.def(),
+        )
+        .filter(playback_progress::Column::UserId.eq(user_id))
+        .filter(files::Column::MissingSince.is_null())
+}
+
 impl SqlPlaybackProgressRepository {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self::with_clock(db, Arc::new(RealClock))
@@ -93,10 +110,9 @@ impl PlaybackProgressRepository for SqlPlaybackProgressRepository {
         limit: u32,
     ) -> Result<Vec<PlaybackProgress>, DbErr> {
         use beam_entity::playback_progress;
-        use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
+        use sea_orm::{ColumnTrait, Order, QueryFilter, QueryOrder, QuerySelect};
 
-        let models = playback_progress::Entity::find()
-            .filter(playback_progress::Column::UserId.eq(user_id))
+        let models = visible_rows_for(user_id)
             .filter(playback_progress::Column::Completed.eq(false))
             .order_by(playback_progress::Column::UpdatedAt, Order::Desc)
             .limit(limit as u64)
@@ -113,10 +129,9 @@ impl PlaybackProgressRepository for SqlPlaybackProgressRepository {
         offset: u64,
     ) -> Result<Vec<PlaybackProgress>, DbErr> {
         use beam_entity::playback_progress;
-        use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect};
+        use sea_orm::{Order, QueryOrder, QuerySelect};
 
-        let models = playback_progress::Entity::find()
-            .filter(playback_progress::Column::UserId.eq(user_id))
+        let models = visible_rows_for(user_id)
             .order_by(playback_progress::Column::UpdatedAt, Order::Desc)
             .offset(offset)
             .limit(limit)
@@ -127,12 +142,8 @@ impl PlaybackProgressRepository for SqlPlaybackProgressRepository {
     }
 
     async fn count_by_user(&self, user_id: Uuid) -> Result<u64, DbErr> {
-        use beam_entity::playback_progress;
-        use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+        use sea_orm::PaginatorTrait;
 
-        playback_progress::Entity::find()
-            .filter(playback_progress::Column::UserId.eq(user_id))
-            .count(self.db.as_ref())
-            .await
+        visible_rows_for(user_id).count(self.db.as_ref()).await
     }
 }

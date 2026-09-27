@@ -74,7 +74,11 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   `vendored-ffmpeg` Cargo feature statically compiles FFmpeg for local dev
   ([ADR-0007](decisions/ADR-0007-vendored-ffmpeg-local-dev.md)).
 - `services/` — `index.rs` (scan loop: WalkDir traversal, mtime/size/hash change detection,
-  XXH3 content-hash dedup, movie-vs-episode classification, find-or-create; it also emits a
+  XXH3 content-hash dedup, movie-vs-episode classification, find-or-create; files the walk or the
+  watcher no longer finds are soft-deleted with `missing_since`, restored under the same id when
+  they reappear, and purged only after `BEAM_MISSING_FILE_GRACE_DAYS` by a scan whose walk hit no
+  error above them (a listed entry the walk cannot stat, other than "not found", counts as an error
+  at that path) — the pure `plan_missing` makes that decision (FR-211); it also emits a
   non-fatal admin warning when two renditions of the same movie/episode have runtimes that diverge
   past `DivergencePolicy`'s relative+absolute thresholds, a likely misnamed/mismatched file);
   `watcher.rs`

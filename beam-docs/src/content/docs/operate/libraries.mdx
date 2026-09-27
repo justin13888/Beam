@@ -30,12 +30,41 @@ changes as they happen, so routine additions usually need no manual scan.
 Scanning and enrichment are independent: a scan makes files playable, and metadata arrives
 separately. See [Metadata and artwork](/operate/metadata/).
 
-A scan removes files from the catalogue when they are gone from disk. The one exception is a root
-that holds **no video files Beam can index** — none with an extension listed
-[below](#which-files-get-indexed) — while the library still has video files indexed. That is what an
-unmounted volume looks like, whether its mount point is left empty or holds only a sentinel or hidden
-file such as `.not_mounted` or `.DS_Store`, so the scan is refused and nothing is removed — see
-[Scan refused: library root is empty](/help/troubleshooting/#scan-refused-library-root-is-empty).
+## When files go missing
+
+A file that is gone from disk is not removed at once. Beam marks it **missing**: it drops out of its
+title's sources, continue-watching and history, and cannot be streamed — but Beam keeps its record,
+and with it every viewer's resume point. The title itself stays in browsing and search; one whose
+only file is missing is still listed but has nothing to play (hiding such titles is tracked in
+[#183](https://github.com/justin13888/beam/issues/183)). If the file comes back at the same path, the
+next scan (or the filesystem watcher) restores it exactly as it was, progress included.
+
+A missing file is removed for good only when a scan still cannot find it after a grace period — 30
+days unless `BEAM_MISSING_FILE_GRACE_DAYS` says otherwise (see
+[Configuration](/reference/configuration/)). Removing it also removes everyone's progress for it.
+Set the grace to `0` to remove missing files at the next scan.
+
+Two things never count as a file going missing:
+
+- **Part of the library could not be read.** If a scan cannot list a folder, or cannot check a
+  file it listed — a permissions problem, a flaky network share — the files beneath that path are
+  left exactly as they were, and the scan writes a warning to the admin log naming it. The rest of
+  the library is scanned as normal, so files elsewhere can still be marked missing or removed.
+- **The whole library went away.** A watcher event while the library root is unavailable changes
+  nothing, and a root that holds **no video files Beam can index** — none with an extension listed
+  [below](#which-files-get-indexed) — while the library still has video files indexed is refused
+  outright. That is what an unmounted volume looks like, whether its mount point is left empty or
+  holds only a sentinel or hidden file such as `.not_mounted` or `.DS_Store` — see
+  [Scan refused: library root is empty](/help/troubleshooting/#scan-refused-library-root-is-empty).
+
+<Aside type="note" title="A library spread over several disks">
+If a library root holds several mount points and only **one** of them is unmounted, the root still
+contains videos from the others, so the empty-root refusal does not apply. The unmounted disk's
+files are marked missing instead — hidden, not removed — and come back with their progress when the
+disk is remounted, as long as that happens within the grace period. For a disk that is routinely
+offline for longer, raise `BEAM_MISSING_FILE_GRACE_DAYS`, or give it a library of its own.
+</Aside>
+
 To remove every video from a library on purpose, delete the library.
 
 ## Which files get indexed

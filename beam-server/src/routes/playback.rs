@@ -39,10 +39,11 @@ pub struct ReportProgressRequest {
     pub duration_secs: Option<f64>,
 }
 
-/// A page of watch history. `total` counts every history row for the user
-/// (completed and in-progress) so the client can paginate; `items` may hold
-/// fewer than the requested `limit` when a row's underlying file was removed
-/// by a rescan (those stale rows are skipped here but still counted in
+/// A page of watch history. `total` counts the user's history rows (completed
+/// and in-progress) whose file is present, so the client can paginate; a row
+/// whose file is missing from disk is in neither `items` nor `total`. `items`
+/// may still hold fewer than the requested `limit` when a row's title can no
+/// longer be resolved (that row is skipped here but still counted in
 /// `total`).
 #[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct HistoryResponse {
@@ -143,10 +144,11 @@ pub async fn get_continue_watching(
 /// updated first.
 ///
 /// `limit` defaults to 50 and is clamped to 1..=100; `offset` defaults to 0.
-/// The response carries `total` (all history rows for the user) so a single
-/// request paginates without a separate count endpoint. Note that `items.len()`
-/// can be below `limit` when stale rows (files removed by a rescan) are
-/// skipped, while `total` still counts them.
+/// The response carries `total` (the user's history rows whose file is
+/// present) so a single request paginates without a separate count endpoint.
+/// A row whose file is missing from disk is left out of both `items` and
+/// `total`. `items.len()` can still be below `limit` when a row's title can no
+/// longer be resolved: that row is skipped, while `total` still counts it.
 #[kynos::get("/history", tag = Playback, operation_id = "getHistory")]
 pub async fn get_history(
     auth: SessionAuth,

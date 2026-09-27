@@ -18,6 +18,7 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+use beam_domain::services::TestClock;
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
@@ -35,6 +36,9 @@ struct Fixture {
     state: AppState,
     file_repo: Arc<InMemoryFileRepository>,
     movie_repo: Arc<InMemoryMovieRepository>,
+    /// What the progress rows' `updated_at` is stamped from, so a test orders
+    /// reports by advancing it rather than by racing the wall clock.
+    progress_clock: Arc<TestClock>,
 }
 
 fn fixture() -> Fixture {
@@ -42,9 +46,13 @@ fn fixture() -> Fixture {
 
     let file_repo = Arc::new(InMemoryFileRepository::default());
     let movie_repo = Arc::new(InMemoryMovieRepository::default());
+    let progress_clock = Arc::new(TestClock::new());
     let playback: Arc<dyn crate::services::playback::PlaybackService> =
         Arc::new(DbPlaybackService::new(
-            Arc::new(InMemoryPlaybackProgressRepository::default()),
+            Arc::new(InMemoryPlaybackProgressRepository::new(
+                progress_clock.clone(),
+                file_repo.clone(),
+            )),
             file_repo.clone(),
             movie_repo.clone(),
             Arc::new(InMemoryShowRepository::default()),
@@ -75,6 +83,7 @@ fn fixture() -> Fixture {
         state: AppState::new(base.config.clone(), services, base.probe.clone(), None),
         file_repo,
         movie_repo,
+        progress_clock,
     }
 }
 
@@ -134,6 +143,7 @@ fn make_media_file(content: MediaFileContent) -> MediaFile {
         status: beam_domain::models::FileStatus::Known,
         scanned_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        missing_since: None,
     }
 }
 
@@ -322,6 +332,56 @@ async fn a_partially_watched_file_resolves_back_to_its_movie() {
     assert_eq!(items[0].media_type, "movie");
 }
 
+/// A file that goes missing (issue #179) drops out of continue-watching and
+/// refuses new reports, but its position is kept: when the file is restored
+/// under the same id, the row comes back where the user left it.
+#[tokio::test]
+async fn a_missing_file_leaves_continue_watching_and_returns_with_its_position_on_restore() {
+    use beam_domain::repositories::FileRepository;
+
+    let fixture = fixture();
+    let (_, file_id) = seed_movie_file(&fixture);
+    let client = client(&fixture);
+    let token = seed_session(&fixture).await;
+    assert_eq!(report(&client, &token, file_id, 37.0).await, StatusCode::OK);
+
+    let continue_watching = || async {
+        let response = client
+            .get("/v1/continue-watching")
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.json::<Vec<ContinueWatchingItem>>()
+    };
+
+    fixture
+        .file_repo
+        .mark_missing(vec![file_id], chrono::Utc::now())
+        .await
+        .unwrap();
+
+    assert!(
+        continue_watching().await.is_empty(),
+        "a missing file cannot be resumed"
+    );
+    assert_eq!(
+        report(&client, &token, file_id, 50.0).await,
+        StatusCode::NOT_FOUND,
+        "a missing file cannot be played, so it takes no reports"
+    );
+
+    fixture.file_repo.restore(file_id).await.unwrap();
+
+    let items = continue_watching().await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].file_id, file_id.to_string());
+    assert_eq!(
+        items[0].position_secs, 37.0,
+        "the position survived the absence"
+    );
+}
+
 // ── GET /v1/history ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -363,4 +423,83 @@ async fn history_counts_and_returns_the_completed_row_continue_watching_hides() 
         body.items.iter().any(|item| item.completed),
         "a completed row belongs in history even though continue-watching drops it"
     );
+}
+
+// ── missing files and the list limits (issue #179) ───────────────────────────
+
+/// Seeds `count` movie files, reports progress on each (one clock step apart,
+/// each newer than the last) and marks every one missing.
+async fn seed_missing_reports(
+    fixture: &Fixture,
+    client: &TestClient<AppState>,
+    token: &str,
+    count: usize,
+    position_secs: f64,
+) {
+    use beam_domain::repositories::FileRepository;
+
+    for _ in 0..count {
+        fixture
+            .progress_clock
+            .advance(std::time::Duration::from_secs(60));
+        let (_, file_id) = seed_movie_file(fixture);
+        assert_eq!(
+            report(client, token, file_id, position_secs).await,
+            StatusCode::OK
+        );
+        fixture
+            .file_repo
+            .mark_missing(vec![file_id], chrono::Utc::now())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn more_missing_rows_than_the_limit_do_not_push_a_present_file_out_of_continue_watching() {
+    let fixture = fixture();
+    let client = client(&fixture);
+    let token = seed_session(&fixture).await;
+    let (_, present) = seed_movie_file(&fixture);
+    assert_eq!(report(&client, &token, present, 10.0).await, StatusCode::OK);
+    // Three missing rows, all newer than the present one, against a limit of
+    // two: cut before they are filtered, they would fill the whole list.
+    seed_missing_reports(&fixture, &client, &token, 3, 10.0).await;
+
+    let response = client
+        .get("/v1/continue-watching?limit=2")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let items: Vec<ContinueWatchingItem> = response.json();
+    let files: Vec<String> = items.into_iter().map(|item| item.file_id).collect();
+    assert_eq!(files, vec![present.to_string()]);
+}
+
+#[tokio::test]
+async fn history_items_and_total_leave_out_missing_files() {
+    let fixture = fixture();
+    let client = client(&fixture);
+    let token = seed_session(&fixture).await;
+    let (_, present) = seed_movie_file(&fixture);
+    assert_eq!(report(&client, &token, present, 99.0).await, StatusCode::OK);
+    seed_missing_reports(&fixture, &client, &token, 3, 10.0).await;
+
+    let response = client
+        .get("/v1/history?limit=2&offset=0")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: HistoryResponse = response.json();
+    let files: Vec<String> = body.items.iter().map(|item| item.file_id.clone()).collect();
+    assert_eq!(
+        files,
+        vec![present.to_string()],
+        "the first page is the present file, not the newer missing ones"
+    );
+    assert_eq!(body.total, 1, "missing files are not counted either");
 }

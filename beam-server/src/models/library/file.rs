@@ -78,6 +78,9 @@ impl From<beam_domain::models::MediaFile> for LibraryFile {
             content,
             scanned_at,
             updated_at,
+            // Not exposed: every read that feeds this DTO is a visible read of
+            // `FileRepository`, which never returns a missing file (#179).
+            missing_since: _,
         } = f;
         let content_type = match &content {
             Some(beam_domain::models::MediaFileContent::Movie { .. }) => FileContentType::Movie,

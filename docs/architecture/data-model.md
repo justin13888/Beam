@@ -177,6 +177,7 @@ quality/edition/language rip.
 | `updated_at` | TIMESTAMPTZ | no | |
 | `file_status` | ENUM (`file_status`) | no | `known` \| `changed` \| `unknown`; default `known` |
 | `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash; NULL rows are treated as "suspected changed" |
+| `missing_since` | TIMESTAMPTZ | yes | soft-delete stamp: NULL while the file is on disk; the instant the indexer first found it gone otherwise (FR-211) |
 
 **CHECK constraint** (table-level): exactly one of `movie_entry_id` / `episode_id` is set — *unless*
 `file_status = 'unknown'`, in which case both must be NULL (a file the indexer found but could not
@@ -185,6 +186,21 @@ classify). This is the load-bearing polymorphic-association invariant for the me
 **Unique index** on `(hash_xxh3, file_path)`: the same content hash can legitimately appear at more
 than one path (hardlinks, duplicates), but the *pair* must be unique — this is what the indexer's
 dedup logic keys off. Other indexes: `movie_entry_id`, `episode_id`, `library_id`, `hash_xxh3`.
+
+**Soft delete** (FR-211): the indexer never deletes a `files` row on first sight. A file the scan's
+walk or the watcher finds gone is stamped `missing_since`; a row with a stamp is *missing*. Every
+read outside the indexer — browse, search, detail sources, streaming, continue-watching, the admin
+file count — goes through `FileRepository`'s *visible* reads, which filter `missing_since IS NULL`.
+The indexer's *reconcile* reads (`find_by_path`, `find_all_by_library_including_missing`) see
+missing rows, so a path that comes back clears the stamp on the same row and keeps its id. The stamp
+is written once: marking an already-missing row keeps the first instant, because the grace period
+runs from when the file was first found gone. `purge_missing` is the only delete, it removes only
+rows that are already missing, and a scan calls it only for rows its walk could vouch for (no walk
+error above them, and not refused by the empty-root guard) once they have been missing for
+`BEAM_MISSING_FILE_GRACE_DAYS`. The `ON DELETE CASCADE` foreign keys from `media_streams` and
+`playback_progress` therefore fire only on that purge — a transient absence no longer takes every
+user's resume point with it. Hiding a *title* whose every file is missing is not this column's
+job; titles are still listed from their own tables.
 
 ### `media_streams`
 One row per elementary stream (video/audio/subtitle track) within a `files` row, populated by
@@ -226,7 +242,11 @@ Resume/continue-watching state, one row per (user, file) the user has started.
 
 Unique index on `(user_id, file_id)`; index on `(user_id, updated_at)` for the continue-watching
 query. Progress is tracked per concrete file, not per abstract title — cross-file progress
-carryover is deliberately not attempted.
+carryover is deliberately not attempted. A row outlives its file going missing (the `files` row is
+only soft-deleted) and is dropped from continue-watching and history while the file is missing; it
+is removed only when the file is purged. The list reads join `files` and filter
+`missing_since IS NULL` in the same statement as their `LIMIT`/`OFFSET` and `COUNT`, so missing
+rows neither take a page slot nor inflate the history total.
 
 ## Enrichment tables
 

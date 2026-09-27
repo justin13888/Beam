@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
@@ -25,10 +27,16 @@ impl FileRepository for SqlFileRepository {
         use beam_entity::files;
         use sea_orm::EntityTrait;
 
-        let model = files::Entity::find_by_id(id).one(self.db.as_ref()).await?;
+        use sea_orm::{ColumnTrait, QueryFilter};
+
+        let model = files::Entity::find_by_id(id)
+            .filter(files::Column::MissingSince.is_null())
+            .one(self.db.as_ref())
+            .await?;
         Ok(model.map(MediaFile::from))
     }
 
+    /// A reconcile read: deliberately no `missing_since` filter.
     async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr> {
         use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -47,6 +55,7 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::HashXxh3.eq(hash as i64))
+            .filter(files::Column::MissingSince.is_null())
             .all(self.db.as_ref())
             .await?;
 
@@ -54,6 +63,22 @@ impl FileRepository for SqlFileRepository {
     }
 
     async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let models = files::Entity::find()
+            .filter(files::Column::LibraryId.eq(library_id))
+            .filter(files::Column::MissingSince.is_null())
+            .all(self.db.as_ref())
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
+    async fn find_all_by_library_including_missing(
+        &self,
+        library_id: Uuid,
+    ) -> Result<Vec<MediaFile>, DbErr> {
         use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -71,6 +96,7 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::MovieEntryId.eq(movie_entry_id))
+            .filter(files::Column::MissingSince.is_null())
             .all(self.db.as_ref())
             .await?;
 
@@ -83,6 +109,7 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::EpisodeId.eq(episode_id))
+            .filter(files::Column::MissingSince.is_null())
             .all(self.db.as_ref())
             .await?;
 
@@ -120,6 +147,7 @@ impl FileRepository for SqlFileRepository {
             updated_at: Set(now.into()),
             file_status: Set(create.status.into()),
             mtime: Set(create.mtime.map(|d| d.into())),
+            missing_since: Set(None),
         };
 
         let result = new_file.insert(self.db.as_ref()).await?;
@@ -176,17 +204,46 @@ impl FileRepository for SqlFileRepository {
         Ok(MediaFile::from(result))
     }
 
-    async fn delete(&self, id: Uuid) -> Result<(), DbErr> {
+    async fn mark_missing(&self, ids: Vec<Uuid>, at: DateTime<Utc>) -> Result<u64, DbErr> {
         use beam_entity::files;
-        use sea_orm::EntityTrait;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-        files::Entity::delete_by_id(id)
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        // `missing_since IS NULL` keeps the first stamp on a row that is
+        // already missing: the grace period runs from when the file was first
+        // found gone.
+        let stamp: DateTimeWithTimeZone = at.into();
+        let result = files::Entity::update_many()
+            .col_expr(files::Column::MissingSince, Expr::value(stamp))
+            .filter(files::Column::Id.is_in(ids))
+            .filter(files::Column::MissingSince.is_null())
+            .exec(self.db.as_ref())
+            .await?;
+
+        Ok(result.rows_affected)
+    }
+
+    async fn restore(&self, id: Uuid) -> Result<(), DbErr> {
+        use beam_entity::files;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        files::Entity::update_many()
+            .col_expr(
+                files::Column::MissingSince,
+                Expr::value(Option::<DateTimeWithTimeZone>::None),
+            )
+            .filter(files::Column::Id.eq(id))
             .exec(self.db.as_ref())
             .await?;
         Ok(())
     }
 
-    async fn delete_by_ids(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {
+    async fn purge_missing(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {
         use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -194,8 +251,12 @@ impl FileRepository for SqlFileRepository {
             return Ok(0);
         }
 
+        // The `IS NOT NULL` guard is what makes this the only hard delete a
+        // present file can never reach: a row restored after the caller read
+        // it is skipped rather than purged.
         let result = files::Entity::delete_many()
             .filter(files::Column::Id.is_in(ids))
+            .filter(files::Column::MissingSince.is_not_null())
             .exec(self.db.as_ref())
             .await?;
 
@@ -204,8 +265,11 @@ impl FileRepository for SqlFileRepository {
 
     async fn count_all(&self) -> Result<u64, DbErr> {
         use beam_entity::files;
-        use sea_orm::{EntityTrait, PaginatorTrait};
+        use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
-        files::Entity::find().count(self.db.as_ref()).await
+        files::Entity::find()
+            .filter(files::Column::MissingSince.is_null())
+            .count(self.db.as_ref())
+            .await
     }
 }

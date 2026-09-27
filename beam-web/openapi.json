@@ -1956,7 +1956,7 @@
           "playback"
         ],
         "summary": "Chronological watch history (completed and in-progress), most-recently- updated first.",
-        "description": "`limit` defaults to 50 and is clamped to 1..=100; `offset` defaults to 0.\nThe response carries `total` (all history rows for the user) so a single\nrequest paginates without a separate count endpoint. Note that `items.len()`\ncan be below `limit` when stale rows (files removed by a rescan) are\nskipped, while `total` still counts them.",
+        "description": "`limit` defaults to 50 and is clamped to 1..=100; `offset` defaults to 0.\nThe response carries `total` (the user's history rows whose file is\npresent) so a single request paginates without a separate count endpoint.\nA row whose file is missing from disk is left out of both `items` and\n`total`. `items.len()` can still be below `limit` when a row's title can no\nlonger be resolved: that row is skipped, while `total` still counts it.",
         "operationId": "getHistory",
         "parameters": [
           {
@@ -8768,7 +8768,7 @@
           "items",
           "total"
         ],
-        "description": "A page of watch history. `total` counts every history row for the user\n(completed and in-progress) so the client can paginate; `items` may hold\nfewer than the requested `limit` when a row's underlying file was removed\nby a rescan (those stale rows are skipped here but still counted in\n`total`)."
+        "description": "A page of watch history. `total` counts the user's history rows (completed\nand in-progress) whose file is present, so the client can paginate; a row\nwhose file is missing from disk is in neither `items` nor `total`. `items`\nmay still hold fewer than the requested `limit` when a row's title can no\nlonger be resolved (that row is skipped here but still counted in\n`total`)."
       },
       "Library": {
         "properties": {

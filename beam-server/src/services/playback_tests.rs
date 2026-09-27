@@ -10,6 +10,7 @@ mod tests {
     use beam_domain::models::movie::Movie;
     use beam_domain::models::show::Show;
     use beam_domain::models::{Episode, MediaFile, MediaFileContent, MovieEntry, Season};
+    use beam_domain::repositories::FileRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
@@ -54,6 +55,7 @@ mod tests {
             status: beam_domain::models::FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         }
     }
 
@@ -71,8 +73,11 @@ mod tests {
         // load, and two `Utc::now()` calls milliseconds apart can collide
         // outright on a busy build host.
         let clock = Arc::new(TestClock::new());
-        let playback_repo = Arc::new(InMemoryPlaybackProgressRepository::new(clock.clone()));
         let file_repo = Arc::new(InMemoryFileRepository::default());
+        let playback_repo = Arc::new(InMemoryPlaybackProgressRepository::new(
+            clock.clone(),
+            file_repo.clone(),
+        ));
         let movie_repo = Arc::new(InMemoryMovieRepository::default());
         let show_repo = Arc::new(InMemoryShowRepository::default());
 
@@ -388,7 +393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_history_skips_stale_rows_but_still_counts_them_in_total() {
+    async fn get_history_skips_rows_whose_title_no_longer_resolves_but_counts_them() {
         let harness = make_harness();
         let user_id = Uuid::new_v4();
 
@@ -406,8 +411,25 @@ mod tests {
             .await
             .unwrap();
 
-        // Remove the stale file as a rescan would.
-        harness.file_repo.files.lock().unwrap().remove(&stale_file);
+        // The file is still present, but the title it belonged to is gone:
+        // the row cannot be resolved to a media id.
+        let stale_entry = match harness
+            .file_repo
+            .files
+            .lock()
+            .unwrap()
+            .get(&stale_file)
+            .and_then(|file| file.content.clone())
+        {
+            Some(MediaFileContent::Movie { movie_entry_id }) => movie_entry_id,
+            other => panic!("seeded a movie file, got {other:?}"),
+        };
+        harness
+            .movie_repo
+            .entries
+            .lock()
+            .unwrap()
+            .remove(&stale_entry);
 
         let (items, total) = harness.service.get_history(user_id, 50, 0).await.unwrap();
         assert_eq!(total, 2, "stale row is still counted in total");
@@ -416,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_continue_watching_skips_rows_whose_file_no_longer_exists() {
+    async fn get_continue_watching_leaves_out_a_row_whose_file_is_missing() {
         let harness = make_harness();
         let file = make_media_file(MediaFileContent::Movie {
             movie_entry_id: Uuid::new_v4(),
@@ -436,8 +458,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Simulate the file being removed by a rescan after progress was recorded.
-        harness.file_repo.files.lock().unwrap().remove(&file_id);
+        // A scan no longer finds the file after progress was recorded.
+        harness
+            .file_repo
+            .mark_missing(vec![file_id], chrono::Utc::now())
+            .await
+            .unwrap();
 
         let items = harness
             .service

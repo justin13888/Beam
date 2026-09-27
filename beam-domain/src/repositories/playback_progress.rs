@@ -19,6 +19,10 @@ pub trait PlaybackProgressRepository: Send + Sync + std::fmt::Debug {
 
     /// In-progress (not `completed`) rows for a user, most-recently-updated
     /// first, for the continue-watching list.
+    ///
+    /// Rows whose file is missing (`files.missing_since` set, issue #179) are
+    /// excluded *before* the limit applies, so any number of them cannot
+    /// push a visible row out of the list.
     async fn find_in_progress_by_user(
         &self,
         user_id: Uuid,
@@ -27,7 +31,9 @@ pub trait PlaybackProgressRepository: Send + Sync + std::fmt::Debug {
 
     /// One page of a user's watch history, most-recently-updated first.
     /// Unlike [`find_in_progress_by_user`], this includes `completed` rows —
-    /// the history view lists everything the user has watched.
+    /// the history view lists everything the user has watched. Rows whose
+    /// file is missing are excluded before the page is sliced, exactly as in
+    /// [`find_in_progress_by_user`].
     async fn find_page_by_user(
         &self,
         user_id: Uuid,
@@ -36,7 +42,8 @@ pub trait PlaybackProgressRepository: Send + Sync + std::fmt::Debug {
     ) -> Result<Vec<PlaybackProgress>, DbErr>;
 
     /// Total number of history rows for a user (completed and in-progress),
-    /// for paginating [`find_page_by_user`].
+    /// for paginating [`find_page_by_user`]. Counts the same rows that method
+    /// pages over, so rows whose file is missing are not counted.
     async fn count_by_user(&self, user_id: Uuid) -> Result<u64, DbErr>;
 }
 
@@ -48,8 +55,9 @@ pub trait PlaybackProgressRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
     use crate::services::Clock;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
     /// In-memory stand-in for the SQL repository.
@@ -58,24 +66,37 @@ pub mod in_memory {
     /// ordering is driven by an advanced [`crate::services::TestClock`] rather
     /// than by wall-clock time -- which is what lets the shared contract in
     /// [`super::contract`] assert ordering without sleeping.
+    ///
+    /// Takes the file store too: the list reads join `files` and drop rows
+    /// whose file is missing, and the double answers that join from the same
+    /// [`InMemoryFileRepository`] the caller marks files missing through.
     #[derive(Debug)]
     pub struct InMemoryPlaybackProgressRepository {
         rows: Mutex<HashMap<Uuid, PlaybackProgress>>,
         clock: Arc<dyn Clock>,
+        files: Arc<InMemoryFileRepository>,
     }
 
     impl InMemoryPlaybackProgressRepository {
-        pub fn new(clock: Arc<dyn Clock>) -> Self {
+        pub fn new(clock: Arc<dyn Clock>, files: Arc<InMemoryFileRepository>) -> Self {
             Self {
                 rows: Mutex::new(HashMap::new()),
                 clock,
+                files,
             }
         }
-    }
 
-    impl Default for InMemoryPlaybackProgressRepository {
-        fn default() -> Self {
-            Self::new(Arc::new(crate::services::RealClock))
+        /// The ids the SQL inner join on `files ... missing_since IS NULL`
+        /// keeps: files that exist and are not missing.
+        fn present_file_ids(&self) -> HashSet<Uuid> {
+            self.files
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|file| file.missing_since.is_none())
+                .map(|file| file.id)
+                .collect()
         }
     }
 
@@ -129,12 +150,13 @@ pub mod in_memory {
             user_id: Uuid,
             limit: u32,
         ) -> Result<Vec<PlaybackProgress>, DbErr> {
+            let present = self.present_file_ids();
             let mut rows: Vec<PlaybackProgress> = self
                 .rows
                 .lock()
                 .unwrap()
                 .values()
-                .filter(|r| r.user_id == user_id && !r.completed)
+                .filter(|r| r.user_id == user_id && !r.completed && present.contains(&r.file_id))
                 .cloned()
                 .collect();
             rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -148,12 +170,13 @@ pub mod in_memory {
             limit: u64,
             offset: u64,
         ) -> Result<Vec<PlaybackProgress>, DbErr> {
+            let present = self.present_file_ids();
             let mut rows: Vec<PlaybackProgress> = self
                 .rows
                 .lock()
                 .unwrap()
                 .values()
-                .filter(|r| r.user_id == user_id)
+                .filter(|r| r.user_id == user_id && present.contains(&r.file_id))
                 .cloned()
                 .collect();
             rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -165,12 +188,13 @@ pub mod in_memory {
         }
 
         async fn count_by_user(&self, user_id: Uuid) -> Result<u64, DbErr> {
+            let present = self.present_file_ids();
             Ok(self
                 .rows
                 .lock()
                 .unwrap()
                 .values()
-                .filter(|r| r.user_id == user_id)
+                .filter(|r| r.user_id == user_id && present.contains(&r.file_id))
                 .count() as u64)
         }
     }
@@ -187,16 +211,20 @@ pub mod in_memory_fixture {
     use uuid::Uuid;
 
     use super::in_memory::InMemoryPlaybackProgressRepository;
-    use crate::repositories::PlaybackProgressRepository;
+    use crate::models::file::{CreateMediaFile, FileStatus};
     use crate::repositories::contract::fixture::PlaybackProgressFixture;
-    use crate::services::TestClock;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
+    use crate::repositories::{FileRepository, PlaybackProgressRepository};
+    use crate::services::{Clock, TestClock};
 
     /// The hermetic instantiation of the shared contract. The in-memory store
-    /// enforces no referential integrity, so a fresh v4 UUID is a valid
-    /// identifier; the Postgres fixture in `beam-index` inserts real rows for
-    /// the same calls.
+    /// enforces no referential integrity, so a fresh v4 UUID is a valid user;
+    /// a file is a real row in the [`InMemoryFileRepository`] the progress
+    /// double joins against. The Postgres fixture in `beam-index` inserts
+    /// real rows for the same calls.
     pub struct InMemoryFixture {
         repo: InMemoryPlaybackProgressRepository,
+        files: Arc<InMemoryFileRepository>,
         clock: Arc<TestClock>,
     }
 
@@ -209,8 +237,10 @@ pub mod in_memory_fixture {
     impl InMemoryFixture {
         pub fn new() -> Self {
             let clock = Arc::new(TestClock::new());
+            let files = Arc::new(InMemoryFileRepository::default());
             Self {
-                repo: InMemoryPlaybackProgressRepository::new(clock.clone()),
+                repo: InMemoryPlaybackProgressRepository::new(clock.clone(), files.clone()),
+                files,
                 clock,
             }
         }
@@ -231,7 +261,30 @@ pub mod in_memory_fixture {
         }
 
         async fn new_file(&self) -> Uuid {
-            Uuid::new_v4()
+            let id = Uuid::new_v4();
+            self.files
+                .create(CreateMediaFile {
+                    library_id: Uuid::new_v4(),
+                    path: std::path::PathBuf::from(format!("/videos/{id}.mkv")),
+                    hash: 0,
+                    size_bytes: 1024,
+                    mtime: None,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: None,
+                    status: FileStatus::Known,
+                })
+                .await
+                .expect("create a file row")
+                .id
+        }
+
+        async fn mark_file_missing(&self, file_id: Uuid) {
+            self.files
+                .mark_missing(vec![file_id], self.clock.now())
+                .await
+                .expect("mark the file missing");
         }
     }
 }
