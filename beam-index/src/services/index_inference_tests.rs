@@ -447,6 +447,10 @@ async fn excluded_files_are_never_indexed() {
         "@eaDir/Movie.2019.mkv/SYNOVIDEO.mkv",
         "Downloads/Partial.2021.mkv",
         "Movie (2019)/Movie.2019.en.srt",
+        // Disc structures copied whole: no file in them is a film.
+        "Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+        "Heat.1995.DVD9/VIDEO_TS/VTS_01_1.VOB",
+        "Heat (1995)/BDMV/STREAM/00001.m2ts",
     ] {
         h.write(excluded);
     }

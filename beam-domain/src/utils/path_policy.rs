@@ -16,7 +16,7 @@ use crate::utils::media_path::season_folder_number;
 /// Extensions of the video files Beam indexes, lowercase.
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "m2ts", "mts", "flv", "wmv", "3gp", "ogv",
-    "mpg", "mpeg", "vob", "divx", "asf", "f4v",
+    "mpg", "mpeg", "divx", "asf", "f4v",
 ];
 
 /// Extensions of the files that travel beside a video -- subtitles, metadata
@@ -36,6 +36,15 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
     "system volume information",
     "lost+found",
 ];
+
+/// The folders of a DVD or Blu-ray disc structure copied whole. What is
+/// inside them is not a title -- a DVD splits one film into
+/// `VTS_01_1.VOB`, `VTS_01_2.VOB`, ...; a Blu-ray's `BDMV/STREAM/` holds
+/// `00001.m2ts` and friends -- so indexing the files as they stand invents
+/// films named `VTS 01 1` or `00001`, and merges every disc's same-numbered
+/// file into one. Matched case-insensitively at any depth; playing a disc
+/// structure as its enclosing title is issue #189's.
+const DISC_STRUCTURE_DIRECTORIES: &[&str] = &["video_ts", "audio_ts", "bdmv", "certificate"];
 
 /// Folders that hold a title's extras rather than the title (the Plex and
 /// Jellyfin conventions), and could not plausibly be anything else. Matched
@@ -96,6 +105,8 @@ pub enum ExclusionReason {
     Hidden,
     /// Under a NAS or operating-system housekeeping folder.
     SystemDirectory,
+    /// Inside a DVD or Blu-ray disc structure (`VIDEO_TS/`, `BDMV/`).
+    DiscStructure,
     /// Under an extras folder (`Trailers/`, `Featurettes/`, ...).
     ExtrasDirectory,
     /// Named as an extra (`Movie-trailer.mkv`, `sample.mkv`).
@@ -195,6 +206,9 @@ impl PathPolicy {
             }
             if SYSTEM_DIRECTORIES.contains(&lower.as_str()) {
                 return Some(ExclusionReason::SystemDirectory);
+            }
+            if DISC_STRUCTURE_DIRECTORIES.contains(&lower.as_str()) {
+                return Some(ExclusionReason::DiscStructure);
             }
             if depth >= 1
                 && (EXTRAS_DIRECTORIES.contains(&lower.as_str())
@@ -298,6 +312,30 @@ mod tests {
             ("$RECYCLE.BIN/Movie.mkv", Excluded(SystemDirectory)),
             ("System Volume Information/x.mkv", Excluded(SystemDirectory)),
             ("lost+found/x.mkv", Excluded(SystemDirectory)),
+            // A disc structure copied whole, at any depth and in any case:
+            // none of its files is a title on its own.
+            (
+                "Movies/Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+                Excluded(DiscStructure),
+            ),
+            (
+                "Heat.1995.DVD9/VIDEO_TS/VIDEO_TS.VOB",
+                Excluded(DiscStructure),
+            ),
+            ("Heat (1995)/AUDIO_TS/x.mkv", Excluded(DiscStructure)),
+            ("VIDEO_TS/VTS_01_2.VOB", Excluded(DiscStructure)),
+            ("Heat (1995)/video_ts/vts_01_0.vob", Excluded(DiscStructure)),
+            (
+                "Heat (1995)/BDMV/STREAM/00001.m2ts",
+                Excluded(DiscStructure),
+            ),
+            ("BDMV/STREAM/00001.m2ts", Excluded(DiscStructure)),
+            (
+                "Heat (1995)/CERTIFICATE/BACKUP/x.m2ts",
+                Excluded(DiscStructure),
+            ),
+            // A VOB outside one is not a video Beam indexes.
+            ("Heat (1995)/Heat.vob", Ignored),
             // Extras folders below the top level.
             (
                 "Movie (2019)/Extras/Making Of.mkv",
@@ -431,6 +469,8 @@ mod tests {
             "Movie (2019)/Extras",
             "Show/Extras",
             "Show/.snapshots",
+            "Heat (1995)/VIDEO_TS",
+            "Heat (1995)/BDMV",
         ] {
             assert!(policy.excludes_directory(Path::new(dir)), "{dir}");
         }

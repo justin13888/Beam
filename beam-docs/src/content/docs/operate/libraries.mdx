@@ -118,8 +118,8 @@ Two things never count as a file going missing:
   nothing, and a root that holds **no video files at all** — none with an extension listed
   [below](#which-files-get-indexed), counting files Beam skips by their name (samples, trailers,
   your ignore patterns) — while the library still has video files indexed is refused outright.
-  Files inside a folder Beam skips wholesale (a hidden or housekeeping folder, an extras folder, a
-  folder an ignore pattern matches) are never looked at, so they do not count: a root holding only
+  Files inside a folder Beam skips wholesale (a hidden or housekeeping folder, a disc structure, an
+  extras folder, a folder an ignore pattern matches) are never looked at, so they do not count: a root holding only
   `Movie (2019)/Trailers/Teaser.mkv` is refused too. A refused scan changes nothing, so this errs
   on the safe side. That is what an unmounted volume looks like, whether its mount point is left empty or
   holds only a sentinel or hidden file such as `.not_mounted` or `.DS_Store` — see
@@ -141,7 +141,7 @@ Beam indexes video files with these extensions, case-insensitively, and nothing 
 
 ```
 mp4  mkv  avi  mov   webm  m4v  ts   m2ts  mts
-flv  wmv  3gp  ogv   mpg   mpeg vob  divx  asf  f4v
+flv  wmv  3gp  ogv   mpg   mpeg divx  asf  f4v
 ```
 
 Subtitles, `.nfo` files, artwork and anything else beside your videos are left alone: they are not
@@ -154,6 +154,10 @@ Some video files are skipped too, because they are not what a library is for:
 - **Hidden files and folders** — any name starting with `.`, at any depth.
 - **NAS and system housekeeping folders** — `@eaDir` (Synology), `#recycle`, `$RECYCLE.BIN`,
   `System Volume Information`, `lost+found`.
+- **DVD and Blu-ray disc structures** — everything in a `VIDEO_TS`, `AUDIO_TS`, `BDMV` or
+  `CERTIFICATE` folder, at any depth. A disc copied whole splits one film into files such as
+  `VTS_01_1.VOB` or `00001.m2ts`, none of which is a title on its own, so Beam does not index them
+  yet. Remux the disc to a single file (`Heat (1995)/Heat (1995).mkv`) to add it to your library.
 - **Extras folders** anywhere below the top of a library — `Extras`, `Featurettes`,
   `Behind The Scenes`, `Deleted Scenes`, `Interviews`, `Sample`, `Samples`, `Bonus`
   (`Breaking Bad/Extras/`, a release folder's `Sample/`).

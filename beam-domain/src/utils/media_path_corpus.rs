@@ -492,6 +492,33 @@ fn season_folder_names() {
     }
 }
 
+/// Disc structures copied whole, as rippers leave them. Inference would read
+/// each file as a film of its own (`VTS 01 1`, `00001`) and merge every
+/// disc's same-numbered file into one, so the path policy keeps them out of
+/// the library before inference is ever asked (playing a disc as its title
+/// is issue #189's).
+#[test]
+fn disc_structures_never_reach_inference() {
+    use crate::utils::path_policy::{ExclusionReason, PathDisposition, PathPolicy};
+
+    let policy = PathPolicy::default();
+    for path in [
+        "Movies/Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+        "Movies/Heat (1995)/VIDEO_TS/VTS_01_0.VOB",
+        "Movies/Heat (1995)/VIDEO_TS/VIDEO_TS.VOB",
+        "Heat.1995.DVD9/VIDEO_TS/VTS_01_1.VOB",
+        "Heat (1995)/BDMV/STREAM/00001.m2ts",
+        "Heat.1995.COMPLETE.BLURAY/BDMV/STREAM/00800.m2ts",
+        "Heat.1995.COMPLETE.BLURAY/CERTIFICATE/BACKUP/x.m2ts",
+    ] {
+        assert_eq!(
+            policy.disposition(Path::new(path)),
+            PathDisposition::Excluded(ExclusionReason::DiscStructure),
+            "{path}"
+        );
+    }
+}
+
 /// Two releases of one show -- one in season folders, one flat -- key to the
 /// same show, which is what makes the season-folder rule matter: the old
 /// parent-folder rule keyed the first to a show called "Season 01".
