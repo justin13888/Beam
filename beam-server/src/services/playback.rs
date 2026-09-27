@@ -168,9 +168,10 @@ impl PlaybackService for DbPlaybackService {
 
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
-            // The underlying file/movie/show may have been removed by a
-            // rescan since progress was recorded; skip that row rather than
-            // fail the whole list for one stale entry.
+            // A missing file never reaches here: the repository drops it
+            // before the limit. The title the file belonged to may still
+            // have gone since progress was recorded; skip that row rather
+            // than fail the whole list for one stale entry.
             if let Ok((media_id, media_type, episode_id)) =
                 self.resolve_media_ref(row.file_id).await
             {
@@ -194,10 +195,12 @@ impl PlaybackService for DbPlaybackService {
         limit: u64,
         offset: u64,
     ) -> Result<(Vec<HistoryItem>, u64), PlaybackReadError> {
-        // `total` is counted over all rows independently of the page slice, so
-        // it stays stable across pages. Stale rows whose file was removed by a
-        // rescan are skipped from `items` (like continue-watching) but remain
-        // in `total`, so a page can legitimately hold fewer than `limit` items.
+        // `total` is counted independently of the page slice, so it stays
+        // stable across pages. The repository leaves rows whose file is
+        // missing out of both the page and the count. A row whose title no
+        // longer resolves is skipped from `items` (like continue-watching) but
+        // remains in `total`, so a page can legitimately hold fewer than
+        // `limit` items.
         let total = self.playback_repo.count_by_user(user_id).await?;
         let rows = self
             .playback_repo

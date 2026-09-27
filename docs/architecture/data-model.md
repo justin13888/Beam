@@ -244,7 +244,9 @@ Unique index on `(user_id, file_id)`; index on `(user_id, updated_at)` for the c
 query. Progress is tracked per concrete file, not per abstract title — cross-file progress
 carryover is deliberately not attempted. A row outlives its file going missing (the `files` row is
 only soft-deleted) and is dropped from continue-watching and history while the file is missing; it
-is removed only when the file is purged.
+is removed only when the file is purged. The list reads join `files` and filter
+`missing_since IS NULL` in the same statement as their `LIMIT`/`OFFSET` and `COUNT`, so missing
+rows neither take a page slot nor inflate the history total.
 
 ## Enrichment tables
 

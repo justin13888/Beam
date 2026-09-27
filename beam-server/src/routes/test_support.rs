@@ -210,7 +210,10 @@ pub(crate) fn make_app_state_full(
     let show_repo = Arc::new(InMemoryShowRepository::default());
     let playback: Arc<dyn crate::services::playback::PlaybackService> =
         Arc::new(DbPlaybackService::new(
-            Arc::new(InMemoryPlaybackProgressRepository::default()),
+            Arc::new(InMemoryPlaybackProgressRepository::new(
+                clock.clone(),
+                file_repo.clone(),
+            )),
             file_repo,
             movie_repo.clone(),
             show_repo.clone(),

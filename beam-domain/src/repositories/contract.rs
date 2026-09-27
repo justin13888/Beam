@@ -48,6 +48,10 @@ pub mod fixture {
 
         /// A media file that exists as far as the backing store is concerned.
         async fn new_file(&self) -> Uuid;
+
+        /// Stamp `missing_since` on a file from [`Self::new_file`], as a scan
+        /// that no longer finds it would (issue #179).
+        async fn mark_file_missing(&self, file_id: Uuid);
     }
 
     /// Everything the [`crate::file_repository_contract`] suite needs from a
@@ -390,6 +394,70 @@ macro_rules! playback_progress_repository_contract {
 
             assert_eq!(repo.count_by_user(user).await.unwrap(), 2);
             assert_eq!(repo.count_by_user(other).await.unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn find_in_progress_drops_missing_files_before_the_limit_applies() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let clock = fixture.clock();
+            let user = fixture.new_user().await;
+            let visible = fixture.new_file().await;
+            repo.upsert(report(user, visible, 10.0)).await.unwrap();
+            // More missing rows than the limit, every one newer than the
+            // visible row: filtered after the limit, they would fill it.
+            for _ in 0..3 {
+                clock.advance(Duration::from_secs(60));
+                let missing = fixture.new_file().await;
+                repo.upsert(report(user, missing, 10.0)).await.unwrap();
+                fixture.mark_file_missing(missing).await;
+            }
+
+            let rows: Vec<Uuid> = repo
+                .find_in_progress_by_user(user, 2)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.file_id)
+                .collect();
+
+            assert_eq!(rows, vec![visible]);
+        }
+
+        #[tokio::test]
+        async fn history_pages_and_counts_only_rows_whose_file_is_present() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let clock = fixture.clock();
+            let user = fixture.new_user().await;
+            let visible = fixture.new_file().await;
+            repo.upsert(report(user, visible, 99.0)).await.unwrap();
+            clock.advance(Duration::from_secs(60));
+            let missing = fixture.new_file().await;
+            repo.upsert(report(user, missing, 10.0)).await.unwrap();
+            fixture.mark_file_missing(missing).await;
+
+            let page: Vec<Uuid> = repo
+                .find_page_by_user(user, 1, 0)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.file_id)
+                .collect();
+
+            assert_eq!(page, vec![visible], "the first page is not a missing row");
+            assert_eq!(
+                repo.count_by_user(user).await.unwrap(),
+                1,
+                "the total counts the rows the pages hold"
+            );
+            assert!(
+                repo.find_by_user_and_file(user, missing)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the missing file's progress is kept, only hidden"
+            );
         }
     };
 }

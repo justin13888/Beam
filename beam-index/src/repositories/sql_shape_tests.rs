@@ -114,6 +114,19 @@ mod playback_progress {
 
     use crate::repositories::SqlPlaybackProgressRepository;
 
+    /// The list reads join `files` on the progress row's file and keep only
+    /// present files, in the same statement that carries the `LIMIT`/`OFFSET`
+    /// or the `COUNT` -- so a missing file cannot take a slot in a page or in
+    /// the total (issue #179).
+    #[track_caller]
+    fn assert_joins_present_files(statement: &Statement) {
+        assert_contains(
+            statement,
+            r#"INNER JOIN "files" ON "playback_progress"."file_id" = "files"."id""#,
+        );
+        assert_contains(statement, r#""files"."missing_since" IS NULL"#);
+    }
+
     #[tokio::test]
     async fn upsert_targets_the_user_file_unique_index_and_updates_the_mutable_columns() {
         let db = connection(empty_mock());
@@ -165,6 +178,8 @@ mod playback_progress {
         drop(repo);
 
         let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_joins_present_files(&sql[0]);
         assert_filters(&sql[0], "playback_progress", "user_id", "=");
         assert_filters(&sql[0], "playback_progress", "completed", "=");
         assert_contains(&sql[0], r#"ORDER BY "playback_progress"."updated_at" DESC"#);
@@ -180,6 +195,8 @@ mod playback_progress {
         drop(repo);
 
         let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_joins_present_files(&sql[0]);
         assert_filters(&sql[0], "playback_progress", "user_id", "=");
         assert!(
             !sql[0].sql.contains(r#""playback_progress"."completed" ="#),
@@ -200,6 +217,8 @@ mod playback_progress {
         drop(repo);
 
         let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_joins_present_files(&sql[0]);
         assert_filters(&sql[0], "playback_progress", "user_id", "=");
         assert_bound(&sql[0], &user.to_string());
     }
