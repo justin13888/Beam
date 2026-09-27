@@ -26,7 +26,8 @@ builtin connector could not emit `groups` for static users
 to `staticPasswords`, released in Dex v2.45.0; #1080 was closed as completed on 2026-02-23, and
 `compose.dependencies.yaml` already pins v2.45.1. The dev fixture still points
 `BEAM_OIDC_ADMIN_CLAIM` at `email_verified`, making every dev user an admin, but that is now a
-fixture choice rather than a Dex limitation.
+fixture choice rather than a Dex limitation. (Amended 2026-09-27 — see issue #195 — the dev fixture
+now grants admin via a Dex `groups` claim; only admin@beam.localhost is in `beam-admin`.)
 
 So the question has to be decided on what remains. #149 listed that too.
 
@@ -86,7 +87,8 @@ page each and no security promise.
 - Now that Dex v2.45+ can assert `groups` for static users, the dev fixture could give only its
   admin user a `beam-admin` group and point `BEAM_OIDC_ADMIN_CLAIM` at `groups`, so the dev stack
   exercises a non-admin user. That is a change to `dex/config.yaml` and `mise run dev:up`, and it
-  does not reopen this decision.
+  does not reopen this decision. (Amended 2026-09-27 — see issue #195 — the dev fixture now grants
+  admin via a Dex `groups` claim; only admin@beam.localhost is in `beam-admin`.)
 
 **Reversing this decision** means a new ADR adopting a bundled IdP that supersedes this one. That
 ADR would have to answer the user-management, password-lifecycle and secret-rotation questions

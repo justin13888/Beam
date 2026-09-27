@@ -114,11 +114,12 @@ hooks {
                 glob = List("Cargo.toml", "Cargo.lock", "beam-server/Containerfile", ".github/actions/setup-ffmpeg/action.yml")
                 check = "mise run check:ffmpeg-version"
             }
-            // Pure YAML parsing -- milliseconds. Narrower than ci.yml's `compose`
-            // filter, which also watches mise.toml and dex/, for the reason the
-            // docs-build step gives: the gate reads only the compose files.
+            // Pure YAML/TOML parsing -- milliseconds. Narrower than ci.yml's
+            // `compose` filter, which also watches dex/, for the reason the
+            // docs-build step gives: the gate reads only the compose files and
+            // mise.toml (for dev:up's OIDC scope and admin-claim wiring).
             ["compose-invariants"] {
-                glob = List("compose*.yaml")
+                glob = List("compose*.yaml", "mise.toml")
                 check = "mise run check:compose-invariants"
             }
             // A pure grep over the tracked .rs files -- milliseconds, and it catches

@@ -36,10 +36,18 @@ staticPasswords:
   # Both use the password "password". The hash below is bcrypt cost 10; if
   # it doesn't work with your Dex build, regenerate it with:
   #   echo -n password | htpasswd -BinC 10 admin | cut -d: -f2
+  #
+  # Admin is derived solely from an IdP-asserted claim (FR-106). Only `admin`
+  # carries the `beam-admin` group, so `user` is a genuine non-admin for
+  # exercising the admin guards; `mise run dev:up` points BEAM_OIDC_ADMIN_CLAIM
+  # at `groups` and requests the `groups` scope, without which Dex leaves the
+  # claim out of the ID token. Static-user `groups` needs Dex v2.45.0+
+  # (dexidp/dex#4456); compose.dependencies.yaml pins a version that has it.
   - email: "admin@beam.localhost"
     hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
     username: "admin"
     userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+    groups: ["beam-admin"]
   - email: "user@beam.localhost"
     hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
     username: "user"
