@@ -300,15 +300,128 @@ mod discovered {
 
     #[cfg(test)]
     mod http_client_tests {
-        use super::into_http_response;
-        use openidconnect::http::{self, StatusCode, Version, header::LOCATION};
+        use super::{OidcHttpClient, into_http_response};
+        use openidconnect::http::{self, Method, StatusCode, Version, header::LOCATION};
+        use openidconnect::{AsyncHttpClient, HttpClientError};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        /// Reads one HTTP/1.1 request (head plus a `Content-Length` body)
+        /// off `stream` and returns it raw.
+        async fn read_request(stream: &mut TcpStream) -> String {
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "connection closed mid-request");
+                raw.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&raw);
+                let Some(head_end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = text[..head_end]
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if raw.len() >= head_end + 4 + content_length {
+                    return String::from_utf8(raw).unwrap();
+                }
+            }
+        }
 
         #[tokio::test]
-        async fn a_redirect_is_handed_back_intact_rather_than_followed_or_dropped() {
-            // The client never follows redirects, so a 3xx from an IdP reaches
-            // `openidconnect` as-is -- and must arrive with its status,
-            // version, every header, and body, or the crate misreports why
-            // discovery or the exchange failed.
+        async fn a_redirect_is_returned_as_is_and_its_target_is_never_contacted() {
+            // Following an IdP's redirect would let whoever controls that
+            // response aim the server at an arbitrary host (SSRF), so the 3xx
+            // must come back to `openidconnect` unfollowed.
+            let idp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let elsewhere = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let elsewhere_url = format!("http://{}/", elsewhere.local_addr().unwrap());
+            let idp_url = format!("http://{}/token", idp.local_addr().unwrap());
+
+            let location = elsewhere_url.clone();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = idp.accept().await.unwrap();
+                let request = read_request(&mut stream).await;
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                request
+            });
+
+            let body = b"grant_type=authorization_code&code=abc".to_vec();
+            let request = http::Request::builder()
+                .method(Method::POST)
+                .uri(&idp_url)
+                .header("x-beam-probe", "forwarded")
+                .body(body.clone())
+                .unwrap();
+
+            let client = OidcHttpClient::new().unwrap();
+            let response = client.call(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers()[LOCATION], elsewhere_url.as_str());
+
+            // The request reached the IdP as `openidconnect` built it.
+            let received = server.await.unwrap();
+            assert!(
+                received.starts_with("POST /token HTTP/1.1\r\n"),
+                "{received}"
+            );
+            assert!(
+                received
+                    .to_ascii_lowercase()
+                    .contains("\r\nx-beam-probe: forwarded\r\n"),
+                "{received}"
+            );
+            assert!(
+                received.ends_with(std::str::from_utf8(&body).unwrap()),
+                "{received}"
+            );
+
+            // A followed redirect would have left a connection queued here.
+            let elsewhere = elsewhere.into_std().unwrap();
+            elsewhere.set_nonblocking(true).unwrap();
+            assert_eq!(
+                elsewhere.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the redirect target was contacted"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unreachable_idp_is_a_transport_error() {
+            // Bind then drop, so the port is known to have no listener.
+            let addr = TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            let request = http::Request::builder()
+                .uri(format!("http://{addr}/.well-known/openid-configuration"))
+                .body(Vec::new())
+                .unwrap();
+
+            let result = OidcHttpClient::new().unwrap().call(request).await;
+
+            match result {
+                Err(HttpClientError::Reqwest(error)) => assert!(error.is_connect(), "{error}"),
+                other => panic!("expected a reqwest connect error, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_response_is_copied_with_status_version_every_header_and_body() {
+            // `openidconnect` parses this copy, so a dropped header, a
+            // collapsed repeat, or a lost body misreports why discovery or the
+            // exchange failed.
             let upstream = http::Response::builder()
                 .status(StatusCode::FOUND)
                 .version(Version::HTTP_2)
