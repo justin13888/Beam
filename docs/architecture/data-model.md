@@ -138,7 +138,8 @@ overwrites it with the provider's spelling. `identity_key` is what the indexer f
 and nothing but the indexer's own backfill ever writes it after insert: enrichment's `UPDATE` does
 not name the column. It is `beam_domain::utils::identity::title_identity_key` of the filename
 parse — NFKD-decomposed, every combining mark in the Combining Diacritical Marks block
-(U+0300–U+036F: Latin, Greek and Cyrillic accents alike) dropped, punctuation dropped, lowercased,
+(U+0300–U+036F: Latin, Greek and Cyrillic accents alike) dropped, apostrophes (`'` and `’`) elided
+so a scene name's `Greys` is the folder's `Grey's`, other punctuation dropped, lowercased,
 `&` read as `and`, and recomposed (NFC) — followed by `|` and the parsed year (empty when there is
 none). Every combining mark outside that block is kept: a kana voicing mark or an Indic vowel sign
 is part of its letter, so `かぎ` and `かき`, or `दिल` and `दल`, stay two titles. The fold is by block,

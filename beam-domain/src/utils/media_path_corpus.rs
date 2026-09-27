@@ -178,6 +178,32 @@ const CORPUS: &[(&str, &str)] = &[
         "episode Breaking Bad|- s1 e1 Standard",
     ),
     ("Kids/Bluey.S01E01.mkv", "episode Bluey|- s1 e1 Standard"),
+    // Scene names drop a title's apostrophes; the folder's spelling is still
+    // the same show, so it keeps the show and its year (D10).
+    (
+        "Grey's Anatomy/Season 2/Greys.Anatomy.S02E01.mkv",
+        "episode Grey's Anatomy|- s2 e1 Standard",
+    ),
+    (
+        "Grey's Anatomy/Greys.Anatomy.S03.1080p.WEB-GRP/Greys.Anatomy.S03E01.mkv",
+        "episode Grey's Anatomy|- s3 e1 Standard",
+    ),
+    (
+        "Grey's Anatomy (2005)/Greys.Anatomy.S01E01.mkv",
+        "episode Grey's Anatomy|2005 s1 e1 Standard",
+    ),
+    (
+        "Bob's Burgers/Bobs.Burgers.S01E01.mkv",
+        "episode Bob's Burgers|- s1 e1 Standard",
+    ),
+    (
+        "Schitt\u{2019}s Creek (2015)/Schitts.Creek.S01E01.mkv",
+        "episode Schitt\u{2019}s Creek|2015 s1 e1 Standard",
+    ),
+    (
+        "The Handmaid's Tale/The.Handmaids.Tale.S01E01.mkv",
+        "episode The Handmaid's Tale|- s1 e1 Standard",
+    ),
     // A split marker (D182-C5).
     ("Show/Show.S01.E01.mkv", "episode Show|- s1 e1 Standard"),
     ("Show S01 E02.mkv", "episode Show|- s1 e2 Standard"),
@@ -439,6 +465,33 @@ fn a_season_folder_and_a_flat_layout_key_the_same_show() {
         key("Show Name/Season 01/Show.Name.S01E01.mkv"),
         key("Show Name/Show.Name.S01E02.mkv")
     );
+}
+
+/// A folder keeps a title's apostrophes and a scene name drops them: every
+/// layout of one show -- season folder, season pack, flat, bare scene file --
+/// keys to the same show whichever way each spells it.
+#[test]
+fn identity_keys_ignore_apostrophes() {
+    let key = |path: &str| match infer_media(Path::new(path)) {
+        MediaInference::Episode(episode) => episode.series.identity_key(),
+        other => panic!("{path} is not an episode: {other:?}"),
+    };
+    for (folder, scene) in [
+        ("Grey's Anatomy", "Greys.Anatomy"),
+        ("Bob\u{2019}s Burgers", "Bobs.Burgers"),
+        ("The Handmaid's Tale", "The.Handmaids.Tale"),
+    ] {
+        let keys: std::collections::BTreeSet<String> = [
+            format!("{folder}/Season 2/{scene}.S02E01.mkv"),
+            format!("{folder}/{scene}.S03.1080p.WEB-GRP/{scene}.S03E01.mkv"),
+            format!("{folder}/{scene}.S01E01.mkv"),
+            format!("{scene}.S04E01.mkv"),
+        ]
+        .iter()
+        .map(|path| key(path))
+        .collect();
+        assert_eq!(keys.len(), 1, "{folder}: {keys:?}");
+    }
 }
 
 mod properties {
