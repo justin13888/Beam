@@ -1,15 +1,17 @@
 //! The shared `PlaybackTelemetryRepository` contract (issue #143), run
 //! against real SQL -- the same assertions as the in-memory instantiation in
 //! `beam-domain/src/repositories/playback_telemetry.rs` -- and what only a real
-//! Postgres can show: that the upsert is atomic, and that the table refuses
-//! the rows no code should write.
+//! Postgres can show: that the upsert is atomic, that a batch failing
+//! part-way counts none of it, and that the table refuses the rows no code
+//! should write.
 //!
 //! `summarize` and `prune_before` are global, so each test owns a migrated
 //! schema: over a shared database they would see every other test's rows.
 
 use std::sync::Arc;
 
-// `start_key` is brought into scope by the contract macro below.
+// `start_key`, `switch_key` and `PlaybackTelemetryEvent` are brought into
+// scope by the contract macro below.
 use beam_domain::repositories::PlaybackTelemetryRepository;
 use beam_index::repositories::SqlPlaybackTelemetryRepository;
 use beam_test_support::postgres::ScopedSchema;
@@ -51,8 +53,9 @@ beam_domain::playback_telemetry_repository_contract!(setup);
 async fn concurrent_reports_of_one_key_all_count() {
     let fixture = setup().await;
     let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+    let batch = [PlaybackTelemetryEvent::Start(start_key())];
 
-    let writes = (0..8).map(|_| fixture.repo.record_start(day, start_key()));
+    let writes = (0..8).map(|_| fixture.repo.record_batch(day, &batch));
     for result in futures::future::join_all(writes).await {
         result.expect("every concurrent upsert succeeds");
     }
@@ -98,4 +101,44 @@ async fn the_start_table_refuses_incoherent_rows() {
             "{outcome}/{reason}/{stage} count {count} must be refused"
         );
     }
+}
+
+/// A batch is all or nothing: when its last upsert fails, the upserts before
+/// it in the same batch are rolled back, so a client retrying the 500 does
+/// not count them twice. The failure is a real one -- a switch counter
+/// already at the `BIGINT` limit overflows -- and the start ahead of it in
+/// the batch is the write that must not survive.
+#[tokio::test]
+async fn a_batch_failing_part_way_counts_none_of_it() {
+    let fixture = setup().await;
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+    fixture
+        .repo
+        .record_batch(day, &[PlaybackTelemetryEvent::Switch(switch_key())])
+        .await
+        .unwrap();
+    fixture
+        .db
+        .execute_raw(Statement::from_string(
+            fixture.db.get_database_backend(),
+            format!("UPDATE playback_switch_counts SET count = {}", i64::MAX),
+        ))
+        .await
+        .unwrap();
+
+    let failed = fixture
+        .repo
+        .record_batch(
+            day,
+            &[
+                PlaybackTelemetryEvent::Start(start_key()),
+                PlaybackTelemetryEvent::Switch(switch_key()),
+            ],
+        )
+        .await;
+
+    assert!(failed.is_err(), "the switch counter overflows");
+    let summary = fixture.repo.summarize(day, day).await.unwrap();
+    assert!(summary.starts.is_empty(), "the start was rolled back");
+    assert_eq!(summary.switches[0].count, i64::MAX as u64);
 }

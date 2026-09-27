@@ -474,9 +474,12 @@ async fn retention_prunes_at_start_and_then_daily() {
     let today = day(2026, 9, 27);
     // Retention of 2 days keeps 25th..27th on the 27th.
     for n in [24, 25, 26] {
-        repo.record_start(day(2026, 9, n), start_key())
-            .await
-            .unwrap();
+        repo.record_batch(
+            day(2026, 9, n),
+            &[PlaybackTelemetryEvent::Start(start_key())],
+        )
+        .await
+        .unwrap();
     }
     let service = Arc::new(PlaybackTelemetryService::new(
         PlaybackTelemetryConfig {

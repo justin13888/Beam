@@ -117,7 +117,9 @@ playback-telemetry-disabled`: a 4xx a client's transport does not retry (the nat
 
 **Daily counters in three typed tables, not an event log.** `playback_start_counts`,
 `playback_rebuffer_counts` and `playback_switch_counts` each hold one row per UTC day per
-combination of coarse dimensions, incremented with `INSERT ... ON CONFLICT DO UPDATE`. A raw event
+combination of coarse dimensions, incremented with `INSERT ... ON CONFLICT DO UPDATE`. A batch is
+counted in one transaction, all or nothing: the native core retries a 5xx, so a batch that failed
+part-way and still kept its first events would count them twice on the retry. A raw event
 log, even one without a user column, is a timeline a determined reader can match against who was
 watching; a daily counter is not. One generic `(kind, dimensions jsonb, count)` table was rejected:
 it loses the `CHECK`s and the typed report, and every consumer would re-parse the dimensions.

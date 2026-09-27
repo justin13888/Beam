@@ -1,32 +1,35 @@
 //! SQL implementation of [`PlaybackTelemetryRepository`] (issue #143).
 //!
-//! Every write is one `INSERT ... ON CONFLICT (<primary key>) DO UPDATE` that
-//! increments the day's counter in place: concurrent reports for one key
-//! cannot race a read-modify-write, and a day's counter is one row however
-//! many reports it counts. Reads sum across days in SQL, so the report reads
-//! one row per key rather than one per key per day.
+//! A batch is written as its tally, in one transaction: at most one
+//! `INSERT ... ON CONFLICT (<primary key>) DO UPDATE` per table, each adding
+//! the batch's counts to the day's rows in place. The transaction makes a
+//! batch all or nothing, so a failure never leaves part of it counted for a
+//! retry to count again; the in-place increment means concurrent batches for
+//! one key cannot race a read-modify-write; and a tally's rows arrive sorted
+//! by key, so every writer takes its row locks in the same order and two
+//! batches cannot deadlock each other. Reads sum across days in SQL, so the
+//! report reads one row per key rather than one per key per day.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
-use sea_orm::sea_query::{Expr, ExprTrait, OnConflict};
+use sea_orm::sea_query::{Alias, Expr, ExprTrait, OnConflict};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, IdenStatic,
-    QueryFilter, QueryResult, Set, Statement,
+    QueryFilter, QueryResult, Set, Statement, TransactionTrait,
 };
 
 use beam_domain::models::playback_telemetry::{
-    BitrateClass, ClientKind, HeightClass, PlaybackTelemetrySummary, RebufferBucket, RebufferCount,
-    RebufferHistogram, RebufferKey, StartCount, StartKey, StartOutcome, SwitchCount, SwitchKey,
-    SwitchTrigger,
+    BitrateClass, ClientKind, HeightClass, PlaybackTelemetryEvent, PlaybackTelemetrySummary,
+    RebufferBucket, RebufferCount, RebufferHistogram, RebufferKey, StartCount, StartKey,
+    StartOutcome, SwitchCount, SwitchKey, SwitchTrigger,
 };
 use beam_domain::repositories::PlaybackTelemetryRepository;
-use beam_domain::utils::telemetry::rebuffer_bucket;
 use beam_entity::{playback_rebuffer_count, playback_start_count, playback_switch_count};
 
 /// The rebuffer histogram's column for each bucket, in [`RebufferBucket::ALL`]
-/// order. Written by `record_rebuffer`, summed by `summarize`.
+/// order. Written by `record_batch`, summed by `summarize`.
 fn bucket_column(bucket: RebufferBucket) -> playback_rebuffer_count::Column {
     match bucket {
         RebufferBucket::Under1Secs => playback_rebuffer_count::Column::Lt1s,
@@ -35,6 +38,25 @@ fn bucket_column(bucket: RebufferBucket) -> playback_rebuffer_count::Column {
         RebufferBucket::From10To30Secs => playback_rebuffer_count::Column::S1030,
         RebufferBucket::AtLeast30Secs => playback_rebuffer_count::Column::Ge30s,
     }
+}
+
+/// A counter as a bound value. Every counter is a `BIGINT`; a tally of one
+/// batch of at most a few dozen events is nowhere near its limit.
+fn counter(value: u64) -> Result<i64, DbErr> {
+    i64::try_from(value).map_err(|_| DbErr::Type(format!("counter {value} exceeds BIGINT")))
+}
+
+/// `SET <column> = <table>.<column> + excluded.<column>`: on conflict, the
+/// row's counter grows by what the batch brought, whatever it already held.
+fn add_excluded<E: EntityTrait>(
+    on_conflict: &mut OnConflict,
+    entity: E,
+    column: E::Column,
+) -> &mut OnConflict {
+    on_conflict.value(
+        column,
+        Expr::col((entity, column)).add(Expr::col((Alias::new("excluded"), column))),
+    )
 }
 
 const STARTS_SQL: &str = "\
@@ -157,11 +179,19 @@ impl SqlPlaybackTelemetryRepository {
     }
 }
 
-#[async_trait]
-impl PlaybackTelemetryRepository for SqlPlaybackTelemetryRepository {
-    async fn record_start(&self, day: NaiveDate, key: StartKey) -> Result<(), DbErr> {
-        use playback_start_count::{ActiveModel, Column, Entity};
+/// Adds a tally's start rows to `day`'s counters.
+async fn upsert_starts<C: ConnectionTrait>(
+    db: &C,
+    day: NaiveDate,
+    rows: Vec<StartCount>,
+) -> Result<(), DbErr> {
+    use playback_start_count::{ActiveModel, Column, Entity};
 
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut models = Vec::with_capacity(rows.len());
+    for StartCount { key, count } in rows {
         let StartKey {
             client_kind,
             outcome,
@@ -170,7 +200,7 @@ impl PlaybackTelemetryRepository for SqlPlaybackTelemetryRepository {
             audio_codec,
             height_class,
         } = key;
-        let row = ActiveModel {
+        models.push(ActiveModel {
             day: Set(day),
             client_kind: Set(client_kind.as_str().to_owned()),
             outcome: Set(outcome.outcome_label().to_owned()),
@@ -180,37 +210,48 @@ impl PlaybackTelemetryRepository for SqlPlaybackTelemetryRepository {
             video_codec: Set(video_codec),
             audio_codec: Set(audio_codec),
             height_class: Set(height_class.as_str().to_owned()),
-            count: Set(1),
-        };
-        Entity::insert(row)
-            .on_conflict(
-                OnConflict::columns([
-                    Column::Day,
-                    Column::ClientKind,
-                    Column::Outcome,
-                    Column::Reason,
-                    Column::Stage,
-                    Column::Container,
-                    Column::VideoCodec,
-                    Column::AudioCodec,
-                    Column::HeightClass,
-                ])
-                .value(Column::Count, Expr::col((Entity, Column::Count)).add(1))
-                .to_owned(),
-            )
-            .exec_without_returning(self.db.as_ref())
-            .await?;
-        Ok(())
+            count: Set(counter(count)?),
+        });
     }
+    let mut on_conflict = OnConflict::columns([
+        Column::Day,
+        Column::ClientKind,
+        Column::Outcome,
+        Column::Reason,
+        Column::Stage,
+        Column::Container,
+        Column::VideoCodec,
+        Column::AudioCodec,
+        Column::HeightClass,
+    ]);
+    add_excluded(&mut on_conflict, Entity, Column::Count);
+    Entity::insert_many(models)
+        .on_conflict(on_conflict)
+        .exec_without_returning(db)
+        .await?;
+    Ok(())
+}
 
-    async fn record_rebuffer(
-        &self,
-        day: NaiveDate,
-        key: RebufferKey,
-        duration_ms: u32,
-    ) -> Result<(), DbErr> {
-        use playback_rebuffer_count::{ActiveModel, Column, Entity};
+/// Adds a tally's rebuffer rows -- events, total duration and every
+/// histogram bucket -- to `day`'s counters.
+async fn upsert_rebuffers<C: ConnectionTrait>(
+    db: &C,
+    day: NaiveDate,
+    rows: Vec<RebufferCount>,
+) -> Result<(), DbErr> {
+    use playback_rebuffer_count::{ActiveModel, Column, Entity};
 
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut models = Vec::with_capacity(rows.len());
+    for RebufferCount {
+        key,
+        events,
+        total_ms,
+        histogram,
+    } in rows
+    {
         let RebufferKey {
             client_kind,
             container,
@@ -218,79 +259,109 @@ impl PlaybackTelemetryRepository for SqlPlaybackTelemetryRepository {
             height_class,
             bitrate_class,
         } = key;
-        let bucket = rebuffer_bucket(duration_ms);
-        let in_bucket = |candidate: RebufferBucket| Set(i64::from(candidate == bucket));
-        let row = ActiveModel {
+        let in_bucket = |bucket: RebufferBucket| counter(histogram.count(bucket)).map(Set);
+        models.push(ActiveModel {
             day: Set(day),
             client_kind: Set(client_kind.as_str().to_owned()),
             container: Set(container),
             video_codec: Set(video_codec),
             height_class: Set(height_class.as_str().to_owned()),
             bitrate_class: Set(bitrate_class.as_str().to_owned()),
-            events: Set(1),
-            total_ms: Set(i64::from(duration_ms)),
-            lt_1s: in_bucket(RebufferBucket::Under1Secs),
-            s1_3: in_bucket(RebufferBucket::From1To3Secs),
-            s3_10: in_bucket(RebufferBucket::From3To10Secs),
-            s10_30: in_bucket(RebufferBucket::From10To30Secs),
-            ge_30s: in_bucket(RebufferBucket::AtLeast30Secs),
-        };
-        let bucket_column = bucket_column(bucket);
-        Entity::insert(row)
-            .on_conflict(
-                OnConflict::columns([
-                    Column::Day,
-                    Column::ClientKind,
-                    Column::Container,
-                    Column::VideoCodec,
-                    Column::HeightClass,
-                    Column::BitrateClass,
-                ])
-                .value(Column::Events, Expr::col((Entity, Column::Events)).add(1))
-                .value(
-                    Column::TotalMs,
-                    Expr::col((Entity, Column::TotalMs)).add(i64::from(duration_ms)),
-                )
-                .value(bucket_column, Expr::col((Entity, bucket_column)).add(1))
-                .to_owned(),
-            )
-            .exec_without_returning(self.db.as_ref())
-            .await?;
-        Ok(())
+            events: Set(counter(events)?),
+            total_ms: Set(counter(total_ms)?),
+            lt_1s: in_bucket(RebufferBucket::Under1Secs)?,
+            s1_3: in_bucket(RebufferBucket::From1To3Secs)?,
+            s3_10: in_bucket(RebufferBucket::From3To10Secs)?,
+            s10_30: in_bucket(RebufferBucket::From10To30Secs)?,
+            ge_30s: in_bucket(RebufferBucket::AtLeast30Secs)?,
+        });
     }
+    let mut on_conflict = OnConflict::columns([
+        Column::Day,
+        Column::ClientKind,
+        Column::Container,
+        Column::VideoCodec,
+        Column::HeightClass,
+        Column::BitrateClass,
+    ]);
+    add_excluded(&mut on_conflict, Entity, Column::Events);
+    add_excluded(&mut on_conflict, Entity, Column::TotalMs);
+    for bucket in RebufferBucket::ALL {
+        add_excluded(&mut on_conflict, Entity, bucket_column(*bucket));
+    }
+    Entity::insert_many(models)
+        .on_conflict(on_conflict)
+        .exec_without_returning(db)
+        .await?;
+    Ok(())
+}
 
-    async fn record_switch(&self, day: NaiveDate, key: SwitchKey) -> Result<(), DbErr> {
-        use playback_switch_count::{ActiveModel, Column, Entity};
+/// Adds a tally's switch rows to `day`'s counters.
+async fn upsert_switches<C: ConnectionTrait>(
+    db: &C,
+    day: NaiveDate,
+    rows: Vec<SwitchCount>,
+) -> Result<(), DbErr> {
+    use playback_switch_count::{ActiveModel, Column, Entity};
 
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut models = Vec::with_capacity(rows.len());
+    for SwitchCount { key, count } in rows {
         let SwitchKey {
             client_kind,
             trigger,
             from_height_class,
             to_height_class,
         } = key;
-        let row = ActiveModel {
+        models.push(ActiveModel {
             day: Set(day),
             client_kind: Set(client_kind.as_str().to_owned()),
             trigger: Set(trigger.as_str().to_owned()),
             from_height_class: Set(from_height_class.as_str().to_owned()),
             to_height_class: Set(to_height_class.as_str().to_owned()),
-            count: Set(1),
-        };
-        Entity::insert(row)
-            .on_conflict(
-                OnConflict::columns([
-                    Column::Day,
-                    Column::ClientKind,
-                    Column::Trigger,
-                    Column::FromHeightClass,
-                    Column::ToHeightClass,
-                ])
-                .value(Column::Count, Expr::col((Entity, Column::Count)).add(1))
-                .to_owned(),
-            )
-            .exec_without_returning(self.db.as_ref())
-            .await?;
-        Ok(())
+            count: Set(counter(count)?),
+        });
+    }
+    let mut on_conflict = OnConflict::columns([
+        Column::Day,
+        Column::ClientKind,
+        Column::Trigger,
+        Column::FromHeightClass,
+        Column::ToHeightClass,
+    ]);
+    add_excluded(&mut on_conflict, Entity, Column::Count);
+    Entity::insert_many(models)
+        .on_conflict(on_conflict)
+        .exec_without_returning(db)
+        .await?;
+    Ok(())
+}
+
+#[async_trait]
+impl PlaybackTelemetryRepository for SqlPlaybackTelemetryRepository {
+    async fn record_batch(
+        &self,
+        day: NaiveDate,
+        events: &[PlaybackTelemetryEvent],
+    ) -> Result<(), DbErr> {
+        let tally = PlaybackTelemetrySummary::tally(events);
+        if tally.is_empty() {
+            return Ok(());
+        }
+        let PlaybackTelemetrySummary {
+            starts,
+            rebuffers,
+            switches,
+        } = tally;
+        // Dropped without a commit on any error, which rolls every upsert
+        // back.
+        let txn = self.db.begin().await?;
+        upsert_starts(&txn, day, starts).await?;
+        upsert_rebuffers(&txn, day, rebuffers).await?;
+        upsert_switches(&txn, day, switches).await?;
+        txn.commit().await
     }
 
     async fn summarize(

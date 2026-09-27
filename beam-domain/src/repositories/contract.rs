@@ -2140,8 +2140,9 @@ macro_rules! playback_telemetry_repository_contract {
         use ::chrono::NaiveDate;
         use $crate::models::playback_telemetry::test_utils::{rebuffer_key, start_key, switch_key};
         use $crate::models::playback_telemetry::{
-            BitrateClass, ClientKind, FailureReason, FailureStage, HeightClass, RebufferBucket,
-            RebufferKey, StartKey, StartOutcome, SwitchKey, SwitchTrigger,
+            BitrateClass, ClientKind, FailureReason, FailureStage, HeightClass,
+            PlaybackTelemetryEvent, PlaybackTelemetrySummary, RebufferBucket, RebufferKey,
+            StartKey, StartOutcome, SwitchKey, SwitchTrigger,
         };
         use $crate::repositories::contract::fixture::PlaybackTelemetryFixture;
 
@@ -2149,17 +2150,29 @@ macro_rules! playback_telemetry_repository_contract {
             NaiveDate::from_ymd_opt(2026, 9, n).expect("a September day")
         }
 
+        fn start_event(key: StartKey) -> PlaybackTelemetryEvent {
+            PlaybackTelemetryEvent::Start(key)
+        }
+
+        fn rebuffer_event(key: RebufferKey, duration_ms: u32) -> PlaybackTelemetryEvent {
+            PlaybackTelemetryEvent::Rebuffer { key, duration_ms }
+        }
+
+        fn switch_event(key: SwitchKey) -> PlaybackTelemetryEvent {
+            PlaybackTelemetryEvent::Switch(key)
+        }
+
         #[tokio::test]
         async fn a_start_recorded_twice_counts_two() {
             let fixture = $setup().await;
             fixture
                 .repo()
-                .record_start(day(1), start_key())
+                .record_batch(day(1), &[start_event(start_key())])
                 .await
                 .unwrap();
             fixture
                 .repo()
-                .record_start(day(1), start_key())
+                .record_batch(day(1), &[start_event(start_key())])
                 .await
                 .unwrap();
 
@@ -2168,6 +2181,55 @@ macro_rules! playback_telemetry_repository_contract {
             assert_eq!(summary.starts.len(), 1);
             assert_eq!(summary.starts[0].key, start_key());
             assert_eq!(summary.starts[0].count, 2);
+        }
+
+        /// One batch mixing every kind, naming some keys more than once,
+        /// reads back as its own tally -- every event counted once, repeats
+        /// folded into one row -- and a second batch adds to what the first
+        /// counted.
+        #[tokio::test]
+        async fn a_batch_counts_each_event_once_and_adds_to_what_is_kept() {
+            let fixture = $setup().await;
+            let hd = StartKey {
+                height_class: HeightClass::Hd,
+                ..start_key()
+            };
+            let batch = vec![
+                PlaybackTelemetryEvent::Start(start_key()),
+                PlaybackTelemetryEvent::Switch(switch_key()),
+                PlaybackTelemetryEvent::Rebuffer {
+                    key: rebuffer_key(),
+                    duration_ms: 500,
+                },
+                PlaybackTelemetryEvent::Start(hd.clone()),
+                PlaybackTelemetryEvent::Start(start_key()),
+                PlaybackTelemetryEvent::Rebuffer {
+                    key: rebuffer_key(),
+                    duration_ms: 12_000,
+                },
+            ];
+
+            fixture.repo().record_batch(day(1), &batch).await.unwrap();
+
+            let once = fixture.repo().summarize(day(1), day(1)).await.unwrap();
+            assert_eq!(once, PlaybackTelemetrySummary::tally(&batch));
+
+            fixture.repo().record_batch(day(1), &batch).await.unwrap();
+
+            let twice = fixture.repo().summarize(day(1), day(1)).await.unwrap();
+            let doubled: Vec<PlaybackTelemetryEvent> =
+                batch.iter().chain(batch.iter()).cloned().collect();
+            assert_eq!(twice, PlaybackTelemetrySummary::tally(&doubled));
+        }
+
+        #[tokio::test]
+        async fn an_empty_batch_counts_nothing() {
+            let fixture = $setup().await;
+
+            fixture.repo().record_batch(day(1), &[]).await.unwrap();
+
+            let summary = fixture.repo().summarize(day(1), day(1)).await.unwrap();
+            assert_eq!(summary, Default::default());
         }
 
         /// Every dimension is part of the key: a start differing in any one
@@ -2215,7 +2277,7 @@ macro_rules! playback_telemetry_repository_contract {
             for key in variants.iter().rev() {
                 fixture
                     .repo()
-                    .record_start(day(1), key.clone())
+                    .record_batch(day(1), &[start_event(key.clone())])
                     .await
                     .unwrap();
             }
@@ -2263,7 +2325,7 @@ macro_rules! playback_telemetry_repository_contract {
             for key in &starts {
                 fixture
                     .repo()
-                    .record_start(day(1), key.clone())
+                    .record_batch(day(1), &[start_event(key.clone())])
                     .await
                     .unwrap();
             }
@@ -2277,7 +2339,7 @@ macro_rules! playback_telemetry_repository_contract {
             for key in &rebuffers {
                 fixture
                     .repo()
-                    .record_rebuffer(day(1), key.clone(), 10)
+                    .record_batch(day(1), &[rebuffer_event(key.clone(), 10)])
                     .await
                     .unwrap();
             }
@@ -2292,7 +2354,11 @@ macro_rules! playback_telemetry_repository_contract {
                 }
             }
             for key in &switches {
-                fixture.repo().record_switch(day(1), *key).await.unwrap();
+                fixture
+                    .repo()
+                    .record_batch(day(1), &[switch_event(*key)])
+                    .await
+                    .unwrap();
             }
 
             let summary = fixture.repo().summarize(day(1), day(1)).await.unwrap();
@@ -2313,17 +2379,17 @@ macro_rules! playback_telemetry_repository_contract {
             let fixture = $setup().await;
             fixture
                 .repo()
-                .record_start(day(1), start_key())
+                .record_batch(day(1), &[start_event(start_key())])
                 .await
                 .unwrap();
             fixture
                 .repo()
-                .record_start(day(2), start_key())
+                .record_batch(day(2), &[start_event(start_key())])
                 .await
                 .unwrap();
             fixture
                 .repo()
-                .record_start(day(2), start_key())
+                .record_batch(day(2), &[start_event(start_key())])
                 .await
                 .unwrap();
 
@@ -2344,17 +2410,17 @@ macro_rules! playback_telemetry_repository_contract {
             for n in [1, 2, 4, 5] {
                 fixture
                     .repo()
-                    .record_start(day(n), start_key())
+                    .record_batch(day(n), &[start_event(start_key())])
                     .await
                     .unwrap();
                 fixture
                     .repo()
-                    .record_rebuffer(day(n), rebuffer_key(), 100)
+                    .record_batch(day(n), &[rebuffer_event(rebuffer_key(), 100)])
                     .await
                     .unwrap();
                 fixture
                     .repo()
-                    .record_switch(day(n), switch_key())
+                    .record_batch(day(n), &[switch_event(switch_key())])
                     .await
                     .unwrap();
             }
@@ -2379,7 +2445,7 @@ macro_rules! playback_telemetry_repository_contract {
             for duration_ms in [999, 1_000, 30_000] {
                 fixture
                     .repo()
-                    .record_rebuffer(day(1), rebuffer_key(), duration_ms)
+                    .record_batch(day(1), &[rebuffer_event(rebuffer_key(), duration_ms)])
                     .await
                     .unwrap();
             }
@@ -2402,19 +2468,23 @@ macro_rules! playback_telemetry_repository_contract {
             let fixture = $setup().await;
             fixture
                 .repo()
-                .record_switch(day(1), switch_key())
+                .record_batch(day(1), &[switch_event(switch_key())])
                 .await
                 .unwrap();
             fixture
                 .repo()
-                .record_switch(day(1), switch_key())
+                .record_batch(day(1), &[switch_event(switch_key())])
                 .await
                 .unwrap();
             let auto = SwitchKey {
                 trigger: SwitchTrigger::Auto,
                 ..switch_key()
             };
-            fixture.repo().record_switch(day(1), auto).await.unwrap();
+            fixture
+                .repo()
+                .record_batch(day(1), &[switch_event(auto)])
+                .await
+                .unwrap();
 
             let summary = fixture.repo().summarize(day(1), day(1)).await.unwrap();
 
@@ -2433,17 +2503,17 @@ macro_rules! playback_telemetry_repository_contract {
             for n in [1, 2, 3] {
                 fixture
                     .repo()
-                    .record_start(day(n), start_key())
+                    .record_batch(day(n), &[start_event(start_key())])
                     .await
                     .unwrap();
                 fixture
                     .repo()
-                    .record_rebuffer(day(n), rebuffer_key(), 100)
+                    .record_batch(day(n), &[rebuffer_event(rebuffer_key(), 100)])
                     .await
                     .unwrap();
                 fixture
                     .repo()
-                    .record_switch(day(n), switch_key())
+                    .record_batch(day(n), &[switch_event(switch_key())])
                     .await
                     .unwrap();
             }

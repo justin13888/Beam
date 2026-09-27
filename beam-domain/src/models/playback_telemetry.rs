@@ -313,10 +313,79 @@ pub struct PlaybackTelemetrySummary {
     pub switches: Vec<SwitchCount>,
 }
 
+/// One event to count, already resolved to the key it is counted under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaybackTelemetryEvent {
+    /// A playback start, successful or failed.
+    Start(StartKey),
+    /// A rebuffer lasting `duration_ms`.
+    Rebuffer { key: RebufferKey, duration_ms: u32 },
+    /// A source switch.
+    Switch(SwitchKey),
+}
+
+impl PlaybackTelemetrySummary {
+    /// What counting `events` adds: one entry per distinct key, each list
+    /// sorted by key, exactly as [`crate::repositories::PlaybackTelemetryRepository::summarize`]
+    /// would read the events back from an empty store. A batch is written as
+    /// its tally, so a key named twice is one increment of two, and every
+    /// writer takes its rows in the same order.
+    pub fn tally(events: &[PlaybackTelemetryEvent]) -> Self {
+        use std::collections::BTreeMap;
+
+        let mut starts: BTreeMap<&StartKey, u64> = BTreeMap::new();
+        let mut rebuffers: BTreeMap<&RebufferKey, (u64, u64, RebufferHistogram)> = BTreeMap::new();
+        let mut switches: BTreeMap<SwitchKey, u64> = BTreeMap::new();
+        for event in events {
+            match event {
+                PlaybackTelemetryEvent::Start(key) => *starts.entry(key).or_insert(0) += 1,
+                PlaybackTelemetryEvent::Rebuffer { key, duration_ms } => {
+                    let (events, total_ms, histogram) = rebuffers.entry(key).or_default();
+                    *events += 1;
+                    *total_ms += u64::from(*duration_ms);
+                    histogram.record(crate::utils::telemetry::rebuffer_bucket(*duration_ms));
+                }
+                PlaybackTelemetryEvent::Switch(key) => *switches.entry(*key).or_insert(0) += 1,
+            }
+        }
+
+        Self {
+            starts: starts
+                .into_iter()
+                .map(|(key, count)| StartCount {
+                    key: key.clone(),
+                    count,
+                })
+                .collect(),
+            rebuffers: rebuffers
+                .into_iter()
+                .map(|(key, (events, total_ms, histogram))| RebufferCount {
+                    key: key.clone(),
+                    events,
+                    total_ms,
+                    histogram,
+                })
+                .collect(),
+            switches: switches
+                .into_iter()
+                .map(|(key, count)| SwitchCount { key, count })
+                .collect(),
+        }
+    }
+
+    /// Whether the summary counts nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.starts.is_empty() && self.rebuffers.is_empty() && self.switches.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
+    use proptest::prelude::*;
+
+    use super::test_utils::{rebuffer_key, start_key, switch_key};
     use super::*;
 
     /// Checks one vocabulary: every label reads back as its value, no two
@@ -408,6 +477,126 @@ mod tests {
                 None,
                 "{outcome}/{reason}/{stage}"
             );
+        }
+    }
+
+    /// A key named more than once is one entry with its events summed; keys
+    /// differing in a dimension stay apart; each list comes out sorted.
+    #[test]
+    fn a_tally_folds_repeated_keys_and_sorts_each_list() {
+        let hd = StartKey {
+            height_class: HeightClass::Hd,
+            ..start_key()
+        };
+        let auto = SwitchKey {
+            trigger: SwitchTrigger::Auto,
+            ..switch_key()
+        };
+        let events = vec![
+            PlaybackTelemetryEvent::Switch(auto),
+            PlaybackTelemetryEvent::Start(start_key()),
+            PlaybackTelemetryEvent::Rebuffer {
+                key: rebuffer_key(),
+                duration_ms: 999,
+            },
+            PlaybackTelemetryEvent::Start(hd.clone()),
+            PlaybackTelemetryEvent::Switch(switch_key()),
+            PlaybackTelemetryEvent::Start(start_key()),
+            PlaybackTelemetryEvent::Rebuffer {
+                key: rebuffer_key(),
+                duration_ms: 30_000,
+            },
+            PlaybackTelemetryEvent::Switch(auto),
+        ];
+
+        let tally = PlaybackTelemetrySummary::tally(&events);
+
+        let mut starts = vec![(start_key(), 2), (hd, 1)];
+        starts.sort();
+        let read: Vec<(StartKey, u64)> = tally
+            .starts
+            .iter()
+            .map(|s| (s.key.clone(), s.count))
+            .collect();
+        assert_eq!(read, starts);
+        let mut histogram = RebufferHistogram::default();
+        histogram.record(RebufferBucket::Under1Secs);
+        histogram.record(RebufferBucket::AtLeast30Secs);
+        assert_eq!(
+            tally.rebuffers,
+            vec![RebufferCount {
+                key: rebuffer_key(),
+                events: 2,
+                total_ms: 30_999,
+                histogram,
+            }]
+        );
+        let mut switches = vec![(switch_key(), 1), (auto, 2)];
+        switches.sort();
+        let read: Vec<(SwitchKey, u64)> = tally.switches.iter().map(|s| (s.key, s.count)).collect();
+        assert_eq!(read, switches);
+        assert!(!tally.is_empty());
+        assert!(PlaybackTelemetrySummary::tally(&[]).is_empty());
+    }
+
+    fn event() -> impl Strategy<Value = PlaybackTelemetryEvent> {
+        let height = prop::sample::select(HeightClass::ALL);
+        prop_oneof![
+            height
+                .clone()
+                .prop_map(|height_class| PlaybackTelemetryEvent::Start(StartKey {
+                    height_class,
+                    ..start_key()
+                })),
+            (height.clone(), 1u32..=600_000).prop_map(|(height_class, duration_ms)| {
+                PlaybackTelemetryEvent::Rebuffer {
+                    key: RebufferKey {
+                        height_class,
+                        ..rebuffer_key()
+                    },
+                    duration_ms,
+                }
+            }),
+            height.prop_map(|to_height_class| PlaybackTelemetryEvent::Switch(SwitchKey {
+                to_height_class,
+                ..switch_key()
+            })),
+        ]
+    }
+
+    proptest! {
+        /// A tally loses and invents nothing: every event is counted once,
+        /// every rebuffer's duration once, every rebuffer in one bucket, and
+        /// no key appears twice.
+        #[test]
+        fn a_tally_counts_every_event_exactly_once(events in prop::collection::vec(event(), 0..60)) {
+            let tally = PlaybackTelemetrySummary::tally(&events);
+
+            let mut starts = 0u64;
+            let mut rebuffers = 0u64;
+            let mut total_ms = 0u64;
+            let mut switches = 0u64;
+            for event in &events {
+                match event {
+                    PlaybackTelemetryEvent::Start(_) => starts += 1,
+                    PlaybackTelemetryEvent::Rebuffer { duration_ms, .. } => {
+                        rebuffers += 1;
+                        total_ms += u64::from(*duration_ms);
+                    }
+                    PlaybackTelemetryEvent::Switch(_) => switches += 1,
+                }
+            }
+            prop_assert_eq!(tally.starts.iter().map(|s| s.count).sum::<u64>(), starts);
+            prop_assert_eq!(tally.rebuffers.iter().map(|r| r.events).sum::<u64>(), rebuffers);
+            prop_assert_eq!(tally.rebuffers.iter().map(|r| r.total_ms).sum::<u64>(), total_ms);
+            for row in &tally.rebuffers {
+                prop_assert_eq!(row.histogram.iter().map(|(_, n)| n).sum::<u64>(), row.events);
+            }
+            prop_assert_eq!(tally.switches.iter().map(|s| s.count).sum::<u64>(), switches);
+            prop_assert!(tally.starts.windows(2).all(|w| w[0].key < w[1].key));
+            prop_assert!(tally.rebuffers.windows(2).all(|w| w[0].key < w[1].key));
+            prop_assert!(tally.switches.windows(2).all(|w| w[0].key < w[1].key));
+            prop_assert_eq!(tally.is_empty(), events.is_empty());
         }
     }
 }

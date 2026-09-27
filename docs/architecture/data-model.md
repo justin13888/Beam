@@ -343,6 +343,9 @@ target every write increments through. `playback_start_counts` also checks that 
 'started'` exactly when `reason` and `stage` are `none`. `day` leads every key, which serves both
 the report's date range and the daily retention prune (`DELETE ... WHERE day < cutoff`). The
 vocabularies themselves are not `CHECK`ed: a new client kind is a code change, not a migration.
+A reported batch is written in one transaction, as at most one multi-row upsert per table adding
+the batch's tally (`count = count + excluded.count`), so a batch is counted whole or not at all and
+its rows are locked in key order.
 
 ## Enrichment tables
 

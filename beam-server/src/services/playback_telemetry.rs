@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use beam_domain::models::playback_telemetry::{
-    NO_STREAM_LABEL, PlaybackTelemetrySummary, RebufferKey, StartKey, StartOutcome, SwitchKey,
+    NO_STREAM_LABEL, PlaybackTelemetryEvent, PlaybackTelemetrySummary, RebufferKey, StartKey,
+    StartOutcome, SwitchKey,
 };
 use beam_domain::models::stream::{MediaStream, StreamMetadata};
 use beam_domain::models::{BitrateClass, ClientKind, HeightClass, MediaFile};
@@ -455,7 +456,7 @@ impl PlaybackTelemetryService {
     /// telemetry is disabled or the batch breaks a rule; otherwise every
     /// event is counted except those whose file does not resolve, which are
     /// dropped. Each file is resolved once per batch however many events name
-    /// it.
+    /// it, and the counted events are recorded in one all-or-nothing write.
     pub async fn ingest(
         &self,
         batch: PlaybackTelemetryBatch,
@@ -495,12 +496,13 @@ impl PlaybackTelemetryService {
         let file = |id: &Uuid| resolved.get(id).and_then(Option::as_ref);
 
         let mut outcome = IngestOutcome::default();
+        let mut events: Vec<PlaybackTelemetryEvent> = Vec::new();
         for event in starts {
             match file(&event.file_id) {
                 Some(file) => {
                     let key =
                         file.start_key(client_kind, StartOutcome::Started, event.audio_track_index);
-                    self.repo.record_start(day, key).await?;
+                    events.push(PlaybackTelemetryEvent::Start(key));
                     outcome.recorded += 1;
                 }
                 None => outcome.dropped += 1,
@@ -514,7 +516,7 @@ impl PlaybackTelemetryService {
                         stage: event.stage.into(),
                     };
                     let key = file.start_key(client_kind, failed, event.audio_track_index);
-                    self.repo.record_start(day, key).await?;
+                    events.push(PlaybackTelemetryEvent::Start(key));
                     outcome.recorded += 1;
                 }
                 None => outcome.dropped += 1,
@@ -523,9 +525,10 @@ impl PlaybackTelemetryService {
         for event in rebuffers {
             match file(&event.file_id) {
                 Some(file) => {
-                    self.repo
-                        .record_rebuffer(day, file.rebuffer_key(client_kind), event.duration_ms)
-                        .await?;
+                    events.push(PlaybackTelemetryEvent::Rebuffer {
+                        key: file.rebuffer_key(client_kind),
+                        duration_ms: event.duration_ms,
+                    });
                     outcome.recorded += 1;
                 }
                 None => outcome.dropped += 1,
@@ -534,18 +537,20 @@ impl PlaybackTelemetryService {
         for event in source_switches {
             match (file(&event.from_file_id), file(&event.to_file_id)) {
                 (Some(from), Some(to)) => {
-                    let key = SwitchKey {
+                    events.push(PlaybackTelemetryEvent::Switch(SwitchKey {
                         client_kind,
                         trigger: event.trigger.into(),
                         from_height_class: from.height_class,
                         to_height_class: to.height_class,
-                    };
-                    self.repo.record_switch(day, key).await?;
+                    }));
                     outcome.recorded += 1;
                 }
                 _ => outcome.dropped += 1,
             }
         }
+        // One call, all or nothing: a store failure counts none of the batch,
+        // so the client's retry of the 500 cannot count any of it twice.
+        self.repo.record_batch(day, &events).await?;
         Ok(outcome)
     }
 

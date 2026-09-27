@@ -530,12 +530,17 @@ async fn a_backwards_or_overlong_range_is_a_400() {
 }
 
 /// NFR-205: the store failing is a 500 problem on both operations, not a
-/// panic or a partial answer.
+/// panic or a partial answer. The batch reaches the store as one write
+/// carrying every event, so the store's all-or-nothing contract covers all
+/// of it: a failure counts none of the batch, and the client's retry of the
+/// 500 cannot count any event twice.
 #[tokio::test]
 async fn a_store_failure_is_an_internal_error_problem() {
     let mut store = MockPlaybackTelemetryRepository::new();
     store
-        .expect_record_start()
+        .expect_record_batch()
+        .withf(|_, events| events.len() == 3)
+        .times(1)
         .returning(|_, _| Err(DbErr::Custom("connection reset".to_string())));
     store
         .expect_summarize()
@@ -547,7 +552,11 @@ async fn a_store_failure_is_an_internal_error_problem() {
     post(
         &fixture,
         &token,
-        &json!({ "client_kind": "android", "starts": [{ "file_id": file }] }),
+        &json!({
+            "client_kind": "android",
+            "starts": [{ "file_id": file }, { "file_id": file }],
+            "rebuffers": [{ "file_id": file, "duration_ms": 2_500 }]
+        }),
     )
     .await
     .assert_status(StatusCode::INTERNAL_SERVER_ERROR)

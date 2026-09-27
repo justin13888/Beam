@@ -2,33 +2,28 @@ use async_trait::async_trait;
 use chrono::NaiveDate;
 use sea_orm::DbErr;
 
-use crate::models::playback_telemetry::{
-    PlaybackTelemetrySummary, RebufferKey, StartKey, SwitchKey,
-};
+use crate::models::playback_telemetry::{PlaybackTelemetryEvent, PlaybackTelemetrySummary};
 
 /// The daily playback counters (issue #143, ADR-0019).
 ///
-/// Every write increments a counter for one UTC day and one key; there is no
-/// write that stores an event. Nothing a caller can pass names a user or a
-/// file, so nothing this trait keeps can be read back as a viewing record.
+/// Every write increments counters for one UTC day; there is no write that
+/// stores an event. Nothing a caller can pass names a user or a file, so
+/// nothing this trait keeps can be read back as a viewing record.
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait PlaybackTelemetryRepository: Send + Sync + std::fmt::Debug {
-    /// Counts one playback start under `key` on `day`.
-    async fn record_start(&self, day: NaiveDate, key: StartKey) -> Result<(), DbErr>;
-
-    /// Counts one rebuffer lasting `duration_ms` under `key` on `day`: one
-    /// more event, `duration_ms` more in total, and one more in the duration
-    /// range it falls into.
-    async fn record_rebuffer(
+    /// Counts every event of one batch on `day`, all or nothing: when this
+    /// returns an error, none of the batch is counted, so a client that
+    /// retries a failed report does not count any of it twice.
+    ///
+    /// A start adds one to its key; a rebuffer adds one event, its duration
+    /// to the total, and one to the duration range it falls into; a switch
+    /// adds one to its key. An empty batch counts nothing.
+    async fn record_batch(
         &self,
         day: NaiveDate,
-        key: RebufferKey,
-        duration_ms: u32,
+        events: &[PlaybackTelemetryEvent],
     ) -> Result<(), DbErr>;
-
-    /// Counts one source switch under `key` on `day`.
-    async fn record_switch(&self, day: NaiveDate, key: SwitchKey) -> Result<(), DbErr>;
 
     /// Every counter from `from` to `to`, both inclusive, summed across the
     /// days: one entry per key, each list sorted by key. An empty range
@@ -52,9 +47,8 @@ pub mod in_memory {
 
     use super::*;
     use crate::models::playback_telemetry::{
-        RebufferCount, RebufferHistogram, StartCount, SwitchCount,
+        RebufferCount, RebufferHistogram, RebufferKey, StartCount, StartKey, SwitchCount, SwitchKey,
     };
-    use crate::utils::telemetry::rebuffer_bucket;
 
     /// One day-row of rebuffer counters.
     #[derive(Debug, Clone, Copy, Default)]
@@ -79,27 +73,33 @@ pub mod in_memory {
 
     #[async_trait]
     impl PlaybackTelemetryRepository for InMemoryPlaybackTelemetryRepository {
-        async fn record_start(&self, day: NaiveDate, key: StartKey) -> Result<(), DbErr> {
-            *self.starts.lock().unwrap().entry((day, key)).or_insert(0) += 1;
-            Ok(())
-        }
-
-        async fn record_rebuffer(
+        async fn record_batch(
             &self,
             day: NaiveDate,
-            key: RebufferKey,
-            duration_ms: u32,
+            events: &[PlaybackTelemetryEvent],
         ) -> Result<(), DbErr> {
+            let PlaybackTelemetrySummary {
+                starts: start_rows,
+                rebuffers: rebuffer_rows,
+                switches: switch_rows,
+            } = PlaybackTelemetrySummary::tally(events);
+            // Every map is locked before any is written, in the order every
+            // other method takes them, so a batch lands whole.
+            let mut starts = self.starts.lock().unwrap();
             let mut rebuffers = self.rebuffers.lock().unwrap();
-            let totals = rebuffers.entry((day, key)).or_default();
-            totals.events += 1;
-            totals.total_ms += u64::from(duration_ms);
-            totals.histogram.record(rebuffer_bucket(duration_ms));
-            Ok(())
-        }
-
-        async fn record_switch(&self, day: NaiveDate, key: SwitchKey) -> Result<(), DbErr> {
-            *self.switches.lock().unwrap().entry((day, key)).or_insert(0) += 1;
+            let mut switches = self.switches.lock().unwrap();
+            for row in start_rows {
+                *starts.entry((day, row.key)).or_insert(0) += row.count;
+            }
+            for row in rebuffer_rows {
+                let totals = rebuffers.entry((day, row.key)).or_default();
+                totals.events += row.events;
+                totals.total_ms += row.total_ms;
+                totals.histogram.merge(&row.histogram);
+            }
+            for row in switch_rows {
+                *switches.entry((day, row.key)).or_insert(0) += row.count;
+            }
             Ok(())
         }
 
