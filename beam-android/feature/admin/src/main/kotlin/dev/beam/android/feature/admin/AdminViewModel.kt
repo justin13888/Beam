@@ -100,7 +100,11 @@ public class AdminViewModel
             }
         }
 
-        /** Rescan a library. */
+        /**
+         * Start a rescan of a library. The server answers once it has accepted
+         * the scan, not when the scan finishes: its progress reaches the event
+         * feed, and the library's counts on the next reload.
+         */
         public fun scan(libraryId: String) {
             mutableState.update { it.mapValue { state -> state.copy(scanningLibraryId = libraryId) } }
             viewModelScope.launch {
@@ -115,11 +119,8 @@ public class AdminViewModel
                             scanningLibraryId = null,
                             message =
                                 outcome.fold(
-                                    onSuccess = { added -> "Scan finished. $added files added." },
-                                    onFailure = { error ->
-                                        (error as? BeamException)?.toFailure()?.message
-                                            ?: "The scan could not be started."
-                                    },
+                                    onSuccess = { "Scan started." },
+                                    onFailure = { error -> scanFailureMessage(error) },
                                 ),
                         )
                     }
@@ -216,5 +217,24 @@ public class AdminViewModel
 
         private companion object {
             const val USER_PAGE: UInt = 100u
+        }
+    }
+
+/** The problem type the server answers a scan of a library already being scanned with. */
+private const val SCAN_IN_PROGRESS = "#library-scan-in-progress"
+
+/**
+ * Why a scan could not be started, for the operator. A scan already running
+ * is not a failure of anything: the library is being scanned.
+ */
+private fun scanFailureMessage(error: Throwable): String =
+    when {
+        error is BeamException.Server && error.code.endsWith(SCAN_IN_PROGRESS) -> {
+            "A scan of this library is already running."
+        }
+
+        else -> {
+            (error as? BeamException)?.toFailure()?.message
+                ?: "The scan could not be started."
         }
     }

@@ -223,8 +223,11 @@ public interface AdminRepository {
     /** Delete a library and everything indexed into it. */
     public suspend fun deleteLibrary(libraryId: String)
 
-    /** Rescan a library. Returns how many files were added. */
-    public suspend fun scanLibrary(libraryId: String): UInt
+    /**
+     * Start a rescan of a library. Returns once the server has accepted it; the
+     * scan itself runs on the server afterwards.
+     */
+    public suspend fun scanLibrary(libraryId: String)
 
     /** Re-fetch metadata for one title. */
     public suspend fun refreshMetadata(mediaId: String)

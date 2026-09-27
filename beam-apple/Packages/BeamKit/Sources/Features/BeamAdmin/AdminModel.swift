@@ -62,12 +62,12 @@ public final class AdminModel {
         logs = (try? await admin.logs(limit: Self.logLimit, offset: 0)) ?? []
     }
 
-    /// Scan one library, and report how many files it added.
+    /// Start a scan of one library. The server answers once it has accepted
+    /// the scan, not when the scan finishes, so there is no count to report.
     public func scan(libraryId: String) async {
         do {
-            let added = try await admin.scanLibrary(id: libraryId)
-            actionMessage =
-                added == 0 ? "Scan finished; nothing new." : "Scan added \(added) files."
+            try await admin.scanLibrary(id: libraryId)
+            actionMessage = "Scan started."
             libraries = (try? await catalog.libraries()) ?? libraries
         } catch {
             actionMessage = BeamFailure.from(error).message

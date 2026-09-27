@@ -17,7 +17,10 @@ use crate::services::watch_status::{PollReason, WatchMode, WatchStatus};
 
 /// The kind of filesystem change observed. This is a hint only: reconciliation
 /// always re-checks the filesystem, so a mislabelled event still resolves
-/// correctly (e.g. a rename surfaces as a Removed + Created pair).
+/// correctly. A rename, for one, arrives from inotify as a `Modify(Name(..))`
+/// event on each side, which [`translate_event_kind`] reads as `Modified`:
+/// the reconcile stats the path and finds the old name gone and the new one
+/// present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsEventKind {
     Created,

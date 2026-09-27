@@ -8,7 +8,7 @@
 //! the whole file unobservable: a test could not tell a task from a hang, and
 //! the rescan cadence could only be exercised by waiting for it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,9 +23,10 @@ use beam_domain::services::{Clock, RealClock};
 
 use crate::services::enrichment::MetadataEnrichmentService;
 use crate::services::filesystem_probe::StatfsFilesystemProbe;
-use crate::services::index::{IndexError, IndexService, LocalIndexService};
+use crate::services::index::{IndexError, LocalIndexService, ReconcileOutcome};
+use crate::services::scan::ScanTrigger;
 use crate::services::watch_status::{WatchMode, WatchStatus, read_max_user_watches};
-use crate::services::watcher::{FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer};
+use crate::services::watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer};
 
 /// The slice of the indexer the background tasks actually use.
 ///
@@ -35,21 +36,24 @@ use crate::services::watcher::{FsEventKind, FsWatcher, NotifyFsWatcher, PathDebo
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
-    /// Scan every library, returning the number of files added.
-    async fn scan_all_libraries(&self) -> Result<u32, IndexError>;
+    /// Scan every library, returning the number of files added. A library
+    /// already being scanned is skipped.
+    async fn scan_all_libraries(&self, trigger: ScanTrigger) -> Result<u32, IndexError>;
 
     /// Scan one library, returning the number of files added. Used when a
     /// library starts being polled: the poller only reports changes made
-    /// after it took its snapshot.
+    /// after it took its snapshot. Fails with [`IndexError::ScanInProgress`]
+    /// when a scan of the library is already queued or running.
     async fn scan_library(&self, library_id: Uuid) -> Result<u32, IndexError>;
 
-    /// Reconcile one path in response to a filesystem event.
+    /// Reconcile one path in response to a filesystem event. A
+    /// [`ReconcileOutcome::Deferred`] event is to be handed back later.
     async fn reconcile_path(
         &self,
         library_id: Uuid,
         path: PathBuf,
         kind: FsEventKind,
-    ) -> Result<(), IndexError>;
+    ) -> Result<ReconcileOutcome, IndexError>;
 
     /// The repository the watch refresher lists libraries from.
     fn library_repo(&self) -> Arc<dyn LibraryRepository>;
@@ -57,12 +61,13 @@ pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
 
 #[async_trait::async_trait]
 impl BackgroundIndexer for LocalIndexService {
-    async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
-        LocalIndexService::scan_all_libraries(self).await
+    async fn scan_all_libraries(&self, trigger: ScanTrigger) -> Result<u32, IndexError> {
+        LocalIndexService::scan_all_libraries(self, trigger).await
     }
 
     async fn scan_library(&self, library_id: Uuid) -> Result<u32, IndexError> {
-        IndexService::scan_library(self, library_id.to_string()).await
+        let progress = self.scan_now(library_id, ScanTrigger::NewlyPolled).await?;
+        Ok(u32::try_from(progress.added).unwrap_or(u32::MAX))
     }
 
     async fn reconcile_path(
@@ -70,7 +75,7 @@ impl BackgroundIndexer for LocalIndexService {
         library_id: Uuid,
         path: PathBuf,
         kind: FsEventKind,
-    ) -> Result<(), IndexError> {
+    ) -> Result<ReconcileOutcome, IndexError> {
         LocalIndexService::reconcile_path(self, library_id, path, kind).await
     }
 
@@ -215,42 +220,101 @@ pub fn spawn_background_indexing_with(
 
 /// Consume filesystem-watcher events, coalescing bursts within a debounce
 /// window before reconciling each affected path.
+///
+/// An event the indexer defers -- its library is being scanned, or its file
+/// is still being written -- is kept and handed back once its delay has
+/// passed, measured on `clock`. A fresh event for the same path replaces the
+/// kept one, since it says more recently what happened there. Waiting on the
+/// library instead would stall every other library's events behind one scan.
 async fn run_watch_consumer(
     watcher: Arc<dyn FsWatcher>,
     indexer: Arc<dyn BackgroundIndexer>,
     clock: Arc<dyn Clock>,
     debounce: Duration,
 ) {
+    let mut deferred: HashMap<(Uuid, PathBuf), (FsEventKind, std::time::Instant)> = HashMap::new();
     loop {
-        // Block until the first event of a burst.
-        let Some(first) = watcher.next_event().await else {
-            info!("Filesystem watcher closed; stopping consumer");
-            return;
+        // Block until the first event of a burst, or until a deferred event
+        // falls due.
+        let next_due = deferred.values().map(|(_, due)| *due).min();
+        let first = match next_due {
+            Some(due) => {
+                let wait = due.saturating_duration_since(clock.monotonic());
+                tokio::select! {
+                    event = watcher.next_event() => match event {
+                        Some(event) => Some(event),
+                        None => {
+                            info!("Filesystem watcher closed; stopping consumer");
+                            return;
+                        }
+                    },
+                    _ = clock.sleep(wait) => None,
+                }
+            }
+            None => match watcher.next_event().await {
+                Some(event) => Some(event),
+                None => {
+                    info!("Filesystem watcher closed; stopping consumer");
+                    return;
+                }
+            },
         };
-        let mut debouncer = PathDebouncer::new();
-        debouncer.submit(first);
 
-        // Collect further events for the debounce window.
-        let window = clock.sleep(debounce);
-        tokio::pin!(window);
-        loop {
-            tokio::select! {
-                _ = &mut window => break,
-                event = watcher.next_event() => match event {
-                    Some(e) => debouncer.submit(e),
-                    None => break,
-                },
+        let mut batch: Vec<FsEvent> = Vec::new();
+        if let Some(first) = first {
+            let mut debouncer = PathDebouncer::new();
+            debouncer.submit(first);
+
+            // Collect further events for the debounce window.
+            let window = clock.sleep(debounce);
+            tokio::pin!(window);
+            loop {
+                tokio::select! {
+                    _ = &mut window => break,
+                    event = watcher.next_event() => match event {
+                        Some(e) => debouncer.submit(e),
+                        None => break,
+                    },
+                }
+            }
+            batch = debouncer.drain();
+            for event in &batch {
+                deferred.remove(&(event.library_id, event.path.clone()));
+            }
+        }
+
+        // Every deferred event that has fallen due joins the batch.
+        let now = clock.monotonic();
+        let due: Vec<(Uuid, PathBuf)> = deferred
+            .iter()
+            .filter(|(_, (_, due))| *due <= now)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in due {
+            if let Some((kind, _)) = deferred.remove(&key) {
+                let (library_id, path) = key;
+                batch.push(FsEvent {
+                    library_id,
+                    path,
+                    kind,
+                });
             }
         }
 
         // Reconcile the coalesced events.
-        for event in debouncer.drain() {
-            let path = event.path.clone();
-            if let Err(e) = indexer
-                .reconcile_path(event.library_id, event.path, event.kind)
-                .await
-            {
-                warn!("Failed to reconcile {}: {e}", path.display());
+        for event in batch {
+            let FsEvent {
+                library_id,
+                path,
+                kind,
+            } = event;
+            match indexer.reconcile_path(library_id, path.clone(), kind).await {
+                Ok(ReconcileOutcome::Done) => {}
+                Ok(ReconcileOutcome::Deferred { retry_after }) => {
+                    let due = clock.monotonic() + retry_after;
+                    deferred.insert((library_id, path), (kind, due));
+                }
+                Err(e) => warn!("Failed to reconcile {}: {e}", path.display()),
             }
         }
     }
@@ -305,6 +369,10 @@ async fn run_watch_poller(
 async fn reconcile_newly_polled(indexer: &dyn BackgroundIndexer, library_id: Uuid) {
     match indexer.scan_library(library_id).await {
         Ok(n) => info!(%library_id, "Scanned a newly polled library: {n} file(s) added"),
+        // The scan already queued or running covers what polling missed.
+        Err(IndexError::ScanInProgress) => {
+            info!(%library_id, "A newly polled library is already being scanned")
+        }
         Err(e) => warn!(%library_id, "Failed to scan a newly polled library: {e}"),
     }
 }
@@ -335,7 +403,7 @@ async fn run_periodic_maintenance(
     }
 
     info!("Running startup library scan...");
-    match indexer.scan_all_libraries().await {
+    match indexer.scan_all_libraries(ScanTrigger::Startup).await {
         Ok(n) => info!("Startup scan complete: {n} file(s) added"),
         Err(e) => error!("Startup scan failed: {e}"),
     }
@@ -345,7 +413,7 @@ async fn run_periodic_maintenance(
     loop {
         clock.sleep(interval).await;
 
-        match indexer.scan_all_libraries().await {
+        match indexer.scan_all_libraries(ScanTrigger::Periodic).await {
             Ok(n) => info!("Periodic rescan complete: {n} file(s) added"),
             Err(e) => error!("Periodic rescan failed: {e}"),
         }

@@ -5,6 +5,7 @@ pub mod hash;
 pub mod index;
 pub mod media_info;
 pub mod notification;
+pub mod scan;
 pub mod watch_status;
 pub mod watcher;
 
@@ -21,13 +22,14 @@ pub use enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 pub use hash::{HashConfig, HashService, LocalHashService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use index::MockIndexService;
-pub use index::{IndexError, IndexService, LocalIndexService};
+pub use index::{IndexError, IndexService, LocalIndexService, ReconcileOutcome};
 pub use media_info::{LocalMediaInfoService, MediaInfoService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use notification::InMemoryNotificationService;
 pub use notification::{
     AdminEvent, EventCategory, EventLevel, LocalNotificationService, NotificationService,
 };
+pub use scan::{ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger};
 pub use watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer, WatchError};
 #[cfg(any(test, feature = "test-utils"))]
 pub use watcher::{InMemoryFsWatcher, MockFsWatcher};

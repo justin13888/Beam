@@ -891,7 +891,10 @@ async fn a_failed_backfill_does_not_hold_up_the_scan_and_is_retried() {
         )),
     );
 
-    service.scan_all_libraries().await.unwrap();
+    service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
     assert!(
         library_repo
             .find_by_id(library.id)
@@ -903,14 +906,23 @@ async fn a_failed_backfill_does_not_hold_up_the_scan_and_is_retried() {
         "the scan ran despite the failed backfill"
     );
     assert!(
-        !*service.identity_passes_succeeded.lock().await,
+        !service.identity_passes_succeeded.load(Ordering::SeqCst),
         "a failed backfill is not recorded as done"
     );
 
-    service.scan_all_libraries().await.unwrap();
-    assert!(*service.identity_passes_succeeded.lock().await, "retried");
+    service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+    assert!(
+        service.identity_passes_succeeded.load(Ordering::SeqCst),
+        "retried"
+    );
 
-    service.scan_all_libraries().await.unwrap();
+    service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -971,7 +983,10 @@ async fn scanning_every_library_backfills_first_so_a_legacy_title_takes_its_next
         .await;
     h.write("The.Matrix.1999.2160p.mkv");
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
 
     assert_eq!(
         h.only_movie().id,
@@ -1020,7 +1035,10 @@ async fn an_unkeyed_husk_is_retired(enriched: bool) {
     }
     h.write("Show X/Season 01/Show.X.S01E01.mkv");
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
 
     let show = h.only_show();
     assert_ne!(show.id, husk, "the husk is retired, not adopted");
@@ -1126,7 +1144,10 @@ async fn a_key_from_before_the_apostrophe_fold_is_rederived_in_place() {
         .await
         .unwrap();
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
 
     let after = h.only_show();
     assert_eq!(after.id, show, "the same show, not a new one");
@@ -1221,7 +1242,10 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
         )
         .await;
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
 
     let show = h.only_show();
     assert_eq!(show.id, folder, "the show a provider matched is kept");
@@ -1405,7 +1429,10 @@ async fn a_title_whose_files_are_all_missing_is_rederived_from_them() {
         .await;
     h.mark_every_file_missing().await;
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
     assert_eq!(
         h.show_repo
             .find_by_id(show)
@@ -1449,7 +1476,10 @@ async fn a_keyed_husk_is_released(enriched: bool) {
         h.enrich_show(husk, 999).await;
     }
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
 
     let show = h.only_show();
     assert_ne!(show.id, husk, "enriched: {enriched}");
@@ -1552,7 +1582,10 @@ async fn a_failed_rekey_pass_holds_reclassification_until_a_pass_succeeds() {
     let h = Harness::purging_at_once_with_movies(Arc::new(movies)).await;
     let show = stale_enriched_greys(&h).await;
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
     assert_held(&h, show);
     h.scan().await;
     assert_held(&h, show);
@@ -1567,7 +1600,10 @@ async fn a_failed_rekey_pass_holds_reclassification_until_a_pass_succeeds() {
         .expect("the administrator is told");
     assert_eq!(warning["pass"], "re-derivation");
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
 
     let after = h.only_show();
     assert_eq!(after.id, show, "the same show");
@@ -1619,7 +1655,10 @@ async fn a_watcher_event_with_nothing_to_reclassify_does_not_retry_the_passes() 
         .await
         .unwrap();
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
     assert_eq!(h.file_version(CURRENT), CLASSIFIER_VERSION);
     for rel in [CURRENT, UNPROBED, CURRENT] {
         h.service
@@ -1655,6 +1694,9 @@ async fn a_scan_of_one_library_rekeys_before_it_reclassifies() {
     assert_eq!(h.season_one(show), vec![(1, vec![GREYS.to_string()])]);
     assert_eq!(h.file_version(GREYS), CLASSIFIER_VERSION);
 
-    h.service.scan_all_libraries().await.unwrap();
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
     assert_eq!(h.only_show().id, show);
 }

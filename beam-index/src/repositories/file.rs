@@ -7,7 +7,7 @@ use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
 use beam_domain::models::{
-    CreateMediaFile, FileClassification, MediaFile, MediaFileContent, UpdateMediaFile,
+    CreateMediaFile, FileClassification, MediaFile, MediaFileContent, ProbeUpdate, UpdateMediaFile,
 };
 
 /// The `files` columns a file's content is stored in: `(movie_entry_id,
@@ -190,14 +190,22 @@ impl FileRepository for SqlFileRepository {
         if let Some(mtime) = update.mtime {
             active_model.mtime = Set(Some(mtime.into()));
         }
-        if let Some(mime_type) = update.mime_type {
-            active_model.mime_type = Set(Some(mime_type));
-        }
-        if let Some(duration) = update.duration {
-            active_model.duration_secs = Set(Some(duration.as_secs_f64()));
-        }
-        if let Some(container) = update.container_format {
-            active_model.container_format = Set(Some(container));
+        match update.probe {
+            ProbeUpdate::Keep => {}
+            ProbeUpdate::Set {
+                mime_type,
+                duration,
+                container_format,
+            } => {
+                active_model.mime_type = Set(Some(mime_type));
+                active_model.duration_secs = Set(Some(duration.as_secs_f64()));
+                active_model.container_format = Set(Some(container_format));
+            }
+            ProbeUpdate::Clear => {
+                active_model.mime_type = Set(None);
+                active_model.duration_secs = Set(None);
+                active_model.container_format = Set(None);
+            }
         }
         if let Some(status) = update.status {
             active_model.file_status = Set(status.into());

@@ -1446,17 +1446,22 @@ impl BeamClient {
         Ok(())
     }
 
-    /// Rescan a library, returning how many files were added.
+    /// Start a rescan of a library. Returns once the server has accepted it:
+    /// the scan runs on the server afterwards, and its progress arrives on the
+    /// admin event feed.
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
-    pub async fn scan_library(&self, library_id: String) -> Result<u32, BeamError> {
+    /// Returns [`BeamError::BadRequest`] when `library_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator, and
+    /// [`BeamError::Server`] with status 409 while a scan of the library is
+    /// already running.
+    pub async fn scan_library(&self, library_id: String) -> Result<(), BeamError> {
+        let wire_library_id = parse_uuid("library_id", &library_id)?;
         let (server_id, client, _) = self.active_context()?;
-        let response = self
-            .send(&server_id, client.scan_library(library_id, None))
+        self.send(&server_id, client.scan_library(wire_library_id, None))
             .await?;
-        Ok(u32::try_from(response.into_inner().added).unwrap_or(0))
+        Ok(())
     }
 
     /// Re-fetch metadata for one title.
@@ -3357,6 +3362,97 @@ mod tests {
             .expect_err("the canned 404 fails the call");
 
         assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
+    }
+
+    /// A scan is accepted, not finished: the 202 and its job are all the
+    /// call waits for.
+    #[tokio::test]
+    async fn starting_a_scan_returns_once_the_server_accepts_it() {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering(
+            202,
+            "application/json",
+            r#"{"id":"00000000-0000-0000-0000-000000000001","library_id":"00000000-0000-0000-0000-000000000002","trigger":"manual","state":"queued","queued_at":"2026-09-27T00:00:00Z","started_at":null,"finished_at":null,"progress":{"total_count":null,"processed_count":0,"added_count":0,"changed_count":0,"unchanged_count":0,"deferred_count":0,"failed_count":0,"marked_missing_count":0,"restored_count":0,"purged_count":0},"failure":null}"#,
+        ));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        client
+            .scan_library("00000000-0000-0000-0000-000000000002".to_owned())
+            .await
+            .expect("an accepted scan is a success");
+
+        let recorded = backend.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].method, reqwest::Method::POST);
+        assert!(
+            recorded[0]
+                .url
+                .path()
+                .ends_with("/v1/admin/libraries/00000000-0000-0000-0000-000000000002/scan"),
+            "{}",
+            recorded[0].url
+        );
+    }
+
+    /// A library id that is not a UUID is refused before anything is sent:
+    /// the route captures a `Uuid`, so the request could only be a 400.
+    #[tokio::test]
+    async fn a_scan_of_a_malformed_library_id_is_refused_without_a_request() {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering(202, "application/json", "{}"));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .scan_library("not-a-uuid".to_owned())
+            .await
+            .expect_err("a malformed id fails the call");
+
+        assert!(
+            matches!(&error, BeamError::BadRequest { code, .. } if code == ABOUT_BLANK),
+            "{error:?}"
+        );
+        assert!(backend.recorded().is_empty(), "nothing was sent");
+    }
+
+    /// A scan already running is the server's 409, surfaced with its problem
+    /// type so a screen can say so rather than report a failure.
+    #[tokio::test]
+    async fn a_scan_already_running_is_a_409() {
+        let (client, id, _) = signed_in_client().await;
+        client
+            .use_transport(
+                &id,
+                Arc::new(CannedBackend::answering(
+                    409,
+                    "application/problem+json",
+                    r#"{"type":"https://beam.justinchung.net/reference/errors/#library-scan-in-progress","status":409,"detail":"A scan of this library is already queued or running"}"#,
+                )),
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .scan_library("00000000-0000-0000-0000-000000000002".to_owned())
+            .await
+            .expect_err("the canned 409 fails the call");
+
+        assert!(
+            matches!(
+                &error,
+                BeamError::Server { status: 409, code, .. }
+                    if code.ends_with("#library-scan-in-progress")
+            ),
+            "{error:?}"
+        );
     }
 
     /// A 429 whose body is not Beam's `rate-limited` problem -- a reverse

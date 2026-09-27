@@ -323,29 +323,36 @@ impl ShowRepository for SqlShowRepository {
         season_number: u32,
     ) -> Result<Season, DbErr> {
         use beam_entity::season;
-        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
-        // Try to find existing season
-        let existing = season::Entity::find()
-            .filter(season::Column::ShowId.eq(show_id))
-            .filter(season::Column::SeasonNumber.eq(season_number as i32))
-            .one(self.db.as_ref())
-            .await?;
-
-        if let Some(model) = existing {
-            return Ok(Season::from(model));
-        }
-
-        // Create new season
-        let new_season = season::ActiveModel {
+        // One `INSERT ... ON CONFLICT DO NOTHING`, not SELECT-then-INSERT:
+        // `(show_id, season_number)` carries `idx_seasons_unique`, so two
+        // episodes of one new season indexed at once (two libraries' scans)
+        // would both read "absent" and the second insert would fail. Read
+        // back below whichever call won, as `find_or_create_episode` does.
+        let active = season::ActiveModel {
             id: Set(Uuid::new_v4()),
             show_id: Set(show_id),
             season_number: Set(season_number as i32),
             ..Default::default()
         };
+        season::Entity::insert(active)
+            .on_conflict_do_nothing_on([season::Column::ShowId, season::Column::SeasonNumber])
+            .exec_without_returning(self.db.as_ref())
+            .await?;
 
-        let result = new_season.insert(self.db.as_ref()).await?;
-        Ok(Season::from(result))
+        let stored = season::Entity::find()
+            .filter(season::Column::ShowId.eq(show_id))
+            .filter(season::Column::SeasonNumber.eq(season_number as i32))
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                DbErr::RecordNotFound(format!(
+                    "season {season_number} of show {show_id} is not readable after \
+                     find-or-create"
+                ))
+            })?;
+        Ok(Season::from(stored))
     }
 
     async fn find_seasons_by_show_id(&self, show_id: Uuid) -> Result<Vec<Season>, DbErr> {

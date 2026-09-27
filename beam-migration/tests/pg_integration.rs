@@ -780,3 +780,149 @@ async fn the_classifier_migration_rolls_back_and_reapplies() {
 
     scoped.drop_schema().await.expect("drop schema");
 }
+
+/// Issue #181's migration: a path stored more than once keeps one row -- the
+/// present, `known` one with the most progress -- every user's newest
+/// progress moves onto it, the others' streams go with them, and a second row
+/// for a path is refused from then on. A path stored once is untouched.
+#[tokio::test]
+async fn the_unique_path_migration_merges_duplicate_rows_and_their_progress() {
+    use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
+
+    let scoped = ScopedSchema::create("files_unique_path")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+
+    let migrations = beam_migration::Migrator::migrations();
+    let this_one = migrations
+        .iter()
+        .position(|m| m.name() == "m20261001_000001_files_unique_path")
+        .expect("the migration is registered");
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(this_one as u32))
+        .await
+        .expect("every earlier migration applies");
+
+    // Three rows at /videos/a.mkv:
+    //   a1 -- missing, with progress for both users (the newest for user 1)
+    //   a2 -- present and known, with progress for user 2 (their newest)
+    //   a3 -- present and unknown, no progress
+    // a2 is kept: present beats missing, known beats unknown. One row at
+    // /videos/b.mkv, with progress, is left alone.
+    let seed = [
+        "INSERT INTO libraries (id, name, root_path, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
+        "INSERT INTO users (id, display_name, is_admin, oidc_issuer, oidc_subject, created_at, \
+                            updated_at) VALUES \
+         ('00000000-0000-0000-0000-0000000000c1', 'one', false, 'iss', 'one', now(), now()), \
+         ('00000000-0000-0000-0000-0000000000c2', 'two', false, 'iss', 'two', now(), now())",
+        "INSERT INTO movies (id, title, identity_key, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000b', 'Movie', 'movie|', now(), now())",
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) \
+         VALUES ('00000000-0000-0000-0000-00000000000e', '00000000-0000-0000-0000-00000000000a', \
+                 '00000000-0000-0000-0000-00000000000b', NULL, true, now())",
+        "INSERT INTO files (id, movie_entry_id, library_id, file_path, file_size, hash_xxh3, \
+                            file_status, missing_since, scanned_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000000e', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/a.mkv', 1, 1, 'known', now(), now(), \
+          now()), \
+         ('00000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-00000000000e', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/a.mkv', 1, 2, 'known', NULL, now(), \
+          now() - interval '1 day'), \
+         ('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-00000000000e', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/b.mkv', 1, 4, 'known', NULL, now(), \
+          now())",
+        "INSERT INTO files (id, library_id, file_path, file_size, hash_xxh3, file_status, \
+                            scanned_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-0000000000a3', '00000000-0000-0000-0000-00000000000a', \
+          '/videos/a.mkv', 1, 3, 'unknown', now(), now())",
+        "INSERT INTO media_streams (id, file_id, stream_index, stream_type, codec) VALUES \
+         ('00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000a1', 0, \
+          'video', 'h264')",
+        "INSERT INTO playback_progress (id, user_id, file_id, position_secs, completed, updated_at) \
+         VALUES \
+         ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000c1', \
+          '00000000-0000-0000-0000-0000000000a1', 100, false, now()), \
+         ('00000000-0000-0000-0000-0000000000f2', '00000000-0000-0000-0000-0000000000c2', \
+          '00000000-0000-0000-0000-0000000000a1', 200, false, now() - interval '2 days'), \
+         ('00000000-0000-0000-0000-0000000000f3', '00000000-0000-0000-0000-0000000000c2', \
+          '00000000-0000-0000-0000-0000000000a2', 300, false, now() - interval '1 day'), \
+         ('00000000-0000-0000-0000-0000000000f4', '00000000-0000-0000-0000-0000000000c1', \
+          '00000000-0000-0000-0000-0000000000b1', 400, false, now())",
+    ];
+    for sql in seed {
+        db.execute_unprepared(sql)
+            .await
+            .expect("seed pre-migration rows");
+    }
+
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+        .await
+        .expect("the unique-path migration applies over duplicate rows");
+
+    let text = |sql: &'static str| async move {
+        db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
+            .await
+            .expect("query")
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "v").expect("a text column v"))
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        text("SELECT id::text AS v FROM files ORDER BY file_path").await,
+        vec![
+            "00000000-0000-0000-0000-0000000000a2",
+            "00000000-0000-0000-0000-0000000000b1"
+        ],
+        "the present, known row is kept; the untouched path keeps its row"
+    );
+    assert_eq!(
+        text(
+            "SELECT (user_id::text || ' ' || file_id::text || ' ' || position_secs::text) AS v \
+               FROM playback_progress ORDER BY user_id, file_id"
+        )
+        .await,
+        vec![
+            "00000000-0000-0000-0000-0000000000c1 00000000-0000-0000-0000-0000000000a2 100",
+            "00000000-0000-0000-0000-0000000000c1 00000000-0000-0000-0000-0000000000b1 400",
+            "00000000-0000-0000-0000-0000000000c2 00000000-0000-0000-0000-0000000000a2 300",
+        ],
+        "each user's newest progress on the path moves to the kept row"
+    );
+    assert!(
+        text("SELECT id::text AS v FROM media_streams")
+            .await
+            .is_empty(),
+        "a merged-away row's streams go with it"
+    );
+    assert!(
+        db.execute_unprepared(
+            "INSERT INTO files (id, library_id, file_path, file_size, hash_xxh3, file_status, \
+                                scanned_at, updated_at) VALUES \
+             (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', '/videos/b.mkv', 1, 9, \
+              'unknown', now(), now())",
+        )
+        .await
+        .is_err(),
+        "a second row for a path must be refused, whatever its hash"
+    );
+
+    // Reversible: the old `(hash, path)` index comes back, and so does what
+    // it allowed.
+    let steps_back =
+        <u32 as TryFrom<usize>>::try_from(migrations.len() - this_one).expect("few migrations");
+    beam_migration::Migrator::down(db, Some(steps_back))
+        .await
+        .expect("the unique-path migration rolls back");
+    db.execute_unprepared(
+        "INSERT INTO files (id, library_id, file_path, file_size, hash_xxh3, file_status, \
+                            scanned_at, updated_at) VALUES \
+         (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', '/videos/b.mkv', 1, 9, \
+          'unknown', now(), now())",
+    )
+    .await
+    .expect("the rolled-back schema takes a second row at a path under another hash");
+
+    scoped.drop_schema().await.expect("drop schema");
+}

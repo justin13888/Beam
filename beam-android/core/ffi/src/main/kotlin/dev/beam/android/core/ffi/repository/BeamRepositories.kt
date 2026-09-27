@@ -224,7 +224,7 @@ internal class BeamAdminRepository
 
         override suspend fun deleteLibrary(libraryId: String) = client.deleteLibrary(libraryId)
 
-        override suspend fun scanLibrary(libraryId: String): UInt = client.scanLibrary(libraryId)
+        override suspend fun scanLibrary(libraryId: String) = client.scanLibrary(libraryId)
 
         override suspend fun refreshMetadata(mediaId: String) = client.refreshMediaMetadata(mediaId)
     }

@@ -46,6 +46,10 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     /// `Unknown`: a file is `Known` (or `Changed`) only as a movie's or an
     /// episode's file. Postgres enforces it with the `files` CHECK
     /// constraint.
+    ///
+    /// `create` also refuses a path that already has a row, missing or not,
+    /// whatever its hash: one row per path (issue #181), which Postgres
+    /// enforces with `idx_files_path_unique`.
     async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr>;
     async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr>;
     /// Replace `id`'s classification -- content, status and classifier
@@ -82,7 +86,7 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
-    use crate::models::file::{FileStatus, MediaFileContent};
+    use crate::models::file::{FileStatus, MediaFileContent, ProbeUpdate};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Mutex;
@@ -212,7 +216,14 @@ pub mod in_memory {
                 classifier_version: create.classifier_version,
             };
             check_status(&file)?;
-            self.files.lock().unwrap().insert(file.id, file.clone());
+            let mut files = self.files.lock().unwrap();
+            if files.values().any(|stored| stored.path == file.path) {
+                return Err(DbErr::Custom(format!(
+                    "idx_files_path_unique: a file is already stored at {}",
+                    file.path.display()
+                )));
+            }
+            files.insert(file.id, file.clone());
             Ok(file)
         }
 
@@ -236,14 +247,22 @@ pub mod in_memory {
             if let Some(mtime) = update.mtime {
                 file.mtime = Some(mtime);
             }
-            if let Some(mime_type) = update.mime_type {
-                file.mime_type = Some(mime_type);
-            }
-            if let Some(duration) = update.duration {
-                file.duration = Some(duration);
-            }
-            if let Some(container) = update.container_format {
-                file.container_format = Some(container);
+            match update.probe {
+                ProbeUpdate::Keep => {}
+                ProbeUpdate::Set {
+                    mime_type,
+                    duration,
+                    container_format,
+                } => {
+                    file.mime_type = Some(mime_type);
+                    file.duration = Some(duration);
+                    file.container_format = Some(container_format);
+                }
+                ProbeUpdate::Clear => {
+                    file.mime_type = None;
+                    file.duration = None;
+                    file.container_format = None;
+                }
             }
             if let Some(status) = update.status {
                 file.status = status;

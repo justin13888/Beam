@@ -23,6 +23,7 @@ mod m20260928_000001_title_identity_key;
 mod m20260928_000010_device_auths;
 mod m20260929_000001_classifier_v2;
 mod m20260930_000001_playback_telemetry;
+mod m20261001_000001_files_unique_path;
 
 pub struct Migrator;
 
@@ -50,6 +51,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260928_000010_device_auths::Migration),
             Box::new(m20260929_000001_classifier_v2::Migration),
             Box::new(m20260930_000001_playback_telemetry::Migration),
+            Box::new(m20261001_000001_files_unique_path::Migration),
         ]
     }
 }

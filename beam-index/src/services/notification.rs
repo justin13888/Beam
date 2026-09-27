@@ -6,6 +6,8 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::services::scan::ScanEvent;
+
 const BROADCAST_CAPACITY: usize = 256;
 const DEFAULT_LOG_SIZE: usize = 1000;
 
@@ -19,6 +21,11 @@ pub enum EventLevel {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventCategory {
     LibraryScan,
+    /// A scan job's structured progress (FR-208): started, per-item
+    /// progress, completed, failed. Every such event carries
+    /// [`AdminEvent::scan`]. Broadcast live and never kept in the recent
+    /// event log, which a scan of a large library would otherwise flush.
+    ScanProgress,
     System,
 }
 
@@ -31,6 +38,8 @@ pub struct AdminEvent {
     pub message: String,
     pub library_id: Option<String>,
     pub library_name: Option<String>,
+    /// The scan job an [`EventCategory::ScanProgress`] event reports on.
+    pub scan: Option<ScanEvent>,
 }
 
 impl AdminEvent {
@@ -48,6 +57,7 @@ impl AdminEvent {
             message: message.into(),
             library_id,
             library_name,
+            scan: None,
         }
     }
 
@@ -65,6 +75,7 @@ impl AdminEvent {
             message: message.into(),
             library_id,
             library_name,
+            scan: None,
         }
     }
 
@@ -82,7 +93,14 @@ impl AdminEvent {
             message: message.into(),
             library_id,
             library_name,
+            scan: None,
         }
+    }
+
+    /// Attach the scan job this event reports on.
+    pub fn with_scan(mut self, scan: ScanEvent) -> Self {
+        self.scan = Some(scan);
+        self
     }
 }
 
@@ -118,11 +136,15 @@ impl Default for LocalNotificationService {
 
 impl NotificationService for LocalNotificationService {
     fn publish(&self, event: AdminEvent) {
-        let mut log = self.event_log.write();
-        if log.len() >= self.max_log_size {
-            log.pop_front();
+        // Progress is live state, not history: a subscriber sees it as it
+        // happens, and the log keeps what an administrator reads later.
+        if event.category != EventCategory::ScanProgress {
+            let mut log = self.event_log.write();
+            if log.len() >= self.max_log_size {
+                log.pop_front();
+            }
+            log.push_back(event.clone());
         }
-        log.push_back(event.clone());
         let _ = self.sender.send(event);
     }
 
@@ -232,6 +254,42 @@ mod tests {
         assert_eq!(events[0].level, EventLevel::Info);
         assert_eq!(events[1].level, EventLevel::Warning);
         assert_eq!(events[2].level, EventLevel::Error);
+    }
+
+    /// Scan progress reaches a live subscriber but not the recent-event log:
+    /// one scan of a large library would otherwise push every other event out
+    /// of it.
+    #[tokio::test]
+    async fn scan_progress_is_broadcast_but_not_kept_in_the_log() {
+        use crate::services::scan::{ScanEvent, ScanPhase, ScanProgress};
+
+        let svc = LocalNotificationService::new();
+        let mut live = svc.subscribe();
+        svc.publish(
+            AdminEvent::info(EventCategory::ScanProgress, "Scanning", None, None).with_scan(
+                ScanEvent {
+                    job_id: Uuid::nil(),
+                    phase: ScanPhase::Progress,
+                    progress: ScanProgress::default(),
+                },
+            ),
+        );
+        svc.publish(AdminEvent::info(
+            EventCategory::LibraryScan,
+            "Scan complete",
+            None,
+            None,
+        ));
+
+        let first = live.recv().await.expect("the progress event is broadcast");
+        assert_eq!(first.category, EventCategory::ScanProgress);
+        assert_eq!(first.scan.map(|scan| scan.phase), Some(ScanPhase::Progress));
+        let kept: Vec<EventCategory> = svc
+            .recent_events(10)
+            .into_iter()
+            .map(|event| event.category)
+            .collect();
+        assert_eq!(kept, vec![EventCategory::LibraryScan]);
     }
 
     #[test]

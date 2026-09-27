@@ -101,6 +101,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             admin::get_library_files,
             admin::create_library,
             admin::scan_library,
+            admin::get_library_scan,
             admin::refresh_media_metadata,
             admin::delete_library,
         ])
