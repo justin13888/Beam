@@ -36,7 +36,9 @@ read inside the locked batch (`beam_migration::apply_pending`), and `beam-migrat
 ledger read-only instead of creating it. This is what makes migrate-on-boot safe on Kubernetes, and
 it is covered by deterministic `pg-integration` tests that fail without it: two migrators racing,
 and the server's exact startup sequence starting beside an in-flight `beam-migration up` on a fresh
-database.
+database. Only `up` and `status` are safe beside a running server: `down`, `fresh`, `refresh` and
+`reset` keep sea-orm's per-migration transactions and take no lock, so they are documented as
+server-stopped operations (on Kubernetes, scale the Deployment to zero and pause GitOps self-heal).
 
 **The chart runs exactly one server replica, with the Recreate strategy.** There is no
 `replicaCount` value at all -- the schema rejects one. Recreate means the old pod is gone before the
@@ -54,7 +56,11 @@ source, mounted at `/videos/<name>` with `readOnly: true`. Every source kind wit
 which is also what keeps the kubelet from applying the pod's `fsGroup`, a recursive `chgrp`, to the
 media. The schema admits only those kinds plus `hostPath` and `image`, which have no such field and
 which the kubelet never chowns; empty or generated volumes (`emptyDir`, `ephemeral`, `gitRepo`,
-`configMap`, ...) and in-tree kinds with no read-only guarantee are refused. `BEAM_VIDEO_DIR` and `BEAM_DATA_DIR` are fixed, not values, so no
+`configMap`, ...) and in-tree kinds with no read-only guarantee are refused. A `hostPath` is pinned
+to `type: Directory`: the default `""` skips the check, and the create types would have the kubelet
+make an empty, root-owned library out of a mistyped path for Beam to index as empty. `image` sources
+need a cluster with the `ImageVolume` feature (1.31+ behind the gate, on by default from 1.35).
+`BEAM_VIDEO_DIR` and `BEAM_DATA_DIR` are fixed, not values, so no
 override can move a library outside `/videos` or the state onto a library. This is FR-202's promise,
 kept on Kubernetes the way `check:compose-invariants` keeps it on Compose.
 
@@ -62,6 +68,15 @@ kept on Kubernetes the way `check:compose-invariants` keeps it on Compose.
 server's own database retry plus migrations. Readiness is `/v1/health`, which answers 503 while the
 database is down, taking the pod out of the Service. Liveness is a TCP check: `/v1/health` there
 would turn a database outage into a restart loop that fixes nothing.
+
+**The server pod runs as the image's user, and media access is widened by group.** uid and gid
+are the image's 1000, fixed: the image owns `/data` as 1000, and the read-only root filesystem and
+`fsGroup: 1000` assume it. Library media must therefore be readable by uid 1000, gid 1000, a
+supplemental group, or other. `server.podSecurityContext.supplementalGroups` (a list of gids; gid 0
+refused) is the one knob -- an environment fact like a NAS `media` group, not a behaviour switch.
+Exposing `runAsUser`/`runAsGroup` was rejected: a different uid could not write `/data` without a
+`fsGroup` rewrite that the chart's `OnRootMismatch` policy and the image's ownership do not
+promise. `check:chart-invariants` asserts the uid/gid and that the configured groups render.
 
 **The server pod is hardened by default.** Non-root (the image's uid 1000), read-only root
 filesystem, every capability dropped, no privilege escalation, `RuntimeDefault` seccomp, and no

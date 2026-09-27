@@ -62,17 +62,27 @@ Postgres advisory lock (`pg_advisory_xact_lock`, key `beam_migration::MIGRATION_
 the duration of the batch, and taken before the batch reads or creates the migration ledger): if
 two processes start against the same database at once -- an overlapping restart, a Kubernetes pod
 replaced while its predecessor is still terminating, the CLI run beside a live server -- the second
-waits, then finds nothing pending. `beam-migration status` only reads the ledger, so it is safe to
-run at any time. The lock makes
-migrate-on-boot safe; it does not make Beam multi-replica (the indexer is not leader-elected), so
-the supported topologies still run exactly one server process. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the `beam-migration` CLI
-(`cargo run -p beam-migration -- up|down|status` with `DATABASE_URL` set).
+waits, then finds nothing pending. The lock makes migrate-on-boot safe; it does not make Beam
+multi-replica (the indexer is not leader-elected), so the supported topologies still run exactly
+one server process. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the
+`beam-migration` CLI (`cargo run -p beam-migration -- <command>` with `DATABASE_URL` set).
+
+Only two CLI commands are safe beside a running server:
+
+- `beam-migration up` takes the same lock as the server, so it waits for a starting server's
+  batch, or the server waits for it.
+- `beam-migration status` only reads the ledger and creates nothing, so it is safe at any time.
+
+`down`, `fresh`, `refresh` and `reset` are destructive, take no lock, and commit one migration at a
+time: **stop the server first.** Run beside a live server they drop tables it is using, and on a
+fresh database they can race a starting server's ledger creation. On Compose, `podman compose stop
+server`; on Kubernetes, scale the Deployment to zero (see [Kubernetes (Helm)](#kubernetes-helm)).
 
 Pending migrations apply all-or-nothing, at startup and through `beam-migration up` alike: they
 run in one transaction, so if any migration in the batch fails, none of them is committed and the
 server exits with the error. The database stays at the schema the previous release expects, so
 rolling back to the previous image is safe after a failed upgrade. Only `up` is batched this way:
-`beam-migration down`, `fresh` and `refresh` still commit one migration at a time.
+`beam-migration down`, `fresh`, `refresh` and `reset` still commit one migration at a time.
 
 ## Deploying on a real server
 
@@ -131,7 +141,7 @@ documents every value, and `values.schema.json` rejects unknown ones.
 
 | Object | Role |
 |---|---|
-| `Deployment` (server) | One `beam-server` pod, `replicas: 1`, strategy `Recreate`. There is no replica value: the indexer and enrichment worker run in-process without leader election, and rate limits and the admin event stream are in memory. Non-root (uid 1000), read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token. `terminationGracePeriodSeconds` is `server.shutdownTimeoutSeconds` (`BEAM_SHUTDOWN_TIMEOUT_SECS`, default 30) plus 15, so a stopping server always finishes its drain before the kubelet's SIGKILL. |
+| `Deployment` (server) | One `beam-server` pod, `replicas: 1`, strategy `Recreate`. There is no replica value: the indexer and enrichment worker run in-process without leader election, and rate limits and the admin event stream are in memory. Non-root (the image's uid and gid 1000, fixed; extra gids through `server.podSecurityContext.supplementalGroups`), read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token. `terminationGracePeriodSeconds` is `server.shutdownTimeoutSeconds` (`BEAM_SHUTDOWN_TIMEOUT_SECS`, default 30) plus 15, so a stopping server always finishes its drain before the kubelet's SIGKILL. |
 | `Service` | `ClusterIP` on port 8000 by default. A `NodePort` or `LoadBalancer` type exposes the whole API port -- `/metrics` (with `metrics.enabled`) and `/openapi` included -- and lets clients bypass the ingress; `NOTES.txt` warns when it is set. |
 | `PersistentVolumeClaim` | `/data` (`BEAM_DATA_DIR`), 10Gi `ReadWriteOnce` by default, or `persistence.data.existingClaim`. Kept on uninstall (`helm.sh/resource-policy: keep`). `persistence.data.enabled: false` uses an `emptyDir`, lost whenever the pod is replaced. |
 | `Secret` | Only for secrets given inline (`database.url`, `oidc.clientSecret`, `tmdb.apiToken`); each also accepts an `existingSecret`. |
@@ -148,17 +158,33 @@ cluster.
 **Migrations.** The server migrates on boot under the advisory lock described in
 [Database migrations](#database-migrations), so the old pod of a rollout, a rescheduled pod, and a
 `beam-migration up` run by hand cannot race it. The startup probe allows five minutes for the server's own
-database retry plus migrations before liveness takes over.
+database retry plus migrations before liveness takes over. `beam-migration up` and `status` are safe
+beside the running pod; `down`, `fresh`, `refresh` and `reset` need the server stopped first --
+`kubectl -n <namespace> scale deploy/<server deployment> --replicas=0` (`beam` for
+`helm install beam`; the chart's full name otherwise), and pause any GitOps self-heal (Argo CD `selfHeal`, Flux
+reconciliation) first so it does not scale the Deployment straight back to one. Scale it back to 1
+afterwards.
 
 **Libraries.** Each entry in `libraries` names a Kubernetes volume source and is mounted read-only
 at `/videos/<name>`; create the library in the admin UI with that path. Every source kind with a
 `readOnly` field (`persistentVolumeClaim`, `nfs`, `csi`, `iscsi`, `rbd`, `cephfs`, ...) is forced to
 `readOnly: true` as well, which also keeps the kubelet from applying the pod's `fsGroup` -- a
 recursive `chgrp` -- to the media. `hostPath` and `image` sources, which have no such field and
-which the kubelet never chowns, are accepted as they are; every other kind (`emptyDir`,
+which the kubelet never chowns, are accepted as they are, except that a `hostPath` always renders
+`type: Directory` and any other `type` is refused: the default (`""`) skips the check and the
+create types (`DirectoryOrCreate`, ...) would have the kubelet make an empty library out of a
+mistyped path. An `image` source needs the `ImageVolume` feature: alpha in Kubernetes 1.31, beta
+and on by default from 1.35, GA in 1.36, and a container runtime that supports it. Every other
+kind (`emptyDir`,
 `ephemeral`, `gitRepo`, `configMap`, `secret`, `projected`, `downwardAPI`, and the in-tree
 `flocker`, `photonPersistentDisk` and `vsphereVolume`) is refused by the schema. `BEAM_VIDEO_DIR` (`/videos`) and `BEAM_DATA_DIR` (`/data`)
 are fixed by the chart and cannot be overridden through `server.env`.
+
+The pod reads media as uid 1000 and gid 1000 (the image's user, which owns `/data`; fixed by the
+chart), plus any gids in `server.podSecurityContext.supplementalGroups`. Library media must be
+readable by one of those or by everyone. A NAS export readable by a `media` group with gid 1500
+needs `supplementalGroups: [1500]`; the chart never changes ownership on a library, so nothing
+else can grant access.
 
 **Probes.** Startup and readiness use `GET /v1/health`, which answers 503 while the database is
 unreachable -- the pod leaves the Service until it recovers. Liveness is a TCP check, so a database

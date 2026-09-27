@@ -41,7 +41,19 @@ You need:
 3. **Your media** on volumes the cluster can mount: a PersistentVolumeClaim, an NFS export, a CSI
    volume (SMB, for example), another network volume such as iSCSI or CephFS, or a host path. The
    chart mounts each read-only and refuses volume kinds it cannot make read-only, such as
-   `emptyDir` or `configMap`.
+   `emptyDir` or `configMap`. A host path must be an existing directory: the chart sets
+   `type: Directory` and refuses any other type. An `image` volume (media packaged as an OCI
+   image) needs Kubernetes 1.31 or later with the `ImageVolume` feature gate enabled -- it is on by
+   default from 1.35 and GA in 1.36 -- and a container runtime that supports it.
+4. **Media Beam can read.** Beam runs as uid 1000, gid 1000, and the chart never changes the
+   ownership of your media, so every library must be readable by uid 1000, by gid 1000, by a group
+   you add, or by everyone. If your NAS grants read access to a group, add its gid:
+
+   ```yaml
+   server:
+     podSecurityContext:
+       supplementalGroups: [1500] # the gid of your NAS's media group
+   ```
 
 ## Install
 
@@ -105,6 +117,26 @@ does. The first start is allowed five minutes for the database to appear and mig
 When the pod stops, the server lets in-flight requests and streams finish for up to
 `server.shutdownTimeoutSeconds` (30 by default). Kubernetes is told to wait 15 seconds longer than
 that before killing it, so raising the value is all it takes to give long streams more time.
+
+## Running `beam-migration` by hand
+
+The server migrates on boot, so you normally never need the CLI. When you do, run it from a
+checkout with `DATABASE_URL` pointing at the same database:
+
+- `beam-migration up` and `beam-migration status` are safe while the server runs. `up` waits for,
+  or is waited on by, a starting server; `status` only reads.
+- `down`, `fresh`, `refresh` and `reset` drop tables the server is using. **Stop the server
+  first:**
+
+  ```sh
+  kubectl -n beam scale deploy/beam --replicas=0
+  # run the command, then:
+  kubectl -n beam scale deploy/beam --replicas=1
+  ```
+
+  `deploy/beam` is the server's name for a release called `beam`; `kubectl -n beam get deploy`
+  shows yours. If Argo CD self-heal or Flux manages the release, pause it first, or it scales the
+  server straight back up mid-command.
 
 ## The web client
 
