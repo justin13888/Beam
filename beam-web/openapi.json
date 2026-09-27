@@ -7581,6 +7581,18 @@
           "200": {
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Pragma": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
               "X-RateLimit-Limit": {
                 "description": "Requests permitted per window",
                 "schema": {
@@ -7949,6 +7961,18 @@
           "200": {
             "description": "The user approved; a session was minted",
             "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Pragma": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
               "X-RateLimit-Limit": {
                 "description": "Requests permitted per window",
                 "schema": {
@@ -7979,6 +8003,18 @@
           "202": {
             "description": "The user has not approved yet; poll again",
             "headers": {
+              "Cache-Control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Pragma": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
               "X-RateLimit-Limit": {
                 "description": "Requests permitted per window",
                 "schema": {

@@ -212,6 +212,31 @@ pub struct SetCookie {
     set_cookie: String,
 }
 
+/// `Cache-Control: no-store` and `Pragma: no-cache` on a response that
+/// carries a credential or a login secret.
+///
+/// RFC 6749 section 5.1 requires both on a token response, and RFC 8628
+/// section 3.2 allows them on a device authorization response. The device
+/// login's start (a `device_handle`) and its poll (a `session_token`, once
+/// approved) are Beam's versions of those two, so an intermediary or the
+/// client's HTTP cache must never keep a copy.
+#[derive(Schema, HeaderParams)]
+pub struct NoStore {
+    #[header(rename = "Cache-Control")]
+    cache_control: String,
+    #[header(rename = "Pragma")]
+    pragma: String,
+}
+
+impl NoStore {
+    fn new() -> Self {
+        Self {
+            cache_control: "no-store".to_owned(),
+            pragma: "no-cache".to_owned(),
+        }
+    }
+}
+
 /// A `Set-Cookie` value that could not be rendered as header text.
 ///
 /// Its own type rather than a variant of any handler's error, because every
@@ -739,7 +764,7 @@ pub async fn oidc_callback(
 pub async fn start_device_login(
     Inject(oidc_client): Inject<Arc<dyn OidcClient>>,
     Inject(device_auth_store): Inject<Arc<dyn DeviceAuthStore>>,
-) -> Result<Json<DeviceLoginStart>, DeviceLoginStartError> {
+) -> Result<WithHeaders<Json<DeviceLoginStart>, NoStore>, DeviceLoginStartError> {
     let started = oidc_client.begin_device_auth().await.map_err(|e| match e {
         OidcError::DeviceFlowUnsupported => DeviceLoginStartError::Unsupported(e.to_string()),
         other => DeviceLoginStartError::OidcUnavailable(format!("OIDC login unavailable: {other}")),
@@ -766,14 +791,17 @@ pub async fn start_device_login(
             DeviceLoginStartError::Internal(format!("Failed to start device login: {e}"))
         })?;
 
-    Ok(Json(DeviceLoginStart {
-        device_handle: handle,
-        user_code: started.user_code,
-        verification_uri: started.verification_uri,
-        verification_uri_complete: started.verification_uri_complete,
-        expires_in_secs,
-        interval_secs,
-    }))
+    Ok(WithHeaders::new(
+        Json(DeviceLoginStart {
+            device_handle: handle,
+            user_code: started.user_code,
+            verification_uri: started.verification_uri,
+            verification_uri_complete: started.verification_uri_complete,
+            expires_in_secs,
+            interval_secs,
+        }),
+        NoStore::new(),
+    ))
 }
 
 /// Polls a device login once.
@@ -814,7 +842,7 @@ pub async fn poll_device_login(
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
     Inject(config): Inject<OidcRuntimeConfig>,
     Json(body): Json<DeviceLoginPoll>,
-) -> Result<DeviceLoginPollReply, DeviceLoginPollError> {
+) -> Result<WithHeaders<DeviceLoginPollReply, NoStore>, DeviceLoginPollError> {
     let internal = |e: beam_auth::utils::device_auth_store::DeviceAuthError| {
         DeviceLoginPollError::Internal(e.to_string())
     };
@@ -846,20 +874,26 @@ pub async fn poll_device_login(
                 .await
                 .map_err(internal)?
                 .unwrap_or(interval_secs);
-            return Ok(DeviceLoginPollReply::Pending(DeviceLoginPending {
-                status: DeviceLoginWait::SlowDown,
-                interval_secs,
-            }));
+            return Ok(WithHeaders::new(
+                DeviceLoginPollReply::Pending(DeviceLoginPending {
+                    status: DeviceLoginWait::SlowDown,
+                    interval_secs,
+                }),
+                NoStore::new(),
+            ));
         }
         Claim::Claimed(auth) => auth,
     };
 
     let identity = match oidc_client.poll_device_token(&auth.device_code).await {
         Ok(DevicePoll::Pending) => {
-            return Ok(DeviceLoginPollReply::Pending(DeviceLoginPending {
-                status: DeviceLoginWait::AuthorizationPending,
-                interval_secs: auth.interval_secs,
-            }));
+            return Ok(WithHeaders::new(
+                DeviceLoginPollReply::Pending(DeviceLoginPending {
+                    status: DeviceLoginWait::AuthorizationPending,
+                    interval_secs: auth.interval_secs,
+                }),
+                NoStore::new(),
+            ));
         }
         Ok(DevicePoll::SlowDown) => {
             let interval_secs = device_auth_store
@@ -867,10 +901,13 @@ pub async fn poll_device_login(
                 .await
                 .map_err(internal)?
                 .unwrap_or(auth.interval_secs);
-            return Ok(DeviceLoginPollReply::Pending(DeviceLoginPending {
-                status: DeviceLoginWait::SlowDown,
-                interval_secs,
-            }));
+            return Ok(WithHeaders::new(
+                DeviceLoginPollReply::Pending(DeviceLoginPending {
+                    status: DeviceLoginWait::SlowDown,
+                    interval_secs,
+                }),
+                NoStore::new(),
+            ));
         }
         Ok(DevicePoll::Denied) => {
             device_auth_store
@@ -949,11 +986,14 @@ pub async fn poll_device_login(
         LoginError::Internal(message) => DeviceLoginPollError::Internal(message),
     })?;
 
-    Ok(DeviceLoginPollReply::SignedIn(DeviceLoginComplete {
-        session_token: token,
-        session_expires_in_secs: absolute_ttl_secs,
-        user: me_from(user),
-    }))
+    Ok(WithHeaders::new(
+        DeviceLoginPollReply::SignedIn(DeviceLoginComplete {
+            session_token: token,
+            session_expires_in_secs: absolute_ttl_secs,
+            user: me_from(user),
+        }),
+        NoStore::new(),
+    ))
 }
 
 /// Returns the currently authenticated user (via the `beam_session` cookie).

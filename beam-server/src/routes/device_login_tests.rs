@@ -635,3 +635,38 @@ async fn an_id_token_that_does_not_verify_is_400_and_ends_the_flow() {
         assert_eq!(harness.oidc.device_poll_count(), 1, "{label}");
     }
 }
+
+// ─── Caching ──────────────────────────────────────────────────────────────────
+
+fn assert_no_store(response: &TestResponse, what: &str) {
+    assert_eq!(response.header("cache-control"), Some("no-store"), "{what}");
+    assert_eq!(response.header("pragma"), Some("no-cache"), "{what}");
+}
+
+#[tokio::test]
+async fn no_answer_carrying_a_handle_or_a_session_may_be_cached() {
+    // RFC 6749 section 5.1 for the credential; the handle is as good as one
+    // for as long as the flow is open.
+    let approving = harness(
+        FakeOidcClient::default()
+            .with_device_script(vec![Ok(DevicePoll::Complete(identity(json!({}))))]),
+    );
+    let waiting = harness(FakeOidcClient::default());
+
+    let start_response = start(&approving).await;
+    start_response.assert_status(StatusCode::OK);
+    assert_no_store(&start_response, "the start, which carries the handle");
+
+    let handle = start_response.json::<Value>()["device_handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let signed_in = poll(&approving, &handle).await;
+    signed_in.assert_status(StatusCode::OK);
+    assert_no_store(&signed_in, "the 200, which carries the session");
+
+    let waiting_handle = started(&waiting).await;
+    let pending = poll(&waiting, &waiting_handle).await;
+    pending.assert_status(StatusCode::ACCEPTED);
+    assert_no_store(&pending, "the 202");
+}
