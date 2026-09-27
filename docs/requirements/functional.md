@@ -219,8 +219,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   one path, and several paths for one row, the pairing with the same file name wins, then the same
   directory, then the row played most recently by anyone (a row never played last), then the lowest
   row id, then the lowest path. One pairing is declined, a replace-by-rename: when the row a path
-  has -- present or missing -- has been played by anyone and the row whose content is now at that
-  path never has, the path MUST keep its own row, its new content a change to it as for any other
+  has -- present or missing -- would otherwise be displaced (its own content is at no path the scan
+  hashed, or that path went to a better pairing), has been played by anyone, and the row whose
+  content is now at that path never has, the path MUST keep its own row, its new content a change to it as for any other
   path, and the other row MUST NOT take the path; that row is paired elsewhere if the scan finds its
   content elsewhere, and otherwise is marked missing like any gone file. Every other case follows
   the order above. A row whose path a relink takes and whose content is at no path the
