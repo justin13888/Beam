@@ -319,7 +319,11 @@ impl AppServices {
             .with_clock(clock.clone())
             .with_path_policy(config.scan_path_policy()?)
             .with_missing_file_grace(config.missing_file_grace())
-            .with_enrichment_repo(enrichment_repo.clone()),
+            .with_enrichment_repo(enrichment_repo.clone())
+            // Sidecar subtitles are indexed but not yet served: issue #189.
+            .with_sidecar_repo(Arc::new(
+                beam_index::repositories::SqlSidecarSubtitleRepository::new(db.clone()),
+            )),
         );
 
         let enrichment_provider = build_enrichment_provider(config)?;

@@ -174,7 +174,7 @@ pub fn infer_sidecar(video_stem: &str, subtitle_name: &str) -> Option<SidecarInf
 }
 
 /// Whether a folder is a `Subs/` or `Subtitles/` folder, in any case.
-fn is_subtitle_folder(name: &str) -> bool {
+pub fn is_subtitle_folder(name: &str) -> bool {
     name.eq_ignore_ascii_case("subs") || name.eq_ignore_ascii_case("subtitles")
 }
 

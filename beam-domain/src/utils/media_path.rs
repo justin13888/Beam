@@ -27,7 +27,13 @@ use crate::utils::identity::{normalize_title, title_identity_key};
 /// reaches files and titles indexed before it. Bump it whenever a path would
 /// classify differently or a title would key differently. Rows and keys
 /// stored before versions existed carry `0`.
-pub const CLASSIFIER_VERSION: u16 = 1;
+///
+/// - `1`: path inference v2 and the identity-key fold (issues #182, #183).
+/// - `2`: an NFO beside the file, and its container tags, are read too
+///   ([`crate::utils::classification`], issue #184). Keys are derived exactly
+///   as by `1`, so the re-derivation this bump triggers changes none; the
+///   reclassification it triggers is what applies NFOs already on disk.
+pub const CLASSIFIER_VERSION: u16 = 2;
 
 /// A title and year as a path spells them -- what a movie or show is keyed by.
 #[derive(Debug, Clone, PartialEq, Eq)]
