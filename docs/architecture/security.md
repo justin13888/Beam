@@ -53,8 +53,10 @@ behalf:
 3. **Poll.** `POST /v1/auth/device/token` claims the flow with a conditional `UPDATE` on
    `next_poll_at`: a poll inside the interval is answered `slow_down` by Beam without contacting the
    IdP, and the interval grows. A claimed poll makes exactly one token-endpoint request through
-   `OidcHttpClient`, authenticated `client_secret_basic`. On approval the ID token is verified
-   (signature, issuer, audience, expiry — there is no nonce in this grant), the flow row is deleted
+   `OidcHttpClient`. Both device requests authenticate with `client_secret_post` when discovery
+   advertises it (Dex reads the secret only from the form) and `client_secret_basic` otherwise. On
+   approval the ID token is verified (signature, issuer, audience, expiry — there is no nonce in
+   this grant), the flow row is deleted
    with `DELETE ... RETURNING` (so one approval mints one session), and steps 4–5 of the browser
    flow run unchanged through the shared `complete_login`. The session value is returned in the
    body; the client presents it as the `beam_session` cookie.

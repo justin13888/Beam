@@ -286,6 +286,37 @@ mod discovered {
             .clone()
     }
 
+    /// How Beam authenticates its device-grant requests to the IdP.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum DeviceClientAuth {
+        /// `client_secret_post`: `client_id` and `client_secret` in the form.
+        Post,
+        /// `client_secret_basic`: the credentials in an `Authorization`
+        /// header, `client_id` repeated in the form as an identifier.
+        Basic,
+    }
+
+    /// Picks the device-grant client authentication from discovery.
+    ///
+    /// `client_secret_post` whenever the IdP advertises it. The device
+    /// authorization request carries `client_id` in its form regardless (RFC
+    /// 8628 section 3.1), and Dex -- found driving v2.45.1 -- reads the client
+    /// secret only from that form: given Basic credentials it records an
+    /// empty secret with the device request, then fails its own internal code
+    /// exchange at approval with `invalid_client`. Otherwise
+    /// `client_secret_basic`, which RFC 8414 section 2 makes the default when
+    /// the document lists nothing.
+    pub(crate) fn device_client_auth(metadata: &DeviceAwareProviderMetadata) -> DeviceClientAuth {
+        let advertises_post = metadata
+            .token_endpoint_auth_methods_supported()
+            .is_some_and(|methods| methods.contains(&CoreClientAuthMethod::ClientSecretPost));
+        if advertises_post {
+            DeviceClientAuth::Post
+        } else {
+            DeviceClientAuth::Basic
+        }
+    }
+
     /// RFC 8628 section 3.4's grant type for polling the token endpoint.
     const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
@@ -299,6 +330,8 @@ mod discovered {
         scopes: Vec<String>,
         /// From discovery; `None` when the IdP does not offer the grant.
         device_url: Option<DeviceAuthorizationUrl>,
+        /// From discovery: how the device-grant requests authenticate.
+        device_auth: DeviceClientAuth,
         /// Kept for the device-token poll, which Beam sends itself (see
         /// `poll_device_token`).
         client_id: String,
@@ -323,6 +356,7 @@ mod discovered {
                     .await
                     .map_err(|e| OidcError::Discovery(e.to_string()))?;
             let device_url = device_endpoint(&provider_metadata);
+            let device_auth = device_client_auth(&provider_metadata);
 
             let redirect_url = RedirectUrl::new(redirect_url.to_string())
                 .map_err(|e| OidcError::Discovery(e.to_string()))?;
@@ -339,21 +373,26 @@ mod discovered {
                 http_client,
                 scopes,
                 device_url,
+                device_auth,
                 client_id: client_id.to_owned(),
                 client_secret: client_secret.to_owned(),
             })
         }
 
         /// The one form POST RFC 8628 section 3.4 describes, authenticated
-        /// the way `openidconnect` authenticates the code exchange
-        /// (`client_secret_basic`, RFC 6749 section 2.3.1 -- id and secret
-        /// each form-url-encoded before base64).
+        /// the way the device authorization request was.
         fn device_token_request(
             &self,
             token_url: &str,
             device_code: &str,
         ) -> Result<HttpRequest, OidcError> {
-            device_token_request(token_url, &self.client_id, &self.client_secret, device_code)
+            device_token_request(
+                token_url,
+                &self.client_id,
+                &self.client_secret,
+                device_code,
+                self.device_auth,
+            )
         }
     }
 
@@ -364,6 +403,7 @@ mod discovered {
         client_id: &str,
         client_secret: &str,
         device_code: &str,
+        auth: DeviceClientAuth,
     ) -> Result<HttpRequest, OidcError> {
         use base64::Engine as _;
         use openidconnect::http::{Method, header};
@@ -376,17 +416,27 @@ mod discovered {
             encode(client_id),
             encode(client_secret)
         ));
-        let body = form_urlencoded::Serializer::new(String::new())
-            .append_pair("grant_type", DEVICE_CODE_GRANT)
+        let mut form = form_urlencoded::Serializer::new(String::new());
+        form.append_pair("grant_type", DEVICE_CODE_GRANT)
             .append_pair("device_code", device_code)
-            .finish();
+            // An identifier some IdPs read only from the form, whichever way
+            // the client authenticates.
+            .append_pair("client_id", client_id);
+        if auth == DeviceClientAuth::Post {
+            form.append_pair("client_secret", client_secret);
+        }
+        let body = form.finish();
 
-        openidconnect::http::Request::builder()
+        let mut builder = openidconnect::http::Request::builder()
             .method(Method::POST)
             .uri(token_url)
             .header(header::ACCEPT, "application/json")
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .header(header::AUTHORIZATION, format!("Basic {credential}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        // One authentication method per request (RFC 6749 section 2.3).
+        if auth == DeviceClientAuth::Basic {
+            builder = builder.header(header::AUTHORIZATION, format!("Basic {credential}"));
+        }
+        builder
             .body(body.into_bytes())
             .map_err(|e| OidcError::Exchange(e.to_string()))
     }
@@ -525,8 +575,27 @@ mod discovered {
                 .ok_or(OidcError::DeviceFlowUnsupported)?;
             let client = self.client.clone().set_device_authorization_url(device_url);
 
+            // `openid` is skipped below because openidconnect already adds it.
+            let client = match self.device_auth {
+                // oauth2 puts `client_id` and `client_secret` in the form.
+                DeviceClientAuth::Post => {
+                    client.set_auth_type(openidconnect::AuthType::RequestBody)
+                }
+                DeviceClientAuth::Basic => client,
+            };
             let mut request = client.exchange_device_code();
-            for scope in &self.scopes {
+            if self.device_auth == DeviceClientAuth::Basic {
+                // `client_id` in the form as well as in the Basic header: RFC
+                // 8628 section 3.1 makes it optional for an authenticated
+                // client, but some IdPs read it from the form only. It is an
+                // identifier, not a second authentication method.
+                request = request.add_extra_param("client_id", self.client_id.clone());
+            }
+            for scope in self
+                .scopes
+                .iter()
+                .filter(|scope| scope.as_str() != "openid")
+            {
                 request = request.add_scope(Scope::new(scope.clone()));
             }
             let details: CoreDeviceAuthorizationResponse = request
@@ -797,8 +866,9 @@ mod discovered {
     #[cfg(test)]
     mod device_grant_tests {
         use super::{
-            DeviceAwareProviderMetadata, DeviceTokenOutcome, classify_device_token_response,
-            device_endpoint, device_token_request,
+            DeviceAwareProviderMetadata, DeviceClientAuth, DeviceTokenOutcome,
+            classify_device_token_response, device_client_auth, device_endpoint,
+            device_token_request,
         };
         use crate::utils::oidc::OidcError;
         use base64::Engine as _;
@@ -839,6 +909,28 @@ mod discovered {
             // Most IdPs that do not offer the grant simply omit the field; that
             // must not fail discovery and take the browser login down with it.
             assert!(device_endpoint(&discovery(json!({}))).is_none());
+        }
+
+        #[test]
+        fn device_requests_post_the_secret_when_the_idp_advertises_it() {
+            // Dex advertises both and needs the form: with Basic it approves
+            // the user and then fails its own exchange with invalid_client.
+            let both = discovery(json!({
+                "token_endpoint_auth_methods_supported":
+                    ["client_secret_basic", "client_secret_post"],
+            }));
+            assert_eq!(device_client_auth(&both), DeviceClientAuth::Post);
+
+            let basic_only = discovery(json!({
+                "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+            }));
+            assert_eq!(device_client_auth(&basic_only), DeviceClientAuth::Basic);
+
+            // RFC 8414: an absent list means client_secret_basic.
+            assert_eq!(
+                device_client_auth(&discovery(json!({}))),
+                DeviceClientAuth::Basic
+            );
         }
 
         fn body(value: Value) -> Vec<u8> {
@@ -947,13 +1039,13 @@ mod discovered {
             );
         }
 
-        #[test]
-        fn the_poll_is_a_device_code_grant_authenticated_with_client_secret_basic() {
+        fn poll_form(auth: DeviceClientAuth) -> (Vec<(String, String)>, Option<String>) {
             let request = device_token_request(
                 "https://idp.test/token",
                 "beam",
                 "s3cret:with&odd=chars",
                 "the-device-code",
+                auth,
             )
             .unwrap();
 
@@ -963,26 +1055,36 @@ mod discovered {
                 request.headers()[header::CONTENT_TYPE],
                 "application/x-www-form-urlencoded"
             );
+            let form = openidconnect::url::form_urlencoded::parse(request.body())
+                .into_owned()
+                .collect();
+            let authorization = request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .map(|value| value.to_str().unwrap().to_owned());
+            (form, authorization)
+        }
 
-            let form: Vec<(String, String)> =
-                openidconnect::url::form_urlencoded::parse(request.body())
-                    .into_owned()
-                    .collect();
+        fn pair(name: &str, value: &str) -> (String, String) {
+            (name.to_owned(), value.to_owned())
+        }
+
+        #[test]
+        fn a_basic_poll_keeps_the_secret_in_the_header() {
+            let (form, authorization) = poll_form(DeviceClientAuth::Basic);
             assert_eq!(
                 form,
                 [
-                    (
-                        "grant_type".to_owned(),
-                        "urn:ietf:params:oauth:grant-type:device_code".to_owned()
-                    ),
-                    ("device_code".to_owned(), "the-device-code".to_owned()),
+                    pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                    pair("device_code", "the-device-code"),
+                    pair("client_id", "beam"),
                 ],
-                "the client secret belongs in the header, never the body"
+                "with client_secret_basic the secret never enters the body"
             );
 
             // RFC 6749 section 2.3.1: id and secret are each form-encoded
             // before being joined and base64-encoded.
-            let authorization = request.headers()[header::AUTHORIZATION].to_str().unwrap();
+            let authorization = authorization.expect("basic auth");
             let encoded = authorization.strip_prefix("Basic ").expect("basic auth");
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
@@ -990,6 +1092,24 @@ mod discovered {
             assert_eq!(
                 String::from_utf8(decoded).unwrap(),
                 "beam:s3cret%3Awith%26odd%3Dchars"
+            );
+        }
+
+        #[test]
+        fn a_post_poll_carries_the_secret_in_the_form_and_no_header() {
+            let (form, authorization) = poll_form(DeviceClientAuth::Post);
+            assert_eq!(
+                form,
+                [
+                    pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                    pair("device_code", "the-device-code"),
+                    pair("client_id", "beam"),
+                    pair("client_secret", "s3cret:with&odd=chars"),
+                ]
+            );
+            assert_eq!(
+                authorization, None,
+                "one authentication method per request (RFC 6749 section 2.3)"
             );
         }
     }
