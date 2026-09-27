@@ -70,6 +70,24 @@ ktlint = "1.8.0"
 HK_MISE = "1"
 CARGO_TERM_COLOR = "always"
 RUST_BACKTRACE = "1"
+# The physical path of the cargo home, with every symlink resolved.
+#
+# `uniffi_bindgen` (built by `core:bindgen`) derives askama templates, and
+# askama_derive 0.16 embeds askama.toml through an `include_bytes!` path it
+# computes *lexically*: from the canonicalised config file to the directory of
+# the source file as rustc saw it. When the cargo home is reached through a
+# symlink -- Fedora Atomic's /home -> /var/home, a /mnt -> /var/mnt scratch
+# disk, a relocated ~/.cargo -- the two sides disagree, the kernel resolves the
+# emitted `../` chain physically, and the crate fails to compile with
+# "couldn't read .../askama.toml". Handing cargo the canonical path makes both
+# sides agree. It has to be every task rather than only the bindgen ones:
+# cargo fingerprints registry crates by their source path, so a task that saw
+# a different spelling of the same directory would rebuild every dependency.
+#
+# Guarded on the directory existing because `canonicalize` fails on a missing
+# path, and a host that has never run cargo must still be able to load this
+# file. An unset CARGO_HOME means ~/.cargo, as it does to cargo and rustup.
+CARGO_HOME = "{% set cargo_home = env.CARGO_HOME | default(value=env.HOME ~ '/.cargo') %}{% if cargo_home is dir %}{{ cargo_home | canonicalize }}{% else %}{{ cargo_home }}{% endif %}"
 # The Android SDK is not a mise tool: the registry only reaches it through a
 # third-party vfox plugin, and it has no NDK entry at all. `android:sdk`
 # bootstraps it with Google's own tooling instead.
