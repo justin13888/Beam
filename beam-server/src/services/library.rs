@@ -369,9 +369,7 @@ impl LibraryService for LocalLibraryService {
                     data_dir = %self.data_dir.display(),
                     "library path overlaps the data directory"
                 );
-                return Err(LibraryError::PathOverlapsDataDir(
-                    "Library path overlaps the server's data directory".to_string(),
-                ));
+                return Err(LibraryError::PathOverlapsDataDir);
             }
             Some(RootConflict::Library(existing)) => {
                 warn!(
@@ -379,9 +377,7 @@ impl LibraryService for LocalLibraryService {
                     existing = %existing.display(),
                     "library path overlaps an existing library"
                 );
-                return Err(LibraryError::PathOverlapsLibrary(
-                    "Library path is, contains, or lies inside an existing library".to_string(),
-                ));
+                return Err(LibraryError::PathOverlapsLibrary);
             }
         }
 
@@ -462,10 +458,12 @@ pub enum LibraryError {
     PathNotFound(String),
     #[error("Library path is outside the permitted root: {0}")]
     PathOutsideRoot(String),
-    #[error("Library path overlaps an existing library: {0}")]
-    PathOverlapsLibrary(String),
-    #[error("Library path overlaps the data directory: {0}")]
-    PathOverlapsDataDir(String),
+    // Unit variants: the message is the whole story, and names no path
+    // (NFR-108).
+    #[error("Library path is, contains, or lies inside an existing library")]
+    PathOverlapsLibrary,
+    #[error("Library path overlaps the server's data directory")]
+    PathOverlapsDataDir,
 }
 
 impl From<IndexError> for LibraryError {

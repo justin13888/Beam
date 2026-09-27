@@ -801,7 +801,7 @@ mod tests {
             .expect_err("nested inside Movies");
 
         assert!(
-            matches!(err, LibraryError::PathOverlapsLibrary(_)),
+            matches!(err, LibraryError::PathOverlapsLibrary),
             "got {err:?}"
         );
         assert!(!err.to_string().contains('/'), "no path in {err}");
@@ -818,7 +818,7 @@ mod tests {
             .expect_err("contains the data directory");
 
         assert!(
-            matches!(err, LibraryError::PathOverlapsDataDir(_)),
+            matches!(err, LibraryError::PathOverlapsDataDir),
             "got {err:?}"
         );
         assert!(!err.to_string().contains('/'), "no path in {err}");

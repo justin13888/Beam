@@ -67,8 +67,8 @@ impl From<LibraryError> for LibraryRefError {
             // registered or rescanned, never when one is resolved by id.
             LibraryError::PathNotFound(_)
             | LibraryError::PathOutsideRoot(_)
-            | LibraryError::PathOverlapsLibrary(_)
-            | LibraryError::PathOverlapsDataDir(_)
+            | LibraryError::PathOverlapsLibrary
+            | LibraryError::PathOverlapsDataDir
             | LibraryError::Db(_) => Self::Internal(err.to_string()),
         }
     }
@@ -79,8 +79,8 @@ impl From<LibraryError> for LibraryCreateError {
         match err {
             LibraryError::PathNotFound(_) => Self::PathNotFound(err.to_string()),
             LibraryError::PathOutsideRoot(_) => Self::PathOutsideRoot(err.to_string()),
-            LibraryError::PathOverlapsLibrary(_) => Self::PathOverlapsLibrary(err.to_string()),
-            LibraryError::PathOverlapsDataDir(_) => Self::PathOverlapsDataDir(err.to_string()),
+            LibraryError::PathOverlapsLibrary => Self::PathOverlapsLibrary(err.to_string()),
+            LibraryError::PathOverlapsDataDir => Self::PathOverlapsDataDir(err.to_string()),
             // Unreachable: creation names no existing library and parses no id.
             LibraryError::InvalidId | LibraryError::LibraryNotFound | LibraryError::Db(_) => {
                 Self::Internal(err.to_string())
@@ -101,8 +101,8 @@ impl From<LibraryError> for LibraryScanError {
             // Unreachable: containment and overlap are decided at
             // registration.
             LibraryError::PathOutsideRoot(_)
-            | LibraryError::PathOverlapsLibrary(_)
-            | LibraryError::PathOverlapsDataDir(_)
+            | LibraryError::PathOverlapsLibrary
+            | LibraryError::PathOverlapsDataDir
             | LibraryError::Db(_) => Self::Internal(err.to_string()),
         }
     }
