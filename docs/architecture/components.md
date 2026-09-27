@@ -87,7 +87,11 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   watcher no longer finds are soft-deleted with `missing_since`, restored under the same id when
   they reappear, and purged only after `BEAM_MISSING_FILE_GRACE_DAYS` by a scan whose walk hit no
   error above them (a listed entry the walk cannot stat, other than "not found", counts as an error
-  at that path) — the pure `plan_missing` makes that decision (FR-211); it also emits a
+  at that path) — the pure `plan_missing` makes that decision (FR-211); a new file with the content
+  of a row whose file is gone is that file moved or renamed, and is relinked to the row rather than
+  indexed anew — the pure `choose_relink_candidate` picks the row, from the rows the scan's walk did
+  not see or, for a watcher event, from the library's rows with that hash (FR-221); a watcher event
+  for a directory reconciles its subtree; it also emits a
   non-fatal admin warning when two renditions of the same movie/episode have runtimes that diverge
   past `DivergencePolicy`'s relative+absolute thresholds, a likely misnamed/mismatched file);
   `watcher.rs`
@@ -103,14 +107,17 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   and the background indexer schedules no single-library scan alongside it; scans a library once when it starts being polled
   after startup; and on each maintenance cycle unwatches libraries that no longer exist and
   re-registers any the watcher no longer holds, asking the watcher rather than remembering what it
-  registered; the watcher keeps one registration per root, so a
+  registered — the backstop to `LibraryWatches`, the `LibraryWatchHook` through which
+  `beam-server`'s library service registers a library as soon as it is created and unwatches it as
+  soon as it is deleted (FR-213); the watcher keeps one registration per root, so a
   library re-created at a deleted one's root owns its events; `watch_status.rs` records each library's watch mode for the
   admin status); `scan.rs` (`ScanCoordinator`: one lock per library that every scan — startup,
   periodic, newly polled, administrator's — and every watcher reconcile takes, the latest
   `ScanJob` per library in memory, and a catalog gate the identity-key passes hold exclusively while
   every scan and reconcile holds it shared; a scan is `begin_scan` then `run_scan`, so the server
   answers before it runs; a reconcile never waits, but is handed back `Deferred` and retried by
-  `runtime.rs` on the injected `Clock`; a file is hashed only once it has gone
+  `runtime.rs` on the injected `Clock`; deleting a library retires it, so no scan or reconcile starts
+  on it again, and fails its queued scan as cancelled at once; a file is hashed only once it has gone
   `BEAM_SCAN_SETTLE_SECS` without a write; issue #181); `enrichment/` (queue-driven async worker with retry/backoff and
   candidate matching/scoring); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
   `notification.rs` (the latter two back the admin log and SSE progress events).

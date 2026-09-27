@@ -144,8 +144,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
   changes made before polling began are not missed (for a library polled from startup, the startup
   scan is that scan: the background indexer MUST register every watch before the startup scan
-  starts, and MUST schedule no single-library scan alongside it); a deleted library MUST stop being
-  watched; the admin status MUST report each library's watch mode and whether the watch limit has
+  starts, and MUST schedule no single-library scan alongside it); a library MUST be watched as soon
+  as it is created and stop being watched as soon as it is deleted, with the periodic maintenance
+  cycle as the backstop for a registration that failed; the admin status MUST report each library's watch mode and whether the watch limit has
   been reached. Every scan of a library is serialised (FR-218).
 - **FR-214**: The indexer MUST match a file to an existing movie or show by an identity key derived
   from the filename parse -- the normalised title and year, and for a show its series folder --
@@ -196,7 +197,23 @@ strength. Each requirement is independently testable. See `product.md` for narra
   it has gone `BEAM_SCAN_SETTLE_SECS` without a write (measured with the injected `Clock`), and a
   file whose probe failed MUST be probed again on each visit and classified when a probe succeeds;
   when a file's content changes and its probe fails, the old content's probe results and streams
-  MUST be cleared rather than kept. At most one `files` row MAY exist per path.
+  MUST be cleared rather than kept; when its size or modification time moved but its content did
+  not, the new size and modification time MUST be recorded so it is not hashed again on the next
+  visit. At most one `files` row MAY exist per path. Deleting a library MUST first stop anything
+  from starting on it -- a scan of any trigger, or a watcher reconcile -- then fail a queued scan of
+  it as cancelled at once and wait (bounded) for a running one to stop.
+- **FR-221**: A file moved or renamed within a library MUST keep its `files` row: a newly seen file
+  whose content hash (non-zero) and size match a row of the same library whose file is gone --
+  marked missing (FR-211), or no longer at its path -- MUST be relinked to that row, which keeps its
+  id and so its playback progress, its movie or episode, and its streams, and MUST NOT be probed or
+  classified again. A file whose original is still on disk is a copy and gets a row of its own. The
+  scan and the watcher MUST relink alike, whichever of a move's two watcher events is reconciled
+  first; among several candidate rows the one with the same file name, then the same directory,
+  then the one gone most recently wins. Every relink MUST be reported through the admin log with
+  both paths, and a scan's progress MUST count relinked files. A watcher event naming a directory
+  MUST reconcile what is beneath it: a directory renamed or moved in is walked and each file
+  reconciled (relinking a moved one), and the rows beneath a removed directory whose files are gone
+  are soft-deleted; the watcher never purges.
 
 ## FR-3xx — Metadata Enrichment
 

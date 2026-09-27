@@ -337,6 +337,18 @@ error above them, and not refused by the empty-root guard) once they have been m
 user's resume point with it. A *title* whose every file is missing is hidden from browse and search
 by the liveness check above, and retired once its last file is purged.
 
+**Relink** (FR-221): a row follows its file when the file is moved or renamed within its library.
+A new path whose content hash (never the unhashed `0`) and `file_size` match a row of the same
+library whose file is gone — stamped missing, or simply no longer at its `file_path` — is that row:
+`FileRepository::relink` rewrites `file_path`, `file_size` and `mtime` and clears `missing_since` in
+one `UPDATE`, so `id`, and with it `playback_progress`, `movie_entry_id`/`episode_id` and
+`media_streams`, is kept, and the file is not probed or classified again. The candidates come from
+`find_by_library_and_hash_including_missing`, a reconcile read served by `idx_files_hash` and
+scoped to one library: a movie entry belongs to its library, so a file moved to another library is
+that library's new file. A row whose file is still on disk is never a candidate — the new path is a
+copy, and gets a row of its own. `idx_files_path_unique` refuses a relink onto a path another row
+holds.
+
 ### `media_streams`
 One row per elementary stream (video/audio/subtitle track) within a `files` row, populated by
 `beam-index`'s ffmpeg-based probing at index time.
