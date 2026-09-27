@@ -4,13 +4,16 @@
 //! another's progress.
 
 use kynos::prelude::*;
+use kynos::response::status::NoContent;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::playback::{ContinueWatchingItem, HistoryItem, PlaybackProgressDto};
-use crate::routes::api_error::{InternalError, ProgressError, SessionAuth};
+use crate::models::playback_telemetry::PlaybackTelemetryBatch;
+use crate::routes::api_error::{InternalError, PlaybackTelemetryError, ProgressError, SessionAuth};
 use crate::routes::tags::Playback;
 use crate::services::playback::{PlaybackError, PlaybackReadError};
+use crate::services::playback_telemetry::IngestError;
 use crate::state::AppState;
 
 impl From<PlaybackError> for ProgressError {
@@ -172,9 +175,45 @@ pub async fn get_history(
     Ok(Json(HistoryResponse { items, total }))
 }
 
+impl From<IngestError> for PlaybackTelemetryError {
+    fn from(err: IngestError) -> Self {
+        match err {
+            IngestError::Disabled => Self::Disabled(err.to_string()),
+            IngestError::Invalid(errors) => Self::ValidationFailed { errors },
+            IngestError::Db(_) => Self::Internal(err.to_string()),
+        }
+    }
+}
+
+/// Report playback starts, failures, rebuffers and source switches.
+///
+/// Each event is counted per UTC day under coarse dimensions of the file it
+/// names -- container, codecs, resolution and bitrate class -- after which
+/// the file id is discarded; who reported is never recorded. Answers 409
+/// when the operator has not enabled playback telemetry: stop reporting.
+#[kynos::post(
+    "/telemetry/playback",
+    tag = Playback,
+    operation_id = "reportPlaybackTelemetry"
+)]
+pub async fn report_playback_telemetry(
+    // Authenticates, and nothing more: the session's identity is deliberately
+    // not passed on, so no count can be tied to a user (ADR-0019).
+    _auth: SessionAuth,
+    Inject(state): Inject<AppState>,
+    Json(body): Json<PlaybackTelemetryBatch>,
+) -> Result<NoContent, PlaybackTelemetryError> {
+    state.services.playback_telemetry.ingest(body).await?;
+    Ok(NoContent)
+}
+
 #[cfg(test)]
 #[path = "playback_tests.rs"]
 mod playback_tests;
+
+#[cfg(test)]
+#[path = "playback_telemetry_tests.rs"]
+mod playback_telemetry_tests;
 
 #[cfg(test)]
 mod parse_user_id_tests {

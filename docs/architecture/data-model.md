@@ -376,6 +376,28 @@ is removed only when the file is purged. The list reads join `files` and filter
 `missing_since IS NULL` in the same statement as their `LIMIT`/`OFFSET` and `COUNT`, so missing
 rows neither take a page slot nor inflate the history total.
 
+### `playback_start_counts` / `playback_rebuffer_counts` / `playback_switch_counts`
+Operator-local playback telemetry (issue #143, [ADR-0019](decisions/ADR-0019-telemetry-posture.md)):
+daily counters, never events. No column references a user, a file or a title, so there are no
+foreign keys and nothing here is a viewing record; the server resolves a reported file to these
+dimensions and discards its id before writing.
+
+| Table | Primary key (every column `TEXT NOT NULL` except `day DATE`) | Counters (`BIGINT NOT NULL CHECK (>= 0)`) |
+|---|---|---|
+| `playback_start_counts` | `day, client_kind, outcome, reason, stage, container, video_codec, audio_codec, height_class` | `count` |
+| `playback_rebuffer_counts` | `day, client_kind, container, video_codec, height_class, bitrate_class` | `events`, `total_ms`, and one per duration bucket: `lt_1s`, `s1_3`, `s3_10`, `s10_30`, `ge_30s` |
+| `playback_switch_counts` | `day, client_kind, trigger, from_height_class, to_height_class` | `count` |
+
+Absent values are sentinels, not `NULL` (`none` for a stream the file lacks or a start that did not
+fail, `unknown` for one the prober could not name), because the key columns are the `ON CONFLICT`
+target every write increments through. `playback_start_counts` also checks that `outcome =
+'started'` exactly when `reason` and `stage` are `none`. `day` leads every key, which serves both
+the report's date range and the daily retention prune (`DELETE ... WHERE day < cutoff`). The
+vocabularies themselves are not `CHECK`ed: a new client kind is a code change, not a migration.
+A reported batch is written in one transaction, as at most one multi-row upsert per table adding
+the batch's tally (`count = count + excluded.count`), so a batch is counted whole or not at all and
+its rows are locked in key order.
+
 ## Enrichment tables
 
 ### `genres` / `movie_genres` / `show_genres`

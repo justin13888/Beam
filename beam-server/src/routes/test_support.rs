@@ -17,7 +17,9 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library_shape::in_memory::InMemoryLibraryShapeRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
+use beam_domain::repositories::playback_telemetry::in_memory::InMemoryPlaybackTelemetryRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig};
@@ -30,6 +32,7 @@ use crate::services::metadata::{
 };
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::playback::DbPlaybackService;
+use crate::services::playback_telemetry::{PlaybackTelemetryConfig, PlaybackTelemetryService};
 use crate::services::telemetry::{LibraryReportConfig, LibraryReportService};
 use crate::state::{AppServices, AppState};
 
@@ -212,6 +215,21 @@ pub(crate) fn idle_library_report() -> Arc<LibraryReportService> {
     ))
 }
 
+/// Playback telemetry that is switched off, over empty in-memory stores:
+/// every report is refused with 409, and the admin report reads nothing.
+pub(crate) fn idle_playback_telemetry() -> Arc<PlaybackTelemetryService> {
+    Arc::new(PlaybackTelemetryService::new(
+        PlaybackTelemetryConfig {
+            enabled: false,
+            retention_days: 365,
+        },
+        Arc::new(InMemoryPlaybackTelemetryRepository::default()),
+        Arc::new(InMemoryFileRepository::default()),
+        Arc::new(InMemoryMediaStreamRepository::default()),
+        Arc::new(beam_domain::services::RealClock),
+    ))
+}
+
 /// Every seam at once. The three wrappers above name the one they vary.
 pub(crate) fn make_app_state_full(
     adjust: impl FnOnce(&mut crate::config::ServerConfig),
@@ -222,6 +240,23 @@ pub(crate) fn make_app_state_full(
     make_app_state_with_telemetry(adjust, clock, probe, metrics, idle_library_report())
 }
 
+/// [`make_app_state_with_telemetry`] with the playback telemetry service
+/// chosen too.
+pub(crate) fn make_app_state_with_playback_telemetry(
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
+    clock: Arc<dyn beam_domain::services::Clock>,
+    playback_telemetry: Arc<PlaybackTelemetryService>,
+) -> AppState {
+    make_app_state_with_services(
+        adjust,
+        clock,
+        Arc::new(InMemoryDependencyProbe::healthy()),
+        None,
+        idle_library_report(),
+        playback_telemetry,
+    )
+}
+
 /// [`make_app_state_full`] with the library report chosen too.
 pub(crate) fn make_app_state_with_telemetry(
     adjust: impl FnOnce(&mut crate::config::ServerConfig),
@@ -229,6 +264,25 @@ pub(crate) fn make_app_state_with_telemetry(
     probe: Arc<dyn crate::services::health::DependencyProbe>,
     metrics: Option<metrics_exporter_prometheus::PrometheusHandle>,
     telemetry: Arc<LibraryReportService>,
+) -> AppState {
+    make_app_state_with_services(
+        adjust,
+        clock,
+        probe,
+        metrics,
+        telemetry,
+        idle_playback_telemetry(),
+    )
+}
+
+/// Every seam, both telemetry services included.
+fn make_app_state_with_services(
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
+    clock: Arc<dyn beam_domain::services::Clock>,
+    probe: Arc<dyn crate::services::health::DependencyProbe>,
+    metrics: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    telemetry: Arc<LibraryReportService>,
+    playback_telemetry: Arc<PlaybackTelemetryService>,
 ) -> AppState {
     let notification = Arc::new(InMemoryNotificationService::new());
     let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
@@ -287,6 +341,7 @@ pub(crate) fn make_app_state_with_telemetry(
         },
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         telemetry,
+        playback_telemetry,
     };
 
     let config = crate::config::ServerConfig {

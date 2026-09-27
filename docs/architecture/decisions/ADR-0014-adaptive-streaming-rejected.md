@@ -66,7 +66,7 @@ wrong remedy. Each now has a named issue answering it directly:
 |---|---|
 | Direct-play compatibility insufficient | [#138](https://github.com/justin13888/beam/issues/138) capability-aware source selection in `beam-web`, which today picks `sources[0]` blind and so also violates FR-704; [#140](https://github.com/justin13888/beam/issues/140) client-side Matroska demux in the browser, the counterpart of [ADR-0013](ADR-0013-apple-client-two-engines.md); [#139](https://github.com/justin13888/beam/issues/139) the measured browser capability matrix |
 | Constrained-bandwidth behaviour insufficient | [#141](https://github.com/justin13888/beam/issues/141) client-driven downgrade to a smaller indexed source on sustained rebuffering, built on the `QualityPolicy` the native core already has |
-| Neither could be settled with evidence | [#143](https://github.com/justin13888/beam/issues/143) playback failure and rebuffer telemetry |
+| Neither could be settled with evidence | [#143](https://github.com/justin13888/beam/issues/143) playback failure and rebuffer telemetry: the server half -- opt-in, operator-local daily counts of start failures by reason, rebuffers by duration, and source switches, per codec, container, client kind and resolution class, read at `GET /v1/admin/telemetry/playback` ([ADR-0019](ADR-0019-telemetry-posture.md), FR-511, FR-609) -- is in place; the client emitters that feed it follow |
 
 Capability belongs in one place per platform and nowhere else: `beam-client-core::capability` for
 the native clients, its browser equivalent for `beam-web`. A second implementation that drifts from

@@ -308,6 +308,22 @@ pub struct ServerConfig {
     /// ever logged.
     #[config(env = "BEAM_TELEMETRY_URL")]
     pub telemetry_url: Option<String>,
+
+    /// Whether clients may report playback starts, failures, rebuffers and
+    /// source switches (issue #143, ADR-0019). **Off by default.** When on,
+    /// the server keeps daily counts per client kind, container, codec and
+    /// resolution class -- never a user, file or title -- for admins to read
+    /// at `GET /v1/admin/telemetry/playback`. Nothing leaves the server:
+    /// these counts are not part of the `BEAM_TELEMETRY_URL` report. Turning
+    /// it off stops collection; what was already counted stays until the
+    /// retention period removes it.
+    #[config(env = "BEAM_PLAYBACK_TELEMETRY_ENABLED", default = false)]
+    pub playback_telemetry_enabled: bool,
+
+    /// How many days playback counts are kept after the day they count
+    /// (1 to 3650). Pruned daily whether or not collection is enabled.
+    #[config(env = "BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS", default = 365)]
+    pub playback_telemetry_retention_days: u32,
 }
 
 /// Hand-written so the startup "Configuration loaded" log line can never
@@ -361,6 +377,8 @@ impl fmt::Debug for ServerConfig {
             rate_limit_device_poll_per_minute,
             rate_limit_trust_forwarded_for,
             telemetry_url,
+            playback_telemetry_enabled,
+            playback_telemetry_retention_days,
         } = self;
         f.debug_struct("ServerConfig")
             .field("bind_address", bind_address)
@@ -420,12 +438,21 @@ impl fmt::Debug for ServerConfig {
                     .as_deref()
                     .map(|url| url_origin(url).unwrap_or_else(|| "<invalid>".to_string())),
             )
+            .field("playback_telemetry_enabled", playback_telemetry_enabled)
+            .field(
+                "playback_telemetry_retention_days",
+                playback_telemetry_retention_days,
+            )
             .finish()
     }
 }
 
 /// Seconds in a day.
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+/// The retention `BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS` accepts: at least a
+/// day, at most ten years.
+pub const PLAYBACK_TELEMETRY_RETENTION_DAYS: std::ops::RangeInclusive<u32> = 1..=3650;
 
 /// Renders an `Option` secret without its value.
 fn redact_option(secret: &Option<String>) -> Option<&'static str> {
@@ -574,6 +601,16 @@ impl ServerConfig {
         }
     }
 
+    /// What the playback telemetry service is configured with (issue #143).
+    pub fn playback_telemetry_config(
+        &self,
+    ) -> crate::services::playback_telemetry::PlaybackTelemetryConfig {
+        crate::services::playback_telemetry::PlaybackTelemetryConfig {
+            enabled: self.playback_telemetry_enabled,
+            retention_days: self.playback_telemetry_retention_days,
+        }
+    }
+
     /// Whether enough OIDC configuration is present to attempt discovery.
     /// All three of issuer/client_id/client_secret are required together.
     pub fn oidc_configured(&self) -> bool {
@@ -707,6 +744,18 @@ impl ServerConfig {
             return Err(ConfigError::InvalidValue(
                 "BEAM_TELEMETRY_URL".to_string(),
                 "must be an http or https URL with a host".to_string(),
+            ));
+        }
+
+        if !PLAYBACK_TELEMETRY_RETENTION_DAYS.contains(&self.playback_telemetry_retention_days) {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS".to_string(),
+                format!(
+                    "must be in the range {}..={}, got {}",
+                    PLAYBACK_TELEMETRY_RETENTION_DAYS.start(),
+                    PLAYBACK_TELEMETRY_RETENTION_DAYS.end(),
+                    self.playback_telemetry_retention_days
+                ),
             ));
         }
 
@@ -848,6 +897,43 @@ mod tests {
         .expect("a blank URL is unset");
 
         assert_eq!(validated.telemetry_url, None);
+    }
+
+    /// A retention of zero would prune today's counts as they arrive, and one
+    /// past the ceiling is a typo; both fail the load. The range's own ends
+    /// are accepted.
+    #[test]
+    fn playback_telemetry_retention_must_be_in_range() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("videos")).unwrap();
+        let with = |days: u32| ServerConfig {
+            video_dir: temp.path().join("videos"),
+            data_dir: temp.path().join("data"),
+            playback_telemetry_retention_days: days,
+            ..Default::default()
+        };
+
+        for accepted in [
+            *PLAYBACK_TELEMETRY_RETENTION_DAYS.start(),
+            *PLAYBACK_TELEMETRY_RETENTION_DAYS.end(),
+        ] {
+            with(accepted)
+                .normalize_and_validate()
+                .unwrap_or_else(|e| panic!("{accepted} should be accepted: {e}"));
+        }
+        for refused in [
+            PLAYBACK_TELEMETRY_RETENTION_DAYS.start() - 1,
+            PLAYBACK_TELEMETRY_RETENTION_DAYS.end() + 1,
+        ] {
+            let err = with(refused)
+                .normalize_and_validate()
+                .expect_err("out of range");
+            assert!(
+                err.to_string()
+                    .contains("BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS"),
+                "{err}"
+            );
+        }
     }
 
     /// `BEAM_OIDC_CLIENT_AUTH_METHOD` takes exactly RFC 7591's

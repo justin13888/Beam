@@ -35,6 +35,10 @@ services:
       # Opt-in anonymous library report (ADR-0019). Unset sends nothing,
       # ever; set it to an OTLP/HTTP metrics endpoint you chose to opt in.
       - BEAM_TELEMETRY_URL
+      # Opt-in operator-local playback telemetry (issue #143). The counts
+      # never leave the server; read them at GET /v1/admin/telemetry/playback.
+      - BEAM_PLAYBACK_TELEMETRY_ENABLED=${BEAM_PLAYBACK_TELEMETRY_ENABLED:-false}
+      - BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS=${BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS:-365}
 
       # Schema migrations apply automatically at startup; set to false for
       # operator-managed migrations via the beam-migration CLI.

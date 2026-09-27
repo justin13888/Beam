@@ -169,9 +169,19 @@ impl ScopedSchema {
             .await?;
         drop(admin);
 
+        let db = Database::connect(Self::options(&name, 2)).await?;
+
+        Ok(Self {
+            db: std::sync::Arc::new(db),
+            name,
+        })
+    }
+
+    /// How every pool on schema `name` connects.
+    fn options(name: &str, max_connections: u32) -> ConnectOptions {
         let mut options = ConnectOptions::new(database_url());
         options
-            .max_connections(2)
+            .max_connections(max_connections)
             .sqlx_logging(false)
             // Every statement on this pool resolves unqualified names inside the
             // scoped schema; `public` stays on the path so shared extensions
@@ -183,15 +193,22 @@ impl ScopedSchema {
             // [`Self::name`]). Schema names are at most 63 bytes, which is also
             // Postgres's limit for this setting.
             .map_sqlx_postgres_opts({
-                let application_name = name.clone();
+                let application_name = name.to_owned();
                 move |pg_options| pg_options.application_name(&application_name)
             });
-        let db = Database::connect(options).await?;
+        options
+    }
 
-        Ok(Self {
-            db: std::sync::Arc::new(db),
-            name,
-        })
+    /// A second pool on the same schema, of up to `max_connections`
+    /// connections. [`Self::db`] holds two, so a test that needs more
+    /// statements in flight at once than that -- to show two writers really
+    /// overlapping -- opens a pool this size.
+    pub async fn pool(
+        &self,
+        max_connections: u32,
+    ) -> Result<std::sync::Arc<DatabaseConnection>, DbErr> {
+        let db = Database::connect(Self::options(&self.name, max_connections)).await?;
+        Ok(std::sync::Arc::new(db))
     }
 
     /// The scoped connection. Cloning the handle is cheap and shares one pool.

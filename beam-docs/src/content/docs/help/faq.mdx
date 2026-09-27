@@ -43,6 +43,11 @@ summary of your libraries' shape — counts (as ranges), codecs, containers and 
 title, path or identifier — to the collector *you* name. There is no default destination, and an admin can see
 the exact bytes before turning it on. See [Anonymous library report](/operate/telemetry/).
 
+Playback telemetry is separate and never leaves the server: with `BEAM_PLAYBACK_TELEMETRY_ENABLED`
+on, clients report what failed to play or rebuffered, and the server keeps daily counts by codec,
+container and client kind -- no user, file or title -- for an admin to read. See
+[Playback telemetry](/operate/telemetry/#playback-telemetry).
+
 Two more things are worth knowing:
 
 - **AniList enrichment is on by default**, so a stock server contacts AniList during enrichment

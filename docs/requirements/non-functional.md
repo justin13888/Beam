@@ -186,7 +186,10 @@ requirements (referenced below as FR-xxx).
   title, path, library or user name, file hash, or identifier of the server, its users or its
   install. Reports are not guaranteed unlinkable: a stable, distinctive shape may still let a
   collector correlate one server's reports. Playback progress and history never leave the server
-  ([ADR-0019](../architecture/decisions/ADR-0019-telemetry-posture.md)).
+  ([ADR-0019](../architecture/decisions/ADR-0019-telemetry-posture.md)). Playback telemetry
+  (FR-511) is off by default and never leaves the server either: it MUST be kept only as daily
+  counts per coarse dimension, with no user, session, file or title identifier and no time finer
+  than the UTC day, and MUST NOT be added to the outbound library report.
 
 ## NFR-6xx — Extensibility
 

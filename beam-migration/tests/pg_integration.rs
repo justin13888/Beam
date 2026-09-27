@@ -696,17 +696,16 @@ async fn the_classifier_migration_rolls_back_and_reapplies() {
     let db = scoped.db();
     let db = db.as_ref();
 
-    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+    // Applied up to and including this migration, so rolling back one step
+    // reverts exactly it, however many migrations come after it.
+    let through_this_one = beam_migration::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20260929_000001_classifier_v2")
+        .expect("the migration is registered")
+        + 1;
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(through_this_one as u32))
         .await
-        .expect("every migration applies");
-    let last = beam_migration::Migrator::migrations()
-        .last()
-        .map(|m| m.name().to_string());
-    assert_eq!(
-        last.as_deref(),
-        Some("m20260929_000001_classifier_v2"),
-        "rolling back one step reverts exactly this migration"
-    );
+        .expect("every migration through this one applies");
 
     let text = |sql: &'static str| async move {
         db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))

@@ -40,6 +40,17 @@ attaches to the existing row as another source rather than failing the scan -- c
 decision. The existing episode is never written on that path: its title and runtime stay those the
 first file (or enrichment) set.
 
+"Observed network conditions" in (c) are now something a server can count. With playback telemetry
+enabled (FR-511, [ADR-0019](decisions/ADR-0019-telemetry-posture.md)), clients report mid-stream
+rebuffers with their duration and every source switch, manual or automatic, to
+`POST /v1/telemetry/playback`; the server keeps daily counts by client kind, container, codec,
+resolution class and bitrate class, and an admin reads them at `GET /v1/admin/telemetry/playback`.
+Start failures are counted the same way, by reason. That is the evidence
+[ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md) asks for before constrained-bandwidth
+or compatibility behaviour is judged insufficient. The client emitters are tracked in
+[#222](https://github.com/justin13888/beam/issues/222), separately from the server half that landed
+with [#143](https://github.com/justin13888/beam/issues/143).
+
 Both endpoints authenticate via the session cookie like every other request; no tokens in URLs (see
 `security.md`).
 

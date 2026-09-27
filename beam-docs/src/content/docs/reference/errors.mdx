@@ -358,6 +358,46 @@ it would break seeking.
 proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only behind a proxy that **overwrites**
 `X-Forwarded-For`, since a proxy that appends lets a client forge the header and evade the limit.
 
+### playback-telemetry-disabled
+
+**409.** From `POST /v1/telemetry/playback`. The server's operator has not turned on playback
+telemetry, so the report was not counted.
+
+**What to do.** Clients: stop reporting for the rest of the session. The answer will not change on
+retry, which is why it is a 409 rather than a 5xx. Operators: set
+`BEAM_PLAYBACK_TELEMETRY_ENABLED=true` if you want playback counts (see
+[Telemetry](/operate/telemetry/)).
+
+### validation-failed
+
+**422.** The request body parsed, but broke a rule the server enforces. Carries an **`errors`**
+array, one entry per broken rule, each a `pointer` (an RFC 6901 JSON Pointer into the body; empty
+for the body as a whole) and a `detail`:
+
+```json
+{
+  "type": "https://beam.justinchung.net/reference/errors/#validation-failed",
+  "status": 422,
+  "title": "Validation failed",
+  "detail": "the request body breaks 1 rule(s)",
+  "errors": [{ "pointer": "/rebuffers/0/duration_ms", "detail": "must be from 1 to 600000, got 0" }]
+}
+```
+
+Today only `POST /v1/telemetry/playback` answers it: a batch carries 1 to 50 events in total and at
+most 50 in any one list, a rebuffer lasts 1 ms to 10 minutes, and a source switch is between two
+different files.
+
+**What to do.** Fix the request at each pointer. A 422 with `"type": "about:blank"` is the other
+kind: the body did not fit its schema at all (see [below](#responses-with-no-code)).
+
+### invalid-date-range
+
+**400.** From `GET /v1/admin/telemetry/playback`. `from` is after `to`, or the range spans more than
+366 days.
+
+**What to do.** Ask for a shorter or correctly ordered range. Both ends are inclusive UTC days.
+
 ### metrics-unavailable
 
 **503.** `GET /metrics` was called and no metrics recorder is installed.

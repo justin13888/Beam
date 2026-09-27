@@ -22,16 +22,17 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::models::{
     AdminEventDto, AdminLogCountResponse, AdminLogEntryDto, AdminStatusCounts, AdminStatusResponse,
     AdminUserDto, AdminUserListResponse, CreateLibraryRequest, EnrichmentQueueCounts, Library,
-    LibraryFile, LibraryTelemetryPreview, RecentScanDto, ScanLibraryResponse,
-    UpdateAdminUserRequest, WatcherStatus,
+    LibraryFile, LibraryTelemetryPreview, PlaybackTelemetryReport, RecentScanDto,
+    ScanLibraryResponse, UpdateAdminUserRequest, WatcherStatus,
 };
 use crate::routes::api_error::{
     AdminAuth, AdminUserError, InternalError, LibraryCreateError, LibraryRefError,
-    LibraryScanError, MediaRefreshError, SessionAuth,
+    LibraryScanError, MediaRefreshError, PlaybackTelemetryReportError, SessionAuth,
 };
 use crate::routes::tags::Admin;
 use crate::services::library::LibraryError;
 use crate::services::metadata::{MediaFilter, MetadataError};
+use crate::services::playback_telemetry::ReportError;
 use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
 
@@ -618,6 +619,51 @@ pub async fn preview_library_telemetry(
         // never a panic if that ever stopped being true.
         payload: String::from_utf8_lossy(&payload).into_owned(),
     }))
+}
+
+// ── Playback telemetry report (admin only, issue #143) ─────────────────────
+
+/// Which UTC days the playback telemetry report covers.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct PlaybackTelemetryQuery {
+    /// First day, inclusive (default: 29 days before `to`).
+    pub from: Option<chrono::NaiveDate>,
+    /// Last day, inclusive (default: today, UTC). At most 366 days after
+    /// `from`.
+    pub to: Option<chrono::NaiveDate>,
+}
+
+impl From<ReportError> for PlaybackTelemetryReportError {
+    fn from(err: ReportError) -> Self {
+        match err {
+            ReportError::InvalidDateRange(message) => Self::InvalidDateRange(message),
+            ReportError::Db(_) => Self::Internal(err.to_string()),
+        }
+    }
+}
+
+/// Playback telemetry counts, summed over a range of days.
+///
+/// The starts, start failures, rebuffers and source switches clients
+/// reported. Operator-local: none of it is part of the anonymous library
+/// report, and no row names a user, file or title. Readable whether or not
+/// collection is enabled.
+#[kynos::get(
+    "/admin/telemetry/playback",
+    tag = Admin,
+    operation_id = "getPlaybackTelemetry"
+)]
+pub async fn get_playback_telemetry(
+    _auth: AdminAuth,
+    Query(query): Query<PlaybackTelemetryQuery>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<PlaybackTelemetryReport>, PlaybackTelemetryReportError> {
+    let report = state
+        .services
+        .playback_telemetry
+        .report(query.from, query.to)
+        .await?;
+    Ok(Json(report))
 }
 
 #[cfg(test)]

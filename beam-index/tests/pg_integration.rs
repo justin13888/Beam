@@ -23,6 +23,8 @@ mod library_shape;
 mod movie_repository;
 #[path = "pg_integration/playback_progress.rs"]
 mod playback_progress;
+#[path = "pg_integration/playback_telemetry.rs"]
+mod playback_telemetry;
 #[path = "pg_integration/schema.rs"]
 mod schema;
 #[path = "pg_integration/show_repository.rs"]

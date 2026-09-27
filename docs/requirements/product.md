@@ -107,7 +107,10 @@ another source ([#142](https://github.com/justin13888/beam/issues/142)).
   ([ADR-0014](../architecture/decisions/ADR-0014-adaptive-streaming-rejected.md)).
 - Non-Postgres storage backends.
 - Full-text or fuzzy search beyond `pg_trgm` similarity matching.
-- Watch-history analytics or recommendations.
+- Watch-history analytics or recommendations. Opt-in, operator-local playback telemetry (FR-511)
+  is not watch history: it keeps daily counts of failures, rebuffers and source switches by codec
+  and client kind, with no user, file or title
+  ([ADR-0019](../architecture/decisions/ADR-0019-telemetry-posture.md)).
 
 ## Cross-references
 
