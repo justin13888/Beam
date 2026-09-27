@@ -143,17 +143,15 @@ impl Middleware for SessionMiddleware {
             // request whose caller never reads the document; there is nowhere
             // to put it and nothing lost by not doing so.
             //
-            // Read here rather than out of the generated error because spargen
-            // gives each operation its own error enum -- `GetMediaDetailError`,
-            // `DeleteLibraryError`, thirty-odd of them -- each holding
-            // `Box<types::Problem>` behind a `StatusNNN` variant, and none of
-            // them exposing an accessor. There is no generic way to reach the
-            // body from `Error::Api`, so the middleware -- which sees every
-            // response through one function -- reads it instead. That gap is
-            // filed upstream as getkono/spargen#85 ("Generated per-operation
-            // error enums expose no accessor for the problem document they
-            // carry"); until a release carries it, this is where the document
-            // comes from.
+            // Read here rather than out of the generated error. spargen gives
+            // each operation its own error enum -- `GetMediaDetailError`,
+            // `DeleteLibraryError`, thirty-odd of them -- and since the contract
+            // narrows each status to the `type` values its operation emits,
+            // every `StatusNNN` variant holds a body type of its own rather
+            // than a shared `Problem`. `Error::api_body` (getkono/spargen#85)
+            // reaches that body, but as `E::Body`, which names no field a
+            // generic reader can use. The middleware sees every response
+            // through one function, so it reads the document instead.
             let parsed = ProblemDetail::parse(&body);
             let _ = PROBLEM_SLOT.try_with(|slot| *slot.lock().expect("problem slot") = parsed);
 
