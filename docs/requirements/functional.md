@@ -63,13 +63,17 @@ strength. Each requirement is independently testable. See `product.md` for narra
   MUST NOT block or extend the scan's completion.
 - **FR-211**: A file the indexer can no longer find on disk MUST be soft-deleted rather than
   removed: its row is kept, stamped `missing_since`, and excluded from browse, search, detail
-  sources and streaming; if the path reappears the row MUST be restored under the same id, so its
-  playback progress survives a transient absence (an unmounted NAS, USB disk or bind mount). A row
-  MUST be purged only by a scan that walked the library without error and found the file still
-  missing after the configurable grace period (`BEAM_MISSING_FILE_GRACE_DAYS`, measured with the
-  injected `Clock`). A walk error MUST leave the rows beneath the unreadable path untouched and be
-  reported through the admin log, and a watcher removal while the library root is unavailable MUST
-  change nothing.
+  sources, streaming, continue-watching and history (including the history total); if the path
+  reappears the row MUST be restored under the same id, so its playback progress survives a
+  transient absence (an unmounted NAS, USB disk or bind mount). A row MUST be purged only by a scan
+  that was not refused and found the file still missing after the configurable grace period
+  (`BEAM_MISSING_FILE_GRACE_DAYS`, measured with the injected `Clock`). A walk error shields rather
+  than vetoes: a row beneath a path the walk could not read -- a directory it could not list, or a
+  listed entry it could not stat for any reason other than "not found" -- MUST be left untouched
+  (neither marked nor purged), and a walk error with no path MUST leave every row untouched; rows
+  elsewhere in the same scan are marked and purged as normal. Every walk error MUST be reported
+  through the admin log. A watcher event whose path cannot be statted for any reason other than
+  "not found", or a watcher removal while the library root is unavailable, MUST change nothing.
 
 ## FR-3xx — Metadata Enrichment
 
