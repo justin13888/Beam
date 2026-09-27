@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::services::library::{
-        InMemoryPathValidator, LibraryError, LibraryService, LocalLibraryService,
+        InMemoryPathValidator, LibraryError, LibraryService, LocalLibraryService, LocatedFile,
     };
     use crate::services::notification::{InMemoryNotificationService, NotificationService};
     use beam_domain::models::{FileStatus, Library as DomainLibrary, MediaFile};
@@ -536,6 +536,10 @@ mod tests {
         let files = result.unwrap();
         assert_eq!(files.len(), 3);
         assert!(files.iter().all(|f| f.library_id == lib_id.to_string()));
+        // Stored at `/media/videos/test.mp4` under a `/media/videos` root: the
+        // listing carries the root-relative path, never the absolute one
+        // (NFR-108).
+        assert!(files.iter().all(|f| f.path == "test.mp4"));
     }
 
     #[tokio::test]
@@ -604,8 +608,16 @@ mod tests {
 
         assert!(result.is_ok());
         let opt = result.unwrap();
-        assert!(opt.is_some());
-        assert_eq!(opt.unwrap().id, file_id.to_string());
+        // The delivery routes open this path, so it is the absolute one the
+        // file is stored under -- unlike the client-facing listing.
+        assert_eq!(
+            opt,
+            Some(LocatedFile {
+                id: file_id,
+                path: PathBuf::from("/media/videos/test.mp4"),
+                mime_type: Some("video/mp4".to_string()),
+            })
+        );
     }
 
     #[tokio::test]

@@ -256,7 +256,7 @@ pub struct LibraryFileSummary {
     pub id: String,
     /// The library that owns it.
     pub library_id: String,
-    /// Path on the server.
+    /// Path relative to the library root, '/'-separated. Never absolute.
     pub path: String,
     /// Size on disk.
     pub size_bytes: u64,

@@ -42,11 +42,9 @@ requirements (referenced below as FR-xxx).
   privilege the disclosure would grant. Process logs are not a client-facing response and are
   likewise unrestricted — a failure that must stay path-free in its error message is expected to put
   the path in a structured `tracing` field at the failing site.
-  One endpoint currently breaks this requirement and is **not** exempted by the paragraph above:
-  `getLibraryFiles` (`GET /v1/libraries/{id}/files`) is `SessionAuth`, not `AdminAuth`, and returns
-  `LibraryFile.path` verbatim to any signed-in user. That is a known violation, recorded as
-  [#168](https://github.com/justin13888/Beam/issues/168), not a sanctioned exemption — it is
-  described here so the requirement is not read as though the code already satisfied it.
+  A client-facing listing that has to name a file's location reports it relative to the file's
+  library root (`LibraryFile.path` in `getLibraryFiles`), never as the absolute path it is stored
+  under.
 
 ## NFR-2xx — Testability
 

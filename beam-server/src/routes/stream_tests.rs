@@ -33,11 +33,11 @@ use kynos::prelude::*;
 use kynos::test::TestClient;
 use tempfile::TempDir;
 
-use crate::models::{FileContentType, FileIndexStatus, LibraryFile};
+use crate::models::LibraryFile;
 use crate::routes::stream::{download_file, head_download_file, head_stream_file, stream_file};
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::hash::HashService;
-use crate::services::library::{LibraryError, LibraryService};
+use crate::services::library::{LibraryError, LibraryService, LocatedFile};
 use crate::services::metadata::{
     MediaConnection, MediaFilter, MediaSearchFilters, MediaSortField, MetadataError,
     MetadataService, PageInfo, SortOrder,
@@ -148,11 +148,11 @@ impl MetadataService for StubMetadataService {
 /// are left `unimplemented!`.
 #[derive(Debug, Clone)]
 struct StubLibraryService {
-    files: Vec<LibraryFile>,
+    files: Vec<LocatedFile>,
 }
 
 impl StubLibraryService {
-    fn new(files: Vec<LibraryFile>) -> Self {
+    fn new(files: Vec<LocatedFile>) -> Self {
         Self { files }
     }
 }
@@ -190,11 +190,11 @@ impl LibraryService for StubLibraryService {
     async fn delete_library(&self, _library_id: String) -> Result<bool, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
-    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LibraryFile>, LibraryError> {
+    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LocatedFile>, LibraryError> {
         // The trait's contract, not a convenience: a malformed id is
         // `InvalidId` rather than a miss, and the delivery routes answer the
         // two with different statuses.
-        uuid::Uuid::parse_str(&file_id).map_err(|_| LibraryError::InvalidId)?;
+        let file_id = uuid::Uuid::parse_str(&file_id).map_err(|_| LibraryError::InvalidId)?;
         Ok(self.files.iter().find(|f| f.id == file_id).cloned())
     }
 }
@@ -207,7 +207,7 @@ struct TestFixture {
     user_repo: Arc<InMemoryUserRepository>,
 }
 
-fn make_test_state(files: Vec<LibraryFile>) -> TestFixture {
+fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
 
@@ -332,21 +332,12 @@ fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
     TestClient::new(service)
 }
 
-/// Constructs a minimal `LibraryFile` fixture for a given `(id, path)` pair.
-fn make_library_file(id: &str, path: &str) -> LibraryFile {
-    LibraryFile {
-        id: id.to_string(),
-        library_id: "00000000-0000-0000-0000-000000000001".to_string(),
-        path: path.to_string(),
-        size_bytes: 1024,
-        hash: "0".to_string(),
+/// Constructs a minimal `LocatedFile` fixture for a given `(id, path)` pair.
+fn make_located_file(id: &str, path: &str) -> LocatedFile {
+    LocatedFile {
+        id: uuid::Uuid::parse_str(id).expect("fixture ids are UUIDs"),
+        path: PathBuf::from(path),
         mime_type: Some("video/mp4".to_string()),
-        duration_secs: Some(60.0),
-        container_format: Some("mp4".to_string()),
-        status: FileIndexStatus::Known,
-        content_type: FileContentType::Movie,
-        scanned_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
     }
 }
 
@@ -365,7 +356,7 @@ async fn serve(name: &str, contents: &[u8]) -> ServedFile {
     let path = dir.path().join(name);
     std::fs::write(&path, contents).unwrap();
 
-    let fixture = make_test_state(vec![make_library_file(
+    let fixture = make_test_state(vec![make_located_file(
         TEST_FILE_ID,
         path.to_str().unwrap(),
     )]);
@@ -395,7 +386,7 @@ async fn stream_file_serves_the_source_bytes_as_indexed() {
     let path = dir.path().join("video.mkv");
     std::fs::write(&path, source_bytes).unwrap();
 
-    let mut file = make_library_file(TEST_FILE_ID, path.to_str().unwrap());
+    let mut file = make_located_file(TEST_FILE_ID, path.to_str().unwrap());
     file.mime_type = Some("video/x-matroska".to_string());
     let fixture = make_test_state(vec![file]);
     let client = build_client(&fixture);
@@ -432,7 +423,7 @@ async fn stream_file_falls_back_to_octet_stream_without_a_mime_type() {
     let path = dir.path().join("video.unknown");
     std::fs::write(&path, b"DATA").unwrap();
 
-    let mut file = make_library_file(TEST_FILE_ID, path.to_str().unwrap());
+    let mut file = make_located_file(TEST_FILE_ID, path.to_str().unwrap());
     file.mime_type = None;
     let fixture = make_test_state(vec![file]);
     let client = build_client(&fixture);
@@ -454,7 +445,7 @@ async fn stream_file_falls_back_to_octet_stream_without_a_mime_type() {
 /// the handler must return 404.
 #[tokio::test]
 async fn stream_file_missing_from_disk_is_404() {
-    let fixture = make_test_state(vec![make_library_file(
+    let fixture = make_test_state(vec![make_located_file(
         TEST_FILE_ID,
         "/tmp/__nonexistent_source_video_xyz_beam_test__.mkv",
     )]);

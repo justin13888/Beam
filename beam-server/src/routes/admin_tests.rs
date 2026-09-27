@@ -441,6 +441,70 @@ async fn a_malformed_library_id_is_a_400_on_every_route_that_takes_one() {
     }
 }
 
+/// NFR-108: listing a library's files is open to any signed-in user, so the
+/// listing must never carry the server's filesystem layout -- each file is
+/// shown relative to its library's root.
+#[tokio::test]
+async fn a_regular_user_listing_library_files_never_sees_a_filesystem_path() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let admin_token = seed_user_session(&fixture, true).await;
+    let user_token = seed_user_session(&fixture, false).await;
+
+    // `InMemoryPathValidator` resolves every root to `/videos/movies`.
+    let library: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &admin_token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+    let library_id = uuid::Uuid::parse_str(&library.id).unwrap();
+
+    for path in ["/videos/movies/A (2016)/A.mkv", "/videos/movies/b.mp4"] {
+        fixture
+            .file_repo
+            .create(CreateMediaFile {
+                library_id,
+                path: PathBuf::from(path),
+                hash: 1,
+                size_bytes: 10,
+                mtime: None,
+                mime_type: None,
+                duration: None,
+                container_format: None,
+                content: None,
+                status: FileStatus::Known,
+            })
+            .await
+            .unwrap();
+    }
+
+    let response = client
+        .get(&format!("/v1/libraries/{library_id}/files"))
+        .cookie("beam_session", &user_token)
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.json::<Value>();
+    assert!(
+        !body.to_string().contains("/videos"),
+        "the library root must not appear anywhere in the listing: {body}"
+    );
+    let mut paths: Vec<&str> = body
+        .as_array()
+        .expect("the listing is an array")
+        .iter()
+        .map(|file| file["path"].as_str().expect("every file has a path"))
+        .collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["A (2016)/A.mkv", "b.mp4"]);
+}
+
 // ─── Library mutations: admin-gated ─────────────────────────────────────────
 
 #[tokio::test]

@@ -8891,7 +8891,7 @@
           },
           "path": {
             "type": "string",
-            "description": "Filesystem path of the file"
+            "description": "Path of the file relative to its library's root, '/'-separated. Never\nabsolute (NFR-108)."
           },
           "size_bytes": {
             "type": "integer",

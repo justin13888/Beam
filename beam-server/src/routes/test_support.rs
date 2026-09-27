@@ -69,7 +69,7 @@ impl crate::services::library::LibraryService for StubLibraryService {
     async fn get_file_by_id(
         &self,
         _file_id: String,
-    ) -> Result<Option<crate::models::LibraryFile>, LibraryError> {
+    ) -> Result<Option<crate::services::library::LocatedFile>, LibraryError> {
         unimplemented!("not called in routing tests")
     }
     async fn create_library(
