@@ -10,6 +10,8 @@ import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BeamClient
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.ContinueWatchingEntry
+import uniffi.beam_client_core.DeviceLoginPrompt
+import uniffi.beam_client_core.DeviceLoginStep
 import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
@@ -66,6 +68,16 @@ internal class BeamServerRepository
         }
 
         override suspend fun loginUrl(serverId: String): String = client.loginUrl(serverId)
+
+        override suspend fun startDeviceLogin(serverId: String): DeviceLoginPrompt = client.startDeviceLogin(serverId)
+
+        override suspend fun pollDeviceLogin(
+            serverId: String,
+            deviceHandle: String,
+        ): DeviceLoginStep =
+            client.pollDeviceLogin(serverId, deviceHandle).also {
+                if (it is DeviceLoginStep.SignedIn) republish()
+            }
 
         override suspend fun completeLogin(
             serverId: String,

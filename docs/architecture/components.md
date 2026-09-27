@@ -210,7 +210,7 @@ app as it stands, not a client regenerated against the current contract.
   `explore.tsx` (search), `admin.tsx` (library CRUD, logs, SSE scan/enrichment progress via
   `useAdminEventStream`), `profile.tsx`, `login.tsx` (a sign-in button that redirects to the
   server's OIDC start endpoint).
-- **Auth:** `hooks/auth.tsx` is a thin context that calls `GET /v1/auth/me` on mount and relies
+- **Auth:** `hooks/auth.tsx` is a thin context that calls `GET /v1/me` on mount and relies
   entirely on the httpOnly session cookie — client-side JS never reads, stores, or sends any
   token, and nothing auth-related touches `localStorage`.
 - **Player:** built on Vidstack (`components/VideoPlayer.tsx`) with a source-quality picker across
@@ -277,9 +277,15 @@ plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
   trust decision by the core, because a mismatch surfaces as apparently corrupt media rather than
   as an auth error. Downloads go through Media3's `DownloadManager` so their bytes land in a cache
   ExoPlayer can read directly.
-- **Auth** lifts the `beam_session` cookie from an in-app WebView, which is the only flow the
-  server currently supports — see NFR-605 and
-  [ADR-0012](decisions/ADR-0012-native-client-rust-core.md).
+- **Auth** lifts the `beam_session` cookie from an in-app WebView on a phone, as it always has,
+  and offers a secondary **Sign in with a code** that runs the device authorization grant — the
+  screen shows the user code and the verification address while the core polls. Where there is no
+  usable browser (`FEATURE_LEANBACK`, or no WebView installed) the device grant is the default, and
+  the WebView the fallback when the server answers `501` because the IdP does not offer the grant.
+  A poll that fails retryably (a retryable server error, a rate limit, a transport error) is
+  retried at the current interval, or after `Retry-After`; only a refusal, an expiry or an
+  invalid flow ends it. See NFR-605 and
+  [ADR-0017](decisions/ADR-0017-device-authorization-grant.md).
 
 **Testing:** 129 JVM tests plus Roborazzi screenshot references, run under Robolectric. No emulator
 runs in CI.
@@ -307,8 +313,10 @@ and `BeamAppShell`.
 - **Liquid Glass** is applied as a system: related controls share a `GlassEffectContainer` so they
   merge and separate in motion, artwork sits under glass rather than being tinted by it, and colours
   are expressed against the system palette so the material keeps adapting.
-- **Auth** lifts the `beam_session` cookie from a `WKWebView`, the only flow the server supports --
-  see NFR-605 and [ADR-0012](decisions/ADR-0012-native-client-rust-core.md). The cookie's domain is
+- **Auth** lifts the `beam_session` cookie from a `WKWebView` -- see NFR-605 and
+  [ADR-0012](decisions/ADR-0012-native-client-rust-core.md). The server's device authorization
+  grant ([ADR-0017](decisions/ADR-0017-device-authorization-grant.md)) is not used here yet; it is
+  what a future tvOS client signs in with. The cookie's domain is
   checked against the server's host, so a cookie set by an identity provider in the redirect chain
   is never mistaken for the server's.
 

@@ -14,9 +14,9 @@ See [ADR-0004](../architecture/decisions/ADR-0004-never-transcode.md).
 Beam ships three clients: the `beam-web` web application, the reference implementation of the domain
 API; `beam-android`, a native Android client for phone and tablet; and `beam-apple`, a native
 SwiftUI client for iOS, iPadOS and macOS. All three are built against the same domain API (see
-NFR-6xx in `non-functional.md`). Android TV and tvOS remain outstanding, both blocked on the same
-thing — neither has a web view to lift a session cookie from, so neither can authenticate until a
-native token mint exists (NFR-605). See the
+NFR-6xx in `non-functional.md`). Android TV and tvOS remain outstanding. Neither has a web view to
+lift a session cookie from; both can now sign in by the device authorization grant wherever the
+identity provider offers it (FR-111, NFR-605), so what remains is the clients themselves. See the
 [client roadmap umbrella #78](https://github.com/justin13888/beam/issues/78).
 
 Native clients exist for a specific reason rather than as a matter of taste. Beam direct-plays, so

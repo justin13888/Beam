@@ -1215,11 +1215,11 @@ git clone -q "$tmp/src" "$tmp/clone"
 '''
 
 [tasks."check:compose-invariants"]
-description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, and mounts libraries read-only"
-# Five properties the dev stack depends on, none of which any other gate sees.
+description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, forwards what dev:up sets, and mounts libraries read-only"
+# Six properties the dev stack depends on, none of which any other gate sees.
 # `dev:verify-oidc` asserts the first two, but it needs a container runtime and
 # so sits outside `ci` (NFR-201) -- which means nothing runs them automatically.
-# These five are pure configuration, hermetic, and belong here:
+# These six are pure configuration, hermetic, and belong here:
 #
 #   1. `dex` stays behind the `dev-idp` profile, so a bare `compose up` is the
 #      production shape and starts no IdP (FR-110, NFR-406).
@@ -1244,10 +1244,16 @@ description = "Assert the compose topology keeps the dev IdP opt-in, declares it
 #      a property of the container, and the docs say the Compose file ships it.
 #      The short form is matched on its trailing `:ro` option rather than split
 #      on `:`, because `${VAR:-default}` puts colons inside the source itself.
+#   6. Every `BEAM_*` variable `dev:up` sets is forwarded by a compose service.
+#      `dev:up` configures the containerized server through its own shell
+#      env, which reaches the container only for a name the service lists; an
+#      unlisted one is silently dropped -- as BEAM_OIDC_CLIENT_AUTH_METHOD
+#      would be, leaving the bundled Dex's device approvals failing (ADR-0017
+#      D151-9).
 #
 # The files are the ones compose.yaml `include`s, read from there rather than
 # restated, so a compose file is under these checks from the moment it is
-# included; property 4 reads `mise.toml` from the same directory. The directory
+# included; properties 4 and 6 read `mise.toml` from the same directory. The directory
 # argument points the gate at a copy of the files; that is how its negative
 # cases are exercised without editing the tracked ones.
 #
@@ -1306,6 +1312,16 @@ for (const [f, doc] of docs) {
 
 // Property 4. A service `environment` is a list of NAME[=value] or a map.
 const devUp = Bun.TOML.parse(await Bun.file("mise.toml").text()).tasks?.["dev:up"]?.env ?? {};
+const forwarded = new Set(
+  [...docs].flatMap(([, doc]) =>
+    Object.values(doc.services ?? {}).flatMap((svc) => {
+      const env = svc?.environment;
+      return Array.isArray(env)
+        ? env.map((e) => String(e).split("=")[0])
+        : Object.keys(env ?? {});
+    }),
+  ),
+);
 check(devUp.BEAM_OIDC_ADMIN_CLAIM !== undefined, "mise.toml: dev:up sets BEAM_OIDC_ADMIN_CLAIM");
 if (devUp.BEAM_OIDC_ADMIN_CLAIM === "groups") {
   const scopes = String(devUp.BEAM_OIDC_SCOPES ?? "").split(/\s+/);
@@ -1313,17 +1329,12 @@ if (devUp.BEAM_OIDC_ADMIN_CLAIM === "groups") {
     scopes.includes("groups"),
     `mise.toml: dev:up requests the groups scope for its groups admin claim (BEAM_OIDC_SCOPES=${JSON.stringify(devUp.BEAM_OIDC_SCOPES ?? null)})`,
   );
-  const forwards = [...docs].some(([, doc]) =>
-    Object.values(doc.services ?? {}).some((svc) => {
-      const env = svc?.environment;
-      const names = Array.isArray(env)
-        ? env.map((e) => String(e).split("=")[0])
-        : Object.keys(env ?? {});
-      return names.includes("BEAM_OIDC_SCOPES");
-    }),
-  );
-  check(forwards, "a compose service forwards BEAM_OIDC_SCOPES");
+  check(forwarded.has("BEAM_OIDC_SCOPES"), "a compose service forwards BEAM_OIDC_SCOPES");
 }
+
+// Property 6.
+for (const name of Object.keys(devUp).filter((name) => name.startsWith("BEAM_")))
+  check(forwarded.has(name), `a compose service forwards ${name}, which dev:up sets`);
 
 // Property 5. A volume is a short-form string or a long-form map.
 const libraryVar = /\b(HOST_VIDEO_DIR|BEAM_VIDEO_DIR)\b/;
@@ -1976,7 +1987,13 @@ description = "Bring up the dev stack, including the bundled Dex IdP"
 # shell env outranks `.env` for compose interpolation, so the redirect target
 # and the CSRF allowed-origin set would both point at :8080 while the app was
 # published somewhere else.
-env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_OIDC_SCOPES = "openid profile email groups", BEAM_OIDC_ADMIN_CLAIM = "groups", BEAM_OIDC_ADMIN_VALUE = "beam-admin" }
+#
+# BEAM_OIDC_CLIENT_AUTH_METHOD is client_secret_post because Dex's device
+# authorization endpoint reads the client secret from the form only: sent HTTP
+# Basic, it records an empty secret and fails the approval in the browser with
+# "Invalid client credentials." (ADR-0017 D151-9). Dex's token endpoint takes
+# either, so the code exchange is unaffected.
+env = { BEAM_OIDC_ISSUER = "http://dex.beam.localhost:5556/dex", BEAM_OIDC_CLIENT_ID = "beam", BEAM_OIDC_CLIENT_SECRET = "beam-dev-secret", BEAM_OIDC_CLIENT_AUTH_METHOD = "client_secret_post", BEAM_OIDC_SCOPES = "openid profile email groups", BEAM_OIDC_ADMIN_CLAIM = "groups", BEAM_OIDC_ADMIN_VALUE = "beam-admin" }
 run = '''
 set -eu
 . scripts/compose.sh
@@ -2071,6 +2088,16 @@ api_base=$(published_url server 8000)
 rc=0; curl -sS -o /dev/null -D - "$api_base/v1/auth/login" \
     | grep -iqF "location: $issuer" || rc=$?
 check "$rc" "GET /v1/auth/login redirects to the IdP at $authority"
+
+# The device grant (ADR-0017): Beam offers it only when discovery names a
+# device endpoint, so assert both that Dex advertises one and that the server,
+# having read it at startup, starts a device login -- a user code in the body.
+# `-X POST` with no body and no Origin, as a TV app sends it. The POST costs one
+# device_auths row, swept when it expires.
+rc=0; printf '%s' "$host_doc" | tr -d ' \t' | grep -qF '"device_authorization_endpoint":"' || rc=$?
+check "$rc" "discovery advertises a device_authorization_endpoint"
+rc=0; curl -fsS -X POST "$api_base/v1/auth/device" | tr -d ' \t' | grep -qF '"user_code":"' || rc=$?
+check "$rc" "POST /v1/auth/device starts a device login"
 
 # The negative: the default topology stays valid and IdP-free. A `depends_on`
 # naming the profile-gated dex service would break the first of these outright.

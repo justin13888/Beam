@@ -7,6 +7,8 @@ import uniffi.beam_client_core.AdminStatus
 import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.ContinueWatchingEntry
+import uniffi.beam_client_core.DeviceLoginPrompt
+import uniffi.beam_client_core.DeviceLoginStep
 import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
@@ -52,6 +54,20 @@ public interface ServerRepository {
 
     /** The URL to open in the in-app browser to sign in. */
     public suspend fun loginUrl(serverId: String): String
+
+    /**
+     * Begin signing in without a browser, by the device authorization grant.
+     *
+     * Throws a non-retryable 501 when the server's identity provider does not
+     * offer the grant, which is the cue to fall back to [loginUrl].
+     */
+    public suspend fun startDeviceLogin(serverId: String): DeviceLoginPrompt
+
+    /** Poll a device login once; signs in on approval. */
+    public suspend fun pollDeviceLogin(
+        serverId: String,
+        deviceHandle: String,
+    ): DeviceLoginStep
 
     /** Hand over a cookie lifted from the browser, and verify it. */
     public suspend fun completeLogin(
