@@ -46,6 +46,10 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     /// `Unknown`: a file is `Known` (or `Changed`) only as a movie's or an
     /// episode's file. Postgres enforces it with the `files` CHECK
     /// constraint.
+    ///
+    /// `create` also refuses a path that already has a row, missing or not,
+    /// whatever its hash: one row per path (issue #181), which Postgres
+    /// enforces with `idx_files_path_unique`.
     async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr>;
     async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr>;
     /// Replace `id`'s classification -- content, status and classifier
@@ -212,7 +216,14 @@ pub mod in_memory {
                 classifier_version: create.classifier_version,
             };
             check_status(&file)?;
-            self.files.lock().unwrap().insert(file.id, file.clone());
+            let mut files = self.files.lock().unwrap();
+            if files.values().any(|stored| stored.path == file.path) {
+                return Err(DbErr::Custom(format!(
+                    "idx_files_path_unique: a file is already stored at {}",
+                    file.path.display()
+                )));
+            }
+            files.insert(file.id, file.clone());
             Ok(file)
         }
 

@@ -618,6 +618,43 @@ macro_rules! file_repository_contract {
             ids
         }
 
+        /// One row per path (issue #181): a second file at a path is refused
+        /// whatever its hash, and the first row is left as it was.
+        #[tokio::test]
+        async fn a_second_file_at_one_path_is_refused_whatever_its_hash() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let first = movie_file(&fixture, library).await;
+            let movie_entry_id = fixture.new_movie_entry(library).await;
+
+            let second = fixture
+                .repo()
+                .create(CreateMediaFile {
+                    library_id: library,
+                    path: first.path.clone(),
+                    hash: first.hash ^ 1,
+                    size_bytes: 2048,
+                    mtime: None,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: Some(MediaFileContent::Movie { movie_entry_id }),
+                    status: FileStatus::Known,
+                    classifier_version: 0,
+                })
+                .await;
+
+            assert!(second.is_err(), "a second row for a path must be refused");
+            let stored = fixture
+                .repo()
+                .find_by_path(&first.path.to_string_lossy())
+                .await
+                .unwrap()
+                .expect("the first row is still there");
+            assert_eq!(stored.id, first.id);
+            assert_eq!(stored.hash, first.hash);
+        }
+
         #[tokio::test]
         async fn a_multi_episode_range_is_stored_with_its_first_episode() {
             let fixture = $setup().await;
