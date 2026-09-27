@@ -533,6 +533,7 @@ macro_rules! file_repository_contract {
         use ::uuid::Uuid;
         use $crate::models::file::{
             CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent,
+            UpdateMediaFile,
         };
         use $crate::repositories::contract::fixture::FileRepositoryFixture;
 
@@ -675,6 +676,81 @@ macro_rules! file_repository_contract {
             let stored = repo.find_by_id(file.id).await.unwrap().expect("still present");
             assert!(stored.content.is_none());
             assert_eq!(stored.classifier_version, 8);
+        }
+
+        /// A file with no content is `Unknown`: `Known` and `Changed` name a
+        /// movie's or an episode's file. Every write that would leave a row
+        /// otherwise is refused, and a refused update changes nothing.
+        #[tokio::test]
+        async fn a_file_without_content_can_only_be_unknown() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let create = |status: FileStatus| {
+                let unique = Uuid::new_v4();
+                CreateMediaFile {
+                    library_id: library,
+                    path: PathBuf::from(format!("/videos/{library}/{unique}.mkv")),
+                    hash: (unique.as_u128() as u64) >> 1,
+                    size_bytes: 1024,
+                    mtime: None,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: None,
+                    status,
+                    classifier_version: 0,
+                }
+            };
+            for status in [FileStatus::Known, FileStatus::Changed] {
+                assert!(
+                    repo.create(create(status)).await.is_err(),
+                    "created a {status:?} file with no content"
+                );
+            }
+            let unknown = repo
+                .create(create(FileStatus::Unknown))
+                .await
+                .expect("an Unknown file with no content is valid");
+
+            for status in [FileStatus::Known, FileStatus::Changed] {
+                let refused = repo
+                    .update(UpdateMediaFile {
+                        id: unknown.id,
+                        hash: Some(unknown.hash + 1),
+                        size_bytes: Some(2048),
+                        mtime: None,
+                        mime_type: None,
+                        duration: None,
+                        container_format: None,
+                        content: None,
+                        status: Some(status),
+                    })
+                    .await;
+                assert!(refused.is_err(), "updated to {status:?} with no content");
+                let refused = repo
+                    .set_classification(
+                        unknown.id,
+                        FileClassification {
+                            content: None,
+                            status,
+                            classifier_version: 1,
+                        },
+                    )
+                    .await;
+                assert!(refused.is_err(), "classified {status:?} with no content");
+            }
+            let stored = repo
+                .find_by_id(unknown.id)
+                .await
+                .unwrap()
+                .expect("still present");
+            assert_eq!(stored.status, FileStatus::Unknown);
+            assert_eq!(
+                (stored.hash, stored.size_bytes, stored.classifier_version),
+                (unknown.hash, unknown.size_bytes, 0),
+                "a refused write changes nothing"
+            );
         }
 
         #[tokio::test]

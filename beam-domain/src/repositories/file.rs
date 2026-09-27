@@ -42,6 +42,10 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read.
     async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
+    /// Every write below refuses a row with no content whose status is not
+    /// `Unknown`: a file is `Known` (or `Changed`) only as a movie's or an
+    /// episode's file. Postgres enforces it with the `files` CHECK
+    /// constraint.
     async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr>;
     async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr>;
     /// Replace `id`'s classification -- content, status and classifier
@@ -78,7 +82,7 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
-    use crate::models::file::MediaFileContent;
+    use crate::models::file::{FileStatus, MediaFileContent};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Mutex;
@@ -86,6 +90,18 @@ pub mod in_memory {
     #[derive(Debug, Default)]
     pub struct InMemoryFileRepository {
         pub files: Mutex<HashMap<Uuid, MediaFile>>,
+    }
+
+    /// The `files` CHECK constraint the Postgres schema enforces: a row with
+    /// no content is `Unknown`.
+    fn check_status(file: &MediaFile) -> Result<(), DbErr> {
+        if file.content.is_none() && file.status != FileStatus::Unknown {
+            return Err(DbErr::Custom(format!(
+                "files CHECK: file {} has no content but status {:?}",
+                file.id, file.status
+            )));
+        }
+        Ok(())
     }
 
     #[async_trait]
@@ -195,18 +211,22 @@ pub mod in_memory {
                 missing_since: None,
                 classifier_version: create.classifier_version,
             };
+            check_status(&file)?;
             self.files.lock().unwrap().insert(file.id, file.clone());
             Ok(file)
         }
 
         async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr> {
             let mut files = self.files.lock().unwrap();
-            let file = files
+            let stored = files
                 .get_mut(&update.id)
                 .ok_or(DbErr::RecordNotFound(format!(
                     "File {} not found",
                     update.id
                 )))?;
+            // Applied to a copy, so a write the CHECK refuses changes nothing.
+            let mut updated = stored.clone();
+            let file = &mut updated;
             if let Some(hash) = update.hash {
                 file.hash = hash;
             }
@@ -232,7 +252,9 @@ pub mod in_memory {
                 file.content = Some(content);
             }
             file.updated_at = chrono::Utc::now();
-            Ok(file.clone())
+            check_status(&updated)?;
+            *stored = updated.clone();
+            Ok(updated)
         }
 
         async fn set_classification(
@@ -246,14 +268,17 @@ pub mod in_memory {
                 classifier_version,
             } = classification;
             let mut files = self.files.lock().unwrap();
-            let file = files
+            let stored = files
                 .get_mut(&id)
                 .ok_or(DbErr::RecordNotFound(format!("File {id} not found")))?;
+            let mut file = stored.clone();
             file.content = content;
             file.status = status;
             file.classifier_version = classifier_version;
             file.updated_at = chrono::Utc::now();
-            Ok(file.clone())
+            check_status(&file)?;
+            *stored = file.clone();
+            Ok(file)
         }
 
         async fn mark_missing(&self, ids: Vec<Uuid>, at: DateTime<Utc>) -> Result<u64, DbErr> {

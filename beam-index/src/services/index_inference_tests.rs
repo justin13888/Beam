@@ -321,6 +321,29 @@ async fn a_season_folder_file_with_no_episode_number_is_kept_untitled_and_report
     );
 }
 
+/// An unclassifiable file whose content later changes is re-probed and
+/// refreshed, and stays `Unknown`: marking it `Known` with no movie or
+/// episode is what the `files` CHECK refuses, and every later scan would
+/// then fail on it.
+#[tokio::test]
+async fn a_changed_unclassifiable_file_is_refreshed_and_stays_unknown() {
+    let h = Harness::new().await;
+    let rel = "Show Name/Season 01/Behind the Scenes.mkv";
+    let path = h.write(rel);
+    h.scan().await;
+    let before = h.file(rel);
+
+    std::fs::write(&path, b"a re-encode, longer than what was there").unwrap();
+    h.scan().await;
+
+    let after = h.file(rel);
+    assert_eq!(after.id, before.id);
+    assert_ne!(after.hash, before.hash, "the new content was recorded");
+    assert_ne!(after.size_bytes, before.size_bytes);
+    assert_eq!(after.status, FileStatus::Unknown);
+    assert!(after.content.is_none(), "{:?}", after.content);
+}
+
 /// Decision D182-C4: a fansub `<title> - <n>` whose folder spells the show
 /// differently (romaji against English) is not a movie. It is kept untitled
 /// and the administrator is told, rather than a season becoming dozens of

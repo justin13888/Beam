@@ -914,7 +914,12 @@ impl LocalIndexService {
 
     /// Apply a confirmed content change: refresh hash, metadata and streams.
     /// The file's movie/episode classification is intentionally left unchanged
-    /// since the path (and therefore the inferred title) has not moved.
+    /// since the path (and therefore the inferred title) has not moved -- and
+    /// so is its status when it has none: a file with no movie or episode
+    /// (one the path could not classify, or whose first probe failed) stays
+    /// `Unknown`, which is all the `files` CHECK allows it to be. A row whose
+    /// probe failed is classified by the next scan's reclassification, now
+    /// that it has a runtime.
     async fn reconcile_changed_file(
         &self,
         existing: &MediaFile,
@@ -932,6 +937,11 @@ impl LocalIndexService {
                 self.insert_media_streams(existing.id, &metadata).await?;
 
                 let duration = Duration::from_secs_f64(metadata.duration_seconds());
+                let status = if existing.content.is_some() {
+                    FileStatus::Known
+                } else {
+                    FileStatus::Unknown
+                };
                 let updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -943,7 +953,7 @@ impl LocalIndexService {
                         duration: Some(duration),
                         container_format: Some(metadata.format_name.clone()),
                         content: None,
-                        status: Some(FileStatus::Known),
+                        status: Some(status),
                     })
                     .await?;
                 self.check_and_report_duplicate(&updated).await;
@@ -956,6 +966,11 @@ impl LocalIndexService {
                     path.display(),
                     e
                 );
+                let status = if existing.content.is_some() {
+                    FileStatus::Changed
+                } else {
+                    FileStatus::Unknown
+                };
                 let updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -967,7 +982,7 @@ impl LocalIndexService {
                         duration: None,
                         container_format: None,
                         content: None,
-                        status: Some(FileStatus::Changed),
+                        status: Some(status),
                     })
                     .await?;
                 self.check_and_report_duplicate(&updated).await;
@@ -3658,9 +3673,12 @@ mod tests {
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: None,
-            content: None,
+            // A Known row is a movie's or an episode's file (the `files` CHECK).
+            content: Some(MediaFileContent::Movie {
+                movie_entry_id: Uuid::new_v4(),
+            }),
             status: FileStatus::Known,
-            classifier_version: 0,
+            classifier_version: CLASSIFIER_VERSION,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -4663,9 +4681,12 @@ mod tests {
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: Some("mp4".to_string()),
-            content: None,
+            // A Known row is a movie's or an episode's file (the `files` CHECK).
+            content: Some(MediaFileContent::Movie {
+                movie_entry_id: Uuid::new_v4(),
+            }),
             status: FileStatus::Known,
-            classifier_version: 0,
+            classifier_version: CLASSIFIER_VERSION,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -4723,9 +4744,12 @@ mod tests {
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: Some("mp4".to_string()),
-            content: None,
+            // A Known row is a movie's or an episode's file (the `files` CHECK).
+            content: Some(MediaFileContent::Movie {
+                movie_entry_id: Uuid::new_v4(),
+            }),
             status: FileStatus::Known,
-            classifier_version: 0,
+            classifier_version: CLASSIFIER_VERSION,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
