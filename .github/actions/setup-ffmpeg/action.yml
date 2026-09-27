@@ -8,28 +8,65 @@ runs:
   using: composite
   steps:
     # The key includes the runner image version. This build is `--enable-shared`
-    # against the image's own libx264/libx265/libvpx/libass/openssl, so a cached
-    # /opt/ffmpeg is only valid for the image it was built on. When the image
-    # updates those .so files underneath a restored cache, the result is not a
-    # build failure but a SIGSEGV the first time anything decodes -- ffprobe
-    # keeps demuxing happily, which makes it look like the caller's bug.
+    # against libx264/libx265/libvpx/libass/openssl, and those libraries do not
+    # all ship in the image: the install below pulls several of them (e.g.
+    # libx264-164, libx265-199, libvpx9) from the Ubuntu archive as it stands at
+    # install time. On a cache hit that step is skipped and the libraries come
+    # from install-rust-build-deps, which every job using the restored build
+    # runs first, again from the archive. So the image version does not pin the
+    # library versions; it only bounds how long an entry lives. Reuse is safe
+    # because Ubuntu's stable updates keep the soname, and a same-soname update
+    # is ABI-compatible. A soname bump renames the package (libx264-164 ->
+    # libx264-165), so it surfaces as a missing .so at link or load time rather
+    # than being caught by this key. A build loaded against libraries it was not
+    # compiled for fails not at build time but with a SIGSEGV the first time
+    # anything decodes -- ffprobe keeps demuxing happily, which makes it look
+    # like the caller's bug.
+    #
+    # The key also hashes this file, so a changed configure flag or package list
+    # cannot restore a build made from the old recipe (681c8bb: a stale cache
+    # hid a null dereference that way).
+    #
+    # The version is read in a shell step because the `env` expression context
+    # holds only variables the workflow itself sets: ImageOS/ImageVersion are
+    # process environment on the runner, so `${{ env.ImageVersion }}` rendered
+    # empty and the key was the same on every image (#196). Failing when they
+    # are unset keeps that from silently recurring on a runner without them.
+    - name: Resolve runner image
+      id: image
+      shell: bash
+      run: |
+        if [ -z "${ImageOS:-}" ] || [ -z "${ImageVersion:-}" ]; then
+          echo "::error::ImageOS/ImageVersion unset; the FFmpeg cache key cannot tell runner images apart"
+          exit 1
+        fi
+        echo "id=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+
     - name: Cache FFmpeg 9.0 build
       id: cache-ffmpeg
       uses: actions/cache@v6
       with:
         path: /opt/ffmpeg
-        key: ffmpeg-9.0-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-v2
+        key: ffmpeg-9.0-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.id }}-${{ hashFiles('.github/actions/setup-ffmpeg/action.yml') }}-v2
 
+    # Plain apt-get, not awalsh128/cache-apt-pkgs-action: at v1.6.3 (its latest
+    # tag) that action refreshes the package index only under nektos/act
+    # (`update_apt_lists_if_stale` is gated on ACT=true), so on a hosted runner
+    # it resolves versions against the image's baked-in index. Once the mirror
+    # drops a superseded version, the install 404s and configure fails on the
+    # missing nasm (#196). Refreshing the index first removes that failure. The
+    # -dev packages and the runtime libraries they pull in come from the archive
+    # at install time, not from the image -- see the cache key comment above.
     - name: Install FFmpeg build dependencies
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-      uses: awalsh128/cache-apt-pkgs-action@v1.6.3
-      with:
-        packages: >-
-          build-essential pkg-config yasm nasm wget ca-certificates
-          libx264-dev libx265-dev libvpx-dev
-          libopus-dev libass-dev libfreetype-dev libfontconfig-dev
+      shell: bash
+      run: |
+        sudo apt-get -o Acquire::Retries=3 update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y \
+          build-essential pkg-config yasm nasm wget ca-certificates \
+          libx264-dev libx265-dev libvpx-dev \
+          libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
           libfribidi-dev libogg-dev libssl-dev
-        version: 1.0
 
     - name: Build FFmpeg 9.0 from source
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
