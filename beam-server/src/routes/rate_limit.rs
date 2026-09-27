@@ -53,9 +53,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use kynos::error::problem::ProblemType;
 use kynos::http::Request;
 use kynos::middleware::rate_limit::decision::{Decision, RateLimitPolicy, ServiceLimit};
 use kynos::middleware::rate_limit::key::{ByClientAddress, RateLimitKey};
+use kynos::middleware::rate_limit::{Legacy, RateLimit};
 use kynos::router::operation::Route;
 
 use crate::config::ServerConfig;
@@ -99,6 +101,20 @@ impl Class {
     }
 }
 
+/// The problem `type` of every 429 a limiter here refuses with.
+///
+/// One code for both classes: what a client does about it -- wait for
+/// `Retry-After` -- is the same whichever budget ran out.
+pub struct RateLimited;
+
+impl ProblemType for RateLimited {
+    const TYPE_URI: Option<&'static str> =
+        Some("https://beam.justinchung.net/reference/errors/#rate-limited");
+}
+
+/// The interceptor a rate-limited group mounts.
+pub type BeamLimiter = RateLimit<BeamRateLimit, Legacy, RateLimited>;
+
 /// A per-client token-bucket limiter for one [`Class`].
 #[derive(Debug)]
 pub struct BeamRateLimit {
@@ -130,6 +146,15 @@ impl BeamRateLimit {
             class,
             buckets: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The interceptor for `class`, naming [`RateLimited`] on its 429.
+    ///
+    /// The one way a limiter is mounted, so the type a refusal carries cannot
+    /// differ between the router and a test that drives it.
+    #[must_use]
+    pub fn interceptor(class: Class) -> BeamLimiter {
+        RateLimit::new(Self::new(class)).problem_type::<RateLimited>()
     }
 
     /// Refill `bucket` to `now` and, if a token is available, consume one.

@@ -110,19 +110,17 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   one from `#[problem(base = ...)]` plus the variant's name, but then a rename silently changes the
   published contract with no string to diff, and the same code is deliberately emitted from several
   enums — `internal` from nearly every one of them — which an implicit convention would hide.
-  `routes/taxonomy_tests.rs` asserts that every literal starts with `ERROR_BASE` and that the
-  set of codes matches the set of sections on the published page, in both directions.
+  `routes/taxonomy_tests.rs` reads every `type` the exported document declares, asserts each starts
+  with `ERROR_BASE`, and asserts the set of codes matches the set of sections on the published page,
+  in both directions.
 
-  **The codes do not reach the OpenAPI document yet**, and that is the one thing about this
-  contract still worth knowing. Kynos's `ApiError` derive uses `type` when it renders a problem but
-  attaches an unconstrained `Problem` schema to every declared response, so `openapi.json` describes
-  every error as `$ref: '#/components/schemas/Problem'` with nothing narrowing `type`. The codes are
-  correct on the wire and invisible to a generated client, which is why `taxonomy_tests` pins them
-  against the published page rather than against the spec. The OpenAPI-correct expression is `type`
-  as a `const` per response, and a `oneOf` of const-narrowed problems where several variants share
-  one status; filed as [getkono/kynos#103](https://github.com/getkono/kynos/issues/103). When it
-  lands, that test should read `openapi.json` instead, and `codegen:openapi:check` starts catching a
-  renamed code on its own.
+  **The codes are part of the OpenAPI document.** Each problem response narrows `type` to a `const`,
+  and where several variants -- or an extractor's `about:blank` -- share one status, to a `oneOf` of
+  const-narrowed problems. A generated client therefore sees every code, and `codegen:openapi:check`
+  catches a renamed one on its own. The consequence to know: spargen lowers each narrowed `type` to
+  a closed set, so a native client decodes only the codes it was generated with. A code the server
+  adds later reaches an older client as an undecodable body with no status, not as the documented
+  status it arrived with ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)).
 
   The error types are a **family, one per operation shape**, not one union. Kynos derives an
   operation's `responses` from its return type, so a shared union would make `GET /v1/genres`
@@ -133,18 +131,13 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   absent from almost all of them because they arrive from the `SessionAuth`/`AdminAuth` extractors,
   which is what makes taking the extractor and documenting the requirement one act.
 
-  **Framework-originated statuses carry `about:blank`, and for most of them that is correct rather
-  than a gap.** For the extractor `400`/`415`/`422`, `RangeRejection`'s `416`, the `404`/`405`
-  fallback and `SessionAuth`'s `401`, the status genuinely is the whole story — RFC 9457's own
-  reading. Two are gaps, and both are filed upstream. The **admin `403`**:
-  `SessionAuthenticator::authorize` returns `AuthRejection::Forbidden`, and Kynos offers no way for
-  an application to name it, so the most actionable 403 on the surface is one Beam cannot publish
-  ([getkono/kynos#105](https://github.com/getkono/kynos/issues/105)). The rate limiter's **`429`**:
-  `RateLimitPolicy`'s `Decision` carries nowhere for a `type` either, and the response Kynos
-  *declares* for it has no content while the one it sends is a problem document
-  ([getkono/kynos#104](https://github.com/getkono/kynos/issues/104);
-  [`kynos-migration-readiness.md`](kynos-migration-readiness.md) has the detail). Neither is
-  "the one" — they are the two responses Beam answers with and cannot name.
+  **Framework-originated statuses carry `about:blank` where the status is the whole story.** For
+  the extractor `400`/`415`/`422`, `RangeRejection`'s `416`, the `404`/`405` fallback and
+  `SessionAuth`'s `401` that is RFC 9457's own reading. The two framework responses with a next step
+  of their own are named: the **admin `403`** is `admin-required`, which `SessionAuthenticator::authorize`
+  sends through `AuthRejection::forbidden_as` and the `Admin` scope set declares as its
+  `FORBIDDEN_TYPE`; the rate limiter's **`429`** is `rate-limited`, which the limiter names through
+  `RateLimit::problem_type`.
 
   Where several components declare the same status on one operation, Kynos titles the response
   from the first declaration it meets. An extractor's `400` and an authenticator's `401` come before

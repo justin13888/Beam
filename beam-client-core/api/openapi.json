@@ -1577,7 +1577,7 @@
                       "properties": {
                         "type": {
                           "type": "string",
-                          "const": "about:blank"
+                          "const": "https://beam.justinchung.net/reference/errors/#rate-limited"
                         }
                       }
                     }
@@ -3912,7 +3912,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -4129,7 +4192,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -4324,7 +4450,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -4495,7 +4684,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -4687,7 +4939,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -4818,7 +5133,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -4939,7 +5317,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -5049,7 +5490,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -5197,7 +5701,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -5346,7 +5913,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -5552,7 +6182,70 @@
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
                 }
               }
             }
@@ -6500,7 +7193,7 @@
                       "properties": {
                         "type": {
                           "type": "string",
-                          "const": "about:blank"
+                          "const": "https://beam.justinchung.net/reference/errors/#rate-limited"
                         }
                       }
                     }
@@ -6840,7 +7533,7 @@
                       "properties": {
                         "type": {
                           "type": "string",
-                          "const": "about:blank"
+                          "const": "https://beam.justinchung.net/reference/errors/#rate-limited"
                         }
                       }
                     }

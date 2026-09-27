@@ -23,14 +23,13 @@ pub mod tags;
 
 use kynos::middleware::catch_panic::Propagate;
 use kynos::middleware::cors::Cors;
-use kynos::middleware::rate_limit::RateLimit;
 use kynos::middleware::stack::Cons;
 use kynos::openapi::Info;
 use kynos::prelude::*;
 use kynos::router::docs::Docs;
 
 use crate::bootstrap;
-use crate::routes::rate_limit::{BeamRateLimit, Class};
+use crate::routes::rate_limit::{BeamLimiter, BeamRateLimit, Class};
 use crate::state::AppState;
 
 #[cfg(test)]
@@ -52,7 +51,7 @@ mod taxonomy_tests;
 /// to compile rather than at startup. Written out rather than inferred: a new
 /// rate-limited group is then a compile error here, next to the list it joins,
 /// instead of a return type that silently widens.
-pub type RestScopes = Cons<RateLimit<BeamRateLimit>, Cons<RateLimit<BeamRateLimit>, ()>>;
+pub type RestScopes = Cons<BeamLimiter, Cons<BeamLimiter, ()>>;
 
 /// [`RestScopes`] beneath the two interceptors [`create_router`] wraps `/v1` in.
 pub type ServedScopes = Cons<middleware::EnforceSameOrigin, Cons<Cors, RestScopes>>;
@@ -82,7 +81,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
         .group(
             Group::new("/")
                 .mount(kynos::routes![media::browse_media])
-                .intercept(RateLimit::new(BeamRateLimit::new(Class::Search))),
+                .intercept(BeamRateLimit::interceptor(Class::Search)),
         )
         .mount(kynos::routes![
             playback::report_playback_progress,
@@ -126,7 +125,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
         .group(
             Group::new("/")
                 .mount(kynos::routes![auth::oidc_login, auth::oidc_callback])
-                .intercept(RateLimit::new(BeamRateLimit::new(Class::Auth))),
+                .intercept(BeamRateLimit::interceptor(Class::Auth)),
         )
 }
 

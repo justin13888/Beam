@@ -19,7 +19,6 @@ use std::time::Duration;
 use beam_domain::services::TestClock;
 use kynos::extract::body::text::Text;
 use kynos::http::StatusCode;
-use kynos::middleware::rate_limit::RateLimit;
 use kynos::prelude::*;
 use kynos::test::{TestClient, TestResponse};
 
@@ -52,7 +51,7 @@ fn harness(class: Class, adjust: impl FnOnce(&mut ServerConfig)) -> Harness {
     let clock = Arc::new(TestClock::new());
     let service = Router::new()
         .mount(kynos::routes![probe])
-        .intercept(RateLimit::new(BeamRateLimit::new(class)))
+        .intercept(BeamRateLimit::interceptor(class))
         .build(make_app_state_with_clock(adjust, clock.clone()))
         .expect("the probe router describes itself");
 
@@ -123,20 +122,9 @@ async fn a_burst_is_allowed_and_then_refused_with_a_problem_document() {
     assert_eq!(field(&response, "x-ratelimit-reset"), retry_after);
 
     // The refusal is RFC 9457, not the `{"error": ...}` shape Salvo's handler
-    // wrote. Kynos renders it, so the type is the unidentified default.
-    //
-    // Both halves of this pin a gap rather than a preference, and both are
-    // getkono/kynos#104. Beam cannot supply a `type` here -- `RateLimitPolicy`
-    // returns a `Decision`, which carries nowhere to put one -- and the 429
-    // that kynos *declares* has no content at all, while the one it sends is
-    // the problem document asserted below. The document therefore misdescribes
-    // this response, which is the failure ADR-0010 exists to prevent, and
-    // there is nothing to fix locally that would not be the hand-written
-    // exception AGENTS.md rule 3 forbids.
-    //
-    // These assertions are expected to fail when the issue is fixed. That is
-    // the point: the failure is the reminder to name this response.
-    response.assert_problem_type("about:blank");
+    // wrote, and it names itself: a client branches on the code to wait out
+    // `Retry-After` rather than reading the status alone.
+    response.assert_problem_type("https://beam.justinchung.net/reference/errors/#rate-limited");
     assert_eq!(
         response.header("content-type"),
         Some("application/problem+json")
