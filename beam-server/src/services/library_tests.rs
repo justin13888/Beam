@@ -32,6 +32,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(mock_index_service),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         )
     }
 
@@ -178,6 +179,7 @@ mod tests {
             notif as Arc<dyn NotificationService>,
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service
@@ -211,6 +213,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service
@@ -235,6 +238,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service
@@ -261,6 +265,7 @@ mod tests {
             Arc::new(InMemoryPathValidator::path_outside_root(
                 "path escapes root",
             )),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service
@@ -281,6 +286,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::path_not_found("no such directory")),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service
@@ -312,6 +318,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service
@@ -334,6 +341,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_libraries("user1".to_string()).await;
@@ -370,6 +378,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_libraries("user1".to_string()).await;
@@ -401,6 +410,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_libraries("user1".to_string()).await;
@@ -430,6 +440,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_libraries("user1".to_string()).await;
@@ -459,6 +470,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_library_by_id(lib_id.to_string()).await;
@@ -483,6 +495,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_library_by_id(Uuid::new_v4().to_string()).await;
@@ -502,6 +515,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service
@@ -542,6 +556,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_library_files(lib_id.to_string()).await;
@@ -567,6 +582,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_library_files(Uuid::new_v4().to_string()).await;
@@ -585,6 +601,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service
@@ -616,6 +633,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_file_by_id(file_id.to_string()).await;
@@ -645,6 +663,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_file_by_id(Uuid::new_v4().to_string()).await;
@@ -680,6 +699,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         assert!(
@@ -702,6 +722,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.get_file_by_id("not-a-valid-uuid".to_string()).await;
@@ -728,6 +749,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.delete_library(Uuid::new_v4().to_string()).await;
@@ -762,6 +784,7 @@ mod tests {
             notif as Arc<dyn NotificationService>,
             Arc::new(idle_index),
             Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
         let result = service.delete_library(lib_id.to_string()).await;
@@ -814,6 +837,7 @@ mod tests {
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
             Arc::new(InMemoryPathValidator::success(PathBuf::from(resolves_to))),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         )
     }
 

@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use beam_domain::models::Library;
 use beam_domain::repositories::LibraryRepository;
 use beam_domain::services::{Clock, RealClock};
 
@@ -105,9 +106,6 @@ pub struct BackgroundIndexingConfig {
     /// Interval between periodic full rescans of every library, in seconds.
     /// Acts as the backstop that catches changes the watcher missed.
     pub scan_interval_secs: u64,
-    /// Whether to run the filesystem watcher. When false, only the startup
-    /// scan and the periodic rescans run.
-    pub watch_enabled: bool,
     /// Debounce window for filesystem-watcher events, in milliseconds. Bursts
     /// of events for the same path within this window collapse into one.
     pub watch_debounce_ms: u64,
@@ -144,33 +142,107 @@ impl BackgroundIndexingTasks {
     }
 }
 
+/// What library creation and deletion tell the filesystem watcher (issue
+/// #180), so a new library is watched as soon as it exists and a deleted one
+/// stops being watched at once, rather than at the next maintenance cycle.
+///
+/// Narrow, so the library service depends on these two moments and not on
+/// the watcher. The maintenance cycle's refresh stays the backstop: a
+/// registration that fails here is retried there, and a library deleted
+/// while a refresh was registering it is unwatched by the next one.
+#[async_trait::async_trait]
+pub trait LibraryWatchHook: Send + Sync + std::fmt::Debug {
+    /// `library` has just been created.
+    async fn library_created(&self, library: &Library);
+    /// The library `library_id` has just been deleted.
+    async fn library_deleted(&self, library_id: Uuid);
+}
+
+/// The process's filesystem watcher, if it runs, shared by the background
+/// tasks and by library creation and deletion ([`LibraryWatchHook`]).
+#[derive(Debug, Clone)]
+pub struct LibraryWatches {
+    watcher: Option<Arc<dyn FsWatcher>>,
+}
+
+impl LibraryWatches {
+    /// Watch through `watcher`, or not at all.
+    pub fn new(watcher: Option<Arc<dyn FsWatcher>>) -> Self {
+        Self { watcher }
+    }
+
+    /// The production watcher when `watch_enabled`, reporting how each
+    /// library is watched to `watch_status` -- the instance the admin status
+    /// endpoint reads.
+    pub fn from_config(watch_enabled: bool, watch_status: Arc<WatchStatus>) -> Self {
+        if !watch_enabled {
+            info!("Filesystem watcher disabled by configuration");
+            return Self::new(None);
+        }
+        watch_status.set_enabled(true);
+        watch_status.set_max_user_watches(read_max_user_watches());
+        Self::new(Some(Arc::new(NotifyFsWatcher::new(
+            Arc::new(StatfsFilesystemProbe),
+            watch_status,
+        ))))
+    }
+
+    /// The watcher, `None` when watching is disabled.
+    pub fn watcher(&self) -> Option<Arc<dyn FsWatcher>> {
+        self.watcher.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LibraryWatchHook for LibraryWatches {
+    /// Registered on the blocking pool: registering walks the tree. A library
+    /// that comes back polled needs no scan here: it has never been scanned,
+    /// so its first scan -- an administrator's, or the next periodic one --
+    /// indexes everything already in it, as for a natively watched one.
+    async fn library_created(&self, library: &Library) {
+        let Some(watcher) = self.watcher.clone() else {
+            return;
+        };
+        let library_id = library.id;
+        let root = library.root_path.clone();
+        match tokio::task::spawn_blocking(move || watcher.watch_library(library_id, &root)).await {
+            Ok(Ok(mode)) => info!(
+                %library_id,
+                "Watching new library '{}' at {} ({mode:?})",
+                library.name,
+                library.root_path.display()
+            ),
+            // The next maintenance cycle registers it.
+            Ok(Err(e)) => warn!(%library_id, "Failed to watch a new library: {e}"),
+            Err(e) => error!(%library_id, "Watching a new library failed: {e}"),
+        }
+    }
+
+    async fn library_deleted(&self, library_id: Uuid) {
+        let Some(watcher) = self.watcher.clone() else {
+            return;
+        };
+        match tokio::task::spawn_blocking(move || watcher.unwatch_library(library_id)).await {
+            Ok(Ok(())) => info!(%library_id, "Stopped watching a deleted library"),
+            Ok(Err(e)) => warn!(%library_id, "Failed to unwatch a deleted library: {e}"),
+            Err(e) => error!(%library_id, "Unwatching a deleted library failed: {e}"),
+        }
+    }
+}
+
 /// Spawn the startup scan, filesystem watcher, and periodic-maintenance
 /// background tasks for in-process indexing. Call once at server startup,
 /// after the [`LocalIndexService`] is constructed.
 ///
-/// `watch_status` is where the watcher reports how each library is watched;
-/// the admin status endpoint reads the same instance.
+/// `watches` is the watcher the library service also tells about created
+/// and deleted libraries (see [`LibraryWatches::from_config`]).
 pub fn spawn_background_indexing(
     index_service: Arc<LocalIndexService>,
     config: BackgroundIndexingConfig,
-    watch_status: Arc<WatchStatus>,
+    watches: &LibraryWatches,
 ) -> BackgroundIndexingTasks {
     let indexer: Arc<dyn BackgroundIndexer> = index_service;
-
-    // Filesystem watcher for near-real-time reconciliation (optional).
-    let watcher: Option<Arc<dyn FsWatcher>> = if config.watch_enabled {
-        watch_status.set_enabled(true);
-        watch_status.set_max_user_watches(read_max_user_watches());
-        Some(Arc::new(NotifyFsWatcher::new(
-            Arc::new(StatfsFilesystemProbe),
-            watch_status,
-        )))
-    } else {
-        info!("Filesystem watcher disabled by configuration");
-        None
-    };
-
-    spawn_background_indexing_with(indexer, watcher, Arc::new(RealClock), config)
+    spawn_background_indexing_with(indexer, watches.watcher(), Arc::new(RealClock), config)
 }
 
 /// [`spawn_background_indexing`] with every collaborator injected.

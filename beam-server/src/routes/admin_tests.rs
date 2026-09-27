@@ -211,6 +211,9 @@ struct TestFixture {
     /// directory for a fixture from [`make_scan_test_state`], and a path
     /// that does not exist otherwise.
     library_root: PathBuf,
+    /// The filesystem watcher the library service tells about created and
+    /// deleted libraries.
+    watcher: Arc<beam_index::services::watcher::InMemoryFsWatcher>,
     _scratch: Option<TempDir>,
 }
 
@@ -349,6 +352,7 @@ fn build_fixture(
         .with_clock(clock.clone()),
     );
 
+    let watcher = Arc::new(beam_index::services::watcher::InMemoryFsWatcher::new());
     let library: Arc<dyn LibraryService> = Arc::new(LocalLibraryService::new(
         library_repo.clone(),
         file_repo.clone(),
@@ -357,6 +361,9 @@ fn build_fixture(
         notification.clone(),
         index.clone() as Arc<dyn IndexService>,
         Arc::new(InMemoryPathValidator::success(library_root.clone())),
+        Arc::new(beam_index::runtime::LibraryWatches::new(Some(
+            watcher.clone(),
+        ))),
     ));
 
     let services = AppServices {
@@ -427,6 +434,7 @@ fn build_fixture(
         hash_gate,
         clock,
         library_root,
+        watcher,
         _scratch: scratch,
     }
 }
@@ -1084,6 +1092,37 @@ async fn deleting_a_library_returns_204_then_404_on_repeat() {
             .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+/// A library is watched from the moment it is created, and no longer from
+/// the moment it is deleted -- not from the next maintenance cycle (issue
+/// #180).
+#[tokio::test]
+async fn a_created_library_is_watched_at_once_and_a_deleted_one_unwatched() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    let created: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+    let id = uuid::Uuid::parse_str(&created.id).unwrap();
+    assert_eq!(fixture.watcher.watched_libraries(), vec![id]);
+
+    let deleted = client
+        .delete(&format!("/v1/admin/libraries/{}", created.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(fixture.watcher.watched_libraries().is_empty());
 }
 
 // ─── Admin logs ─────────────────────────────────────────────────────────────

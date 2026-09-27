@@ -155,7 +155,6 @@ impl BackgroundIndexer for RecordingIndexer {
 fn config(scan_interval_secs: u64, watch_debounce_ms: u64) -> BackgroundIndexingConfig {
     BackgroundIndexingConfig {
         scan_interval_secs,
-        watch_enabled: true,
         watch_debounce_ms,
         watch_poll_interval_secs: 300,
     }
@@ -539,6 +538,52 @@ async fn events_for_different_paths_in_one_burst_each_reconcile() {
 
 // ── Watch lifecycle and newly polled libraries (issue #186) ─────────────────
 
+/// A library is watched the moment it is created and unwatched the moment
+/// it is deleted, not at the next maintenance cycle (issue #180).
+#[tokio::test]
+async fn library_creation_and_deletion_reach_the_watcher_at_once() {
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let watches = LibraryWatches::new(Some(watcher.clone()));
+    let kept = library("kept", "/videos/kept");
+    let created = library("created", "/videos/created");
+    watches.library_created(&kept).await;
+
+    watches.library_created(&created).await;
+    assert_eq!(watcher.watched_libraries(), vec![kept.id, created.id]);
+
+    watches.library_deleted(created.id).await;
+    assert_eq!(watcher.watched_libraries(), vec![kept.id]);
+}
+
+/// A library the hook registered is not registered a second time by the
+/// maintenance cycle's refresh, which asks the watcher what it holds.
+#[tokio::test]
+async fn a_library_the_hook_registered_is_not_registered_again_by_the_refresh() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let watches = LibraryWatches::new(Some(watcher.clone()));
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        watches.watcher(),
+        clock.clone(),
+        config(60, 2000),
+    );
+    until("the maintenance loop and the poller to sleep", || {
+        clock.waiter_count() == 2
+    })
+    .await;
+
+    let created = library("created", "/videos/created");
+    indexer.store(&created);
+    watches.library_created(&created).await;
+    clock.advance(Duration::from_secs(60));
+    until("the next cycle to finish", || clock.waiter_count() == 2).await;
+
+    assert_eq!(watcher.watched_libraries(), vec![created.id]);
+    tasks.abort();
+}
+
 #[tokio::test]
 async fn deleted_libraries_are_unwatched_on_the_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
@@ -877,19 +922,18 @@ mod local_index_service_adapter {
         ))
     }
 
-    /// The admin status reads `enabled` from the status the runtime is handed,
-    /// so the production entry point is what has to set it.
+    /// The admin status reads `enabled` from the status the watches are
+    /// built with, so building them is what has to set it, and the spawned
+    /// tasks run the watcher exactly when it was built.
     #[tokio::test]
     async fn the_production_spawn_reports_whether_the_watcher_runs() {
         for watch_enabled in [false, true] {
             let status = Arc::new(WatchStatus::new());
+            let watches = LibraryWatches::from_config(watch_enabled, status.clone());
             let tasks = spawn_background_indexing(
                 service(Arc::new(InMemoryLibraryRepository::default())),
-                BackgroundIndexingConfig {
-                    watch_enabled,
-                    ..config(3600, 2000)
-                },
-                status.clone(),
+                config(3600, 2000),
+                &watches,
             );
 
             assert_eq!(status.snapshot().enabled, watch_enabled);
@@ -1028,6 +1072,113 @@ mod local_index_service_adapter {
         if let Some(handle) = &tasks.watch_consumer {
             handle.abort();
         }
+    }
+
+    /// The two halves of a rename can land in different debounce windows:
+    /// the old path's removal reconciled -- its row marked missing -- well
+    /// before the new path's creation. The new path still keeps the row
+    /// (issue #180).
+    #[tokio::test]
+    async fn a_rename_split_across_debounce_windows_keeps_the_row() {
+        use beam_domain::repositories::FileRepository;
+
+        let temp = tempfile::tempdir().unwrap();
+        let library_repo = Arc::new(InMemoryLibraryRepository::default());
+        let library = library_repo
+            .create(CreateLibrary {
+                name: "Movies".to_string(),
+                description: None,
+                root_path: temp.path().to_path_buf(),
+            })
+            .await
+            .unwrap();
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let index_service = Arc::new(LocalIndexService::new(
+            library_repo,
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(LocalHashService::new(HashConfig { num_threads: 1 })),
+            Arc::new(LocalMediaInfoService::default()),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        ));
+        let old = temp.path().join("Movie.2019.mkv");
+        std::fs::write(&old, b"not really a movie").unwrap();
+        index_service
+            .reconcile_path(library.id, old.clone(), FsEventKind::Created)
+            .await
+            .unwrap();
+        let row = file_repo
+            .find_by_path(&old.to_string_lossy())
+            .await
+            .unwrap()
+            .expect("indexed");
+
+        let watcher = Arc::new(InMemoryFsWatcher::new());
+        let clock = Arc::new(TestClock::new());
+        let tasks = spawn_background_indexing_with(
+            index_service,
+            Some(watcher.clone()),
+            clock.clone(),
+            config(3600, 2000),
+        );
+        until("both loops to sleep", || clock.waiter_count() == 2).await;
+
+        let new = temp.path().join("Movie (2019).mkv");
+        std::fs::rename(&old, &new).unwrap();
+        let emit = |path: &PathBuf, kind| {
+            watcher.emit(FsEvent {
+                library_id: library.id,
+                path: path.clone(),
+                kind,
+            })
+        };
+
+        emit(&old, FsEventKind::Removed);
+        until("the debounce window to open", || clock.waiter_count() == 3).await;
+        clock.advance(Duration::from_secs(2));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while file_repo
+            .find_by_path(&old.to_string_lossy())
+            .await
+            .unwrap()
+            .is_some_and(|row| row.missing_since.is_none())
+        {
+            assert!(std::time::Instant::now() < deadline, "never marked missing");
+            tokio::task::yield_now().await;
+        }
+
+        emit(&new, FsEventKind::Created);
+        until("the next debounce window to open", || {
+            clock.waiter_count() == 3
+        })
+        .await;
+        clock.advance(Duration::from_secs(2));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let relinked = loop {
+            if let Some(found) = file_repo
+                .find_by_path(&new.to_string_lossy())
+                .await
+                .unwrap()
+            {
+                break found;
+            }
+            assert!(std::time::Instant::now() < deadline, "never reconciled");
+            tokio::task::yield_now().await;
+        };
+
+        assert_eq!(relinked.id, row.id, "the renamed file kept its row");
+        assert_eq!(relinked.missing_since, None);
+        assert!(
+            file_repo
+                .find_by_path(&old.to_string_lossy())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        tasks.abort();
     }
 
     #[tokio::test]

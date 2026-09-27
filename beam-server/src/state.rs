@@ -17,6 +17,7 @@ use beam_domain::services::{Clock, RealClock};
 use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::providers::telemetry::ReqwestTelemetrySink;
+use beam_index::runtime::LibraryWatches;
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
 use beam_index::services::watch_status::WatchStatus;
@@ -177,25 +178,37 @@ pub struct AppServices {
     pub playback_telemetry: Arc<PlaybackTelemetryService>,
 }
 
+/// What [`AppServices::build`] builds: the services, and what the process
+/// entry point needs besides to spawn beam-index's background tasks.
+#[derive(Debug)]
+pub struct BuiltServices {
+    pub services: AppServices,
+    /// The concrete indexer, for `beam_index::runtime`: the background tasks
+    /// need methods beyond the narrow `IndexService` on `services.library`.
+    pub index_service: Arc<LocalIndexService>,
+    /// Likewise the concrete enrichment service, for its sweep loop.
+    pub enrichment_service: Arc<MetadataEnrichmentService>,
+    /// The filesystem watcher, shared by the background tasks and by the
+    /// library service, which tells it about created and deleted libraries
+    /// (issue #180).
+    pub library_watches: Arc<LibraryWatches>,
+}
+
 impl AppServices {
-    /// Build the application's services. Also returns the concrete
-    /// [`LocalIndexService`] and [`MetadataEnrichmentService`] (rather than
-    /// folding them into `AppServices` itself) so the process entry point can
-    /// spawn beam-index's background scan/watch/enrichment tasks via
-    /// `beam_index::runtime` -- those need methods beyond the narrow
-    /// `IndexService`/`MetadataService` trait objects stored on `library`/
-    /// `metadata`. Test fixtures that only need an `AppServices` (not a real
-    /// indexer) are unaffected by these extra return values.
+    /// Build the application's services, and beside them what the process
+    /// entry point needs to spawn beam-index's background scan, watch and
+    /// enrichment tasks (see [`BuiltServices`]). Test fixtures that only
+    /// need an `AppServices` (not a real indexer) are unaffected by these.
     ///
     /// `clock` is the one the caller also hands [`AppState::with_clock`], so
     /// every time-dependent service in the process -- the indexer's scan
     /// stamps and missing-file grace, enrichment, the artwork cache -- reads
     /// the same injected seam.
-    pub async fn new(
+    pub async fn build(
         config: &ServerConfig,
         db: Arc<DatabaseConnection>,
         clock: Arc<dyn Clock>,
-    ) -> eyre::Result<(Self, Arc<LocalIndexService>, Arc<MetadataEnrichmentService>)> {
+    ) -> eyre::Result<BuiltServices> {
         let hash_config = HashConfig::default();
 
         // Create repository implementations
@@ -388,6 +401,15 @@ impl AppServices {
             clock.clone(),
         ));
 
+        // The watcher is built here, not by the background runtime, so the
+        // library service can tell it about libraries as they are created
+        // and deleted.
+        let watch_status = Arc::new(WatchStatus::new());
+        let library_watches = Arc::new(LibraryWatches::from_config(
+            config.watch_enabled,
+            watch_status.clone(),
+        ));
+
         let services = Self {
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
@@ -398,6 +420,7 @@ impl AppServices {
                 notification_service.clone(),
                 index_service.clone() as Arc<dyn IndexService>,
                 Arc::new(OsPathValidator),
+                library_watches.clone(),
             )),
             metadata: Arc::new(
                 DbMetadataService::new(
@@ -424,18 +447,23 @@ impl AppServices {
             pending_auth_store,
             device_auth_store,
             oidc_config,
-            watch_status: Arc::new(WatchStatus::new()),
+            watch_status,
             telemetry,
             playback_telemetry,
         };
 
-        Ok((services, index_service, enrichment_service))
+        Ok(BuiltServices {
+            services,
+            index_service,
+            enrichment_service,
+            library_watches,
+        })
     }
 }
 
 /// Decide which [`EnrichmentProvider`] the configuration asks for.
 ///
-/// Extracted from [`AppServices::new`] so the decision can be tested: inside
+/// Extracted from [`AppServices::build`] so the decision can be tested: inside
 /// the constructor it sat behind a live database connection, so the whole
 /// tree -- including the deliberate asymmetry between an implicit and an
 /// explicit `BEAM_METADATA_LANGUAGE` -- was unreachable from any test.
