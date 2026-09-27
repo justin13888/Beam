@@ -47,6 +47,8 @@ server, and that you have a realm your users sign in to.
 
    The default `BEAM_OIDC_SCOPES` (`openid profile email`) is enough. If you left full group path
    on, set `BEAM_OIDC_ADMIN_VALUE=/beam-admin` instead — the match is exact and case-sensitive.
+   Leave `BEAM_OIDC_CLIENT_AUTH_METHOD` unset: Keycloak's **Client Id and Secret** authenticator
+   accepts the secret by HTTP Basic, Beam's default, as well as in the form.
 
 5. **Check it.** Restart Beam, sign in as a member of `beam-admin`, then open
    `<BEAM_SERVER_URL>/v1/me` in the same browser. It should show `"is_admin": true`.

@@ -37,6 +37,9 @@ be reachable from both your browser and the Beam server.
    BEAM_OIDC_ADMIN_VALUE=beam-admin
    ```
 
+   Leave `BEAM_OIDC_CLIENT_AUTH_METHOD` unset: Pocket ID accepts a confidential client's secret by
+   HTTP Basic, Beam's default, as well as in the form.
+
 4. **Check it.** Restart Beam, sign in as a member of `beam-admin`, then open
    `<BEAM_SERVER_URL>/v1/me` in the same browser. It should show `"is_admin": true`.
 

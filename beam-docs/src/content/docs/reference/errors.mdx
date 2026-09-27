@@ -229,7 +229,9 @@ and naming which half of a CSRF check failed tells an attacker more than it tell
 error, or the token exchange did not verify. On a device login the flow ends with it.
 
 **What to do.** Read the server log for the provider's own message. A nonce mismatch here usually
-means two sign-ins raced in the same browser.
+means two sign-ins raced in the same browser. An `invalid_client` means the provider refused how
+Beam presented its secret: set `BEAM_OIDC_CLIENT_AUTH_METHOD` to the method Beam's client is
+registered with there.
 
 ### account-disabled
 
@@ -245,7 +247,9 @@ a sign-in flow, or could not reach the identity provider to finish one.
 **What to do.** Beam needs `BEAM_OIDC_ISSUER`, `BEAM_OIDC_CLIENT_ID` and `BEAM_OIDC_CLIENT_SECRET`
 **all three** set, and must be able to reach the issuer's `.well-known/openid-configuration`. This
 is a 503 rather than a 500 because the server is working and the identity provider is not. A device
-login that meets it mid-flow is kept: poll again after the interval.
+login that meets it mid-flow is kept: poll again after the interval. If the server log shows
+`invalid_client`, the provider refused how Beam presented its secret: set
+`BEAM_OIDC_CLIENT_AUTH_METHOD` to the method Beam's client is registered with there.
 
 ### device-login-unsupported
 

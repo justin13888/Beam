@@ -45,7 +45,8 @@ server.
    ```
 
    The default `BEAM_OIDC_SCOPES` (`openid profile email`) is enough, since `groups` arrives with
-   `profile`.
+   `profile`. Leave `BEAM_OIDC_CLIENT_AUTH_METHOD` unset: a confidential Authentik provider
+   accepts the secret by HTTP Basic, Beam's default, as well as in the form.
 
 6. **Check it.** Restart Beam, sign in as a member of `beam-admin`, then open
    `<BEAM_SERVER_URL>/v1/me` in the same browser. It should show `"is_admin": true`.

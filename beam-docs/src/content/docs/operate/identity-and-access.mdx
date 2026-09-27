@@ -71,9 +71,13 @@ On a device with no usable browser it goes straight to the code, and uses the bu
 when your provider does not offer device sign-in.
 
 Beam authenticates its device sign-in requests to your provider the same way it authenticates the
-browser sign-in: with HTTP Basic (`client_secret_basic`). If the provider answers `invalid_client`,
-Beam retries once with the secret in the form (`client_secret_post`), and keeps using that method
-until it restarts. Register Beam's client for `client_secret_basic` wherever your provider asks.
+browser sign-in, with the method `BEAM_OIDC_CLIENT_AUTH_METHOD` names: `client_secret_basic` (HTTP
+Basic, the default) or `client_secret_post` (the secret in the form). Set it to whichever method
+Beam's client is registered with at your provider. A provider accepts only that one, and Beam
+cannot find out which it is, so it never guesses or falls back. With the wrong method, browser
+sign-in fails with `login-failed` and device sign-in with `oidc-unavailable` -- or, on Dex, only
+when you approve the device sign-in, with "Invalid client credentials.". Dex needs
+`client_secret_post`.
 
 Beam turns this on automatically when your provider's discovery document names a
 `device_authorization_endpoint`. Check with:

@@ -64,7 +64,9 @@ behalf, and mints an ordinary session when the user approves.**
    (`FEATURE_LEANBACK`, or no WebView package), falling back to the WebView on a 501. `beam-apple`
    is unchanged in this decision: its iOS/macOS client keeps the web view it has, and the tvOS
    client it unblocks is future work.
-7. The device requests authenticate to the IdP exactly as the code exchange does (D151-9).
+7. Every request carrying the client secret -- the code exchange and both device requests --
+   authenticates with the one method the operator names in `BEAM_OIDC_CLIENT_AUTH_METHOD`, the
+   method Beam's client is registered with at the IdP (D151-9).
 
 ### Decision log
 
@@ -127,32 +129,40 @@ behalf, and mints an ordinary session when the user approves.**
   only a refusal (403), an expiry (410), an invalid flow (400) or another non-retryable failure
   ends it. Rejected: device-first on every Android device (the first version of this change),
   which replaced the phone's sign-in screen the issue says must not change. Apple is left as it is.
-- **D151-9 -- device requests authenticate like the code exchange, with one `client_secret_post`
-  retry.** Both device requests use HTTP Basic (`client_secret_basic`), which is what the code
-  exchange sends, with `client_id` also repeated in the form -- RFC 8628 section 3.1 allows it, and
-  Dex answers "Invalid client_id" without it. If the device authorization request is answered
-  `invalid_client`, it is retried **once** with `client_secret_post`; whichever method succeeds is
-  kept for the rest of the process, so the polls and later logins use it directly. Rejected:
-  choosing by discovery's `token_endpoint_auth_methods_supported`, which lists the methods the IdP
-  can accept from *some* client (RFC 8414 section 2), not the method *this* client is registered
-  with. IdPs that pin one method per client (Authelia, configured `client_secret_basic` as Beam's
-  guide says; Zitadel's BASIC) advertise both and refuse the other, so that choice made device
-  login fail with a 503 while browser login worked. **Known limit -- Dex.** Dex's device
-  authorization endpoint does not authenticate the client at all: it reads `client_secret` from the
-  form only and stores it with the request (`server/deviceflowhandlers.go` in v2.45.1; the same in
-  `server/device/device.go` on master), then compares it at approval, answering the approving
-  *browser* `invalid_client` ("Invalid client credentials.") when it is empty. Beam is never told,
-  so the retry cannot fire, and with the bundled Dex a device login starts but its approval fails
-  at Dex. That is a Dex defect (it ignores `client_secret_basic` on an endpoint RFC 8628
-  says authenticates the client as the token endpoint does), to be filed on dexidp/dex by the
-  maintainer; it is not worked around by sending the secret both ways at once, which RFC 6749
-  section 2.3 forbids.
+- **D151-9 -- one operator-set client authentication method for every request that carries the
+  secret.** `BEAM_OIDC_CLIENT_AUTH_METHOD` names the method Beam's client is registered with at
+  the IdP, as RFC 7591's `token_endpoint_auth_method` values: `client_secret_basic` (the default,
+  and RFC 7591's) or `client_secret_post`. The authorization-code exchange and both device
+  requests all use it, so browser and device login cannot disagree. With `client_secret_basic`,
+  the device requests also repeat `client_id` in the form -- RFC 8628 section 3.1 allows it, and
+  Dex answers "Invalid client_id" without it; it is an identifier, not a second method. A refusal
+  is returned to the caller (`login-failed` at the callback, `oidc-unavailable` from the device
+  endpoints), never retried with the other method.
+  *Why a setting:* an IdP pins one method per client registration (Authelia's
+  `token_endpoint_auth_method`, Zitadel's BASIC/POST) and refuses the other, and nothing Beam can
+  read says which one. *Rejected:* choosing by discovery's `token_endpoint_auth_methods_supported`
+  -- it lists what the IdP accepts from *some* client (RFC 8414 section 2), not this client's
+  registration, so device login failed with a 503 on an Authelia configured as Beam's guide says
+  while browser login worked; and Basic with one `client_secret_post` retry on `invalid_client`
+  (this decision's previous form), which fails silently on Dex: Dex's device authorization
+  endpoint does not authenticate the client at all but reads `client_secret` from the form only
+  and stores it with the request (`server/deviceflowhandlers.go`, v2.45.1), then compares it at
+  approval, answering the approving *browser* "Invalid client credentials." when it is empty.
+  Beam is never told, so no heuristic can fire -- the bundled dev Dex broke under it. Dex is
+  therefore run with `client_secret_post` (`mise run dev:up` sets it). Its ignoring
+  `client_secret_basic` on an endpoint RFC 8628 says authenticates the client as the token
+  endpoint does is a Dex defect, to be filed on dexidp/dex by the maintainer; it is not worked
+  around by sending the secret both ways at once, which RFC 6749 section 2.3 forbids. *Reversal:*
+  delete the setting and hard-code `client_secret_basic` (`ClientAuthMethod` in
+  `beam-auth/src/utils/oidc.rs`, the config field in `beam-server/src/config.rs`), which leaves
+  Dex's device approvals failing again.
 
 ## Consequences
 
 tvOS and Android TV are no longer blocked on the server: a client with no browser can sign in
-wherever the IdP offers the device grant, as Keycloak and Authentik do (Dex offers it but, per
-D151-9, never completes one authenticated by `client_secret_basic`). An IdP that does not offer it leaves those platforms blocked, and that is now a
+wherever the IdP offers the device grant, as Keycloak, Authentik and Dex do (Dex only with
+`BEAM_OIDC_CLIENT_AUTH_METHOD=client_secret_post`, per D151-9). An IdP that does not offer it
+leaves those platforms blocked, and that is now a
 deployment choice the operator can change rather than a missing Beam feature.
 
 The server gains a second way to reach `complete_login`, and nothing else about sessions changes:
