@@ -51,8 +51,9 @@ struct WalkOutcome {
     /// How many of `files` have a known video extension -- the files Beam can
     /// index as media, and so the ones the empty-root guard counts.
     video_files: usize,
-    /// Every path the walk failed to read, usually a directory it could not
-    /// list. The walk says nothing about what is beneath one of these, so an
+    /// Every path the walk failed to read: a directory it could not list, or
+    /// a listed entry it could not stat for any reason other than "not
+    /// found". The walk says nothing about what is beneath one of these, so an
     /// indexed row under it is left exactly as it is rather than marked
     /// missing (issue #179).
     failed_subtrees: Vec<PathBuf>,
@@ -64,7 +65,8 @@ struct WalkOutcome {
 /// Walks a library root and collects every regular file beneath it.
 ///
 /// An entry the walk cannot read is collected as a failure rather than
-/// dropped: a subdirectory that fails to list contributes no files, and
+/// dropped: a subdirectory that fails to list, or a listed file that fails to
+/// stat, contributes no files, and
 /// reading that silence as "every file under it is gone" is how a transient
 /// permission or I/O error used to delete rows.
 fn walk_library_root(root: &Path) -> WalkOutcome {
@@ -74,9 +76,31 @@ fn walk_library_root(root: &Path) -> WalkOutcome {
     for entry in WalkDir::new(root) {
         match entry {
             Ok(entry) => {
+                // A directory is descended by the walk itself, which reports
+                // any failure to list it as an `Err` below.
+                if entry.file_type().is_dir() {
+                    continue;
+                }
                 let path = entry.into_path();
-                if path.is_file() {
-                    files.push(path);
+                // `metadata` follows a symlink, as `Path::is_file` did, so a
+                // link to a regular file is still indexed. Only a stat that
+                // says "no such file" (a dangling link, a file deleted
+                // mid-walk) means the entry is absent. Any other failure --
+                // a listable but unsearchable parent (EACCES), a transient
+                // EIO or ESTALE on a network mount -- says nothing about the
+                // file, so it shields the path exactly like a directory the
+                // walk could not list (issue #179).
+                match std::fs::metadata(&path) {
+                    Ok(meta) => {
+                        if meta.is_file() {
+                            files.push(path);
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        warn!(path = %path.display(), error = %err, "library walk could not stat a listed entry");
+                        failed_subtrees.push(path);
+                    }
                 }
             }
             Err(err) => match err.path() {
@@ -1149,7 +1173,29 @@ impl LocalIndexService {
 
         let path_str = path.to_string_lossy().to_string();
 
-        if kind == FsEventKind::Removed || !path.is_file() {
+        // Only a stat that says "no such file" means the path is gone. Any
+        // other failure (EACCES from an unsearchable parent, a transient EIO
+        // or ESTALE on a network mount) says nothing about the file, so the
+        // event is dropped rather than read as a deletion; the next scan
+        // shields the same path (issue #179).
+        let is_file = if kind == FsEventKind::Removed {
+            false
+        } else {
+            match std::fs::metadata(&path) {
+                Ok(meta) => meta.is_file(),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                Err(err) => {
+                    warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "could not stat a changed path; leaving its row as it is"
+                    );
+                    return Ok(());
+                }
+            }
+        };
+
+        if !is_file {
             // A root that is not there is a volume that went away, not a file
             // that was deleted: say nothing about the file until the next scan
             // can see the root again (issue #179).

@@ -571,3 +571,84 @@ async fn rows_under_an_unreadable_directory_are_left_alone_and_the_failure_repor
     );
     assert_eq!(details["shielded"], serde_json::json!(1));
 }
+
+/// Make `dir` listable but not searchable (`0o444`): the walk still reads its
+/// entries, but every stat beneath it fails with `EACCES` -- the same shape as
+/// a transient `EIO` or `ESTALE` on a network mount. Returns `false` when the
+/// process runs as root, where permissions do not bind and the failure these
+/// tests are about cannot be produced; the caller then skips.
+#[cfg(unix)]
+fn make_unsearchable(dir: &Path, probe: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::metadata(probe).is_ok() {
+        restore_searchable(dir);
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn restore_searchable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_listed_file_the_scan_cannot_stat_is_shielded_not_marked_missing() {
+    let h = Harness::new().await;
+    h.index_on_disk("kept.mp4");
+    let unstattable = h.index_on_disk("locked/a.mkv");
+    let locked = h.root.join("locked");
+    if !make_unsearchable(&locked, &unstattable.path) {
+        return;
+    }
+
+    let result = h.scan().await;
+    restore_searchable(&locked);
+    result.unwrap();
+
+    assert_eq!(
+        h.stored(&unstattable).await.unwrap().missing_since,
+        None,
+        "a file the walk listed but could not stat was not found gone"
+    );
+    let logs = h.admin_log_repo.list(100, 0).await.unwrap();
+    let entry = logs
+        .iter()
+        .find(|l| l.level == AdminLogLevel::Warning && l.category == AdminLogCategory::LibraryScan)
+        .expect("the unstattable path is reported as a walk failure");
+    let details = entry.details.as_ref().unwrap();
+    assert_eq!(
+        details["failed_paths"],
+        serde_json::json!([unstattable.path.display().to_string()])
+    );
+    assert_eq!(details["shielded"], serde_json::json!(1));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_watcher_event_for_a_path_that_cannot_be_statted_changes_nothing() {
+    let h = Harness::new().await;
+    let row = h.index_on_disk("locked/a.mkv");
+    let locked = h.root.join("locked");
+    if !make_unsearchable(&locked, &row.path) {
+        return;
+    }
+
+    let result = h
+        .service
+        .reconcile_path(h.library.id, row.path.clone(), FsEventKind::Modified)
+        .await;
+    restore_searchable(&locked);
+    result.unwrap();
+
+    assert_eq!(
+        h.stored(&row).await.unwrap().missing_since,
+        None,
+        "a failed stat says nothing about whether the file is there"
+    );
+}
