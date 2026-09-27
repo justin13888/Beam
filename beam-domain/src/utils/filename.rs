@@ -574,6 +574,13 @@ fn normalized_without_brackets(text: &str) -> String {
     normalize_separators(&without_parens)
 }
 
+/// Whether a parsed title is nothing but release noise: the whole-stem
+/// fallback of a name like `REPACK.1080p` rather than a title.
+pub(crate) fn is_noise_only(title: &str) -> bool {
+    let mut tokens = title.split_whitespace().peekable();
+    tokens.peek().is_some() && tokens.all(|t| is_noise_token(t) || is_punctuation_token(t))
+}
+
 fn finalize_title(tokens: &[&str], fallback: &str) -> String {
     let joined = tokens.join(" ");
     if joined.trim().is_empty() {

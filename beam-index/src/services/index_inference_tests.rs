@@ -321,6 +321,32 @@ async fn a_season_folder_file_with_no_episode_number_is_kept_untitled_and_report
     );
 }
 
+/// Decision D182-C4: a fansub `<title> - <n>` whose folder spells the show
+/// differently (romaji against English) is not a movie. It is kept untitled
+/// and the administrator is told, rather than a season becoming dozens of
+/// films.
+#[tokio::test]
+async fn an_absolute_number_no_folder_names_is_kept_untitled_and_reported() {
+    let h = Harness::new().await;
+    let rel = "Frieren (2023)/[SubsPlease] Sousou no Frieren - 12 (1080p).mkv";
+    h.write(rel);
+
+    assert_eq!(h.scan().await, 1, "the file is still indexed");
+
+    let file = h.file(rel);
+    assert_eq!(file.status, FileStatus::Unknown);
+    assert!(file.content.is_none(), "{:?}", file.content);
+    assert!(h.movie_repo.movies.lock().unwrap().is_empty(), "no movie");
+    assert!(h.shows().is_empty(), "and no show");
+    assert!(
+        h.warnings()
+            .await
+            .iter()
+            .any(|m| m.contains("episode 12") && m.contains("no folder names the show")),
+        "the administrator is told"
+    );
+}
+
 // ─── movies ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]

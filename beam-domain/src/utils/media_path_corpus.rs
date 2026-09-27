@@ -10,8 +10,8 @@ use std::path::Path;
 use super::*;
 
 /// `episode <series>|<year> s<season> e<first>[-<last>] [<title>] <numbering>
-/// [@<air date>] [!folder<n>]`, `movie <title>|<year> [ed=<edition>]`, or
-/// `unclassifiable season <n>`.
+/// [@<air date>] [!folder<n>]`, `movie <title>|<year> [ed=<edition>]`,
+/// `unclassifiable season <n>`, or `unclassifiable absolute <n>`.
 fn describe(inference: &MediaInference) -> String {
     fn year(year: Option<u32>) -> String {
         year.map_or_else(|| "-".to_string(), |y| y.to_string())
@@ -57,6 +57,11 @@ fn describe(inference: &MediaInference) -> String {
         MediaInference::Unclassifiable(UnclassifiableReason::NoEpisodeNumberInSeasonFolder {
             season,
         }) => format!("unclassifiable season {season}"),
+        MediaInference::Unclassifiable(UnclassifiableReason::AmbiguousAbsoluteNumber {
+            number,
+        }) => {
+            format!("unclassifiable absolute {number}")
+        }
     }
 }
 
@@ -102,6 +107,42 @@ const CORPUS: &[(&str, &str)] = &[
         "Show Name/Season 01/Show Name - 1x02 - Title.mkv",
         "episode Show Name|- s1 e2 [Title] Standard",
     ),
+    // A season token anywhere in the folder name (D1): the series is still
+    // the series folder, never the season folder.
+    (
+        "Breaking Bad/Breaking Bad Season 1/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "Breaking Bad/Season 1 (2008)/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "Breaking Bad/Season 01 - Pilot Season/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "Breaking Bad (2008)/Breaking Bad Season 2/Breaking.Bad.S02E01.mkv",
+        "episode Breaking Bad|2008 s2 e1 Standard",
+    ),
+    (
+        "Doctor Who/Series 11/Doctor.Who.S11E01.mkv",
+        "episode Doctor Who|- s11 e1 Standard",
+    ),
+    // A season pack: the text before the season token names the show when
+    // there is no series folder, or when the folder above is a category.
+    (
+        "The.Office.US.S02.1080p.BluRay.x264-GRP/The.Office.US.S02E01.1080p.mkv",
+        "episode The Office US|- s2 e1 Standard",
+    ),
+    (
+        "TV/The.Office.US.S02.1080p.BluRay.x264-GRP/The.Office.US.S02E01.mkv",
+        "episode The Office US|- s2 e1 Standard",
+    ),
+    (
+        "The Office (US)/The.Office.US.S02.720p/The.Office.US.S02E03.mkv",
+        "episode The Office US|- s2 e3 Standard",
+    ),
     // Specials.
     (
         "Show Name/Specials/Show.Name.S00E01.mkv",
@@ -131,6 +172,15 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     // Flat layouts: the parent folder, or at the root the filename.
     ("Show.Name.S01E02.mkv", "episode Show Name|- s1 e2 Standard"),
+    // ... unless the filename names another show than the folder (D182-C1).
+    (
+        "TV Shows/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    ("Kids/Bluey.S01E01.mkv", "episode Bluey|- s1 e1 Standard"),
+    // A split marker (D182-C5).
+    ("Show/Show.S01.E01.mkv", "episode Show|- s1 e1 Standard"),
+    ("Show S01 E02.mkv", "episode Show|- s1 e2 Standard"),
     (
         "Show Name (2019)/Show.Name.S01E02.mkv",
         "episode Show Name|2019 s1 e2 Standard",
@@ -155,7 +205,12 @@ const CORPUS: &[(&str, &str)] = &[
         "Show/Show.S01E01.Pilot.2019.mkv",
         "episode Show|- s1 e1 [Pilot] Standard",
     ),
-    // Multi-episode files.
+    // Multi-episode files, one marker or several back to back (D6).
+    (
+        "Show/Show.S01E01.S01E02.mkv",
+        "episode Show|- s1 e1-2 Standard",
+    ),
+    ("Show.1x01.1x02.mkv", "episode Show|- s1 e1-2 Standard"),
     (
         "Show Name/Season 01/Show.Name.S01E01E02.mkv",
         "episode Show Name|- s1 e1-2 Standard",
@@ -197,14 +252,39 @@ const CORPUS: &[(&str, &str)] = &[
     ("Show/Show - 05.mkv", "episode Show|- s1 e5 Absolute"),
     ("Show/E05.mkv", "episode Show|- s1 e5 Absolute"),
     ("Show/EP12.mkv", "episode Show|- s1 e12 Absolute"),
-    // ... and not where it is not: a folder naming another title, the root,
-    // or a year where the number would be.
+    // A year-shaped number is an episode only in a season folder of the show
+    // the title names; elsewhere it is the release year.
+    (
+        "One Piece (1999)/Season 1/One Piece - 1999.mkv",
+        "episode One Piece|1999 s1 e1999 Absolute",
+    ),
+    ("Show/Show - 2019.mkv", "movie Show|2019"),
+    ("Show/Season 1/Other - 2019.mkv", "unclassifiable season 1"),
+    // A `<title> - <n>` nothing around names as a show is not a movie either
+    // (D182-C4): a folder naming another title -- romaji against English --
+    // or the root.
     (
         "Other Folder/[G] Show - 012 [1080p].mkv",
-        "movie Show - 012|-",
+        "unclassifiable absolute 12",
     ),
-    ("[G] Show - 012 [1080p].mkv", "movie Show - 012|-"),
-    ("Show/Show - 2019.mkv", "movie Show|2019"),
+    ("[G] Show - 012 [1080p].mkv", "unclassifiable absolute 12"),
+    (
+        "Frieren (2023)/[SubsPlease] Sousou no Frieren - 12 (1080p).mkv",
+        "unclassifiable absolute 12",
+    ),
+    // The dash is a movie's when the number is one digit outside a season
+    // folder, or the parent folder carries the filename's own year (D8).
+    ("Movie (2019)/Movie (2019) - 1.mkv", "movie Movie - 1|2019"),
+    ("Movie (2019)/Movie - 1.mkv", "movie Movie - 1|-"),
+    (
+        "Movie (2019)/Movie (2019) - 12.mkv",
+        "movie Movie - 12|2019",
+    ),
+    ("Show/Show - 5.mkv", "movie Show - 5|-"),
+    (
+        "Show/Season 1/Show - 5.mkv",
+        "episode Show|- s1 e5 Absolute",
+    ),
     // A season folder holding a file with no episode number.
     (
         "Show Name/Season 01/Behind the Scenes.mkv",
@@ -212,6 +292,26 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     ("Show/Season 1/05.mkv", "unclassifiable season 1"),
     ("Show/Specials/Making Of.mkv", "unclassifiable season 0"),
+    // ... and names only a season folder makes readable (D182-C5).
+    (
+        "Seinfeld/Season 5/501 - The Glasses.mkv",
+        "episode Seinfeld|- s5 e1 [The Glasses] Standard",
+    ),
+    (
+        "Seinfeld/Season 5/Seinfeld.502.mkv",
+        "episode Seinfeld|- s5 e2 Standard",
+    ),
+    (
+        "Show/Season 5/Episode 1.mkv",
+        "episode Show|- s5 e1 Standard",
+    ),
+    (
+        "Show/Season 2/Ep 03 - Title.mkv",
+        "episode Show|- s2 e3 [Title] Standard",
+    ),
+    ("Show/Season 5/601.mkv", "unclassifiable season 5"),
+    // Outside one, three digits are not an episode.
+    ("Show/Show.101.mkv", "movie Show 101|-"),
     // Movies: identity is title and year.
     (
         "Apollo 13 (1995)/Apollo.13.1995.1080p.BluRay.mkv",
@@ -227,6 +327,19 @@ const CORPUS: &[(&str, &str)] = &[
         "movie Some Movie|2019",
     ),
     ("Movies/Avatar.mkv", "movie Avatar|-"),
+    ("Movie.Name.1920x1080.mkv", "movie Movie Name|-"),
+    // The folder fills in what the filename leaves out (D182-C2): the year
+    // of the same title, or the title of a noise-only name.
+    ("Kill Bill (2003)/Kill Bill.mkv", "movie Kill Bill|2003"),
+    ("Dune (2021)/Dune.2160p.mkv", "movie Dune|2021"),
+    ("Movie (2019)/1080p.BluRay.x264.mkv", "movie Movie|2019"),
+    ("Movie (2019)/[GRP] REPACK 1080p.mkv", "movie Movie|2019"),
+    // ... but not another title's year, and never the library root's.
+    (
+        "Kill Bill (2003)/Kill Bill - Vol 1.mkv",
+        "movie Kill Bill - Vol 1|-",
+    ),
+    ("Avatar.mkv", "movie Avatar|-"),
     ("Wall-E (2008).mkv", "movie Wall-E|2008"),
     ("Kids/Wall-E (2008).mkv", "movie Wall-E|2008"),
     (
@@ -250,6 +363,23 @@ const CORPUS: &[(&str, &str)] = &[
         "Movie (2019)/Movie (2019) {edition-Director's Cut}.mkv",
         "movie Movie|2019 ed=Director's Cut",
     ),
+    // Edition words after a parenthesised year (D4), and noise words that
+    // open a title (D5).
+    (
+        "Movie (2019)/Movie (2019) Director's Cut.mkv",
+        "movie Movie|2019 ed=Director's Cut",
+    ),
+    (
+        "Blade Runner (1982) The Final Cut.mkv",
+        "movie Blade Runner|1982 ed=Final Cut",
+    ),
+    (
+        "Uncut Gems (2019)/Uncut Gems (2019).mkv",
+        "movie Uncut Gems|2019",
+    ),
+    ("Uncut.Gems.2019.1080p.mkv", "movie Uncut Gems|2019"),
+    ("IMAX Hubble (2010).mkv", "movie IMAX Hubble|2010"),
+    ("S1m0ne (2002)/S1m0ne.2002.mkv", "movie S1m0ne|2002"),
 ];
 
 #[test]
@@ -279,8 +409,15 @@ fn season_folder_names() {
         ("s2024", Some(2024)),
         ("Specials", Some(0)),
         ("special", Some(0)),
-        ("Season 01 (2019)", None),
+        ("Season 01 (2019)", Some(1)),
+        ("Breaking Bad Season 1", Some(1)),
+        ("Season 01 - Pilot Season", Some(1)),
+        ("Doctor Who Series 11", Some(11)),
+        ("The.Office.US.S02.1080p.BluRay.x264-GRP", Some(2)),
         ("Seasons", None),
+        ("Show.S02E01", None),
+        ("S1m0ne (2002)", None),
+        ("A Series of Unfortunate Events", None),
         ("Show Name", None),
         ("S", None),
     ];
@@ -327,6 +464,52 @@ mod properties {
                 !matches!(infer_media(Path::new(&path)), MediaInference::Movie(_)),
                 "{path}"
             );
+        }
+
+        /// A season folder is recognised by its season token wherever it
+        /// sits in the name, and the show is always the series folder's --
+        /// never the season folder's own name.
+        #[test]
+        fn a_season_folder_names_the_series_folders_show(
+            show in "Q[a-z]{2,8}( Q[a-z]{2,8})?",
+            season in 1u32..30,
+            episode in 1u32..30,
+            before in proptest::sample::select(vec!["", "SHOW ", "SHOW - "]),
+            word in proptest::sample::select(vec!["Season ", "season", "Series_", "Staffel.", "S"]),
+            after in proptest::sample::select(vec!["", " (2008)", " - Pilot Season", " 1080p"]),
+        ) {
+            let folder = format!("{}{word}{season:02}{after}", before.replace("SHOW", &show));
+            prop_assert_eq!(season_folder_number(&folder), Some(season), "{}", folder);
+            let path = format!(
+                "{show}/{folder}/{}.S{season:02}E{episode:02}.mkv",
+                show.replace(' ', ".")
+            );
+            match infer_media(Path::new(&path)) {
+                MediaInference::Episode(inferred) => {
+                    prop_assert_eq!(&inferred.series.title, &show, "{}", path);
+                    prop_assert_eq!(inferred.season, season, "{}", path);
+                    prop_assert_eq!(inferred.contradicted_season_folder, None, "{}", path);
+                }
+                other => prop_assert!(false, "{path} is not an episode: {other:?}"),
+            }
+        }
+
+        /// A flat file's show is the one its filename names, whatever
+        /// folder -- a category, a collection -- it sits in.
+        #[test]
+        fn a_flat_file_names_its_own_show(
+            category in "Z[a-z]{2,8}",
+            show in "Q[a-z]{2,8}",
+            season in 1u32..30,
+            episode in 1u32..30,
+        ) {
+            let path = format!("{category}/{show}.S{season:02}E{episode:02}.mkv");
+            match infer_media(Path::new(&path)) {
+                MediaInference::Episode(inferred) => {
+                    prop_assert_eq!(&inferred.series.title, &show, "{}", path);
+                }
+                other => prop_assert!(false, "{path} is not an episode: {other:?}"),
+            }
         }
 
         /// A daily episode's number is its month and day.

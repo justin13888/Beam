@@ -661,28 +661,57 @@ impl LocalIndexService {
         path: &Path,
         reason: UnclassifiableReason,
     ) {
-        let UnclassifiableReason::NoEpisodeNumberInSeasonFolder { season } = reason;
-        warn!(
-            path = %path.display(),
-            season,
-            "a file in a season folder has no episode number; indexed without a title"
-        );
+        let (message, details) = match reason {
+            UnclassifiableReason::NoEpisodeNumberInSeasonFolder { season } => {
+                warn!(
+                    path = %path.display(),
+                    season,
+                    "a file in a season folder has no episode number; indexed without a title"
+                );
+                (
+                    format!(
+                        "A file in a season folder of \"{}\" has no episode number, so it was \
+                         indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "season_folder": season }),
+                )
+            }
+            UnclassifiableReason::AmbiguousAbsoluteNumber { number } => {
+                warn!(
+                    path = %path.display(),
+                    number,
+                    "a file is numbered like an episode but no folder names its show; indexed \
+                     without a title"
+                );
+                (
+                    format!(
+                        "A file in \"{}\" is numbered like episode {number} of a show, but no \
+                         folder names the show, so it was indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "absolute_number": number }),
+                )
+            }
+        };
+        let mut metadata = serde_json::json!({
+            "library_id": library.id.to_string(),
+            "path": path.display().to_string(),
+        });
+        if let (Some(metadata), serde_json::Value::Object(details)) =
+            (metadata.as_object_mut(), details)
+        {
+            metadata.extend(details);
+        }
         let _ = self
             .admin_log
             .log(
                 AdminLogLevel::Warning,
                 AdminLogCategory::LibraryScan,
-                format!(
-                    "A file in a season folder of \"{}\" has no episode number, so it was \
-                     indexed without a title: {}",
-                    library.name,
-                    path.display()
-                ),
-                Some(serde_json::json!({
-                    "library_id": library.id.to_string(),
-                    "path": path.display().to_string(),
-                    "season_folder": season,
-                })),
+                message,
+                Some(metadata),
             )
             .await;
     }
@@ -2533,7 +2562,7 @@ mod tests {
     async fn test_classify_episode_standard_s01e02() {
         let (service, _, show_repo) = make_classify_service();
         let lib_id = Uuid::new_v4();
-        let path = PathBuf::from("/media/Breaking Bad/The.Show.S01E02.mkv");
+        let path = PathBuf::from("/media/Breaking Bad/Breaking.Bad.S01E02.mkv");
 
         let content = service
             .classify_for_test(&path, lib_id, Duration::from_secs(3600))
@@ -2640,7 +2669,7 @@ mod tests {
     async fn test_classify_episode_show_title_from_parent_dir() {
         let (service, _, show_repo) = make_classify_service();
         let lib_id = Uuid::new_v4();
-        let path = PathBuf::from("/media/Breaking Bad/episode.S03E05.mkv");
+        let path = PathBuf::from("/media/Breaking Bad/S03E05.mkv");
 
         service
             .classify_for_test(&path, lib_id, Duration::from_secs(3000))

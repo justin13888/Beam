@@ -14,7 +14,9 @@ use std::sync::LazyLock;
 use chrono::{Datelike, NaiveDate};
 use regex::Regex;
 
-use crate::utils::filename::{ParsedFilename, normalized_stem, parse_media_filename};
+use crate::utils::filename::{
+    ParsedFilename, episode_title_after, is_noise_only, normalized_stem, parse_media_filename,
+};
 use crate::utils::identity::{normalize_title, title_identity_key};
 
 /// The version of the rules [`infer_media`] classifies by. Stored on every
@@ -81,6 +83,11 @@ pub enum UnclassifiableReason {
     /// its name says which one. Indexing it as a movie -- what the path alone
     /// would otherwise suggest -- would invent a film.
     NoEpisodeNumberInSeasonFolder { season: u32 },
+    /// The name is `<title> - <n>`, the fansub spelling of an absolutely
+    /// numbered episode, but nothing around it names the show: it is at the
+    /// library root, or its folder names another title (decision D182-4).
+    /// Indexing it as a movie would turn a season into dozens of films.
+    AmbiguousAbsoluteNumber { number: u32 },
 }
 
 /// What a library path is.
@@ -94,10 +101,17 @@ pub enum MediaInference {
 /// The show name used when neither a folder nor the filename names one.
 pub const UNKNOWN_SHOW: &str = "Unknown Show";
 
-static SEASON_FOLDER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:(?:season|series|saison|staffel|temporada)[ ._-]*|s)(\d{1,4})$")
+/// A season word and its number anywhere in a folder name: `Season 01`,
+/// `Breaking Bad Season 1`, `Season 1 (2008)`, `Staffel 2`.
+static SEASON_WORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:season|series|saison|staffel|temporada)[ ._-]*(\d{1,4})\b")
         .expect("valid regex")
 });
+
+/// A lone `S<n>` with no episode after it: `S02`, or a season pack's
+/// `Show.S02.1080p.BluRay`.
+static SEASON_SHORT_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,4})\b").expect("valid regex"));
 
 static SPECIALS_FOLDER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^specials?$").expect("valid regex"));
@@ -111,21 +125,62 @@ static ABSOLUTE_BARE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:(.+?) )?EP?(\d{1,4})(?:v\d)?(?: |$)").expect("valid regex")
 });
 
+/// `Episode 3` or `Ep 3`: an episode number with no season, which only a
+/// season folder can complete.
+static EPISODE_WORD_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:episode|ep)[ -]*(\d{1,4})\b").expect("valid regex"));
+
+/// Three or four digits: `501` for season 5, episode 1.
+static SEASON_EPISODE_DIGITS_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{3,4}$").expect("valid regex"));
+
 static YEAR_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:19|20)\d{2}$").expect("valid regex"));
 
-/// The season a folder name designates: `Season 01`, `Series 2`, `Saison 3`,
-/// `Staffel 4`, `Temporada 5`, `S06`, and `Specials` (season 0). Case and
-/// separators between word and number are ignored; anything else in the name
-/// makes it an ordinary folder.
-pub fn season_folder_number(name: &str) -> Option<u32> {
+/// A season folder: which season it designates, and the text before its
+/// season token (`The.Office.US.` in `The.Office.US.S02.1080p`), which may
+/// name the show.
+struct SeasonFolder<'a> {
+    season: u32,
+    prefix: &'a str,
+}
+
+fn season_folder(name: &str) -> Option<SeasonFolder<'_>> {
     let name = name.trim();
     if SPECIALS_FOLDER_REGEX.is_match(name) {
-        return Some(0);
+        return Some(SeasonFolder {
+            season: 0,
+            prefix: "",
+        });
     }
-    SEASON_FOLDER_REGEX
+    let caps = SEASON_WORD_REGEX
         .captures(name)
-        .and_then(|caps| caps[1].parse().ok())
+        .or_else(|| SEASON_SHORT_REGEX.captures(name))?;
+    let whole = caps.get(0).expect("group 0 always present");
+    Some(SeasonFolder {
+        season: caps[1].parse().ok()?,
+        prefix: &name[..whole.start()],
+    })
+}
+
+/// The season a folder name designates: a season word and number anywhere in
+/// it (`Season 01`, `Series 2`, `Saison 3`, `Staffel 4`, `Temporada 5`,
+/// `Breaking Bad Season 1`, `Season 1 (2008)`), a lone `S06` with no episode
+/// after it (`S06`, a season pack's `Show.S06.1080p`), or `Specials` (season
+/// 0). Case and the separators between word and number are ignored.
+pub fn season_folder_number(name: &str) -> Option<u32> {
+    season_folder(name).map(|folder| folder.season)
+}
+
+/// The title and year a folder or name spells, if it spells a title at all.
+fn title_of(text: &str) -> Option<TitleGuess> {
+    let ParsedFilename { title, year, .. } = parse_media_filename(text);
+    (!title.is_empty()).then_some(TitleGuess { title, year })
+}
+
+/// Whether two titles are the same title once identity-normalised.
+fn same_title(a: &str, b: &str) -> bool {
+    normalize_title(a) == normalize_title(b)
 }
 
 /// Infer what the file at `rel_path` -- relative to its library root -- is.
@@ -152,19 +207,51 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         .unwrap_or_default();
     let parsed = parse_media_filename(&stem);
 
-    let parent_season = dirs.last().and_then(|dir| season_folder_number(dir));
-    // The series folder: the season folder's parent, or the parent itself
-    // when it is not a season folder. A season folder directly under the root
-    // has none, and the series comes from the filename.
-    let series_dir: Option<&str> = match parent_season {
-        Some(_) => dirs
-            .len()
-            .checked_sub(2)
-            .and_then(|i| dirs.get(i))
-            .map(String::as_str),
-        None => dirs.last().map(String::as_str),
+    let parent = dirs.last().map(String::as_str);
+    let parent_season_folder = parent.and_then(season_folder);
+    let parent_season = parent_season_folder.as_ref().map(|folder| folder.season);
+    // The show the folders name. Above a season folder: the series folder
+    // (the season folder's parent), unless the season folder's own text
+    // before its season token names a different title -- a season pack
+    // under a category folder -- or there is no series folder. Otherwise the
+    // parent folder.
+    let folder_series: Option<TitleGuess> = match &parent_season_folder {
+        Some(folder) => {
+            let series_dir = dirs.len().checked_sub(2).and_then(|i| title_of(&dirs[i]));
+            match (series_dir, title_of(folder.prefix)) {
+                (Some(dir), Some(prefix)) if !same_title(&dir.title, &prefix.title) => Some(prefix),
+                (Some(dir), _) => Some(dir),
+                (None, prefix) => prefix,
+            }
+        }
+        None => parent.and_then(title_of),
     };
-    let series = || series_guess(series_dir, &parsed);
+    let filename_series = (!parsed.title.is_empty()).then(|| TitleGuess {
+        title: parsed.title.clone(),
+        year: parsed.year,
+    });
+    let series = || -> TitleGuess {
+        let chosen = match (
+            &parent_season_folder,
+            folder_series.clone(),
+            filename_series.clone(),
+        ) {
+            // A season folder's series is the folders' (unchanged by D182-C1).
+            (Some(_), Some(folder), _) => Some(folder),
+            // Flat: the filename's series wins when it names another title
+            // than the parent folder -- `TV Shows/Breaking.Bad.S01E01.mkv`
+            // (decision D182-C1).
+            (None, Some(folder), Some(file)) if !same_title(&folder.title, &file.title) => {
+                Some(file)
+            }
+            (_, Some(folder), _) => Some(folder),
+            (_, None, file) => file,
+        };
+        chosen.unwrap_or_else(|| TitleGuess {
+            title: UNKNOWN_SHOW.to_string(),
+            year: None,
+        })
+    };
 
     if let (Some(season), Some(episode)) = (parsed.season, parsed.episode) {
         return MediaInference::Episode(EpisodeInference {
@@ -193,30 +280,65 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         });
     }
 
-    if !dirs.is_empty()
-        && let Some((title, number, episode_title)) = absolute_number(&stem)
-    {
-        let series_named = || {
-            title.is_empty()
-                || series_dir.is_some_and(|dir| {
-                    normalize_title(&parse_media_filename(dir).title) == normalize_title(&title)
-                })
-        };
-        if parent_season.is_some() || series_named() {
-            return MediaInference::Episode(EpisodeInference {
-                series: series(),
-                season: parent_season.unwrap_or(1),
-                first_episode: number,
-                last_episode: None,
-                air_date: None,
-                episode_title,
-                numbering: EpisodeNumbering::Absolute,
-                contradicted_season_folder: None,
-            });
+    if let Some(absolute) = absolute_number(&stem) {
+        let series_named = absolute.title.is_empty()
+            || folder_series
+                .as_ref()
+                .is_some_and(|folder| same_title(&folder.title, &absolute.title));
+        let names_show = !dirs.is_empty() && (parent_season.is_some() || series_named);
+        // A year where the number would be is the release year, unless a
+        // season folder of the show the title names holds it: there it is
+        // the episode (`One Piece/Season 1/One Piece - 1999.mkv`).
+        let year_is_episode = !absolute.year_shaped
+            || (parent_season.is_some() && series_named && !absolute.title.is_empty());
+        // The dash form is ambiguous with a movie's part number
+        // (`Movie (2019) - 1`): it needs a season folder or a number of at
+        // least two digits, and a parent folder carrying the filename's own
+        // year says the dash is the movie's.
+        let dash_plausible = !absolute.dash
+            || ((parent_season.is_some() || absolute.digits >= 2)
+                && !parent
+                    .and_then(title_of)
+                    .is_some_and(|folder| folder.year.is_some() && folder.year == parsed.year));
+        if year_is_episode && dash_plausible {
+            if names_show {
+                // The folder was just checked against the title (or is a
+                // season folder), so it -- not the whole `<title> - <n>`
+                // stem -- names the show.
+                return MediaInference::Episode(EpisodeInference {
+                    series: folder_series.clone().unwrap_or_else(series),
+                    season: parent_season.unwrap_or(1),
+                    first_episode: absolute.number,
+                    last_episode: None,
+                    air_date: None,
+                    episode_title: absolute.episode_title,
+                    numbering: EpisodeNumbering::Absolute,
+                    contradicted_season_folder: None,
+                });
+            }
+            if absolute.dash && !absolute.year_shaped {
+                return MediaInference::Unclassifiable(
+                    UnclassifiableReason::AmbiguousAbsoluteNumber {
+                        number: absolute.number,
+                    },
+                );
+            }
         }
     }
 
     if let Some(season) = parent_season {
+        if let Some((episode, episode_title)) = season_folder_episode(&stem, season) {
+            return MediaInference::Episode(EpisodeInference {
+                series: series(),
+                season,
+                first_episode: episode,
+                last_episode: None,
+                air_date: None,
+                episode_title,
+                numbering: EpisodeNumbering::Standard,
+                contradicted_season_folder: None,
+            });
+        }
         return MediaInference::Unclassifiable(
             UnclassifiableReason::NoEpisodeNumberInSeasonFolder { season },
         );
@@ -228,58 +350,93 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         edition,
         ..
     } = parsed;
-    MediaInference::Movie(MovieInference {
-        title: TitleGuess {
+    // The parent folder (never the library root) fills what the filename
+    // leaves out (decision D182-C2): its title when the filename's is empty
+    // or nothing but release noise, and its year when the filename names the
+    // same title without one -- `Kill Bill (2003)/Kill Bill.mkv`.
+    let folder = parent.and_then(title_of);
+    let title = match folder {
+        Some(folder) if title.is_empty() || is_noise_only(&title) => TitleGuess {
+            title: folder.title,
+            year: year.or(folder.year),
+        },
+        Some(folder) if year.is_none() && same_title(&folder.title, &title) => TitleGuess {
+            title,
+            year: folder.year,
+        },
+        _ => TitleGuess {
             title: if title.is_empty() { stem } else { title },
             year,
         },
-        edition,
+    };
+    MediaInference::Movie(MovieInference { title, edition })
+}
+
+/// An absolute episode number found in a stem.
+struct AbsoluteNumber {
+    /// The title before the number; empty for a bare `E12`.
+    title: String,
+    number: u32,
+    /// How many digits the number was written with (`012` is three).
+    digits: usize,
+    /// Whether the number is written `<title> - <n>`, rather than `E<n>`.
+    dash: bool,
+    /// Whether the number could be a release year (1900-2099).
+    year_shaped: bool,
+    episode_title: Option<String>,
+}
+
+/// An absolute episode number in `stem`: `<title> - <n>` or a bare `E<n>`.
+fn absolute_number(stem: &str) -> Option<AbsoluteNumber> {
+    let normalized = normalized_stem(stem);
+    let (caps, dash) = match ABSOLUTE_DASH_REGEX.captures(&normalized) {
+        Some(caps) => (caps, true),
+        None => (ABSOLUTE_BARE_REGEX.captures(&normalized)?, false),
+    };
+    let digits = caps.get(2)?;
+    Some(AbsoluteNumber {
+        title: caps
+            .get(1)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default(),
+        number: digits.as_str().parse().ok()?,
+        digits: digits.as_str().len(),
+        dash,
+        year_shaped: YEAR_REGEX.is_match(digits.as_str()),
+        episode_title: episode_title_after(&normalized, digits.end()),
     })
 }
 
-/// The show a series folder (or, without one, the filename) names.
-fn series_guess(series_dir: Option<&str>, parsed: &ParsedFilename) -> TitleGuess {
-    if let Some(dir) = series_dir {
-        let folder = parse_media_filename(dir);
-        if !folder.title.is_empty() {
-            return TitleGuess {
-                title: folder.title,
-                year: folder.year,
-            };
-        }
-    }
-    if parsed.title.is_empty() {
-        TitleGuess {
-            title: UNKNOWN_SHOW.to_string(),
-            year: None,
-        }
-    } else {
-        TitleGuess {
-            title: parsed.title.clone(),
-            year: parsed.year,
-        }
-    }
-}
-
-/// An absolute episode number in `stem`: the title before it (empty for a
-/// bare `E12`), the number, and any episode title after it. A four-digit
-/// year is never an episode number.
-fn absolute_number(stem: &str) -> Option<(String, u32, Option<String>)> {
+/// An episode number that only a season folder makes readable (decision
+/// D182-C5): `Episode 3` / `Ep 3`, or three or four digits whose leading
+/// digits are the folder's season (`501` in `Season 5`). Only the words
+/// before the first release-noise token are searched.
+fn season_folder_episode(stem: &str, season: u32) -> Option<(u32, Option<String>)> {
     let normalized = normalized_stem(stem);
-    let caps = ABSOLUTE_DASH_REGEX
-        .captures(&normalized)
-        .or_else(|| ABSOLUTE_BARE_REGEX.captures(&normalized))?;
-    let digits = caps.get(2)?;
-    if YEAR_REGEX.is_match(digits.as_str()) {
-        return None;
+    if let Some(caps) = EPISODE_WORD_REGEX.captures(&normalized) {
+        let number = caps.get(1).expect("group 1 always present");
+        let episode = number.as_str().parse().ok()?;
+        return Some((episode, episode_title_after(&normalized, number.end())));
     }
-    let number = digits.as_str().parse().ok()?;
-    let title = caps
-        .get(1)
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_default();
-    let episode_title = crate::utils::filename::episode_title_after(&normalized, digits.end());
-    Some((title, number, episode_title))
+    let mut offset = 0;
+    for token in normalized.split(' ') {
+        let end = offset + token.len();
+        offset = end + 1;
+        if is_noise_only(token) {
+            break;
+        }
+        if !SEASON_EPISODE_DIGITS_REGEX.is_match(token) {
+            continue;
+        }
+        let (season_digits, episode_digits) = token.split_at(token.len() - 2);
+        if season_digits.parse::<u32>().ok() == Some(season)
+            && let Ok(episode) = episode_digits.parse::<u32>()
+            && episode > 0
+        {
+            return Some((episode, episode_title_after(&normalized, end)));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
