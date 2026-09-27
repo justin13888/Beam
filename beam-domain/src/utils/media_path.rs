@@ -195,6 +195,20 @@ fn same_title(a: &str, b: &str) -> bool {
     normalize_title(a) == normalize_title(b)
 }
 
+/// Words a box set's folder adds after the show's name: `Breaking Bad
+/// Complete Series`, `The Wire The Complete Collection`.
+const BOX_SET_WORDS: &[&str] = &["the", "complete", "series", "collection"];
+
+/// Whether `folder` is `show` followed by nothing but box-set words.
+fn is_box_set_of(folder: &str, show: &str) -> bool {
+    let folder = normalize_title(folder);
+    let show = normalize_title(show);
+    folder
+        .strip_prefix(show.as_str())
+        .and_then(|rest| rest.strip_prefix(' '))
+        .is_some_and(|rest| rest.split(' ').all(|word| BOX_SET_WORDS.contains(&word)))
+}
+
 /// Infer what the file at `rel_path` -- relative to its library root -- is.
 pub fn infer_media(rel_path: &Path) -> MediaInference {
     let components: Vec<String> = rel_path
@@ -222,26 +236,33 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
     let parent = dirs.last().map(String::as_str);
     let parent_season_folder = parent.and_then(season_folder);
     let parent_season = parent_season_folder.as_ref().map(|folder| folder.season);
+    let filename_series = (!parsed.title.is_empty()).then(|| TitleGuess {
+        title: parsed.title.clone(),
+        year: parsed.year,
+    });
     // The show the folders name. Above a season folder: the series folder
     // (the season folder's parent), unless the season folder's own text
     // before its season token names a different title -- a season pack
-    // under a category folder -- or there is no series folder. Otherwise the
-    // parent folder.
+    // under a category folder -- or there is no series folder. A series
+    // folder that is a box set of the filename's show (`Breaking Bad
+    // Complete Series`) names that show. Otherwise the parent folder.
     let folder_series: Option<TitleGuess> = match &parent_season_folder {
         Some(folder) => {
             let series_dir = dirs.len().checked_sub(2).and_then(|i| title_of(&dirs[i]));
             match (series_dir, title_of(folder.prefix)) {
                 (Some(dir), Some(prefix)) if !same_title(&dir.title, &prefix.title) => Some(prefix),
-                (Some(dir), _) => Some(dir),
+                (Some(dir), _) => match &filename_series {
+                    Some(file) if is_box_set_of(&dir.title, &file.title) => Some(TitleGuess {
+                        title: file.title.clone(),
+                        year: dir.year.or(file.year),
+                    }),
+                    _ => Some(dir),
+                },
                 (None, prefix) => prefix,
             }
         }
         None => parent.and_then(title_of),
     };
-    let filename_series = (!parsed.title.is_empty()).then(|| TitleGuess {
-        title: parsed.title.clone(),
-        year: parsed.year,
-    });
     let series = || -> TitleGuess {
         let chosen = match (
             &parent_season_folder,

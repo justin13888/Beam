@@ -134,6 +134,25 @@ const CORPUS: &[(&str, &str)] = &[
         "Doctor Who/Series 11/Doctor.Who.S11E01.mkv",
         "episode Doctor Who|- s11 e1 Standard",
     ),
+    // A box set's folder names the show and then the box: the filename's
+    // show, when the rest is nothing but box-set words. Any other word keeps
+    // the folder's title.
+    (
+        "Breaking Bad Complete Series/Season 1/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "The Wire - The Complete Collection/Season 2/The.Wire.S02E01.mkv",
+        "episode The Wire|- s2 e1 Standard",
+    ),
+    (
+        "Firefly The Series Collection/Season 1/Firefly.S01E01.mkv",
+        "episode Firefly|- s1 e1 Standard",
+    ),
+    (
+        "Doctor Who Classic/Season 1/Doctor.Who.S01E01.mkv",
+        "episode Doctor Who Classic|- s1 e1 Standard",
+    ),
     // A season pack: the text before the season token names the show when
     // there is no series folder, or when the folder above is a category.
     (
