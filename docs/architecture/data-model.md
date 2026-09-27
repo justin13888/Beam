@@ -114,7 +114,7 @@ nullable — as for movies), `title_localized`, `description`, `year`, `poster_u
 
 ### Title identity and lifetime
 
-A movie or show has two names (FR-212, FR-213;
+A movie or show has two names (FR-214, FR-215;
 [#183](https://github.com/justin13888/beam/issues/183)). `title` is what users see, and enrichment
 overwrites it with the provider's spelling. `identity_key` is what the indexer finds the title by,
 and nothing but the indexer's own backfill ever writes it after insert: enrichment's `UPDATE` does

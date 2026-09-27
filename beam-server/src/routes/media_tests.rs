@@ -113,6 +113,7 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
         oidc_client: base.services.oidc_client.clone(),
         pending_auth_store: base.services.pending_auth_store.clone(),
         oidc_config: base.services.oidc_config.clone(),
+        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
     };
 
     AppState::new(base.config.clone(), services, base.probe.clone(), None)

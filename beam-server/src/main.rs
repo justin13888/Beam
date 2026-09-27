@@ -104,7 +104,9 @@ async fn main() -> Result<()> {
             scan_interval_secs: config.scan_interval_secs,
             watch_enabled: config.watch_enabled,
             watch_debounce_ms: config.watch_debounce_ms,
+            watch_poll_interval_secs: config.watch_poll_interval_secs,
         },
+        services.watch_status.clone(),
     );
 
     // Start the metadata-enrichment sweep loop. `AppServices::new` wires this

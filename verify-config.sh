@@ -79,6 +79,7 @@ check_var "BEAM_SCAN_INTERVAL_SECS"
 check_var "BEAM_MISSING_FILE_GRACE_DAYS"
 check_var "BEAM_WATCH_ENABLED"
 check_var "BEAM_WATCH_DEBOUNCE_MS"
+check_var "BEAM_WATCH_POLL_INTERVAL_SECS"
 echo ""
 
 echo "Checking Metadata Enrichment Configuration (cameo -> TMDB/AniList):"

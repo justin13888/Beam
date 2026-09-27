@@ -652,3 +652,89 @@ async fn a_watcher_event_for_a_path_that_cannot_be_statted_changes_nothing() {
         "a failed stat says nothing about whether the file is there"
     );
 }
+
+// ─── symlinks are never followed (issue #186) ────────────────────────────────
+//
+// The harness's hasher and prober have no expectations, so indexing anything
+// through a link would panic: each test below passing is itself the proof that
+// nothing behind a link was indexed.
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_to_a_file_is_not_indexed() {
+    let h = Harness::new().await;
+    let real = h.index_on_disk("real.mkv");
+    let target = h.dir.path().join("parked").join("elsewhere.mkv");
+    std::fs::write(&target, b"outside the root").unwrap();
+    std::os::unix::fs::symlink(&target, h.root.join("linked.mkv")).unwrap();
+
+    assert_eq!(h.scan().await.unwrap(), 0, "nothing new is indexed");
+    assert_eq!(h.visible_ids().await, vec![real.id]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_directory_is_not_descended() {
+    let h = Harness::new().await;
+    let real = h.index_on_disk("real.mkv");
+    let outside = h.dir.path().join("parked").join("more-movies");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("movie.mkv"), b"outside the root").unwrap();
+    std::os::unix::fs::symlink(&outside, h.root.join("more")).unwrap();
+
+    assert_eq!(h.scan().await.unwrap(), 0, "nothing new is indexed");
+    assert_eq!(h.visible_ids().await, vec![real.id]);
+}
+
+/// A file indexed before the policy (when `metadata` followed links) or
+/// replaced by a link since is no longer a library file: the scan treats it as
+/// gone, which since #179 means marked missing, not deleted.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_indexed_file_replaced_by_a_symlink_is_marked_missing() {
+    let h = Harness::new().await;
+    let kept = h.index_on_disk("kept.mkv");
+    let replaced = h.index_on_disk("replaced.mkv");
+    h.park(&replaced);
+    std::os::unix::fs::symlink(h.parked(&replaced), &replaced.path).unwrap();
+    h.clock.advance(Duration::from_secs(60));
+
+    h.scan().await.unwrap();
+
+    let stored = h.stored(&replaced).await.expect("the row is kept");
+    assert_eq!(stored.missing_since, Some(instant(60)));
+    assert_eq!(h.visible_ids().await, vec![kept.id]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_watcher_event_for_a_symlink_indexes_nothing_and_hides_a_replaced_file() {
+    let h = Harness::new().await;
+    let target = h.dir.path().join("parked").join("elsewhere.mkv");
+    std::fs::write(&target, b"outside the root").unwrap();
+    let link = h.root.join("linked.mkv");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    h.service
+        .reconcile_path(h.library.id, link, FsEventKind::Created)
+        .await
+        .unwrap();
+    assert!(
+        h.visible_ids().await.is_empty(),
+        "a created link is not indexed"
+    );
+
+    let replaced = h.index_on_disk("replaced.mkv");
+    h.park(&replaced);
+    std::os::unix::fs::symlink(h.parked(&replaced), &replaced.path).unwrap();
+    h.clock.advance(Duration::from_secs(5));
+
+    h.service
+        .reconcile_path(h.library.id, replaced.path.clone(), FsEventKind::Modified)
+        .await
+        .unwrap();
+
+    let stored = h.stored(&replaced).await.expect("the row is kept");
+    assert_eq!(stored.missing_since, Some(instant(5)));
+    assert!(h.visible_ids().await.is_empty());
+}

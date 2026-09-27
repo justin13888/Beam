@@ -155,6 +155,125 @@ pub mod in_memory {
 #[cfg(any(test, feature = "test-utils"))]
 pub use in_memory::{InMemoryPathValidator, InMemoryPathValidatorResult};
 
+/// What a candidate library root collides with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootConflict {
+    /// The candidate is, contains, or lies inside this existing library root.
+    Library(PathBuf),
+    /// The candidate is, contains, or lies inside the server's data directory.
+    DataDir,
+}
+
+/// Whether a candidate library root overlaps an existing library root or the
+/// data directory.
+///
+/// Overlap in either direction is a conflict. A root inside another library
+/// indexes the same files twice, as two libraries with two sets of rows and
+/// two watches; a root containing another does the same from the other side.
+/// A root holding the data directory would index Beam's own artwork cache and
+/// have Beam writing under a library root, which FR-202 forbids; a root inside
+/// the data directory is Beam's state, not media.
+///
+/// Every path must already be canonical: `Path::starts_with` compares whole
+/// components, so `/m/movies` does not contain `/m/movies2`, but it cannot see
+/// through a `..` or a symlink.
+pub fn find_root_conflict(
+    candidate: &Path,
+    existing: &[PathBuf],
+    data_dir: &Path,
+) -> Option<RootConflict> {
+    if roots_overlap(candidate, data_dir) {
+        return Some(RootConflict::DataDir);
+    }
+    existing
+        .iter()
+        .find(|root| roots_overlap(candidate, root))
+        .map(|root| RootConflict::Library(root.clone()))
+}
+
+/// Whether one canonical path is, contains, or lies inside the other.
+fn roots_overlap(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// Two registered libraries whose roots overlap. Registration refuses this
+/// now, but a library registered before it did may still be stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingLibraryOverlap {
+    pub first: Uuid,
+    pub second: Uuid,
+}
+
+/// Why the stored libraries stop the server from starting.
+#[derive(Debug, Error)]
+pub enum StartupRootError {
+    #[error("failed to list libraries to check BEAM_DATA_DIR against them: {0}")]
+    Db(#[from] DbErr),
+    /// The data directory is, contains, or lies inside a library root. Beam
+    /// writes its artwork cache there, and it must never write under a
+    /// library (FR-202), so this is fatal rather than a warning.
+    #[error(
+        "BEAM_DATA_DIR ({data_dir}) overlaps the root of library '{library}' ({root}); \
+         Beam never writes inside a library, so move BEAM_DATA_DIR outside every library root \
+         and restart"
+    )]
+    DataDirOverlapsLibrary {
+        data_dir: PathBuf,
+        library: String,
+        root: PathBuf,
+    },
+}
+
+/// Check the stored library roots against the data directory and each other,
+/// once at startup.
+///
+/// Registration refuses both overlaps, but it cannot see a data directory
+/// that is moved *into* an existing library afterwards, nor libraries stored
+/// before it refused them. The first is fatal: starting would write the
+/// artwork cache under a library root. The second only warns: those
+/// installations work today, and refusing to start would take them down over
+/// a condition that costs duplicated rows, not correctness. The overlaps are
+/// returned so the caller (and a test) can see what was reported.
+///
+/// `data_dir` must be canonical; stored roots already are.
+pub async fn audit_existing_roots(
+    library_repo: &dyn beam_domain::repositories::LibraryRepository,
+    data_dir: &Path,
+) -> Result<Vec<ExistingLibraryOverlap>, StartupRootError> {
+    let libraries = library_repo.find_all().await?;
+    if let Some(library) = libraries
+        .iter()
+        .find(|library| roots_overlap(&library.root_path, data_dir))
+    {
+        return Err(StartupRootError::DataDirOverlapsLibrary {
+            data_dir: data_dir.to_path_buf(),
+            library: library.name.clone(),
+            root: library.root_path.clone(),
+        });
+    }
+
+    let mut overlaps = Vec::new();
+    for (index, first) in libraries.iter().enumerate() {
+        for second in &libraries[index + 1..] {
+            if roots_overlap(&first.root_path, &second.root_path) {
+                warn!(
+                    first = %first.id,
+                    first_root = %first.root_path.display(),
+                    second = %second.id,
+                    second_root = %second.root_path.display(),
+                    "two libraries overlap; their shared files are indexed twice. \
+                     Delete one and register a disjoint root"
+                );
+                overlaps.push(ExistingLibraryOverlap {
+                    first: first.id,
+                    second: second.id,
+                });
+            }
+        }
+    }
+    Ok(overlaps)
+}
+
 /// A catalogued file resolved to where it lives on disk.
 ///
 /// Server-internal on purpose: it carries the absolute path the delivery
@@ -237,16 +356,21 @@ pub struct LocalLibraryService {
     library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
     file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
     video_dir: PathBuf,
+    /// The server's data directory, canonical. No library root may overlap it.
+    data_dir: PathBuf,
     notification_service: Arc<dyn NotificationService>,
     index_service: Arc<dyn IndexService>,
     path_validator: Arc<dyn PathValidator>,
 }
 
 impl LocalLibraryService {
+    /// `data_dir` must be canonical: it is compared component-wise against
+    /// canonical library roots.
     pub fn new(
         library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
         file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
         video_dir: PathBuf,
+        data_dir: PathBuf,
         notification_service: Arc<dyn NotificationService>,
         index_service: Arc<dyn IndexService>,
         path_validator: Arc<dyn PathValidator>,
@@ -255,6 +379,7 @@ impl LocalLibraryService {
             library_repo,
             file_repo,
             video_dir,
+            data_dir,
             notification_service,
             index_service,
             path_validator,
@@ -357,6 +482,35 @@ impl LibraryService for LocalLibraryService {
             .path_validator
             .validate_library_root(&requested_path, &self.video_dir)?;
 
+        // As with the validator, the rejections name no path (NFR-108); the
+        // log does.
+        let existing_roots: Vec<PathBuf> = self
+            .library_repo
+            .find_all()
+            .await?
+            .into_iter()
+            .map(|library| library.root_path)
+            .collect();
+        match find_root_conflict(&canonical_target, &existing_roots, &self.data_dir) {
+            None => {}
+            Some(RootConflict::DataDir) => {
+                warn!(
+                    requested = %canonical_target.display(),
+                    data_dir = %self.data_dir.display(),
+                    "library path overlaps the data directory"
+                );
+                return Err(LibraryError::PathOverlapsDataDir);
+            }
+            Some(RootConflict::Library(existing)) => {
+                warn!(
+                    requested = %canonical_target.display(),
+                    existing = %existing.display(),
+                    "library path overlaps an existing library"
+                );
+                return Err(LibraryError::PathOverlapsLibrary);
+            }
+        }
+
         let create = CreateLibrary {
             name: name.clone(),
             root_path: canonical_target,
@@ -434,6 +588,12 @@ pub enum LibraryError {
     PathNotFound(String),
     #[error("Library path is outside the permitted root: {0}")]
     PathOutsideRoot(String),
+    // Unit variants: the message is the whole story, and names no path
+    // (NFR-108).
+    #[error("Library path is, contains, or lies inside an existing library")]
+    PathOverlapsLibrary,
+    #[error("Library path overlaps the server's data directory")]
+    PathOverlapsDataDir,
 }
 
 impl From<IndexError> for LibraryError {

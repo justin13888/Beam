@@ -242,6 +242,25 @@ pub enum LibraryCreateError {
     )]
     PathOutsideRoot(String),
 
+    /// The root is, contains, or lies inside the server's data directory.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#library-path-overlaps-data-dir",
+        title = "Library path overlaps the data directory"
+    )]
+    PathOverlapsDataDir(String),
+
+    /// The root is, contains, or lies inside an existing library's root: the
+    /// request conflicts with a library that already exists.
+    #[error("{0}")]
+    #[problem(
+        status = 409,
+        type = "https://beam.justinchung.net/reference/errors/#library-path-overlaps-library",
+        title = "Library path overlaps an existing library"
+    )]
+    PathOverlapsLibrary(String),
+
     #[error("{0}")]
     #[problem(
         status = 500,
