@@ -149,6 +149,15 @@ const CORPUS: &[(&str, &str)] = &[
         "Firefly The Series Collection/Season 1/Firefly.S01E01.mkv",
         "episode Firefly|- s1 e1 Standard",
     ),
+    // A box set's folder that names only the box: the filename's show.
+    (
+        "The Complete Series/Season 1/Show.S01E01.mkv",
+        "episode Show|- s1 e1 Standard",
+    ),
+    (
+        "TV/Complete Collection/Season 2/Firefly.S02E01.mkv",
+        "episode Firefly|- s2 e1 Standard",
+    ),
     (
         "Doctor Who Classic/Season 1/Doctor.Who.S01E01.mkv",
         "episode Doctor Who Classic|- s1 e1 Standard",

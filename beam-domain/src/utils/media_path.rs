@@ -229,14 +229,19 @@ fn same_title(a: &str, b: &str) -> bool {
 /// Complete Series`, `The Wire The Complete Collection`.
 const BOX_SET_WORDS: &[&str] = &["the", "complete", "series", "collection"];
 
-/// Whether `folder` is `show` followed by nothing but box-set words.
+/// Whether `folder` is `show` followed by nothing but box-set words, or
+/// nothing but box-set words at all (`The Complete Series`): either way the
+/// folder names the box, and `show` the show.
 fn is_box_set_of(folder: &str, show: &str) -> bool {
     let folder = normalize_title(folder);
     let show = normalize_title(show);
-    folder
+    let box_words = folder
         .strip_prefix(show.as_str())
         .and_then(|rest| rest.strip_prefix(' '))
-        .is_some_and(|rest| rest.split(' ').all(|word| BOX_SET_WORDS.contains(&word)))
+        .unwrap_or(folder.as_str());
+    box_words
+        .split(' ')
+        .all(|word| BOX_SET_WORDS.contains(&word))
 }
 
 /// Infer what the file at `rel_path` -- relative to its library root -- is.

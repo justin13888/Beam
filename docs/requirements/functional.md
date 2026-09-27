@@ -71,8 +71,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   - a show in a season folder is named by its series folder (the season folder's parent), unless
     the season folder's own text before its season token names another title or there is no
     series folder, when that text names it; else by the filename; a series folder that is the
-    filename's show followed only by box-set words (`the`, `complete`, `series`, `collection`)
-    names the filename's show;
+    filename's show followed only by box-set words (`the`, `complete`, `series`, `collection`),
+    or is only box-set words (`The Complete Series`), names the filename's show;
   - a show outside a season folder is named by the file's parent folder, unless the filename names
     another title (compared after identity normalisation), when the filename names it; with
     neither, `Unknown Show`;
