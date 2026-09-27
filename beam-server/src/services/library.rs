@@ -182,14 +182,96 @@ pub fn find_root_conflict(
     existing: &[PathBuf],
     data_dir: &Path,
 ) -> Option<RootConflict> {
-    let overlaps = |other: &Path| candidate.starts_with(other) || other.starts_with(candidate);
-    if overlaps(data_dir) {
+    if roots_overlap(candidate, data_dir) {
         return Some(RootConflict::DataDir);
     }
     existing
         .iter()
-        .find(|root| overlaps(root))
+        .find(|root| roots_overlap(candidate, root))
         .map(|root| RootConflict::Library(root.clone()))
+}
+
+/// Whether one canonical path is, contains, or lies inside the other.
+fn roots_overlap(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// Two registered libraries whose roots overlap. Registration refuses this
+/// now, but a library registered before it did may still be stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingLibraryOverlap {
+    pub first: Uuid,
+    pub second: Uuid,
+}
+
+/// Why the stored libraries stop the server from starting.
+#[derive(Debug, Error)]
+pub enum StartupRootError {
+    #[error("failed to list libraries to check BEAM_DATA_DIR against them: {0}")]
+    Db(#[from] DbErr),
+    /// The data directory is, contains, or lies inside a library root. Beam
+    /// writes its artwork cache there, and it must never write under a
+    /// library (FR-202), so this is fatal rather than a warning.
+    #[error(
+        "BEAM_DATA_DIR ({data_dir}) overlaps the root of library '{library}' ({root}); \
+         Beam never writes inside a library, so move BEAM_DATA_DIR outside every library root \
+         and restart"
+    )]
+    DataDirOverlapsLibrary {
+        data_dir: PathBuf,
+        library: String,
+        root: PathBuf,
+    },
+}
+
+/// Check the stored library roots against the data directory and each other,
+/// once at startup.
+///
+/// Registration refuses both overlaps, but it cannot see a data directory
+/// that is moved *into* an existing library afterwards, nor libraries stored
+/// before it refused them. The first is fatal: starting would write the
+/// artwork cache under a library root. The second only warns: those
+/// installations work today, and refusing to start would take them down over
+/// a condition that costs duplicated rows, not correctness. The overlaps are
+/// returned so the caller (and a test) can see what was reported.
+///
+/// `data_dir` must be canonical; stored roots already are.
+pub async fn audit_existing_roots(
+    library_repo: &dyn beam_domain::repositories::LibraryRepository,
+    data_dir: &Path,
+) -> Result<Vec<ExistingLibraryOverlap>, StartupRootError> {
+    let libraries = library_repo.find_all().await?;
+    if let Some(library) = libraries
+        .iter()
+        .find(|library| roots_overlap(&library.root_path, data_dir))
+    {
+        return Err(StartupRootError::DataDirOverlapsLibrary {
+            data_dir: data_dir.to_path_buf(),
+            library: library.name.clone(),
+            root: library.root_path.clone(),
+        });
+    }
+
+    let mut overlaps = Vec::new();
+    for (index, first) in libraries.iter().enumerate() {
+        for second in &libraries[index + 1..] {
+            if roots_overlap(&first.root_path, &second.root_path) {
+                warn!(
+                    first = %first.id,
+                    first_root = %first.root_path.display(),
+                    second = %second.id,
+                    second_root = %second.root_path.display(),
+                    "two libraries overlap; their shared files are indexed twice. \
+                     Delete one and register a disjoint root"
+                );
+                overlaps.push(ExistingLibraryOverlap {
+                    first: first.id,
+                    second: second.id,
+                });
+            }
+        }
+    }
+    Ok(overlaps)
 }
 
 #[async_trait::async_trait]

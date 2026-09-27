@@ -840,6 +840,92 @@ mod tests {
 
         assert_eq!(lib_repo.libraries.lock().unwrap().len(), 2);
     }
+
+    // ── startup audit of stored roots (issue #186) ───────────────────────────
+
+    /// Store a library directly, as one registered before overlaps were
+    /// refused would be.
+    async fn stored_library(lib_repo: &InMemoryLibraryRepository, name: &str, root: &str) -> Uuid {
+        use beam_domain::models::CreateLibrary;
+        use beam_domain::repositories::LibraryRepository;
+
+        lib_repo
+            .create(CreateLibrary {
+                name: name.to_string(),
+                description: None,
+                root_path: PathBuf::from(root),
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_data_directory_moved_inside_an_existing_library_stops_startup() {
+        use crate::services::library::{StartupRootError, audit_existing_roots};
+
+        let lib_repo = InMemoryLibraryRepository::default();
+        stored_library(&lib_repo, "Shows", "/media/shows").await;
+        stored_library(&lib_repo, "Movies", "/media/movies").await;
+
+        let err = audit_existing_roots(&lib_repo, std::path::Path::new("/media/movies/.beam"))
+            .await
+            .expect_err("the artwork cache would be written inside Movies");
+
+        match &err {
+            StartupRootError::DataDirOverlapsLibrary { library, root, .. } => {
+                assert_eq!(library, "Movies");
+                assert_eq!(root, &PathBuf::from("/media/movies"));
+            }
+            other => panic!("expected DataDirOverlapsLibrary, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("BEAM_DATA_DIR"),
+            "the error names the setting to change: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_data_directory_holding_a_library_stops_startup() {
+        use crate::services::library::{StartupRootError, audit_existing_roots};
+
+        let lib_repo = InMemoryLibraryRepository::default();
+        stored_library(&lib_repo, "Movies", "/srv/beam/movies").await;
+
+        let err = audit_existing_roots(&lib_repo, std::path::Path::new("/srv/beam"))
+            .await
+            .expect_err("the library lies inside the data directory");
+        assert!(
+            matches!(err, StartupRootError::DataDirOverlapsLibrary { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_libraries_that_overlap_each_other_are_reported_not_refused() {
+        use crate::services::library::{ExistingLibraryOverlap, audit_existing_roots};
+
+        let lib_repo = InMemoryLibraryRepository::default();
+        let movies = stored_library(&lib_repo, "Movies", "/media/movies").await;
+        let four_k = stored_library(&lib_repo, "4K", "/media/movies/4k").await;
+        stored_library(&lib_repo, "Movies 2", "/media/movies2").await;
+
+        let overlaps = audit_existing_roots(&lib_repo, std::path::Path::new("/srv/beam"))
+            .await
+            .expect("an overlap between libraries does not stop startup");
+
+        assert_eq!(
+            overlaps.len(),
+            1,
+            "only Movies and 4K overlap: {overlaps:?}"
+        );
+        let ExistingLibraryOverlap { first, second } = overlaps[0].clone();
+        let mut pair = [first, second];
+        pair.sort();
+        let mut expected = [movies, four_k];
+        expected.sort();
+        assert_eq!(pair, expected);
+    }
 }
 
 // ── OsPathValidator: real containment ─────────────────────────────────────────

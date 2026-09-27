@@ -77,7 +77,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-212**: Library roots MUST be pairwise disjoint and disjoint from `BEAM_DATA_DIR`: registering
   a root that is, contains, or lies inside an existing library root MUST be rejected with
   `library-path-overlaps-library` (409), and one that overlaps the data directory with
-  `library-path-overlaps-data-dir` (400), compared by whole components after canonicalization. The
+  `library-path-overlaps-data-dir` (400), compared by whole components after canonicalization. At
+  startup the server MUST refuse to start if `BEAM_DATA_DIR` overlaps a stored library root, and
+  MUST log a warning, not refuse, for stored library roots that overlap each other. The
   indexer and the watcher MUST NOT follow symbolic links beneath a library root; a link is not a
   library file, so a row whose path has become one is treated as missing (FR-211).
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS

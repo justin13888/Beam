@@ -42,6 +42,12 @@ A root that overlaps the data directory is refused as
 there, and it must never write under a library. Paths are compared after symlinks and `..` are
 resolved, by whole path components, so `/videos/movies` and `/videos/movies2` do not overlap.
 
+The same rules are checked against the libraries you already have each time Beam starts. If
+`BEAM_DATA_DIR` has been moved inside a library (or a library lies inside it), Beam refuses to start
+and says so: move `BEAM_DATA_DIR` outside every library root. Two existing libraries that overlap
+each other, registered before Beam refused that, keep working; Beam logs a warning naming both, and
+deleting one and registering a disjoint root clears it.
+
 ## Symbolic links are not followed
 
 Beam never follows a symbolic link beneath a library root — to a file or to a directory — when it

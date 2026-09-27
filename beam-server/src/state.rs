@@ -27,7 +27,7 @@ use crate::{
         artwork::{ArtworkCache, ArtworkCacheConfig},
         hash::{HashConfig, HashService, LocalHashService},
         health::DependencyProbe,
-        library::{LibraryService, LocalLibraryService, OsPathValidator},
+        library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
         playback::{DbPlaybackService, PlaybackService},
@@ -189,6 +189,20 @@ impl AppServices {
         ));
         let file_repo: Arc<dyn beam_domain::repositories::FileRepository> =
             Arc::new(beam_index::repositories::SqlFileRepository::new(db.clone()));
+
+        // Canonical, because library roots are compared against it component
+        // by component. `main` has already created it, so failing to resolve
+        // it is fatal rather than a check silently skipped.
+        let data_dir = config.data_dir.canonicalize().map_err(|e| {
+            eyre::eyre!(
+                "failed to resolve BEAM_DATA_DIR {}: {e}",
+                config.data_dir.display()
+            )
+        })?;
+        // Before anything writes under the data directory (the artwork cache
+        // below): a data directory inside a library is refused here, because
+        // registration can only refuse the library side of that overlap.
+        audit_existing_roots(library_repo.as_ref(), &data_dir).await?;
         let movie_repo: Arc<dyn beam_domain::repositories::MovieRepository> = Arc::new(
             beam_index::repositories::SqlMovieRepository::new(db.clone()),
         );
@@ -331,16 +345,6 @@ impl AppServices {
             )
             .await?,
         );
-
-        // Canonical, because library roots are compared against it component
-        // by component. `main` has already created it, so failing to resolve
-        // it is fatal rather than a check silently skipped.
-        let data_dir = config.data_dir.canonicalize().map_err(|e| {
-            eyre::eyre!(
-                "failed to resolve BEAM_DATA_DIR {}: {e}",
-                config.data_dir.display()
-            )
-        })?;
 
         let services = Self {
             hash: hash_service.clone() as Arc<dyn HashService>,
