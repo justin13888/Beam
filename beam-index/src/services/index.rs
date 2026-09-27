@@ -4791,6 +4791,80 @@ mod tests {
         assert_eq!(files[0].hash, 200);
     }
 
+    /// A file with no movie or episode -- one its path could not classify --
+    /// whose content changes and whose re-probe then fails stays `Unknown`:
+    /// `Changed` without content is what the `files` CHECK refuses, so the
+    /// write would fail and the new hash would never be recorded.
+    #[tokio::test]
+    async fn test_reconcile_changed_unclassifiable_file_ffmpeg_failure_stays_unknown() {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let dir = TempDir::new().unwrap();
+        let library = make_library_in_tempdir(&lib_repo, &dir).await;
+
+        let file_path = dir.path().join("Show Name/Season 01/Behind the Scenes.mkv");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, b"new content").unwrap();
+
+        let existing = MediaFile {
+            id: Uuid::new_v4(),
+            library_id: library.id,
+            path: file_path.clone(),
+            hash: 100,
+            size_bytes: 999, // wrong size → suspected
+            mtime: None,
+            mime_type: Some("video/x-matroska".to_string()),
+            duration: Some(Duration::from_secs(60)),
+            container_format: Some("matroska".to_string()),
+            content: None,
+            status: FileStatus::Unknown,
+            classifier_version: CLASSIFIER_VERSION,
+            scanned_at: Utc::now(),
+            updated_at: Utc::now(),
+            missing_since: None,
+        };
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(existing.id, existing);
+
+        let mut mock_hash = MockHashService::new();
+        mock_hash
+            .expect_hash_async()
+            .times(1)
+            .returning(|_| Ok(200)); // differs from existing.hash
+        let mut mock_media_info = MockMediaInfoService::new();
+        mock_media_info
+            .expect_get_video_metadata()
+            .times(1)
+            .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".into())));
+
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(mock_hash),
+            Arc::new(mock_media_info),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        );
+
+        service
+            .scan_library(library.id.to_string())
+            .await
+            .expect("the scan does not fail on the file");
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Unknown);
+        assert!(files[0].content.is_none(), "{:?}", files[0].content);
+        assert_eq!(files[0].hash, 200, "the new content was recorded");
+        assert_eq!(files[0].size_bytes, "new content".len() as u64);
+    }
+
     #[tokio::test]
     async fn test_reconcile_path_removed_marks_file_missing() {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
