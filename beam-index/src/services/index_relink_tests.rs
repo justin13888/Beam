@@ -1306,6 +1306,59 @@ async fn a_file_renamed_onto_a_missing_rows_path_keeps_its_own_row() {
     );
 }
 
+/// A row kept aside when another file took its path is still its file's:
+/// brought back under a new name, the file is relinked to it. The move is
+/// reported from the path the file had -- never from the name the row was
+/// kept at, which no file ever had.
+#[tokio::test]
+async fn a_displaced_row_found_again_is_reported_from_its_own_path() {
+    let h = Harness::new().await;
+    let old = h.write("Old (1990).mkv", "an old film");
+    let heat = h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    let old_id = h.present(&old).await.id;
+    let away = h.dir.path().join("outside").join("Old (1990).mkv");
+    std::fs::rename(&old, &away).unwrap();
+    h.scan().await;
+    h.mv(&heat, "Old (1990).mkv");
+    h.scan().await;
+    assert_ne!(h.present(&old).await.id, old_id, "Heat took Old's path");
+
+    let back = h.root.join("Old back (1990).mkv");
+    std::fs::rename(&away, &back).unwrap();
+    let progress = h.scan().await;
+
+    assert_eq!((progress.relinked, progress.added), (1, 0));
+    assert_eq!(h.present(&back).await.id, old_id);
+    let found_again = h
+        .move_logs()
+        .await
+        .into_iter()
+        .find(|log| log.details.as_ref().unwrap()["file_id"] == old_id.to_string())
+        .expect("the move is logged");
+    assert_eq!(
+        found_again.details.as_ref().unwrap()["from"],
+        serde_json::json!(old.display().to_string())
+    );
+    assert_eq!(
+        found_again.message,
+        format!(
+            "File moved: '{}' is now '{}'",
+            old.display(),
+            back.display()
+        )
+    );
+    let logged = h.admin_log_repo.list(100, 0).await.unwrap();
+    let published = h.notifications.published_events();
+    let told = logged
+        .iter()
+        .map(|log| format!("{} {:?}", log.message, log.details))
+        .chain(published.iter().map(|event| event.message.clone()));
+    for text in told {
+        assert!(!text.contains(".beam-displaced-"), "{text}");
+    }
+}
+
 /// One of two identical copies moved, the other deleted: the row someone
 /// was watching keeps the file, and the other is marked missing.
 #[tokio::test]

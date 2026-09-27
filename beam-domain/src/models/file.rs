@@ -138,8 +138,23 @@ pub struct FileRelink {
 /// grace period.
 pub fn displaced_path(path: &std::path::Path, id: Uuid) -> PathBuf {
     let mut displaced = path.as_os_str().to_os_string();
-    displaced.push(format!(".beam-displaced-{id}"));
+    displaced.push(format!(".{DISPLACED_MARKER}{id}"));
     PathBuf::from(displaced)
+}
+
+/// What [`displaced_path`] appends to a path, after a dot and before the
+/// row's id.
+const DISPLACED_MARKER: &str = "beam-displaced-";
+
+/// The path a row kept at `path` was displaced from, if `path` is a
+/// [`displaced_path`] -- its inverse. A displaced path never existed on
+/// disk, so what is reported about such a row names the path it had.
+pub fn displaced_from(path: &std::path::Path) -> Option<PathBuf> {
+    let id = path.extension()?.to_str()?.strip_prefix(DISPLACED_MARKER)?;
+    // Only the form `displaced_path` writes: an id spelled any other way is
+    // part of some other name.
+    let parsed = Uuid::try_parse(id).ok()?;
+    (parsed.hyphenated().to_string() == id).then(|| path.with_extension(""))
 }
 
 /// What an [`UpdateMediaFile`] does to a file's probe results -- its MIME
@@ -215,6 +230,74 @@ impl From<beam_entity::files::Model> for MediaFile {
             updated_at: model.updated_at.with_timezone(&Utc),
             missing_since: model.missing_since.map(|d| d.with_timezone(&Utc)),
             classifier_version: model.classifier_version as u16,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::path::Path;
+
+    /// Which paths are displaced ones, and the path each was displaced from.
+    #[test]
+    fn a_displaced_path_names_the_path_it_was_displaced_from() {
+        let cases: [(&str, Option<&str>); 9] = [
+            (
+                "/lib/Old (1990).mkv.beam-displaced-fa9571c0-5b1e-4c2a-9d3e-0123456789ab",
+                Some("/lib/Old (1990).mkv"),
+            ),
+            (
+                "/lib/.hidden.beam-displaced-fa9571c0-5b1e-4c2a-9d3e-0123456789ab",
+                Some("/lib/.hidden"),
+            ),
+            ("/lib/Old (1990).mkv", None),
+            ("/lib/Old (1990).mkv.beam-displaced-", None),
+            ("/lib/Old (1990).mkv.beam-displaced-not-an-id", None),
+            // The same id, but not as `displaced_path` writes it.
+            (
+                "/lib/Old (1990).mkv.beam-displaced-fa9571c05b1e4c2a9d3e0123456789ab",
+                None,
+            ),
+            (
+                "/lib/Old (1990).mkv.beam-displaced-FA9571C0-5B1E-4C2A-9D3E-0123456789AB",
+                None,
+            ),
+            (
+                "/lib/Old (1990).mkv.other-fa9571c0-5b1e-4c2a-9d3e-0123456789ab",
+                None,
+            ),
+            // The marker ends the name; it is not merely somewhere in it.
+            (
+                "/lib/x.beam-displaced-fa9571c0-5b1e-4c2a-9d3e-0123456789ab.mkv",
+                None,
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                displaced_from(Path::new(path)),
+                expected.map(PathBuf::from),
+                "{path}"
+            );
+        }
+    }
+
+    proptest! {
+        /// A row displaced from any path reports that path back, and a path
+        /// never displaced is not read as one.
+        #[test]
+        fn displacing_a_path_and_reading_it_back_is_the_identity(
+            dirs in prop::collection::vec("[A-Za-z0-9 ()_-]{1,12}", 0..4),
+            name in "[A-Za-z0-9 ()_-][A-Za-z0-9 ()._-]{0,24}",
+            id in any::<u128>(),
+        ) {
+            let mut path = PathBuf::from("/lib");
+            path.extend(&dirs);
+            path.push(&name);
+            let displaced = displaced_path(&path, Uuid::from_u128(id));
+            prop_assert_eq!(displaced_from(&displaced), Some(path.clone()));
+            prop_assert_eq!(displaced_from(&path), None);
         }
     }
 }

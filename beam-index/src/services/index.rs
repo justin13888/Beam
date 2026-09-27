@@ -27,7 +27,7 @@ use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
     CreateMediaFile, FileClassification, FileRelink, FileStatus, MediaFile, MediaFileContent,
-    ProbeUpdate, UpdateMediaFile,
+    ProbeUpdate, UpdateMediaFile, displaced_from,
 };
 use beam_domain::models::movie::{CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, Episode};
@@ -1513,16 +1513,19 @@ impl LocalIndexService {
             )
             .await?;
         for (row, path, _) in relinks {
+            // A row kept aside is reported by the path it was displaced
+            // from: the one it is kept at never existed on disk.
+            let from = displaced_from(&row.path).unwrap_or_else(|| row.path.clone());
             info!(
                 file_id = %row.id,
-                from = %row.path.display(),
+                from = %from.display(),
                 to = %path.display(),
                 "a moved file keeps its row"
             );
             record_file_outcome("relinked");
             let message = format!(
                 "File moved: '{}' is now '{}'",
-                row.path.display(),
+                from.display(),
                 path.display()
             );
             self.notification_service.publish(AdminEvent::info(
@@ -1540,7 +1543,7 @@ impl LocalIndexService {
                     Some(serde_json::json!({
                         "library_id": library.id.to_string(),
                         "file_id": row.id.to_string(),
-                        "from": row.path.display().to_string(),
+                        "from": from.display().to_string(),
                         "to": path.display().to_string(),
                     })),
                 )
