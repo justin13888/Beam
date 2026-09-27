@@ -53,7 +53,8 @@ The `payload` field is the request body, byte for byte. Previewing sends nothing
 
 Set `BEAM_TELEMETRY_URL` to an [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/) metrics
 endpoint — for an OpenTelemetry Collector, usually `https://collector.example/v1/metrics`. The URL
-is used exactly as given.
+is used exactly as given. With the [Helm chart](/operate/kubernetes/), set `telemetry.url`, or
+`telemetry.existingSecret` for a URL that carries the collector's credentials.
 
 - The first report is sent an hour after the server starts, then once a week.
 - A failed delivery is retried after an hour, then two, four, and so on up to a day.

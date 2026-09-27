@@ -116,6 +116,7 @@
                 "BEAM_OIDC_ADMIN_CLAIM",
                 "BEAM_OIDC_ADMIN_VALUE",
                 "BEAM_TMDB_API_TOKEN",
+                "BEAM_TELEMETRY_URL",
                 "RUST_LOG"
               ]
             }
@@ -188,6 +189,22 @@
           "existingSecret": { "minLength": 1 }
         },
         "required": ["apiToken", "existingSecret"]
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "$ref": "#/definitions/nonEmptyString" }
+      },
+      "not": {
+        "properties": {
+          "url": { "minLength": 1 },
+          "existingSecret": { "minLength": 1 }
+        },
+        "required": ["url", "existingSecret"]
       }
     },
     "libraries": {
