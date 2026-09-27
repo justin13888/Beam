@@ -116,6 +116,11 @@ public class BeamDownloadManager internal constructor(
         manager.addDownload(request)
         if (posterUrl != null) {
             artwork.pin(posterUrl)
+            // The fetch suspends on the network, so the download may have been
+            // removed while it was in flight -- and that removal found nothing
+            // to evict yet. Checking again once the bytes have landed is what
+            // keeps a removed download from leaving its poster behind.
+            releaseIfUnused(posterUrl)
         }
     }
 
@@ -134,21 +139,35 @@ public class BeamDownloadManager internal constructor(
         val posterUrl = titles.get(fileId)?.posterUrl
         manager.removeDownload(fileId)
         titles.remove(fileId)
-        // Episodes of one series share a poster, so the poster outlives any
-        // one of them and is released with the last.
-        if (posterUrl != null && titles.all().none { it.posterUrl == posterUrl }) {
-            artwork.unpin(posterUrl)
+        if (posterUrl != null) {
+            releaseIfUnused(posterUrl)
         }
     }
 
     /** Delete every download, and every poster kept for one. */
     public fun removeAll() {
         manager.removeAllDownloads()
-        titles
-            .all()
+        // The titles go too. They are what decides whether a poster is still
+        // needed, so one left behind here would keep a later download's
+        // shared poster pinned after that download was removed as well.
+        val removed = titles.all()
+        removed.forEach { title -> titles.remove(title.fileId) }
+        removed
             .mapNotNull(DownloadTitle::posterUrl)
             .distinct()
             .forEach(artwork::unpin)
+    }
+
+    /**
+     * Stop keeping [posterUrl] unless another download still shows it.
+     *
+     * Episodes of one series share a poster, so the poster outlives any one
+     * of them and is released with the last.
+     */
+    private fun releaseIfUnused(posterUrl: String) {
+        if (titles.all().none { it.posterUrl == posterUrl }) {
+            artwork.unpin(posterUrl)
+        }
     }
 
     /**

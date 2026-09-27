@@ -23,6 +23,7 @@ import dev.beam.android.core.media.http.ServerCallFactory
 import dev.beam.android.core.testing.FakePlaybackRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -44,7 +45,9 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.GraphicsMode
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * A download's poster, from enqueue to removal.
@@ -69,12 +72,24 @@ class DownloadArtworkTest {
     private var online = true
     private val fetched = mutableListOf<String>()
 
+    /** Set to hold the next response until the test lets it through. */
+    private var stall: Stall? = null
+
+    private class Stall {
+        val reached = CountDownLatch(1)
+        val released = CountDownLatch(1)
+    }
+
     private val http =
         OkHttpClient
             .Builder()
             .addInterceptor { chain ->
                 val request = chain.request()
                 if (!online) throw IOException("Network is unreachable")
+                stall?.let { held ->
+                    held.reached.countDown()
+                    check(held.released.await(STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) { "never released" }
+                }
                 synchronized(fetched) { fetched += request.url.toString() }
                 Response
                     .Builder()
@@ -217,6 +232,40 @@ class DownloadArtworkTest {
             assertFalse(isOnDisk(OTHER_POSTER))
         }
 
+    @Test
+    fun `a poster shared with a download cleared by remove-all is released with the last`() =
+        runTest {
+            enqueue("e1", POSTER)
+            downloads.removeAll()
+
+            // A later episode of the same series brings the poster back ...
+            enqueue("e2", POSTER)
+            assertTrue(isOnDisk(POSTER))
+
+            // ... and removing it must not find e1 still holding it.
+            downloads.remove("e2")
+
+            assertFalse(isOnDisk(POSTER))
+        }
+
+    @Test
+    fun `a download removed while its poster is still fetching leaves no poster behind`() =
+        runTest {
+            val held = Stall().also { stall = it }
+            val enqueueing = async(Dispatchers.Default) { enqueue("f1", POSTER) }
+            assertTrue(
+                "the poster fetch reached the wire",
+                held.reached.await(STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+            )
+
+            // Removed before the poster's bytes have landed: nothing to evict yet.
+            downloads.remove("f1")
+            held.released.countDown()
+            enqueueing.await()
+
+            assertFalse(isOnDisk(POSTER))
+        }
+
     private suspend fun enqueue(
         fileId: String,
         posterUrl: String,
@@ -235,6 +284,7 @@ class DownloadArtworkTest {
     private companion object {
         const val POSTER = "https://beam.test/v1/artwork/media/m1/poster"
         const val OTHER_POSTER = "https://beam.test/v1/artwork/media/m2/poster"
+        const val STALL_TIMEOUT_SECONDS = 10L
 
         /** A 1x1 PNG: the smallest thing the decoder accepts as an image. */
         val POSTER_PNG: ByteArray =
