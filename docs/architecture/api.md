@@ -40,7 +40,7 @@ role.
 | `/v1/me` | GET | Current user |
 | `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions |
 | `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List / revoke own sessions |
-| `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, recent scans |
+| `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, recent scans, and the filesystem watcher's per-library mode (native, polling and why, unwatched) with the watch limit |
 | `/v1/admin/users` | GET | User accounts (limit/offset paged) |
 | `/v1/admin/users/{id}` | PATCH | Block or unblock an account |
 | `/v1/admin/libraries`, `/v1/admin/libraries/{id}`, `/v1/admin/libraries/{id}/scan` | POST, DELETE, POST | Library management and scan trigger |

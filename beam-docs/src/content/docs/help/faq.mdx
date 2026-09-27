@@ -138,7 +138,10 @@ titles are left un-enriched and the scan still succeeds.
 
 ### How often does Beam notice new files?
 
-A filesystem watcher picks up changes as they happen, and a periodic rescan is the backstop. You
+A filesystem watcher picks up changes as they happen, and a periodic rescan is the backstop. A
+library on a network share (NFS, SMB) is polled every five minutes instead, because such shares do
+not report changes made by other machines — see
+[Network shares and the watch limit](/operate/libraries/#network-shares-and-the-watch-limit). You
 can also trigger a scan manually.
 
 ## Running Beam

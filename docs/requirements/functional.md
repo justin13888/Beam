@@ -74,6 +74,16 @@ strength. Each requirement is independently testable. See `product.md` for narra
   elsewhere in the same scan are marked and purged as normal. Every walk error MUST be reported
   through the admin log. A watcher event whose path cannot be statted for any reason other than
   "not found", or a watcher removal while the library root is unavailable, MUST change nothing.
+- **FR-212**: Library roots MUST be pairwise disjoint and disjoint from `BEAM_DATA_DIR`: registering
+  a root that is, contains, or lies inside an existing library root MUST be rejected with
+  `library-path-overlaps-library` (409), and one that overlaps the data directory with
+  `library-path-overlaps-data-dir` (400), compared by whole components after canonicalization. The
+  indexer and the watcher MUST NOT follow symbolic links beneath a library root; a link is not a
+  library file, so a row whose path has become one is treated as missing (FR-211).
+- **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
+  watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
+  events, with no configuration switch; the admin status MUST report each library's watch mode and
+  whether the watch limit has been reached.
 
 ## FR-3xx — Metadata Enrichment
 

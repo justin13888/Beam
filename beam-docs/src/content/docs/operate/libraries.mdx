@@ -25,10 +25,57 @@ one finished, or **Not scanned**. Progress streams live.
 
 Scans are incremental — a file whose size and modification time are unchanged is skipped, so a
 rescan of a large library is far cheaper than the first one. A filesystem watcher also picks up
-changes as they happen, so routine additions usually need no manual scan.
+changes as they happen — or within a poll interval, for a library on a network share (see
+[below](#network-shares-and-the-watch-limit)) — so routine additions usually need no manual scan.
 
 Scanning and enrichment are independent: a scan makes files playable, and metadata arrives
 separately. See [Metadata and artwork](/operate/metadata/).
+
+## Where a library can live
+
+Each library root must be **disjoint** from every other library and from Beam's data directory
+(`BEAM_DATA_DIR`). Beam refuses to register a root that is the same directory as an existing
+library, lies inside one, or contains one — that would index the same files twice, as two libraries
+— and answers [library-path-overlaps-library](/reference/errors/#library-path-overlaps-library).
+A root that overlaps the data directory is refused as
+[library-path-overlaps-data-dir](/reference/errors/#library-path-overlaps-data-dir): Beam writes
+there, and it must never write under a library. Paths are compared after symlinks and `..` are
+resolved, by whole path components, so `/videos/movies` and `/videos/movies2` do not overlap.
+
+## Symbolic links are not followed
+
+Beam never follows a symbolic link beneath a library root — to a file or to a directory — when it
+scans, when the watcher reports a change, or when it polls. A link is simply not part of the
+library: a symlinked video is not indexed, and a symlinked folder is not descended into. This keeps
+every indexed file inside the root you registered (the root itself may be a link) and rules out
+link cycles.
+
+If you relied on symlinks before, a file that was indexed through a link is now
+[missing](#when-files-go-missing): hidden, with its progress kept, until the grace period ends. To
+bring media from elsewhere into a library, use a **bind mount** (another Compose volume under
+`BEAM_VIDEO_DIR`, or `mount --bind` on the host) or a **hard link**; both are ordinary files and
+directories to Beam.
+
+## Network shares and the watch limit
+
+The filesystem watcher uses native change events (inotify on Linux). Two situations defeat them,
+and Beam handles both by **polling** the affected library instead — walking it every
+`BEAM_WATCH_POLL_INTERVAL_SECS` (five minutes by default) — with no setting to change:
+
+- **Network filesystems.** NFS, SMB/CIFS, 9p, Ceph and other network or FUSE filesystems (sshfs,
+  rclone, mergerfs among them) do not raise events for changes made by another machine. Beam checks
+  each library root's filesystem type when it starts watching it, and polls those that are on one.
+  A local FUSE filesystem is polled too, because it cannot be told apart from a remote one.
+- **The watch limit.** On Linux each watched directory uses one of the per-user inotify watches
+  (`fs.inotify.max_user_watches`). A library with more directories than remain is polled instead,
+  whether the limit is hit when Beam starts watching it or later, as folders are added. Raise the
+  limit on the host — for example `sysctl fs.inotify.max_user_watches=524288`, persisted in
+  `/etc/sysctl.d/` — and restart Beam to watch those libraries natively again.
+
+The admin status endpoint (`GET /v1/admin/status`, field `watcher`) reports, for every library,
+whether it is watched natively, polled (and why), or not watched at all, together with the watch
+limit and whether it has been reached. The periodic rescan (`BEAM_SCAN_INTERVAL_SECS`) remains the
+backstop for all of them.
 
 ## When files go missing
 

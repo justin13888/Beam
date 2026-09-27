@@ -82,8 +82,12 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   non-fatal admin warning when two renditions of the same movie/episode have runtimes that diverge
   past `DivergencePolicy`'s relative+absolute thresholds, a likely misnamed/mismatched file);
   `watcher.rs`
-  (`FsWatcher` trait, production `NotifyFsWatcher` — inotify on Linux — with debouncing, plus
-  `InMemoryFsWatcher` for tests); `enrichment/` (queue-driven async worker with retry/backoff and
+  (`FsWatcher` trait, production `NotifyFsWatcher` — inotify on Linux, with a manual-mode
+  `notify::PollWatcher` for roots `filesystem_probe.rs` (`statfs(2)`) classifies as a network
+  filesystem and for libraries demoted after hitting the inotify watch limit, polled by the runtime
+  on the injected `Clock`; neither backend follows symlinks, and the scan walk does not either —
+  plus `InMemoryFsWatcher` for tests; `watch_status.rs` records each library's watch mode for the
+  admin status); `enrichment/` (queue-driven async worker with retry/backoff and
   candidate matching/scoring); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
   `notification.rs` (the latter two back the admin log and SSE progress events).
 - `providers/cameo.rs` — the `cameo`-backed `EnrichmentProvider` implementation hitting TMDB and
