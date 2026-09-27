@@ -1134,6 +1134,42 @@ macro_rules! show_repository_contract {
             assert_eq!(stored.air_date, Some(aired.to_string()));
         }
 
+        /// Episodes of one new season indexed at once -- two libraries'
+        /// scans -- share one season row rather than failing on the unique
+        /// index (issue #181).
+        #[tokio::test]
+        async fn concurrent_find_or_create_season_calls_share_one_row() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let show = repo
+                .find_or_create_by_identity(new_show("seasons"))
+                .await
+                .unwrap();
+
+            let call = || repo.find_or_create_season(show.id, 3);
+            let (a, b, c, d, e, f, g, h) = ::tokio::join!(
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call()
+            );
+            let ids: ::std::collections::HashSet<Uuid> = [a, b, c, d, e, f, g, h]
+                .into_iter()
+                .map(|season| season.expect("no call fails on the unique index").id)
+                .collect();
+
+            assert_eq!(ids.len(), 1, "every call returns the same season");
+            assert_eq!(
+                repo.find_seasons_by_show_id(show.id).await.unwrap().len(),
+                1,
+                "one row was inserted"
+            );
+        }
+
         #[tokio::test]
         async fn find_or_create_episode_returns_the_same_row_for_the_same_pair() {
             let fixture = $setup().await;
