@@ -53,9 +53,11 @@ async fn main() -> Result<()> {
         .map_err(|e| eyre!("Failed to connect to database after retries: {}", e))?;
     info!("Connected to database");
 
-    // Apply pending migrations. The supported topology is a single server
-    // process against one Postgres (see docs/operations/deployment.md), so
-    // there is no concurrent-migrator race to coordinate.
+    // Apply pending migrations. `up_all_or_nothing` holds a Postgres advisory
+    // lock for the batch, so a second process migrating the same database --
+    // an overlapping restart, a replaced Kubernetes pod, the `beam-migration`
+    // CLI -- waits and then finds nothing pending instead of racing this one.
+    // `pending` is read before that lock, so it is a log hint, not a promise.
     if config.auto_migrate {
         use beam_migration::MigratorTrait;
         let pending = beam_migration::Migrator::get_pending_migrations(&db)

@@ -21,6 +21,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
 beam-test-support = { path = "../beam-test-support" }
+# `sync` and `time` for the concurrent-migrator test's hand-off and timeout.
+tokio = { workspace = true }
 
 [features]
 # Opt-in tier: runs the upgrade path against a real Postgres. Never enabled by

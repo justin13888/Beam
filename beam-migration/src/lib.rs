@@ -46,6 +46,17 @@ impl MigratorTrait for Migrator {
     }
 }
 
+/// The Postgres advisory-lock key every [`up_all_or_nothing`] batch holds
+/// while it runs.
+///
+/// The eight ASCII bytes `beam-mig` read as a big-endian `i64`. The value is
+/// arbitrary but must never change: two releases that disagree on it would not
+/// exclude each other during a rolling upgrade. It shares Postgres's single
+/// advisory-lock keyspace with anything else using that database, so an
+/// operator co-hosting Beam with another application that takes advisory locks
+/// should know it.
+pub const MIGRATION_LOCK_KEY: i64 = i64::from_be_bytes(*b"beam-mig");
+
 /// Apply `M`'s pending migrations (at most `steps` of them) as one unit: either
 /// every one of them commits, or none does.
 ///
@@ -59,6 +70,18 @@ impl MigratorTrait for Migrator {
 /// stays at the version the previous image expects. This is what
 /// sea-orm-migration 1.x did on Postgres by itself.
 ///
+/// On Postgres the batch is also serialised against every other migrator on
+/// the same database: before reading the ledger it takes the transaction-scoped
+/// advisory lock [`MIGRATION_LOCK_KEY`]. Two server processes starting at once
+/// -- a rolling restart that briefly overlaps, a Kubernetes pod replaced while
+/// its predecessor is still terminating, an operator running `beam-migration
+/// up` beside a live server -- would otherwise both read an empty ledger and
+/// both run the same `CREATE TABLE`, and the loser would exit with a duplicate
+/// object error. With the lock the second waits, then reads the ledger the
+/// first committed and finds nothing pending. The lock is released by the
+/// commit or rollback that ends the batch, so a migrator that dies mid-batch
+/// cannot leave it held.
+///
 /// Every caller that applies migrations -- `beam-server` at startup, the
 /// `beam-migration up` CLI, the `pg-integration` tier -- goes through this, so
 /// there is one upgrade path.
@@ -67,10 +90,24 @@ where
     M: MigratorTrait,
     C: IntoSchemaManagerConnection<'c>,
 {
-    use sea_orm::TransactionTrait;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 
     let executor = db.into_database_executor();
     let batch = executor.begin().await?;
+    // Postgres only: MySQL and SQLite have no `pg_advisory_xact_lock`, and
+    // Beam ships against Postgres alone. Taken before `M::up` so that the
+    // ledger read which decides what is pending happens under the lock --
+    // under READ COMMITTED every statement after it sees what the previous
+    // holder committed.
+    if batch.get_database_backend() == DbBackend::Postgres {
+        batch
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT pg_advisory_xact_lock($1)",
+                [MIGRATION_LOCK_KEY.into()],
+            ))
+            .await?;
+    }
     match M::up(&batch, steps).await {
         Ok(()) => batch.commit().await,
         Err(migration_error) => match batch.rollback().await {
