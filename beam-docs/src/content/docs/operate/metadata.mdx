@@ -48,6 +48,25 @@ parses to, however the provider spells it. See
 The admin **Status** tab shows each title's enrichment state, so you can tell "not tried yet"
 apart from "tried and found nothing".
 
+## Pinned titles
+
+A provider id in an `.nfo` beside your media **pins** the title to it (see
+[NFO files](/operate/libraries/#nfo-files-container-tags-and-subtitles)). Enrichment then works
+in this order:
+
+1. A match an administrator chose for the title comes first.
+2. A **TMDB or AniList** pin, for a provider you have configured, is fetched directly by its id —
+   no search, no confidence threshold. This is the fix for a title search keeps getting wrong:
+   write its id into an NFO.
+3. Anything else is searched for as usual. An **IMDb or TheTVDB** pin — or a pin for a provider
+   you have not configured — is checked against the match: a match that carries a different id of
+   the pinned provider is rejected and the title is left unmatched, with the reason in its
+   enrichment state. A match carrying no id of that provider cannot be checked, and is kept.
+
+Pinning a title, or editing the NFO to pin it to another id, queues it for enrichment again with
+its old match discarded. Re-running enrichment for a pinned title (a rematch) discards its match,
+never its pin: the NFO stays the source of truth.
+
 ## Re-running enrichment
 
 Failures retry automatically with a growing delay. You can also trigger a re-enrich for a title

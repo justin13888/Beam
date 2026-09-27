@@ -70,4 +70,6 @@ The correctness bar is standard HTTP semantics, not media semantics:
   `data-model.md`).
 
 Subtitle tracks are not burned in or composited server-side; where present they are separate
-`media_streams` rows for the client to handle.
+`media_streams` rows for the client to handle. Text subtitle files beside a video are indexed too,
+as `sidecar_subtitles` rows of that video (issue #184, see `data-model.md`), but no endpoint serves
+them yet: delivering embedded and sidecar subtitles alike is issue #189's.

@@ -140,6 +140,15 @@ carry each file's path relative to its library root, for display only — never 
 and never something a request resolves. The absolute path the delivery routes open stays in a
 server-internal type (`LocatedFile`) that cannot be serialized into a response.
 
+The indexer also *parses* files it did not write: the Kodi `.nfo` files beside the media (FR-219).
+Anyone who can drop a file into a library can hand Beam one, so an NFO is treated as hostile
+input. It is opened read-only, only when it is a regular file (a symbolic link is never followed),
+and at most 1 MiB of it is read; bytes that are not UTF-8 are refused rather than guessed at; a
+document type declaration is refused before parsing, so no entity is ever expanded (the billion
+laughs); and the XML parser (`roxmltree`, which resolves no external resources) is capped at
+10 000 nodes. A rejected NFO is logged and ignored: the file is classified by its path. Subtitle
+files are only stat-ed and their names read; their contents are never opened by the indexer.
+
 ## Operational hardening
 
 - Startup logs redact secrets: `ServerConfig` has a hand-written `Debug` impl that redacts

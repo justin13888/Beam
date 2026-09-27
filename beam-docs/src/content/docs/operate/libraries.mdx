@@ -10,7 +10,9 @@ A library is a directory Beam indexes. You can have several.
 ## Beam never writes to your media
 
 The indexer only ever reads. It does not rename, move, delete, or write sidecar files, and it
-never creates artwork next to your videos — enrichment data lives in Beam's database.
+never creates artwork next to your videos — enrichment data lives in Beam's database. The
+[`.nfo` files and subtitles](#nfo-files-container-tags-and-subtitles) beside your videos are read,
+never written, and a folder Beam may not write to indexes exactly like one it may.
 
 The Compose file mounts your media read-only (`:ro`), so the guarantee is enforced by the container
 runtime rather than resting on Beam's behaviour alone. Keep it that way if you write your own
@@ -144,10 +146,12 @@ mp4  mkv  avi  mov   webm  m4v  ts   m2ts  mts
 flv  wmv  3gp  ogv   mpg   mpeg divx  asf  f4v
 ```
 
-Subtitles, `.nfo` files, artwork and anything else beside your videos are left alone: they are not
-hashed, probed or given a record. (A Beam version before this recorded every file under a library
-root; the first scan after upgrading marks those records [missing](#when-files-go-missing), so the
-scan's "marked missing" count is large once, and they are removed when the grace period ends.)
+Subtitles, `.nfo` files, artwork and anything else beside your videos are not indexed as videos:
+they are not hashed, probed or listed as titles. Beam does read two kinds of them — `.nfo` files and
+text subtitles — as described [below](#nfo-files-container-tags-and-subtitles). (A Beam version
+before this recorded every file under a library root; the first scan after upgrading marks those
+records [missing](#when-files-go-missing), so the scan's "marked missing" count is large once, and
+they are removed when the grace period ends.)
 
 Some video files are skipped too, because they are not what a library is for:
 
@@ -305,13 +309,74 @@ Both common layouts work, and name the same show:
 When a filename's season disagrees with its season folder — `Season 01/Show.S02E05.mkv` — the
 filename wins, and the server log says so.
 
+### NFO files, container tags and subtitles
+
+What a media manager (Kodi, tinyMediaManager, Jellyfin, Emby) or an encoder left beside or inside a
+video is read too — never written.
+
+**NFO files.** Beam reads the Kodi-style `.nfo` describing a video: `<file name>.nfo` beside it,
+else `movie.nfo` in its folder, and for an episode `tvshow.nfo` in its folder or the series folder
+above a season folder. A `movie.nfo` or `tvshow.nfo` at the very top of a library is ignored — it
+would describe everything. An NFO may be XML (`<movie>`, `<tvshow>`, one `<episodedetails>` per
+episode of a multi-episode file), just a provider URL (`https://www.themoviedb.org/movie/603`), or
+XML followed by a URL.
+
+- **An NFO decides what the file is.** A `<movie>` NFO makes a movie of a file whose name looks
+  like an episode, and an `<episodedetails>` with a season and episode makes an episode of one
+  whose name does not — `Lost/Pilot Part One.mkv` beside a `Pilot Part One.nfo` for season 1,
+  episode 1 is that episode of *Lost*. Its `<edition>` names the movie's edition.
+- **An NFO names a new title.** Its `<title>` and `<year>` are what a movie or show is shown as
+  until enrichment replaces them. Files are still [grouped](#multiple-versions) by the name their
+  path parses to, never by an NFO's title.
+- **An NFO's provider id pins the title.** A `<uniqueid>` (the `default="true"` one first), a
+  legacy `<id>`, `<tmdbid>` or `<imdbid>`, or a provider URL, pins the movie or show to that id, in
+  the order TMDB, AniList, IMDb, TheTVDB. A second file whose NFO names the same id joins the same
+  title whatever its name, and [enrichment](/operate/metadata/#pinned-titles) fetches the title by
+  that id instead of searching for it. An episode's own ids never pin its show; `tvshow.nfo` does.
+  When two NFOs pin one title to different ids, the first pin is kept and the admin log says so.
+
+An NFO added or edited after its video was indexed re-pins the title at the next scan, or as soon
+as the watcher sees it. An NFO larger than 1 MiB, one that is not UTF-8, one declaring a document
+type, and one that is a symbolic link are ignored, and the file is classified by its path.
+
+**Container tags.** The tags inside a file fill only what its path leaves open. An MP4 tagged with
+a show, season and episode (`show`, `season_number`, `episode_sort`) is that episode even when its
+name has no marker (`The Office/The Dundies.m4v`); a file in a season folder whose name has no
+episode number takes the episode from its tag; a `title` tag names an episode that has no title of
+its own, unless it is release noise or just the filename; a `date` or `year` tag gives a movie with
+no year one. A tag never overrides what the path or an NFO says.
+
+**Subtitles.** A text subtitle — `.srt`, `.vtt`, `.ass` or `.ssa` — named after its video is
+recorded as a subtitle of that video, with the language and flags its name gives:
+
+| File | Language | Flags / title |
+|---|---|---|
+| `Movie (1999).en.srt`, `Movie (1999).eng.srt`, `Movie (1999).English.srt` | English | |
+| `Movie (1999).en.forced.srt` | English | forced |
+| `Movie (1999).en.sdh.srt`, `.en.cc.srt`, `.en.hi.srt` | English | SDH |
+| `Movie (1999).hi.srt` | Hindi | |
+| `Movie (1999).pt-BR.vtt` | Portuguese | titled *pt-BR* |
+| `Movie (1999).Commentary.en.srt` | English | titled *Commentary* |
+| `Movie (1999)/Subs/English.srt` | English | (the only video in `Movie (1999)/`) |
+
+Languages are recognised as two- or three-letter codes or English names. A subtitle belongs to the
+video whose name it starts with — the longest, so `Movie.Extended.en.srt` belongs to
+`Movie.Extended.mkv`, not `Movie.mkv` — and a `Subs` or `Subtitles` folder beside the videos holds
+subtitles named the same way, or named for their language alone when the folder above holds one
+video. Image subtitles (`.sub`/`.idx`, `.sup`) are not indexed. Rescans and the watcher keep the
+list current as subtitles are added, changed and removed. Indexed subtitles are not yet offered in
+the players; that is tracked in [#189](https://github.com/justin13888/beam/issues/189).
+
 ### Upgrading: files are reclassified once
 
 These rules are versioned. When Beam starts with newer rules than a file was classified under, the
 next scan reclassifies the file from its path — it keeps its record, and with it everyone's
 progress; nothing is re-probed. A show a Beam version before these rules named after a season folder
 (*Season 01*) has its episodes moved to the show its series folder names, and the emptied
-*Season 01* show is removed by the same scan.
+*Season 01* show is removed by the same scan. The first scan after upgrading to a Beam that reads
+[NFO files](#nfo-files-container-tags-and-subtitles) reclassifies every file this way, so the NFOs
+already in your library take effect — and pin their titles — without a manual rescan. Container
+tags are read when a file is probed, so they apply to files indexed or changed from then on.
 
 The name each movie and show is [grouped by](#multiple-versions) is versioned with the rules too.
 Before the scan reclassifies anything, Beam works out each title's grouping name again from its

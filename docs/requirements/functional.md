@@ -100,9 +100,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
     `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title
     (status `unknown`) and reported through the admin log, never guessed into a movie.
 
-  Every row MUST record the version of these rules that classified it, and a scan MUST reclassify a
-  row classified by an older version from its path -- keeping its id, hash and probe results -- so a
-  change to the rules reaches files indexed before it.
+  An NFO beside the file and the file's container tags refine this (FR-219). Every row MUST record
+  the version of these rules that classified it, and a scan MUST reclassify a row classified by an
+  older version from its path and the NFOs beside it -- keeping its id, hash and probe results -- so
+  a change to the rules reaches files indexed before it.
 - **FR-205**: The server MUST support multiple indexed file versions (distinct `files` rows) under a
   single logical movie or episode entry, to support the source-selection delivery scenario.
 - **FR-206**: The server MUST detect and de-duplicate files that have already been indexed, based on
@@ -186,6 +187,32 @@ strength. Each requirement is independently testable. See `product.md` for narra
   extras, or matched by an ignore pattern), so video files under one are not counted: a root holding
   only those is refused. This errs toward refusing -- the safe side, since a refused scan changes no
   rows.
+- **FR-219**: Classification (FR-204) MUST also read the Kodi-style NFO describing a file --
+  `<stem>.nfo` beside it, else `movie.nfo` in its folder, and for an episode `tvshow.nfo` in its
+  folder or the folder above; never one at the library root -- and the file's container tags, in
+  the priority NFO, then path, then tags. An NFO's root (`<movie>`, or `<episodedetails>` with a
+  season and episode) decides whether the file is a movie or an episode; container tags (`show`,
+  `season_number`, `episode_sort`, `title`, `date`/`year`) only fill what the path leaves open. An
+  NFO or a tag MUST NOT change the identity key a title is matched by (FR-214), which stays the
+  path's; it supplies the display title and year a new title is created with. A provider id in a
+  movie or show NFO (`<uniqueid>`, a legacy id element, or a provider URL; TMDB, then AniList, then
+  IMDb, then TheTVDB) MUST pin the title: a file whose NFO names a pin MUST join the title pinned
+  to it, or enriched with that id, before its key is consulted; one id pins at most one title; a
+  second NFO naming another id for a pinned title MUST be reported through the admin log and not
+  applied; an NFO added or edited after indexing MUST re-pin its titles at the next scan (by
+  modification time) or watcher event. Every NFO MUST be read with a read-only open of a regular
+  file (never through a symbolic link, FR-212) and at most 1 MiB of it; an NFO larger than that, not
+  UTF-8, declaring a document type, or over 10 000 XML nodes MUST be ignored and the file
+  classified by its path. Reading these MUST NOT write anything under a library root (FR-202).
+- **FR-220**: A text subtitle file (`.srt`, `.vtt`, `.ass`, `.ssa`) beside an indexed video, named
+  after the video's filename stem (the longest stem when several match) or in a `Subs`/`Subtitles`
+  folder beside it, MUST be recorded as a subtitle of that video in `sidecar_subtitles`, with the
+  ISO 639-2/B language, forced, SDH and default flags, and title its name's tokens give. A scan MUST
+  record new and changed subtitles, writing only what changed, and delete the rows of subtitles no
+  longer found or no longer owned by an indexed video -- except beneath a path the walk could not
+  read (FR-211); the watcher MUST do the same for a single subtitle, and a video it indexes MUST
+  pick up the subtitles already beside it. Image-based subtitles are not indexed. Serving sidecar
+  subtitles is [#189](https://github.com/justin13888/beam/issues/189)'s scope.
 
 ## FR-3xx — Metadata Enrichment
 
@@ -223,6 +250,12 @@ strength. Each requirement is independently testable. See `product.md` for narra
   client which stored one — a download record, rendered offline — still resolves. Freshness is
   carried by the `ETag` instead, which is derived from the provider URL and therefore changes
   exactly when the artwork does.
+- **FR-312**: A title an NFO pins (FR-219) MUST be enriched in this order: a match an administrator
+  set first; else, when a configured provider resolves the pin's id (TMDB or AniList), a fetch by
+  that id at full confidence, with no search; else a search as usual, whose match MUST be left
+  unmatched, with the reason recorded, when it carries a different id of the pinned provider.
+  Pinning a title, or re-pinning it, MUST queue it for enrichment with its stored match cleared; a
+  rematch MUST clear the match and never the pin.
 
 ## FR-4xx — Browse, Search & Detail
 
