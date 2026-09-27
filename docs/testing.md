@@ -270,8 +270,8 @@ BEAM_TEST_DATABASE_URL=postgres://beam:password@localhost:5432/beam mise run rus
 
 With the variable unset the tier fails loudly rather than skipping: a tier that silently passes
 when it did not run is worse than one that does not run. The harness lives in `beam-test-support`,
-a crate that is a dev-dependency of the crates owning repositories and is depended on by nothing in
-production; with the feature off it compiles to an empty library.
+a crate that is a dev-dependency of the crates owning repositories and of `beam-migration`, and is
+depended on by nothing in production; with the feature off it compiles to an empty library.
 
 **What the tier has already caught.** `files.file_status` is a Postgres `enum` type while
 `beam_entity::files::Model` declared the field as a bare `String`. sea-orm bound the parameter as

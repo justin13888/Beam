@@ -5,16 +5,21 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Dev-dependency of the crates that own repositories; never depended on by any
-# production target. It exists for exactly one thing the hermetic tier cannot
-# provide: a real Postgres, behind the opt-in `pg-integration` feature.
+# Dev-dependency of the crates that own repositories, and of `beam-migration`;
+# never depended on by any production target. It exists for exactly one thing
+# the hermetic tier cannot provide: a real Postgres, behind the opt-in
+# `pg-integration` feature.
 #
 # Note the dependency direction. This crate depends on `beam-domain`,
-# `beam-entity` and `beam-migration`; none of them depend on it. The shared
-# behavioural contracts and the domain builders deliberately live *in*
-# `beam-domain` under its `test-utils` feature instead -- putting them here
-# would make `beam-domain` dev-depend on a crate that depends on it, which
-# cargo rejects as a cycle.
+# `beam-entity` and `beam-migration`, and no production dependency points back.
+# `beam-migration` dev-depends on it for its `tests/` integration binary only.
+# That dev-dependency cycle is safe: an integration test links the one
+# `beam-migration` library this crate also links, so every type matches. It
+# would not be safe for `beam-domain`'s shared behavioural contracts and
+# builders: its unit tests compile `beam-domain` a second time as the test
+# crate, while this crate links the ordinary library, so the two copies' types
+# would not match. That is why those contracts live *in* `beam-domain` under its
+# `test-utils` feature instead of here.
 
 [dependencies]
 beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"], optional = true }

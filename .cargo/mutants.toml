@@ -117,7 +117,8 @@ exclude_globs = [
     "beam-entity/**/*.rs",
 
     # Test scaffolding for the opt-in `pg-integration` tier: a dev-dependency
-    # of the crates that own repositories, reaching no production target.
+    # of the crates that own repositories and of `beam-migration`, reaching no
+    # production target.
     # Mutating it reports on the harness rather than on the product -- the same
     # reason the `test-utils` doubles carry `#[mutants::skip]`.
     "beam-test-support/**/*.rs",
