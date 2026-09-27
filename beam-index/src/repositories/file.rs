@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,6 +28,27 @@ fn content_columns(content: Option<MediaFileContent>) -> (Option<Uuid>, Option<U
         None => (None, None, None),
     }
 }
+
+/// The `LIKE` pattern, escaped with `\`, that matches a stored path strictly
+/// beneath the directory `dir`: its text, wildcards escaped, then a
+/// separator and anything. The separator keeps `/a/S1` from matching
+/// `/a/S10/x.mkv`, and escaping keeps a `_` or `%` in a directory's name
+/// from matching any character.
+fn beneath_pattern(dir: &Path) -> String {
+    let dir = dir.to_string_lossy();
+    let dir = dir.trim_end_matches(std::path::MAIN_SEPARATOR);
+    let mut pattern = String::with_capacity(dir.len() + 2);
+    for c in dir.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern.push(std::path::MAIN_SEPARATOR);
+    pattern.push('%');
+    pattern
+}
+
 use beam_domain::repositories::FileRepository;
 
 /// SQL-based implementation of the FileRepository trait.
@@ -124,6 +145,24 @@ impl FileRepository for SqlFileRepository {
         let models = files::Entity::find()
             .filter(files::Column::HashXxh3.eq(hash as i64))
             .filter(files::Column::LibraryId.eq(library_id))
+            .all(self.db.as_ref())
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
+    async fn find_beneath_including_missing(
+        &self,
+        library_id: Uuid,
+        dir: &Path,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::sea_query::LikeExpr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let models = files::Entity::find()
+            .filter(files::Column::LibraryId.eq(library_id))
+            .filter(files::Column::FilePath.like(LikeExpr::new(beneath_pattern(dir)).escape('\\')))
             .all(self.db.as_ref())
             .await?;
 

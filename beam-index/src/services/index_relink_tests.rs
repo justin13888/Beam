@@ -831,3 +831,77 @@ async fn a_removed_event_for_a_path_that_is_back_leaves_its_row_present() {
 
     assert_eq!(h.present(&path).await.id, before.id);
 }
+
+/// A removed directory is not believed while the library root holds no
+/// video file at all -- what an unmounted volume looks like, as the scan's
+/// empty-root guard reads it. Its rows are left for the next scan.
+#[tokio::test]
+async fn a_removed_directory_under_a_root_with_no_video_is_left_to_the_scan() {
+    let h = Harness::new().await;
+    let episode = h.write("Show/S1/Show S01E01.mkv", "one");
+    let film = h.write("Ronin (1998).mkv", "ronin");
+    h.scan().await;
+
+    std::fs::remove_dir_all(h.root.join("Show")).unwrap();
+    std::fs::remove_file(&film).unwrap();
+    std::fs::write(h.root.join(".not_mounted"), "").unwrap();
+    assert_eq!(
+        h.reconcile(&h.root.join("Show/S1"), FsEventKind::Removed)
+            .await,
+        ReconcileOutcome::Done
+    );
+
+    h.present(&episode).await;
+}
+
+/// A removed path the policy never indexes anything beneath -- a hidden
+/// partial download, a sidecar, an extras folder -- has no row of its own,
+/// and the rows of the library are not read to look beneath it.
+#[tokio::test]
+async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
+    use crate::services::hash::MockHashService;
+    use crate::services::media_info::MockMediaInfoService;
+    use beam_domain::repositories::file::MockFileRepository;
+
+    let dir = TempDir::new().unwrap();
+    let library_repo = Arc::new(InMemoryLibraryRepository::default());
+    let library = library_repo
+        .create(CreateLibrary {
+            name: "Films".to_string(),
+            root_path: dir.path().to_path_buf(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let mut files = MockFileRepository::new();
+    files.expect_find_by_path().returning(|_| Ok(None));
+    files.expect_find_beneath_including_missing().never();
+    let service = LocalIndexService::new(
+        library_repo,
+        Arc::new(files),
+        Arc::new(InMemoryMovieRepository::default()),
+        Arc::new(InMemoryShowRepository::default()),
+        Arc::new(InMemoryMediaStreamRepository::default()),
+        Arc::new(MockHashService::new()),
+        Arc::new(MockMediaInfoService::new()),
+        Arc::new(InMemoryNotificationService::new()),
+        Arc::new(LocalAdminLogService::new(Arc::new(
+            InMemoryAdminLogRepository::default(),
+        ))),
+    );
+
+    for removed in [
+        ".Heat (1995).mkv.part",
+        "Heat (1995).srt",
+        "Heat (1995)/Extras",
+    ] {
+        assert_eq!(
+            service
+                .reconcile_path(library.id, dir.path().join(removed), FsEventKind::Removed)
+                .await
+                .unwrap(),
+            ReconcileOutcome::Done,
+            "{removed}"
+        );
+    }
+}

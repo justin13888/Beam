@@ -1260,6 +1260,61 @@ macro_rules! file_repository_contract {
             assert!(!ids(&found).contains(&different.id));
         }
 
+        /// A file of a new title under `library_id` at `path`.
+        async fn file_at(
+            fixture: &impl FileRepositoryFixture,
+            library_id: Uuid,
+            path: PathBuf,
+        ) -> MediaFile {
+            let movie_entry_id = fixture.new_movie_entry(library_id).await;
+            fixture
+                .repo()
+                .create(CreateMediaFile {
+                    library_id,
+                    path,
+                    hash: 1,
+                    size_bytes: 1024,
+                    mtime: None,
+                    mime_type: None,
+                    duration: None,
+                    container_format: None,
+                    content: Some(MediaFileContent::Movie { movie_entry_id }),
+                    status: FileStatus::Known,
+                    classifier_version: 0,
+                })
+                .await
+                .expect("create a file")
+        }
+
+        /// The rows beneath a directory are those whose path continues it
+        /// by whole components -- missing ones included, another library's
+        /// never. A `_` or `%` in the directory's name is itself, not a
+        /// wildcard.
+        #[tokio::test]
+        async fn the_rows_beneath_a_directory_are_matched_by_whole_components() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let other = fixture.new_library().await;
+            let base = PathBuf::from(format!("/videos/{library}/{}", Uuid::new_v4()));
+            let dir = base.join("Show_%1");
+            let direct = file_at(&fixture, library, dir.join("a.mkv")).await;
+            let nested = file_at(&fixture, library, dir.join("S01/b.mkv")).await;
+            repo.mark_missing(vec![nested.id], at(0)).await.unwrap();
+            // Longer by a character, and what the wildcards would match.
+            file_at(&fixture, library, base.join("Show_%10/c.mkv")).await;
+            file_at(&fixture, library, base.join("ShowAB1/d.mkv")).await;
+            file_at(&fixture, library, base.join("Show_%1.mkv")).await;
+            file_at(&fixture, other, dir.join("e.mkv")).await;
+
+            let found = repo
+                .find_beneath_including_missing(library, &dir)
+                .await
+                .unwrap();
+
+            assert_eq!(ids(&found), sorted(vec![direct.id, nested.id]));
+        }
+
         #[tokio::test]
         async fn empty_id_lists_change_nothing() {
             let fixture = $setup().await;

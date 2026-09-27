@@ -335,6 +335,37 @@ mod file {
         );
     }
 
+    /// The rows beneath a directory are found by one prefix match scoped to
+    /// the library, with the directory's own wildcards escaped, and missing
+    /// rows are not filtered out.
+    #[tokio::test]
+    async fn the_rows_beneath_a_directory_are_one_escaped_prefix_match() {
+        let library = Uuid::from_u128(16);
+        let db = connection(empty_mock());
+        let repo = SqlFileRepository::new(db.clone());
+        let _ = repo
+            .find_beneath_including_missing(library, std::path::Path::new("/lib/Show_%1/"))
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_filters(&sql[0], "files", "library_id", "=");
+        assert_bound(&sql[0], &library.to_string());
+        assert_filters(&sql[0], "files", "file_path", "LIKE");
+        // A debug string: each `\` of the pattern reads `\\`.
+        assert_bound(&sql[0], r"/lib/Show\\_\\%1/%");
+        assert!(
+            sql[0].sql.contains("ESCAPE"),
+            "the pattern names its escape character, got:\n{}",
+            sql[0].sql
+        );
+        assert!(
+            !sql[0].sql.contains(r#""files"."missing_since" IS"#),
+            "a reconcile read must see missing rows, got:\n{}",
+            sql[0].sql
+        );
+    }
+
     #[tokio::test]
     async fn mark_missing_stamps_only_the_listed_rows_not_already_missing() {
         let db = connection(empty_mock());

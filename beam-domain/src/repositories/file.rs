@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -48,6 +48,16 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
         &self,
         library_id: Uuid,
         hash: u64,
+    ) -> Result<Vec<MediaFile>, DbErr>;
+    /// Reconcile read: every file in the library whose path lies strictly
+    /// beneath the directory `dir`, missing ones included. Beneath by whole
+    /// path components: `/a/S1` holds `/a/S1/x.mkv` but not `/a/S10/x.mkv`.
+    /// The watcher asks it which rows a changed or removed directory held
+    /// (issue #180), rather than reading the whole library per event.
+    async fn find_beneath_including_missing(
+        &self,
+        library_id: Uuid,
+        dir: &Path,
     ) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read.
     async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
@@ -203,6 +213,21 @@ pub mod in_memory {
                 .unwrap()
                 .values()
                 .filter(|f| f.library_id == library_id && f.hash == hash)
+                .cloned()
+                .collect())
+        }
+
+        async fn find_beneath_including_missing(
+            &self,
+            library_id: Uuid,
+            dir: &Path,
+        ) -> Result<Vec<MediaFile>, DbErr> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|f| f.library_id == library_id && f.path != dir && f.path.starts_with(dir))
                 .cloned()
                 .collect())
         }

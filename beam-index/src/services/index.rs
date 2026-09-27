@@ -180,6 +180,37 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
     }
 }
 
+/// Whether a library root should be read as unmounted rather than emptied:
+/// it holds no video file (`video_files_seen`, as a walk counts them) while
+/// video files of it are indexed. An unmounted volume usually leaves its
+/// mount point behind as an empty directory -- or one holding only a sentinel
+/// or hidden file -- and believing it would mark every row missing. The
+/// scan's empty-root guard and the watcher's removed-directory guard ask the
+/// same question.
+fn root_looks_unmounted(video_files_seen: usize, indexed_video_files: usize) -> bool {
+    video_files_seen == 0 && indexed_video_files > 0
+}
+
+/// Whether the walk [`walk_library_root`] makes of `root` would see a video
+/// file, stopping at the first: all the watcher needs of
+/// [`root_looks_unmounted`], without walking a mounted library whole. A walk
+/// that fails to read something has not shown the root empty, so it answers
+/// that there is one.
+fn root_holds_a_video_file(root: &Path, policy: &PathPolicy) -> bool {
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            !(entry.depth() > 0
+                && entry.file_type().is_dir()
+                && policy.excludes_directory(relative_to(root, entry.path())))
+        })
+        .any(|entry| match entry {
+            Ok(entry) => entry.file_type().is_file() && is_video_path(entry.path()),
+            Err(_) => true,
+        })
+}
+
 /// What to do with the indexed rows a scan's walk did not see.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct MissingPlan {
@@ -2778,6 +2809,12 @@ impl LocalIndexService {
     /// `path` was a directory, and every row beneath it whose file is gone is
     /// marked missing (issue #180). The watcher never purges: that waits for
     /// a scan and the grace period.
+    ///
+    /// A path the policy never indexes anything beneath -- an excluded
+    /// directory, a hidden or ignored name, a sidecar file -- is not looked
+    /// beneath at all. Nor is a removed directory believed while the library
+    /// root holds no video file: that is a volume going away, as the scan's
+    /// empty-root guard reads it, and the next scan decides.
     async fn reconcile_gone(&self, path: &Path, library: &Library) -> Result<(), IndexError> {
         // A root that is not there is a volume that went away, not a file
         // that was deleted: say nothing about the file until the next scan
@@ -2798,31 +2835,47 @@ impl LocalIndexService {
             }
             return Ok(());
         }
+        let rel = relative_to(&library.root_path, path);
+        if self.path_policy.excludes_directory(rel)
+            || self.path_policy.disposition(rel) == PathDisposition::Sidecar
+        {
+            return Ok(());
+        }
         // Each file is asked after rather than assumed gone with its
         // directory: the directory may be gone while a file of it is not --
         // a rename the watcher reports as two events, the new name
         // reconciled first, has already moved the rows along.
-        let gone: Vec<Uuid> = self
+        let gone: Vec<MediaFile> = self
             .file_repo
-            .find_all_by_library_including_missing(library.id)
+            .find_beneath_including_missing(library.id, path)
             .await?
             .into_iter()
-            .filter(|row| {
-                row.missing_since.is_none()
-                    && row.path != path
-                    && row.path.starts_with(path)
-                    && path_is_absent(&row.path)
-            })
-            .map(|row| row.id)
+            .filter(|row| row.missing_since.is_none() && path_is_absent(&row.path))
             .collect();
-        if !gone.is_empty() {
-            info!(
-                path = %path.display(),
-                files = gone.len(),
-                "Marking the files of a removed directory missing"
-            );
-            self.file_repo.mark_missing(gone, now).await?;
+        if gone.is_empty() {
+            return Ok(());
         }
+        let video_files_seen = usize::from(root_holds_a_video_file(
+            &library.root_path,
+            &self.path_policy,
+        ));
+        let indexed_video_files = gone.iter().filter(|row| is_video_path(&row.path)).count();
+        if root_looks_unmounted(video_files_seen, indexed_video_files) {
+            warn!(
+                path = %path.display(),
+                root = %library.root_path.display(),
+                "library root holds no video files; leaving a removed directory to the next scan"
+            );
+            return Ok(());
+        }
+        info!(
+            path = %path.display(),
+            files = gone.len(),
+            "Marking the files of a removed directory missing"
+        );
+        self.file_repo
+            .mark_missing(gone.into_iter().map(|row| row.id).collect(), now)
+            .await?;
         Ok(())
     }
 
@@ -2887,20 +2940,23 @@ impl LocalIndexService {
         }
 
         // Read after the files are reconciled, so a row relinked to a path
-        // beneath `dir` is seen at its new path.
+        // beneath `dir` is seen at its new path. A row at `dir` itself is a
+        // file a directory has replaced.
         let seen: std::collections::HashSet<&Path> = files.iter().map(PathBuf::as_path).collect();
-        let rows = self
+        let mut rows = self
             .file_repo
-            .find_all_by_library_including_missing(library.id)
+            .find_beneath_including_missing(library.id, dir)
             .await?;
+        if let Some(replaced) = self.file_repo.find_by_path(&dir.to_string_lossy()).await? {
+            rows.push(replaced);
+        }
         let now = self.clock.now();
         let MissingPlan {
             mark,
             purge: _,
             shielded,
         } = plan_missing(
-            rows.iter()
-                .filter(|row| row.path.starts_with(dir) && !seen.contains(row.path.as_path())),
+            rows.iter().filter(|row| !seen.contains(row.path.as_path())),
             &failed_subtrees,
             unscoped_failure,
             now,
@@ -3252,7 +3308,7 @@ impl LocalIndexService {
             .keys()
             .filter(|path| is_video_path(path))
             .count();
-        if walked_video_files == 0 && indexed_video_files > 0 {
+        if root_looks_unmounted(walked_video_files, indexed_video_files) {
             warn!(
                 root = %library.root_path.display(),
                 library_id = %lib_uuid,
