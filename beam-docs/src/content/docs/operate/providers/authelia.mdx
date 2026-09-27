@@ -1,0 +1,75 @@
+---
+title: Authelia
+description: Register Beam as an Authelia OpenID Connect client and grant admin through a group.
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+
+This assumes Authelia is already running with its OpenID Connect provider enabled, and is
+reachable from both your browser and the Beam server. Group membership comes from Authelia's
+user backend — the `groups` list in a file-based user database, or your LDAP directory.
+
+<Aside type="caution" title="Check key names against your Authelia version">
+Authelia's configuration keys have changed between releases. The shape below reflects recent
+releases; if your version rejects a key, its own documentation for OpenID Connect clients is the
+authority.
+</Aside>
+
+<Steps>
+
+1. **Create a group for Beam admins** in your user backend — for example `beam-admin` — and add
+   the users who should administer Beam.
+
+2. **Generate a client secret.** Authelia stores client secrets hashed; its CLI can generate a
+   random secret together with its digest. Keep the plain secret for Beam and put the digest in
+   Authelia's configuration.
+
+3. **Add Beam as a client,** and put `groups` in the ID token. Beam reads the ID token only, and
+   recent Authelia releases keep the ID token minimal unless a claims policy says otherwise:
+
+   ```yaml
+   identity_providers:
+     oidc:
+       claims_policies:
+         beam:
+           id_token: ["groups"]
+       clients:
+         - client_id: "beam"
+           client_name: "Beam"
+           client_secret: "<digest of the secret>"
+           public: false
+           authorization_policy: "two_factor"
+           claims_policy: "beam"
+           require_pkce: true
+           pkce_challenge_method: "S256"
+           redirect_uris:
+             - "<BEAM_SERVER_URL>/v1/auth/callback"
+           scopes: ["openid", "profile", "email", "groups"]
+           response_types: ["code"]
+           grant_types: ["authorization_code"]
+           token_endpoint_auth_method: "client_secret_basic"
+   ```
+
+   Beam always sends a PKCE `S256` challenge and authenticates to the token endpoint with HTTP
+   Basic, which is what `client_secret_basic` names.
+
+4. **Configure Beam.** The issuer is Authelia's root URL. Add `groups` to the requested scopes —
+   Authelia only releases the `groups` claim when that scope is asked for:
+
+   ```sh
+   BEAM_OIDC_ISSUER=https://<authelia-host>
+   BEAM_OIDC_CLIENT_ID=beam
+   BEAM_OIDC_CLIENT_SECRET=<the plain secret>
+   BEAM_OIDC_SCOPES="openid profile email groups"
+   BEAM_OIDC_ADMIN_CLAIM=groups
+   BEAM_OIDC_ADMIN_VALUE=beam-admin
+   ```
+
+5. **Check it.** Restart Authelia and Beam, sign in as a member of `beam-admin`, then open
+   `<BEAM_SERVER_URL>/v1/me` in the same browser. It should show `"is_admin": true`.
+
+</Steps>
+
+See [Identity and admin access](/operate/identity-and-access/) for how admin is recalculated and
+revoked, and [troubleshooting](/help/troubleshooting/#i-am-not-an-admin) if `is_admin` stays
+`false` — the usual cause with Authelia is `groups` arriving in userinfo but not in the ID token.

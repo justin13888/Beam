@@ -110,6 +110,16 @@ export default defineConfig({
 					items: [
 						{ slug: "operate/libraries" },
 						{ slug: "operate/identity-and-access" },
+						{
+							label: "Identity provider quickstarts",
+							collapsed: true,
+							items: [
+								{ slug: "operate/providers/authentik" },
+								{ slug: "operate/providers/keycloak" },
+								{ slug: "operate/providers/authelia" },
+								{ slug: "operate/providers/pocket-id" },
+							],
+						},
 						{ slug: "operate/metadata", label: "Metadata and artwork" },
 						{ slug: "operate/monitoring", label: "Monitoring and logs" },
 						{ slug: "operate/backup-and-upgrade" },

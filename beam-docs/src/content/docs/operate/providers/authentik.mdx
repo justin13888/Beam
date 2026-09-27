@@ -1,0 +1,62 @@
+---
+title: Authentik
+description: Register Beam as an Authentik OAuth2/OpenID provider and grant admin through a group.
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+
+This assumes Authentik is already running and reachable from both your browser and the Beam
+server.
+
+<Steps>
+
+1. **Create a group for Beam admins** — for example `beam-admin` — and add the users who should
+   administer Beam.
+
+2. **Create an OAuth2/OpenID provider for Beam** with client type **Confidential**, and add this
+   redirect URI:
+
+   ```
+   <BEAM_SERVER_URL>/v1/auth/callback
+   ```
+
+   Choose a **signing key** (Authentik ships a self-signed certificate you can use), so ID tokens
+   are signed with a key Authentik publishes rather than with the client secret. Copy the client
+   ID and client secret.
+
+3. **Create an application** bound to that provider. If you want only some users to reach Beam,
+   restrict the application here — Beam has no allow-list of its own and admits whoever
+   Authentik lets through.
+
+4. **Make sure groups reach the ID token.** Authentik's default `profile` scope mapping includes a
+   `groups` claim listing the user's group names. Beam reads the ID token only, so keep the
+   provider's option to include claims in the ID token enabled.
+
+5. **Configure Beam.** The issuer is the provider's OpenID configuration URL without the
+   `.well-known/openid-configuration` suffix — it ends in the application's slug **and a trailing
+   slash**, and Beam compares it exactly:
+
+   ```sh
+   BEAM_OIDC_ISSUER=https://<authentik-host>/application/o/<application-slug>/
+   BEAM_OIDC_CLIENT_ID=<client id>
+   BEAM_OIDC_CLIENT_SECRET=<client secret>
+   BEAM_OIDC_ADMIN_CLAIM=groups
+   BEAM_OIDC_ADMIN_VALUE=beam-admin
+   ```
+
+   The default `BEAM_OIDC_SCOPES` (`openid profile email`) is enough, since `groups` arrives with
+   `profile`.
+
+6. **Check it.** Restart Beam, sign in as a member of `beam-admin`, then open
+   `<BEAM_SERVER_URL>/v1/me` in the same browser. It should show `"is_admin": true`.
+
+</Steps>
+
+<Aside>
+The value Beam matches is the group's **name**, exactly and case-sensitively. If you have edited
+Authentik's scope mappings, check that a `groups` claim is still emitted for the `profile` scope.
+</Aside>
+
+See [Identity and admin access](/operate/identity-and-access/) for how admin is recalculated and
+revoked, and [troubleshooting](/help/troubleshooting/#i-am-not-an-admin) if `is_admin` stays
+`false`.

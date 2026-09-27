@@ -8,7 +8,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
 
 - **FR-101**: The server MUST support authentication exclusively via OpenID Connect (OIDC). No
   password-based login, registration, or "forgot password" flow exists
-  ([ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)).
+  ([ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)). The identity provider is
+  always the operator's own; Beam ships no IdP for deployment
+  ([ADR-0016](../architecture/decisions/ADR-0016-bring-your-own-idp.md)).
 - **FR-102**: The server MUST implement the OIDC Authorization Code flow with PKCE, performed
   entirely server-side. The browser MUST NOT receive, store, or handle ID tokens, access tokens, or
   refresh tokens at any point.

@@ -1,0 +1,53 @@
+---
+title: Pocket ID
+description: The smallest route to a working sign-in if you run no identity provider yet.
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+
+[Pocket ID](https://github.com/pocket-id/pocket-id) is a small, self-hosted OpenID Connect
+provider that signs users in with passkeys. It keeps no passwords, so it is a good fit if you are
+standing up an identity provider only for Beam. Follow its own documentation to deploy it; it must
+be reachable from both your browser and the Beam server.
+
+<Steps>
+
+1. **Create a user group for Beam admins** — for example `beam-admin` — and add the users who
+   should administer Beam.
+
+2. **Create an OIDC client for Beam** with this callback URL:
+
+   ```
+   <BEAM_SERVER_URL>/v1/auth/callback
+   ```
+
+   Leave it as a confidential (non-public) client, so that it has a client secret — Beam needs
+   one. Copy the client ID and secret. Beam always sends a PKCE `S256` challenge, so enabling PKCE
+   on the client is fine.
+
+3. **Configure Beam.** The issuer is Pocket ID's public URL. Add `groups` to the requested scopes,
+   which is what asks Pocket ID for the user's group membership:
+
+   ```sh
+   BEAM_OIDC_ISSUER=https://<pocket-id-host>
+   BEAM_OIDC_CLIENT_ID=<client id>
+   BEAM_OIDC_CLIENT_SECRET=<client secret>
+   BEAM_OIDC_SCOPES="openid profile email groups"
+   BEAM_OIDC_ADMIN_CLAIM=groups
+   BEAM_OIDC_ADMIN_VALUE=beam-admin
+   ```
+
+4. **Check it.** Restart Beam, sign in as a member of `beam-admin`, then open
+   `<BEAM_SERVER_URL>/v1/me` in the same browser. It should show `"is_admin": true`.
+
+</Steps>
+
+<Aside>
+Beam matches the value exactly and case-sensitively, and reads it from the **ID token** only. If
+`is_admin` stays `false`, confirm what the `groups` claim actually contains for your user — a
+group can have a display name that differs from the value the claim carries.
+</Aside>
+
+See [Identity and admin access](/operate/identity-and-access/) for how admin is recalculated and
+revoked, and [troubleshooting](/help/troubleshooting/#i-am-not-an-admin) if `is_admin` stays
+`false`.
