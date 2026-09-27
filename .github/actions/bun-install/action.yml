@@ -21,4 +21,6 @@ runs:
 
     - name: Install dependencies
       shell: bash
-      run: bun install --frozen-lockfile
+      # The same task every JS mise task depends on, so CI installs exactly as
+      # a contributor's first `mise run ts:*` does.
+      run: mise run deps:js

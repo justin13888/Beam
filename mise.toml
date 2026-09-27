@@ -158,7 +158,17 @@ postinstall = "hk install --mise"
 
 [tasks.setup]
 description = "Install tools, JS dependencies, and git hooks"
-run = ["bun install --frozen-lockfile", "hk install --mise"]
+depends = ["deps:js"]
+run = "hk install --mise"
+
+# Every task that runs a JS tool depends on this, so a fresh checkout or
+# worktree -- which has no node_modules -- installs them on first use instead
+# of failing with "command not found". Against an up-to-date node_modules it
+# is a sub-second no-op. --frozen-lockfile: bun.lock is the contract, and a
+# check must never rewrite it.
+[tasks."deps:js"]
+description = "Install the JS workspace dependencies from bun.lock"
+run = "bun install --frozen-lockfile"
 
 # ---------------------------------------------------------------------------
 # Rust
@@ -362,14 +372,17 @@ cargo mutants --workspace \
 
 [tasks."ts:check"]
 description = "Lint and format-check JS/TS with biome"
+depends = ["deps:js"]
 run = "bun run check"
 
 [tasks."ts:check:fix"]
 description = "Apply biome lint and format fixes"
+depends = ["deps:js"]
 run = "bun run check:fix"
 
 [tasks."ts:typecheck"]
 description = "Type-check the beam-web SPA"
+depends = ["deps:js"]
 # Scoped to beam-web, not `bun run typecheck` (which fans out to every
 # workspace): beam-docs is type-checked by docs:build instead. Overlapping the
 # two runs two Astro processes over beam-docs/node_modules/.vite, which race and
@@ -379,26 +392,32 @@ run = "bun run --filter beam-web typecheck"
 
 [tasks."ts:test"]
 description = "Run the beam-web test suite"
+depends = ["deps:js"]
 run = "bun run --filter beam-web test"
 
 [tasks."ts:coverage"]
 description = "Run JS/TS tests with coverage thresholds"
+depends = ["deps:js"]
 run = "bun run test:coverage"
 
 [tasks."ts:build"]
 description = "Build every JS/TS workspace"
+depends = ["deps:js"]
 run = "bun run build"
 
 [tasks."ts:build:web"]
 description = "Build only the beam-web SPA (release asset)"
+depends = ["deps:js"]
 run = "bun run --filter beam-web build"
 
 [tasks."docs:og"]
 description = "Regenerate the docs site's Open Graph card (committed; run after editing the artwork)"
+depends = ["deps:js"]
 run = "bun run --filter beam-docs og:build"
 
 [tasks."docs:build"]
 description = "Type-check and build the beam-docs site"
+depends = ["deps:js"]
 run = [
     "bun run --filter beam-docs typecheck",
     "bun run --filter beam-docs build",

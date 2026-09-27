@@ -128,8 +128,20 @@ hooks {
                 glob = List("*.rs")
                 check = "mise run check:mutants-skip-fakes"
             }
+            // Every JS task depends on `deps:js`, so a fresh worktree -- which has
+            // no node_modules -- provisions itself. But the three JS steps below
+            // run in parallel, and three `bun install`s racing over one empty
+            // node_modules is how a first push fails with ENOTEMPTY. This step
+            // installs once, and they wait on it; their own `deps:js` then finds
+            // nothing to do. The glob is the union of theirs, so it fires exactly
+            // when one of them will.
+            ["js-deps"] {
+                glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json", "beam-docs/**")
+                check = "mise run deps:js"
+            }
             ["ts-check"] {
                 glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json")
+                depends = List("js-deps")
                 check = "mise run ts:check"
             }
             // TODO(#146): restore `ts-typecheck`.
@@ -149,6 +161,7 @@ hooks {
             // generated types to exist, so the suite runs on a fresh checkout.
             ["ts-test"] {
                 glob = List("*.ts", "*.tsx")
+                depends = List("js-deps")
                 check = "mise run ts:test"
             }
             // Without this a docs-only change is pushed unverified, because none of the ts-*
@@ -157,6 +170,7 @@ hooks {
             // build on every mise.toml edit is not worth the wait. CI still covers that.
             ["docs-build"] {
                 glob = List("beam-docs/**")
+                depends = List("js-deps")
                 check = "mise run docs:build"
             }
             // The Android steps also watch beam-client-core: the Kotlin
