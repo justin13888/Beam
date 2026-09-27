@@ -53,10 +53,11 @@ pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 // that into dead retry logic.
 //
 // Sharpening the codes made the split load-bearing rather than merely tidy.
-// Kynos carries one response per status and titles it from the *first* variant
-// declaring that status, so a `MutationError` holding both `MediaNotFound` and
-// `LibraryNotFound` would document `deleteLibrary`'s 404 as "Media not found".
-// One enum per operation shape is what keeps each description true.
+// Kynos describes a status by every variant declaring it -- the titles joined,
+// the `type` narrowed to their codes -- so a `MutationError` holding both
+// `MediaNotFound` and `LibraryNotFound` would tell a client that
+// `deleteLibrary` can answer "Media not found". One enum per operation shape is
+// what keeps each description true.
 //
 // The `type` URI is written out per variant rather than derived from the
 // variant name. Kynos can compose one from `#[problem(base = ...)]` plus the
@@ -125,15 +126,9 @@ pub enum MediaLookupError {
 
 /// `GET /v1/media/{id}/sources`.
 ///
-/// Two 400s share one declared response, and neither titles it. Kynos carries
-/// one response per status and titles it from the first declaration it meets,
-/// and the `Path` extractor's own 400 ("Bad Request") is met before anything
-/// the handler returns -- just as `SessionAuth`'s 401 is for that status. So
-/// variant order decides a title only for a status no extractor or
-/// authenticator declares, which is why the 404-carrying enums and
-/// `CrossOriginRejected`'s 403 are careful about it and this pair need not
-/// be. The `type` is not lost with the title: the document narrows the 400 to
-/// a `oneOf` naming each code below beside the extractor's `about:blank`.
+/// Two 400s share one declared response with the `Path` extractor's own. Kynos
+/// joins the three titles into its description and narrows its `type` to a
+/// `oneOf` of the two codes below beside the extractor's `about:blank`.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum MediaSourcesError {
     #[error("{0}")]

@@ -16,10 +16,12 @@
 //!
 //! Neither side of the comparison is hand-maintained, which is what keeps this
 //! from being the forbidden second copy of a table. The code side is read from
-//! the document `create_router` exports: kynos narrows every problem response
-//! to the `type` values its operation can emit, whether a variant's
+//! the document `create_router` exports: kynos narrows a problem response to
+//! the `type` values its operation can emit, whether a variant's
 //! `#[problem(type = ...)]`, a scope set's `FORBIDDEN_TYPE` or a limiter's
-//! `ProblemType` declared it. The documentation side is the headings of the
+//! `ProblemType` declared it. (A response Kynos keeps wide on purpose -- the
+//! `SessionAuth` 403, the range 416 -- names no code, and no Beam code is
+//! emitted only there.) The documentation side is the headings of the
 //! page those URIs point at. A slug renamed on one side and not the other fails
 //! here, and so does a new code nobody remembered to document.
 //!

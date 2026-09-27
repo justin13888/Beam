@@ -66,15 +66,11 @@ pub struct OriginHeaders {
 /// without reaching the handler, and its `Responses` is what the document
 /// prints.
 ///
-/// `NotAllowed` is written first deliberately. Kynos carries one response per
-/// status and titles it from the first variant declaring that status, so the
-/// leading variant's title becomes the published description of *every* 403 on
-/// every operation this interceptor covers -- including the admin refusal,
-/// which comes from `AuthRejection` and has no title of its own.
-/// "Cross-origin request rejected" is the broader of the two and the one that
-/// reads sensibly in that position; with `Malformed` first, three operations
-/// documented their 403 as "Malformed Origin/Referer header", which is a
-/// narrower thing than they answer with.
+/// `NotAllowed` is written first. Kynos describes a status by joining the
+/// title of every declaration of it in the order it meets them, so on every
+/// operation this interceptor covers the 403 reads "Forbidden; Cross-origin
+/// request rejected; Malformed Origin/Referer header", and the broader of the
+/// two refusals comes before the narrower one.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
 pub enum CrossOriginRejected {
     #[error("Cross-origin request rejected")]

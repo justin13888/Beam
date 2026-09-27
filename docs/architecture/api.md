@@ -114,20 +114,25 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   with `ERROR_BASE`, and asserts the set of codes matches the set of sections on the published page,
   in both directions.
 
-  **The codes are part of the OpenAPI document.** Each problem response narrows `type` to a `const`,
+  **The codes are part of the OpenAPI document.** Every problem response a Beam code can reach
+  narrows `type` to a `const`,
   and where several variants -- or an extractor's `about:blank` -- share one status, to a `oneOf` of
   const-narrowed problems. A generated client therefore sees every code, and `codegen:openapi:check`
   catches a renamed one on its own. The consequence to know: spargen lowers each narrowed `type` to
   a closed set, so a native client decodes only the codes it was generated with. A code the server
   adds later reaches an older client as an undecodable body with no status, not as the documented
-  status it arrived with ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)).
+  status it arrived with ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)). The
+  same holds for a `429` whose body is not Beam's `rate-limited` problem — a reverse proxy's own rate
+  limiter, or a server older than the code — on the three operations that declare one. Two
+  framework responses stay wide on purpose: `SessionAuth`'s `403` and the range engine's `416` are
+  the bare `Problem` component, so any `type` decodes there.
 
   The error types are a **family, one per operation shape**, not one union. Kynos derives an
   operation's `responses` from its return type, so a shared union would make `GET /v1/genres`
   advertise a `416` it cannot reach. Sharpening the codes made the split load-bearing rather than
-  merely tidy: Kynos carries one response per status and titles it from the *first* variant
-  declaring that status, so a shared `MutationError` holding both `MediaNotFound` and
-  `LibraryNotFound` documented `deleteLibrary`'s 404 as "Media not found". `401` and `403` are
+  merely tidy: Kynos describes a status by every variant declaring it, so a shared `MutationError`
+  holding both `MediaNotFound` and `LibraryNotFound` would tell a client that `deleteLibrary` can
+  answer `media-not-found`. `401` and `403` are
   absent from almost all of them because they arrive from the `SessionAuth`/`AdminAuth` extractors,
   which is what makes taking the extractor and documenting the requirement one act.
 
@@ -139,11 +144,9 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   `FORBIDDEN_TYPE`; the rate limiter's **`429`** is `rate-limited`, which the limiter names through
   `RateLimit::problem_type`.
 
-  Where several components declare the same status on one operation, Kynos titles the response
-  from the first declaration it meets. An extractor's `400` and an authenticator's `401` come before
-  the handler's return type, so a handler enum's variant order never titles those two; it decides
-  the title only for a status nothing before it declares — the `404`s, and the same-origin
-  interceptor's `403`.
+  Where several components declare the same status on one operation, Kynos joins their titles into
+  the response's description in the order it meets them — extractors and authenticators before the
+  handler's return type — and narrows `type` to the union of their codes.
 
   Statuses in use: `400`, `401`, `403`, `404`, `416` (stream/download range), `429` (rate limiter,
   with `Retry-After` and `X-RateLimit-Limit`/`-Remaining`/`-Reset`), `500`, `502` (artwork only:
