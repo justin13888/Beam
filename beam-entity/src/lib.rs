@@ -24,6 +24,7 @@ pub mod season;
 pub mod session;
 pub mod show;
 pub mod show_genre;
+pub mod sidecar_subtitle;
 pub mod user;
 
 pub use admin_log::Entity as AdminLog;
@@ -48,4 +49,5 @@ pub use season::Entity as Season;
 pub use session::Entity as Session;
 pub use show::Entity as Show;
 pub use show_genre::Entity as ShowGenre;
+pub use sidecar_subtitle::Entity as SidecarSubtitle;
 pub use user::Entity as User;

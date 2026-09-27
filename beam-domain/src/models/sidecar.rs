@@ -113,6 +113,51 @@ impl UpsertSidecarSubtitle {
     }
 }
 
+#[cfg(feature = "entity")]
+impl TryFrom<beam_entity::sidecar_subtitle::Model> for SidecarSubtitle {
+    type Error = sea_orm::DbErr;
+
+    fn try_from(model: beam_entity::sidecar_subtitle::Model) -> Result<Self, Self::Error> {
+        let beam_entity::sidecar_subtitle::Model {
+            id,
+            file_id,
+            library_id,
+            path,
+            format,
+            language,
+            title,
+            is_forced,
+            is_sdh,
+            is_default,
+            size_bytes,
+            mtime,
+            created_at,
+            updated_at,
+        } = model;
+        let format = SubtitleFormat::from_extension(&format).ok_or_else(|| {
+            sea_orm::DbErr::Custom(format!("unknown sidecar subtitle format {format:?}"))
+        })?;
+        Ok(Self {
+            id,
+            file_id,
+            library_id,
+            path: PathBuf::from(path),
+            info: SidecarInfo {
+                format,
+                language,
+                title,
+                is_forced,
+                is_sdh,
+                is_default,
+            },
+            size_bytes: size_bytes.max(0) as u64,
+            mtime: mtime.map(|t| t.with_timezone(&Utc)),
+            created_at: created_at.with_timezone(&Utc),
+            updated_at: updated_at.with_timezone(&Utc),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -15,6 +15,9 @@ pub struct Show {
     /// backfilled, or that the indexer released (a show merged into another,
     /// or a season-folder husk); such a row is never matched.
     pub identity_key: Option<String>,
+    /// The provider id a `tvshow.nfo` pins this show to (issue #184); see
+    /// [`crate::models::movie::Movie::pinned_ref`].
+    pub pinned_ref: Option<String>,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<u32>,
@@ -107,6 +110,7 @@ impl From<beam_entity::show::Model> for Show {
             id: model.id,
             title: model.title,
             identity_key: model.identity_key,
+            pinned_ref: model.pinned_ref,
             title_localized: model.title_localized,
             description: model.description,
             year: model.year.map(|y| y as u32),
