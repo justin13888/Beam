@@ -214,6 +214,46 @@ async fn a_healthy_batch_commits_every_migration_and_its_ledger_row() {
     scoped.drop_schema().await.expect("drop schema");
 }
 
+/// `beam-server`'s startup on a fresh database, with nothing else migrating:
+/// [`apply_pending`] applies the whole release and reports every migration in
+/// it, which is the count `beam-server` logs.
+#[tokio::test]
+async fn server_startup_on_a_fresh_database_applies_and_counts_every_migration() {
+    let scoped = ScopedSchema::create("startup_fresh")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+
+    let applied = apply_pending::<HealthyRelease>(db.as_ref()).await;
+
+    assert_eq!(
+        applied,
+        Ok(HealthyRelease::migrations().len()),
+        "a fresh database has the whole release pending, and startup applies all of it"
+    );
+    let tables = table_names(db.as_ref(), scoped.name())
+        .await
+        .expect("list tables");
+    assert!(
+        tables.contains(&ALPHA_TABLE.to_string()) && tables.contains(&BETA_TABLE.to_string()),
+        "every migration startup counted must be committed, got {tables:?}"
+    );
+    let pending = HealthyRelease::get_pending_migrations_read_only(db.as_ref())
+        .await
+        .expect("read the migration ledger");
+    assert!(
+        pending.is_empty(),
+        "every migration startup counted must be recorded as applied, still pending: {:?}",
+        pending
+            .iter()
+            .map(|migration| migration.name().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    drop(db);
+    scoped.drop_schema().await.expect("drop schema");
+}
+
 const GATED_TABLE: &str = "concurrency_gated";
 const GATED_MIGRATION: &str = "m_test_000001_gated";
 
@@ -310,17 +350,28 @@ impl MigratorTrait for StartupGatedRelease {
     }
 }
 
-/// Whether any backend is waiting on a lock the first migrator's batch holds.
-async fn anything_waits_on(
+/// Whether the second migrator is waiting on a lock the first migrator's batch
+/// holds.
+///
+/// Scoped to `application_name`, the scoped schema's name, which every backend
+/// on that schema's pool reports. The first migrator's connection is the
+/// blocker itself, so the only backend that can match is the second
+/// migrator's. Counting *any* backend blocked by the batch would not do: every
+/// lock-taking test in this binary queues on the same `MIGRATION_LOCK_KEY`, so
+/// a parallel test's migrator could satisfy the check before the second
+/// migrator issued anything -- the first would then be released early, the
+/// race never staged, and the test pass with the bug it pins reintroduced.
+async fn second_migrator_waits_on(
     observer: &sea_orm::DatabaseConnection,
+    application_name: &str,
     batch_pid: i32,
 ) -> Result<bool, DbErr> {
     let row = observer
         .query_one_raw(sea_orm::Statement::from_sql_and_values(
             sea_orm::DbBackend::Postgres,
             "SELECT count(*) AS waiting FROM pg_stat_activity \
-             WHERE $1 = ANY(pg_blocking_pids(pid))",
-            [batch_pid.into()],
+             WHERE application_name = $1 AND $2 = ANY(pg_blocking_pids(pid))",
+            [application_name.into(), batch_pid.into()],
         ))
         .await?
         .ok_or_else(|| DbErr::Custom("count(*) returned no row".to_string()))?;
@@ -331,10 +382,12 @@ async fn anything_waits_on(
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runs `first` until its gated migration is provably mid-batch, then starts
-/// `second`, lets the first go only once something is provably waiting on it,
-/// and returns both outcomes.
+/// `second`, lets the first go only once `second` is provably waiting on it,
+/// and returns both outcomes. Both must run on `scoped`'s pool, whose two
+/// connections they hold.
 async fn race_second_against_in_flight_first<F, S, T, U>(
     gate: &'static Gate,
+    scoped: &ScopedSchema,
     first: F,
     second: S,
 ) -> (T, U)
@@ -362,7 +415,7 @@ where
     // Polled on the database's own answer rather than timed: each round trip
     // is the pacing, and the deadline only bounds a hang.
     tokio::time::timeout(DEADLINE, async {
-        while !anything_waits_on(&observer, batch_pid)
+        while !second_migrator_waits_on(&observer, scoped.name(), batch_pid)
             .await
             .expect("read pg_stat_activity")
         {
@@ -424,6 +477,7 @@ async fn concurrent_migrators_apply_each_migration_once_and_both_succeed() {
     let second_db = scoped.db();
     let (first, second) = race_second_against_in_flight_first(
         &CONCURRENT_GATE,
+        &scoped,
         async move { up_all_or_nothing::<GatedRelease, _>(first_db.as_ref(), None).await },
         async move { up_all_or_nothing::<GatedRelease, _>(second_db.as_ref(), None).await },
     )
@@ -463,6 +517,7 @@ async fn server_startup_beside_an_in_flight_cli_migrator_waits_then_applies_noth
     let server_db = scoped.db();
     let (cli, server) = race_second_against_in_flight_first(
         &STARTUP_GATE,
+        &scoped,
         async move {
             let cli_migrator = AllOrNothing::<StartupGatedRelease>::new();
             sea_orm_migration::MigratorTraitSelf::up(&cli_migrator, cli_db.as_ref(), None).await
