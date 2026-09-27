@@ -139,7 +139,8 @@ Two limits to know:
 ## When a scan reports failures
 
 A file is recorded as failed when Beam cannot read its size, cannot hash it, or cannot store the
-result — a permissions problem or unreadable storage. The rest of the scan continues regardless; one bad file never aborts it.
+result — a permissions problem or unreadable storage. The rest of the scan continues regardless;
+one bad file never aborts it.
 
 A file Beam *can* read but cannot probe is **not** a failure. It is indexed with unknown status and
 counted as added, so a corrupt or truncated video shows up as an unplayable unknown file rather

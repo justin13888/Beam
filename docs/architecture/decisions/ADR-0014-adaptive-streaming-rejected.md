@@ -7,7 +7,8 @@ Accepted. Settles the revisit condition [ADR-0004](ADR-0004-never-transcode.md) 
 
 The condition this decision set -- closing [#142](https://github.com/justin13888/beam/issues/142),
 so an episode can carry more than one file -- is met: the indexer now find-or-creates episodes, and
-a second file for an episode becomes a second source.
+a second file for an episode becomes a second source. "Consequences" below is left as written and
+describes the indexer before #142.
 
 ## Context
 
