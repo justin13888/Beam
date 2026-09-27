@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use serde_json;
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -30,7 +30,7 @@ use beam_domain::services::{Clock, RealClock};
 use beam_domain::utils::identity::title_identity_key;
 use beam_domain::utils::media_path::{
     CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, UnclassifiableReason,
-    infer_media,
+    infer_media, season_folder_number,
 };
 use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path};
 
@@ -1297,7 +1297,10 @@ impl LocalIndexService {
     /// (2021)` once merged under one title -- or whose key another title
     /// already holds -- the duplicate the old title lookup created -- is left
     /// keyless and named in an admin warning: it stays browsable, is never
-    /// matched, and new files of it go to the keyed title.
+    /// matched, and new files of it go to the keyed title. A show whose
+    /// stored title is a season-folder name is left keyless without a
+    /// warning: it is a husk the scan's reclassification empties and orphan
+    /// cleanup retires (issue #182).
     async fn backfill_identity_keys(&self) -> Result<IdentityBackfill, IndexError> {
         let mut report = IdentityBackfill::default();
 
@@ -1359,6 +1362,17 @@ impl LocalIndexService {
         }
 
         for show in shows {
+            // A show named after a season folder (`Season 05`) is the husk a
+            // build before issue #182 made by naming shows after the file's
+            // parent folder. Keying it with its files' key would hand it the
+            // real series' key, and reclassification would then move every
+            // file of the series onto the husk. Left keyless, it is never
+            // matched: reclassification moves its files to the series they
+            // name, and orphan cleanup retires it.
+            if season_folder_number(&show.title).is_some() {
+                debug!(show_id = %show.id, title = %show.title, "not keying a season-folder husk");
+                continue;
+            }
             let mut keys = std::collections::BTreeSet::new();
             for season in self.show_repo.find_seasons_by_show_id(show.id).await? {
                 for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {

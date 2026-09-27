@@ -823,3 +823,44 @@ async fn scanning_every_library_backfills_first_so_a_legacy_title_takes_its_next
     // The library list the scan walked is the harness's one library.
     assert_eq!(h.library_repo.find_all().await.unwrap().len(), 1);
 }
+
+/// Upgrading straight from a build before issue #183: a show named after a
+/// season folder has no key yet. The backfill must leave it keyless -- its
+/// files derive the real series' key, and a husk holding that key would
+/// capture every file of the series when the scan reclassifies them -- so
+/// the series gets its own show and the husk is retired.
+#[tokio::test]
+async fn an_unkeyed_season_folder_husk_is_retired_not_given_its_series_key() {
+    let h = Harness::purging_at_once().await;
+    let husk = h
+        .legacy_show(
+            "Season 05",
+            &[
+                "Show X/Season 05/Show.X.S05E01.mkv",
+                "Show X/Season 05/Show.X.S05E02.mkv",
+            ],
+        )
+        .await;
+    h.write("Show X/Season 01/Show.X.S01E01.mkv");
+
+    h.service.scan_all_libraries().await.unwrap();
+
+    let show = h.only_show();
+    assert_ne!(show.id, husk, "the husk is retired, not adopted");
+    assert_eq!(show.title, "Show X");
+    assert_eq!(show.identity_key.as_deref(), Some("show x|"));
+    let files = h.file_repo.files.lock().unwrap().clone();
+    assert_eq!(files.len(), 3);
+    for file in files.values() {
+        let Some(MediaFileContent::Episode { episode_id, .. }) = file.content else {
+            panic!("{} is not an episode file", file.path.display());
+        };
+        let episode = h.show_repo.episodes.lock().unwrap()[&episode_id].clone();
+        let season = h.show_repo.seasons.lock().unwrap()[&episode.season_id].clone();
+        assert_eq!(season.show_id, show.id, "{}", file.path.display());
+    }
+    assert!(
+        h.backfill_warning().await.is_none(),
+        "a husk left keyless is not a title the administrator must sort out"
+    );
+}
