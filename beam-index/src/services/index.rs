@@ -39,6 +39,33 @@ fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
     Ok((meta.len(), mtime))
 }
 
+/// What a walk of a library root found on disk.
+///
+/// A named result rather than a bare `Vec` so the walk can report more than
+/// the files it reached without changing its call site.
+struct WalkOutcome {
+    /// Every regular file under the root, in walk order. Non-video files are
+    /// included: the scan indexes them as `Unknown`.
+    files: Vec<PathBuf>,
+    /// How many of `files` have a known video extension -- the files Beam can
+    /// index as media, and so the ones the empty-root guard counts.
+    video_files: usize,
+}
+
+/// Walks a library root and collects every regular file beneath it.
+///
+/// Entries the walk cannot read are skipped, as they always have been.
+fn walk_library_root(root: &Path) -> WalkOutcome {
+    let files: Vec<PathBuf> = WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| path.is_file())
+        .collect();
+    let video_files = files.iter().filter(|path| is_known_video(path)).count();
+    WalkOutcome { files, video_files }
+}
+
 /// Whether a path has a recognised video file extension.
 fn is_known_video(path: &Path) -> bool {
     path.extension()
@@ -100,12 +127,17 @@ pub enum IndexError {
     InvalidId,
     /// The message never contains a filesystem path (NFR-108). The admin
     /// boundary relies on that unconditionally, so every site constructing this
-    /// variant must uphold it; `assert_names_no_path` pins all three.
+    /// variant must uphold it; `assert_names_no_path` pins all four.
+    ///
+    /// The four sites are the scan's two root guards (a root that is not a
+    /// directory, and a root that holds no video files while the library has
+    /// indexed video files) and the two `process_new_file` failures (metadata,
+    /// hash).
     ///
     /// The path itself goes to a structured `tracing` field at the failing
     /// site. Where it *also* reaches the admin log differs by site, and the
-    /// difference is the caller's, not this variant's: the root-guard site
-    /// writes its own admin-log record, while the two `process_new_file` sites
+    /// difference is the caller's, not this variant's: the root-guard sites
+    /// write their own admin-log record, while the two `process_new_file` sites
     /// are logged later by `report_file_failure` — which runs on the scan path
     /// only. Reached through `reconcile_path`, a per-file failure is logged by
     /// `beam-index`'s runtime and never reaches the admin log at all.
@@ -979,11 +1011,9 @@ impl IndexService for LocalIndexService {
             )
             .await;
 
-        // Update scan start time
-        self.library_repo
-            .update_scan_progress(lib_uuid, Some(start_time), None, None)
-            .await?;
-
+        // A refused scan never stamps `last_scan_started_at`: the start time is
+        // written only once every guard below has passed, so a refusal cannot
+        // leave the library reading as "scanning" with no finish to follow.
         if !library.root_path.is_dir() {
             warn!(
                 root = %library.root_path.display(),
@@ -1029,18 +1059,74 @@ impl IndexService for LocalIndexService {
 
         info!("Found {} existing files in DB", existing_map.len());
 
+        // Phase 2: Walk FS
+        let walk = walk_library_root(&library.root_path);
+
+        // An unmounted volume usually leaves its mount point behind as an empty
+        // directory, which passes the guard above -- or one holding only a
+        // sentinel or hidden file (`.not_mounted`, `.DS_Store`, `Thumbs.db`),
+        // which admins put on mount points on purpose. Reconciling that walk
+        // would delete every indexed video row, so a root with no video files
+        // under a library that has indexed video files is refused rather than
+        // believed. Only video rows are counted on either side: they are what
+        // is at stake, and a library that only ever held non-video files has
+        // nothing an unmounted volume could take from it. Emptying a library on
+        // purpose is deleting the library.
+        let indexed_video_files = existing_map
+            .keys()
+            .filter(|path| is_known_video(path))
+            .count();
+        if walk.video_files == 0 && indexed_video_files > 0 {
+            warn!(
+                root = %library.root_path.display(),
+                library_id = %lib_uuid,
+                indexed_video_files,
+                "library root contains no video files but video files are indexed; refusing to reconcile"
+            );
+            self.notification_service.publish(AdminEvent::error(
+                EventCategory::LibraryScan,
+                format!(
+                    "Library '{}' root contains no video files but {} are indexed; refusing to \
+                     reconcile — is the volume mounted? Root: {}",
+                    library.name,
+                    indexed_video_files,
+                    library.root_path.display()
+                ),
+                Some(lib_uuid.to_string()),
+                Some(library.name.clone()),
+            ));
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Error,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "Library scan refused: root contains no video files but {} are indexed for \"{}\"",
+                        indexed_video_files, library.name
+                    ),
+                    Some(serde_json::json!({
+                        "library_id": library_id,
+                        "path": library.root_path,
+                        "indexed_video_files": indexed_video_files,
+                    })),
+                )
+                .await;
+            return Err(IndexError::PathNotFound(
+                "Library root contains no video files but video files are indexed; refusing to \
+                 reconcile"
+                    .to_string(),
+            ));
+        }
+
+        // Update scan start time
+        self.library_repo
+            .update_scan_progress(lib_uuid, Some(start_time), None, None)
+            .await?;
+
         let mut added_count = 0;
 
-        // Phase 2 & 3: Walk FS, compare with DB, add new files
-        for entry in WalkDir::new(&library.root_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path().to_path_buf();
-            if !path.is_file() {
-                continue;
-            }
-
+        // Phase 3: Compare with DB, add new files
+        for path in walk.files {
             if let Some(existing_file) = existing_map.remove(&path) {
                 // Known file: reconcile against its current on-disk state.
                 if let Err(e) = self.reconcile_existing_file(&existing_file, &path).await {
@@ -2542,6 +2628,12 @@ mod tests {
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         assert!(files.is_empty());
+
+        // Nothing was indexed, so there is nothing to lose: a new, empty
+        // library scans to completion rather than being refused.
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert!(stored.last_scan_started_at.is_some());
+        assert_eq!(stored.last_scan_file_count, Some(0));
     }
 
     #[tokio::test]
@@ -2734,6 +2826,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
+        // A file that is still on disk and unchanged since it was indexed, so
+        // the root is not empty and the scan reconciles rather than refuses.
+        let kept_path = dir.path().join("kept.mp4");
+        std::fs::write(&kept_path, b"still here").unwrap();
+        let kept = indexed_file_matching_disk(library.id, &kept_path);
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(kept.id, kept.clone());
+
         // Seed the file repo with a phantom file that doesn't exist on disk
         let phantom = MediaFile {
             id: Uuid::new_v4(),
@@ -2771,9 +2874,349 @@ mod tests {
         let result = service.scan_library(library.id.to_string()).await;
         assert_eq!(result.unwrap(), 0); // no new files
 
-        // Phantom record must have been deleted
+        // Phantom record must have been deleted; the file on disk survives.
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
-        assert!(files.is_empty());
+        let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![kept.id]);
+    }
+
+    /// The row a previous scan would have written for a file that is on disk
+    /// and unchanged, so reconciling it takes the size-and-mtime fast path and
+    /// touches neither the hasher nor the prober.
+    fn indexed_file_matching_disk(library_id: Uuid, path: &Path) -> MediaFile {
+        let (size_bytes, mtime) = read_fs_meta(path).unwrap();
+        MediaFile {
+            id: Uuid::new_v4(),
+            library_id,
+            path: path.to_path_buf(),
+            hash: 0,
+            size_bytes,
+            mtime,
+            mime_type: None,
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    /// A row for a file indexed under `root` by an earlier scan and not on
+    /// disk now.
+    fn indexed_file_under(library_id: Uuid, root: &Path, name: &str) -> MediaFile {
+        MediaFile {
+            id: Uuid::new_v4(),
+            library_id,
+            path: root.join(name),
+            hash: 42,
+            size_bytes: 1024,
+            mtime: None,
+            mime_type: Some("video/mp4".to_string()),
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Known,
+            scanned_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    /// A scan service over `root` for a library that already has `indexed`
+    /// rows, with the admin log and notifications captured.
+    struct IndexedLibraryHarness {
+        library: Library,
+        lib_repo: Arc<InMemoryLibraryRepository>,
+        file_repo: Arc<InMemoryFileRepository>,
+        notification_svc: Arc<InMemoryNotificationService>,
+        admin_log_repo: Arc<InMemoryAdminLogRepository>,
+        service: LocalIndexService,
+    }
+
+    async fn indexed_library_harness(root: &Path, indexed: &[&str]) -> IndexedLibraryHarness {
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let notification_svc = Arc::new(InMemoryNotificationService::new());
+        let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+        let library = lib_repo
+            .create(CreateLibrary {
+                name: "Mounted Library".to_string(),
+                root_path: root.to_path_buf(),
+                description: None,
+            })
+            .await
+            .unwrap();
+        for name in indexed {
+            let row = indexed_file_under(library.id, root, name);
+            file_repo.files.lock().unwrap().insert(row.id, row);
+        }
+        // No expectations: reaching the hasher or the prober would be a bug.
+        let service = LocalIndexService::new(
+            lib_repo.clone(),
+            file_repo.clone(),
+            Arc::new(InMemoryMovieRepository::default()),
+            Arc::new(InMemoryShowRepository::default()),
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(MockHashService::new()),
+            Arc::new(MockMediaInfoService::new()),
+            notification_svc.clone(),
+            Arc::new(LocalAdminLogService::new(
+                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+            )),
+        );
+        IndexedLibraryHarness {
+            library,
+            lib_repo,
+            file_repo,
+            notification_svc,
+            admin_log_repo,
+            service,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_empty_root_with_indexed_files_is_refused() {
+        // An unmounted volume: the mount point is left behind as an empty
+        // directory while the catalogue still holds the library's files.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let IndexedLibraryHarness {
+            library,
+            lib_repo,
+            file_repo,
+            notification_svc,
+            admin_log_repo,
+            service,
+        } = indexed_library_harness(root, &["a.mp4", "b.mkv"]).await;
+
+        let err = service
+            .scan_library(library.id.to_string())
+            .await
+            .expect_err("an empty root under indexed files must refuse the scan");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        assert_names_no_path(&err, &[root]);
+
+        // Nothing was reconciled away.
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 2, "a refused scan must not delete any row");
+
+        // A refused scan never started, so the library must not read as
+        // scanning.
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert_eq!(stored.last_scan_started_at, None);
+        assert_eq!(stored.last_scan_finished_at, None);
+
+        // The operator is told, with the root and the count at stake.
+        let root_str = root.to_string_lossy();
+        let errors: Vec<_> = notification_svc
+            .published_events()
+            .into_iter()
+            .filter(|e| {
+                matches!(e.level, EventLevel::Error)
+                    && matches!(e.category, EventCategory::LibraryScan)
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "exactly one error event: {errors:?}");
+        assert!(
+            errors[0].message.contains(root_str.as_ref()),
+            "the notification must name the refused root: {:?}",
+            errors[0].message
+        );
+        assert!(
+            errors[0].message.contains("2 are indexed"),
+            "the notification must say how many rows were at stake: {:?}",
+            errors[0].message
+        );
+
+        let logs = admin_log_repo.list(10, 0).await.unwrap();
+        let entry = logs
+            .iter()
+            .find(|l| {
+                l.level == AdminLogLevel::Error && l.category == AdminLogCategory::LibraryScan
+            })
+            .expect("a refused scan must write an error-level LibraryScan admin-log entry");
+        let details = entry
+            .details
+            .as_ref()
+            .expect("the admin-log entry must carry a details payload");
+        assert_eq!(
+            details.get("path").and_then(|p| p.as_str()),
+            Some(root_str.as_ref())
+        );
+        assert_eq!(
+            details.get("indexed_video_files").and_then(|n| n.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            details.get("library_id").and_then(|id| id.as_str()),
+            Some(library.id.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_root_with_only_empty_subdirs_is_refused() {
+        // A root that is itself a directory of mount points, none of which is
+        // mounted: directories, but not one file anywhere beneath them.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("disk1")).unwrap();
+        std::fs::create_dir_all(root.join("disk2").join("Movies")).unwrap();
+        let IndexedLibraryHarness {
+            library,
+            lib_repo,
+            file_repo,
+            service,
+            ..
+        } = indexed_library_harness(root, &["disk1/a.mp4", "disk2/Movies/b.mkv"]).await;
+
+        let err = service
+            .scan_library(library.id.to_string())
+            .await
+            .expect_err("a root holding only empty directories must refuse the scan");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        assert_eq!(files.len(), 2, "a refused scan must not delete any row");
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert_eq!(stored.last_scan_started_at, None);
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_root_with_only_sentinel_files_is_refused() {
+        // An unmounted volume whose mount point carries the files admins and
+        // desktop OSes leave there on purpose: regular files, but not one
+        // that Beam can index as media.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".not_mounted"), b"").unwrap();
+        std::fs::write(root.join(".DS_Store"), b"\0").unwrap();
+        std::fs::create_dir_all(root.join("Movies")).unwrap();
+        std::fs::write(root.join("Movies").join("Thumbs.db"), b"\0").unwrap();
+        let IndexedLibraryHarness {
+            library,
+            lib_repo,
+            file_repo,
+            admin_log_repo,
+            service,
+            ..
+        } = indexed_library_harness(root, &["a.mp4", "Movies/b.mkv"]).await;
+        let before: Vec<Uuid> = {
+            let mut ids: Vec<Uuid> = file_repo
+                .find_all_by_library(library.id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|f| f.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        let err = service
+            .scan_library(library.id.to_string())
+            .await
+            .expect_err("a root holding only non-video files must refuse the scan");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        assert_names_no_path(&err, &[root]);
+
+        // Every row survives, and the sentinels were not indexed either.
+        let mut after: Vec<Uuid> = file_repo
+            .find_all_by_library(library.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        after.sort();
+        assert_eq!(after, before, "a refused scan must not touch any row");
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert_eq!(stored.last_scan_started_at, None);
+
+        let logs = admin_log_repo.list(10, 0).await.unwrap();
+        let entry = logs
+            .iter()
+            .find(|l| {
+                l.level == AdminLogLevel::Error && l.category == AdminLogCategory::LibraryScan
+            })
+            .expect("a refused scan must write an error-level LibraryScan admin-log entry");
+        assert_eq!(
+            entry
+                .details
+                .as_ref()
+                .and_then(|d| d.get("indexed_video_files"))
+                .and_then(|n| n.as_u64()),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_without_indexed_video_files_is_not_refused() {
+        // The guard protects indexed video rows. A library that has only ever
+        // held non-video files has none, so a walk finding no video files is
+        // believed and a non-video file that went is removed as usual.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let kept_path = root.join("notes.nfo");
+        std::fs::write(&kept_path, b"still here").unwrap();
+        let IndexedLibraryHarness {
+            library,
+            lib_repo,
+            file_repo,
+            service,
+            ..
+        } = indexed_library_harness(root, &["gone.txt"]).await;
+        let kept = indexed_file_matching_disk(library.id, &kept_path);
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(kept.id, kept.clone());
+
+        assert_eq!(
+            service.scan_library(library.id.to_string()).await.unwrap(),
+            0
+        );
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![kept.id]);
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert!(stored.last_scan_finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_one_file_left_still_reconciles() {
+        // The guard is for a walk that found no video files. A root that still
+        // holds one is believed: the rows for the files that went are deleted.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let kept_path = root.join("kept.mp4");
+        std::fs::write(&kept_path, b"still here").unwrap();
+        let IndexedLibraryHarness {
+            library,
+            lib_repo,
+            file_repo,
+            service,
+            ..
+        } = indexed_library_harness(root, &["gone.mp4"]).await;
+        let kept = indexed_file_matching_disk(library.id, &kept_path);
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(kept.id, kept.clone());
+
+        assert_eq!(
+            service.scan_library(library.id.to_string()).await.unwrap(),
+            0
+        );
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![kept.id]);
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert!(stored.last_scan_started_at.is_some());
+        assert!(stored.last_scan_finished_at.is_some());
     }
 
     #[tokio::test]
@@ -2907,6 +3350,11 @@ mod tests {
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         assert!(files.is_empty(), "nothing may be indexed under a file root");
+
+        // A refused scan never started, so the library must not read as
+        // scanning with no finish to follow.
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert_eq!(stored.last_scan_started_at, None);
     }
 
     #[tokio::test]

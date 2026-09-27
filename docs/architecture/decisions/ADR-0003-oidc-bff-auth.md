@@ -51,7 +51,10 @@ the production shape.)
   "just create an account" fallback; this raises the setup bar for a brand-new self-hoster, who must
   stand up (or already have) an IdP. Dex ships in the dev compose stack specifically to soften this
   for local development and evaluation — opt-in behind the `dev-idp` profile via `mise run dev:up`,
-  so the default stack starts no IdP (see the 2026-09-01 amendment above).
+  so the default stack starts no IdP (see the 2026-09-01 amendment above). Whether to lower this
+  bar by bundling an IdP for deployment was decided in
+  [ADR-0016](ADR-0016-bring-your-own-idp.md): Beam stays bring-your-own-IdP permanently, and
+  provider quickstarts in the user documentation lower the bar instead.
 - The BFF pattern's "cookie authenticates the `<video>` tag" property depends on same-site (dev) or
   same-origin (prod) deployment topology; a deployment that serves the web client and API from
   genuinely cross-site origins would need a different mechanism (this is treated as an unsupported

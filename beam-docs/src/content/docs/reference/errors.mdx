@@ -100,6 +100,18 @@ mount is present.
 A library already registered against a path that has since become a regular file cannot be repaired
 in place — there is no update-library endpoint — so it has to be deleted and registered again.
 
+A rescan also answers with this code when the root **is** a directory but holds no video files Beam
+can index — no file with one of the [indexed extensions](/operate/libraries/#which-files-get-indexed)
+anywhere beneath it — while the library still has video files indexed. The `detail` reads `Library
+root contains no video files but video files are indexed; refusing to reconcile`. An unmounted
+volume usually leaves its mount point behind empty, or holding only files such as `.not_mounted`,
+`.DS_Store` or `Thumbs.db`, and believing that walk would delete every indexed file from the
+catalogue, so Beam refuses the scan and changes nothing. The admin notification names the library,
+how many video files are indexed, and the root. The Logs tab entry's message names the library and
+that count; the root is in the entry's **Details** (`path`), alongside `library_id` and
+`indexed_video_files`. Check the mount inside the container and rescan once the files are visible
+again. If you really did remove every video on purpose, delete the library instead.
+
 ### library-path-outside-root
 
 **400.** The root path resolves outside the directory Beam is permitted to serve from.
