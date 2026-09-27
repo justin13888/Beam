@@ -162,6 +162,12 @@ hooks {
             // The Android steps also watch beam-client-core: the Kotlin
             // bindings and the .so are generated from it, so a change there can
             // break the Android build without touching a Kotlin file.
+            //
+            // Nothing needs installing by hand first: every `android:*` task
+            // depends on `android:sdk`, which installs the pinned SDK and NDK
+            // into the mise-owned ANDROID_SDK_ROOT on the first run and is a
+            // no-op after that. It is not a race across these three: they are
+            // chained, so `android-lint` provisions before the others start.
             ["android-lint"] {
                 glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
                 check = "mise run android:lint"

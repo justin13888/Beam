@@ -90,15 +90,23 @@ RUST_BACKTRACE = "1"
 CARGO_HOME = "{% set cargo_home = env.CARGO_HOME | default(value=env.HOME ~ '/.cargo') %}{% if cargo_home is dir %}{{ cargo_home | canonicalize }}{% else %}{{ cargo_home }}{% endif %}"
 # The Android SDK is not a mise tool: the registry only reaches it through a
 # third-party vfox plugin, and it has no NDK entry at all. `android:sdk`
-# bootstraps it with Google's own tooling instead.
+# bootstraps it with Google's own tooling instead, and every task that drives
+# Gradle or the NDK depends on it, so a fresh checkout provisions itself on the
+# first `mise run android:*` -- which is what the pre-push hook runs.
 #
-# ~/Android/Sdk is both the Android CLI's own default and Android Studio's, so
-# using it means a contributor who already has either does not end up with two
-# 12 GB copies. Overridable for CI images and existing installs.
-ANDROID_SDK_ROOT = "{{ env.ANDROID_SDK_ROOT | default(value=env.HOME ~ '/Android/Sdk') }}"
-ANDROID_HOME = "{{ env.ANDROID_SDK_ROOT | default(value=env.HOME ~ '/Android/Sdk') }}"
+# The location is owned by this file rather than read from the environment.
+# An ambient ANDROID_HOME is exactly what went wrong before: it named whatever
+# SDK the host happened to have -- often one without the pinned NDK, sometimes
+# one that no longer existed -- and Gradle and cargo-ndk followed it. A
+# directory only `android:sdk` writes to always holds the pinned packages.
+# Android Studio can be pointed at the same directory to avoid a second copy.
+#
+# Gradle reads ANDROID_HOME when beam-android/local.properties is absent, so
+# no local.properties is needed; one written by hand still takes precedence.
+ANDROID_SDK_ROOT = "{{ xdg_data_home }}/beam/android-sdk"
+ANDROID_HOME = "{{ env.ANDROID_SDK_ROOT }}"
 # cargo-ndk resolves the toolchain from here.
-ANDROID_NDK_HOME = "{{ env.ANDROID_SDK_ROOT | default(value=env.HOME ~ '/Android/Sdk') }}/ndk/29.0.14206865"
+ANDROID_NDK_HOME = "{{ env.ANDROID_SDK_ROOT }}/ndk/29.0.14206865"
 # Local dev statically vendors an LGPL-only FFmpeg (ADR-0007) so the workspace
 # builds on hosts without FFmpeg development libraries. CI sets this to "" in
 # the job environment because .github/actions/setup-ffmpeg provides a system
@@ -453,7 +461,7 @@ echo "OpenAPI spec matches the router"
 # ---------------------------------------------------------------------------
 
 [tasks."android:sdk"]
-description = "Bootstrap the Android SDK, NDK, and emulator image into $ANDROID_SDK_ROOT"
+description = "Install the pinned Android SDK packages and NDK into $ANDROID_SDK_ROOT (idempotent)"
 run = '''
 set -eu
 
@@ -466,11 +474,11 @@ set -eu
 # --no-metrics is passed to every invocation. The CLI reports command and flag
 # usage to Google by default, and that is a contributor's decision rather than
 # something a build task should make quietly on their behalf.
-# Google publishes the command-line tools per host and the emulator system
-# image per ABI, and both were pinned to the Linux x86_64 pair. CI is Linux, so
-# CI never noticed -- but on a Mac the unpacked `android` is a Linux ELF and the
-# task dies with "cannot execute binary file", and the system image would be an
-# architecture the host cannot boot.
+#
+# Google publishes the command-line tools per host, and they were once pinned
+# to the Linux x86_64 archive. CI is Linux, so CI never noticed -- but on a Mac
+# the unpacked `android` is a Linux ELF and the task dies with "cannot execute
+# binary file".
 #
 # The checksums are Google's own, from the SDK repository manifest at
 # https://dl.google.com/android/repository/repository2-3.xml. Google ships no
@@ -479,17 +487,14 @@ case "$(uname -s)-$(uname -m)" in
     Linux-x86_64)
         cmdline_tools_zip="commandlinetools-linux-16111833_latest.zip"
         cmdline_tools_sha1="e025545c62a8e64c7559119566a569fb1dec5f60"
-        system_image_abi="x86_64"
         ;;
     Darwin-arm64)
         cmdline_tools_zip="commandlinetools-mac_arm64-16111833_latest.zip"
         cmdline_tools_sha1="ad03dc49bfacfd52c110b14104ea548b8a07e830"
-        system_image_abi="arm64-v8a"
         ;;
     Darwin-x86_64)
         cmdline_tools_zip="commandlinetools-mac_x86_64-16111833_latest.zip"
         cmdline_tools_sha1="112cf9618794a997ff273537d55bee02c22abffe"
-        system_image_abi="x86_64"
         ;;
     *)
         echo "android:sdk: no Android command-line tools for $(uname -s)-$(uname -m)." >&2
@@ -532,21 +537,35 @@ fi
 # The NDK is pinned to 29.0.14206865 because every 30.x release is still a
 # release candidate, and a release build should not cross-compile with one.
 #
-# The emulator and its system image are ~10 GB and are only useful where there
-# is a screen and nested virtualisation. CI has neither -- the Android jobs are
-# JVM-only -- so BEAM_ANDROID_SDK_MINIMAL=1 leaves them out, which is the
-# difference between a job that installs 12 GB and one that installs 2.
+# These are only what a build needs. The emulator and its system image are
+# ~10 GB and only useful where there is a screen and nested virtualisation, so
+# `android:avd` -- the one task that uses them -- installs them itself. Every
+# Gradle task depends on this one, which is why it has to stay the ~2 GB set.
 packages="platform-tools platforms/android-37.2 build-tools/37.0.0 ndk/29.0.14206865"
-if [ "${BEAM_ANDROID_SDK_MINIMAL:-0}" != "1" ]; then
-    packages="$packages emulator system-images/android-37.1/google_apis_ps16k/$system_image_abi"
+
+# Every Android task depends on this one, including each pre-push step, so an
+# already provisioned SDK must cost nothing: no CLI start-up, no network. Every
+# installed package carries a package.xml, the SDK's own record of what is in
+# that directory, so its presence is the marker; anything without one goes
+# back to the CLI, which is itself idempotent.
+missing=""
+for package in $packages; do
+    if [ ! -f "$ANDROID_SDK_ROOT/$package/package.xml" ]; then
+        missing="$missing $package"
+    fi
+done
+if [ -z "$missing" ]; then
+    exit 0
 fi
 
+echo "Installing into $ANDROID_SDK_ROOT:$missing"
 # shellcheck disable=SC2086
-"$android" --no-metrics --sdk "$ANDROID_SDK_ROOT" sdk install $packages
+"$android" --no-metrics --sdk "$ANDROID_SDK_ROOT" sdk install $missing
 '''
 
 [tasks."core:android"]
 description = "Cross-compile beam-client-core into jniLibs for every Android ABI"
+depends = ["android:sdk"]
 run = '''
 set -eu
 # Under `build/`, and per profile. Not `src/main/jniLibs`, which is AGP's
@@ -781,6 +800,18 @@ depends = ["android:sdk"]
 run = '''
 set -eu
 android="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/android"
+
+# The emulator and its system image live here rather than in `android:sdk`:
+# they are ~10 GB, and `android:sdk` is a dependency of every Gradle task and
+# pre-push step, none of which boots a device. The image has to match the
+# host's architecture -- an x86_64 image is one an Apple silicon Mac cannot
+# boot.
+case "$(uname -m)" in
+    arm64|aarch64) system_image_abi="arm64-v8a" ;;
+    *) system_image_abi="x86_64" ;;
+esac
+"$android" --no-metrics --sdk "$ANDROID_SDK_ROOT" sdk install \
+    emulator "system-images/android-37.1/google_apis_ps16k/$system_image_abi"
 
 # Both form factors, because #67 asks for phone *and* tablet and the adaptive
 # layouts are the part most likely to regress unnoticed on one of them.
@@ -1144,6 +1175,7 @@ process.exit(status);
 
 [tasks."android:lint"]
 description = "Format-check the Kotlin sources and run Android Lint"
+depends = ["android:sdk"]
 run = '''
 set -eu
 # ktlint runs over the sources rather than through Gradle: it is the same
@@ -1164,16 +1196,19 @@ run = "ktlint --format --relative 'beam-android/**/*.kt' '!beam-android/**/build
 # but it carries three of these four: see hk.pkl for why minify stays out.
 [tasks."android:test"]
 description = "Run the Android unit tests (JVM and Robolectric)"
+depends = ["android:sdk"]
 wait_for = ["android:lint"]
 run = "cd beam-android && ./gradlew testDebugUnitTest"
 
 [tasks."android:screenshot"]
 description = "Check the rendered screens against the recorded references"
+depends = ["android:sdk"]
 wait_for = ["android:lint", "android:test"]
 run = "cd beam-android && ./gradlew verifyRoborazziDebug"
 
 [tasks."android:minify"]
 description = "Run R8 over the release build, the only build type that shrinks"
+depends = ["android:sdk"]
 wait_for = ["android:lint", "android:test", "android:screenshot"]
 # Every other Android gate is debug-only, and `isMinifyEnabled` /
 # `isShrinkResources` are set on the release build type alone (see
@@ -1204,14 +1239,17 @@ run = "cd beam-android && ./gradlew :app:minifyReleaseWithR8"
 
 [tasks."android:screenshot:record"]
 description = "Re-record the screenshot references after an intended visual change"
+depends = ["android:sdk"]
 run = "cd beam-android && ./gradlew recordRoborazziDebug"
 
 [tasks."android:build"]
 description = "Assemble the debug APK"
+depends = ["android:sdk"]
 run = "cd beam-android && ./gradlew assembleDebug"
 
 [tasks."android:release"]
 description = "Assemble the release APK for every ABI"
+depends = ["android:sdk"]
 # No explicit cross-compile step: the Gradle `cargoNdkRelease` task selects the
 # release profile itself, and every ABI with it. Doing it here as well would be
 # a second place for the profile to be chosen, and the two could disagree --
