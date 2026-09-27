@@ -217,6 +217,16 @@ fn make_test_state_with(
     notification: Arc<dyn NotificationService>,
     mock_index: MockIndexService,
 ) -> TestFixture {
+    make_test_state_with_data_dir(notification, mock_index, PathBuf::from("/beam-data"))
+}
+
+/// Like [`make_test_state_with`], with the library service's data directory
+/// chosen by the test.
+fn make_test_state_with_data_dir(
+    notification: Arc<dyn NotificationService>,
+    mock_index: MockIndexService,
+    data_dir: PathBuf,
+) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
 
@@ -235,7 +245,7 @@ fn make_test_state_with(
         library_repo.clone(),
         file_repo.clone(),
         PathBuf::from("/videos"),
-        PathBuf::from("/beam-data"),
+        data_dir,
         notification.clone(),
         Arc::new(mock_index),
         Arc::new(InMemoryPathValidator::success(PathBuf::from(
@@ -1278,6 +1288,49 @@ async fn registering_a_root_that_overlaps_an_existing_library_is_409_and_changes
         .await
         .json::<Vec<Library>>();
     assert_eq!(listed.len(), 1, "the rejected library was not stored");
+}
+
+#[tokio::test]
+async fn registering_a_root_that_holds_the_data_directory_is_400_and_changes_nothing() {
+    let mut mock_index = MockIndexService::new();
+    mock_index.expect_scan_library().never();
+    // The fixture's validator resolves every request to /videos/movies.
+    let fixture = make_test_state_with_data_dir(
+        Arc::new(InMemoryNotificationService::new()),
+        mock_index,
+        PathBuf::from("/videos/movies/.beam"),
+    );
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    let response = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let problem: serde_json::Value = response.json();
+    assert_eq!(
+        problem["type"],
+        "https://beam.justinchung.net/reference/errors/#library-path-overlaps-data-dir"
+    );
+    let detail = problem["detail"].as_str().unwrap_or_default();
+    assert!(
+        !detail.contains('/'),
+        "the detail names no path (NFR-108): {detail:?}"
+    );
+    let listed = client
+        .get("/v1/libraries")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json::<Vec<Library>>();
+    assert!(listed.is_empty(), "the rejected library was not stored");
 }
 
 // ── Watcher status (issue #186) ─────────────────────────────────────────────
