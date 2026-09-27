@@ -286,6 +286,7 @@ fn make_test_state_with_data_dir(
             session_max_days: 60,
         },
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
+        telemetry: crate::routes::test_support::idle_library_report(),
     };
 
     let config = crate::config::ServerConfig {

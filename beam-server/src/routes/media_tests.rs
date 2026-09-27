@@ -114,6 +114,7 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
         pending_auth_store: base.services.pending_auth_store.clone(),
         oidc_config: base.services.oidc_config.clone(),
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
+        telemetry: crate::routes::test_support::idle_library_report(),
     };
 
     AppState::new(base.config.clone(), services, base.probe.clone(), None)

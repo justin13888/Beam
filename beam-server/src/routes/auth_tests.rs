@@ -190,6 +190,7 @@ mod tests {
             pending_auth_store,
             oidc_config: config,
             watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
+            telemetry: crate::routes::test_support::idle_library_report(),
         };
 
         let state = AppState::new(

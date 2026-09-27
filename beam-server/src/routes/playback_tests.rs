@@ -78,6 +78,7 @@ fn fixture() -> Fixture {
         pending_auth_store: base.services.pending_auth_store.clone(),
         oidc_config: base.services.oidc_config.clone(),
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
+        telemetry: crate::routes::test_support::idle_library_report(),
     };
 
     Fixture {

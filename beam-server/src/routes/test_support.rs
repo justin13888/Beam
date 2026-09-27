@@ -11,8 +11,10 @@ use beam_auth::utils::{
     repository::in_memory::InMemoryUserRepository, session_store::in_memory::InMemorySessionStore,
 };
 use beam_domain::providers::artwork::test_utils::InMemoryArtworkFetcher;
+use beam_domain::providers::telemetry::RecordingTelemetrySink;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+use beam_domain::repositories::library_shape::in_memory::InMemoryLibraryShapeRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
@@ -28,6 +30,7 @@ use crate::services::metadata::{
 };
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::playback::DbPlaybackService;
+use crate::services::telemetry::{LibraryReportConfig, LibraryReportService};
 use crate::state::{AppServices, AppState};
 
 #[derive(Debug)]
@@ -193,12 +196,39 @@ pub(crate) fn cold_artwork_cache() -> Arc<ArtworkCache> {
     ))
 }
 
+/// A library report with no destination over an empty store: previewable,
+/// never scheduled, and -- having no collector -- never sent.
+pub(crate) fn idle_library_report() -> Arc<LibraryReportService> {
+    Arc::new(LibraryReportService::new(
+        LibraryReportConfig {
+            destination: None,
+            destination_origin: None,
+            state_path: PathBuf::from("/nonexistent/telemetry/library-report.json"),
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        Arc::new(InMemoryLibraryShapeRepository::default()),
+        Arc::new(RecordingTelemetrySink::new()),
+        Arc::new(beam_domain::services::RealClock),
+    ))
+}
+
 /// Every seam at once. The three wrappers above name the one they vary.
 pub(crate) fn make_app_state_full(
     adjust: impl FnOnce(&mut crate::config::ServerConfig),
     clock: Arc<dyn beam_domain::services::Clock>,
     probe: Arc<dyn crate::services::health::DependencyProbe>,
     metrics: Option<metrics_exporter_prometheus::PrometheusHandle>,
+) -> AppState {
+    make_app_state_with_telemetry(adjust, clock, probe, metrics, idle_library_report())
+}
+
+/// [`make_app_state_full`] with the library report chosen too.
+pub(crate) fn make_app_state_with_telemetry(
+    adjust: impl FnOnce(&mut crate::config::ServerConfig),
+    clock: Arc<dyn beam_domain::services::Clock>,
+    probe: Arc<dyn crate::services::health::DependencyProbe>,
+    metrics: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    telemetry: Arc<LibraryReportService>,
 ) -> AppState {
     let notification = Arc::new(InMemoryNotificationService::new());
     let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
@@ -253,6 +283,7 @@ pub(crate) fn make_app_state_full(
             session_max_days: 60,
         },
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
+        telemetry,
     };
 
     let config = crate::config::ServerConfig {

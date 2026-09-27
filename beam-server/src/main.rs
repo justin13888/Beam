@@ -117,6 +117,15 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(config.enrich_interval_secs),
     );
 
+    // The anonymous library report runs only when the operator opted in by
+    // naming a collector (issue #93, ADR-0019). Unset, nothing is scheduled
+    // and nothing is ever sent; the admin preview still works.
+    if services.telemetry.destination_configured() {
+        let telemetry = services.telemetry.clone();
+        tokio::spawn(async move { telemetry.run().await });
+        info!("Anonymous library report enabled -- first report in one hour, then weekly");
+    }
+
     // Install the global Prometheus recorder when metrics are enabled. Done
     // once at startup: every `metrics::counter!`/`histogram!` call anywhere in
     // the process (the HTTP observer, beam-index domain counters) records into
