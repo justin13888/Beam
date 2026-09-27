@@ -51,13 +51,15 @@ hooks {
                 // Generated files (api.gen.ts, routeTree.gen.ts) are gitignored
                 // and so never appear in the staged set.
                 //
-                // --no-errors-on-unmatched: biome.json scopes `files.includes`
-                // to a subset of the JS/TS tree, and biome exits non-zero when
-                // handed a path it is configured to ignore. Without this,
-                // staging e.g. beam-web/tsconfig.json alone fails the commit.
+                // Through mise, like the pre-push steps, so the tasks' `deps:js`
+                // dependency installs node_modules on a fresh checkout's first
+                // JS commit and is skipped, without starting bun, after that.
+                // This is the only pre-commit step that needs it, so there is
+                // no parallel-install race to serialise (compare `js-deps`
+                // below). See the tasks in mise.toml for the biome flags.
                 glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro")
-                check = "bun biome check --no-errors-on-unmatched {{files}}"
-                fix = "bun biome check --write --no-errors-on-unmatched {{files}}"
+                check = "mise run ts:biome {{files}}"
+                fix = "mise run ts:biome:fix {{files}}"
             }
         }
     }

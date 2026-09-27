@@ -175,11 +175,19 @@ run = "hk install --mise"
 # cached node_modules) has manifests newer than any restored stamp, so it
 # installs too. Anything else -- say, one workspace's node_modules deleted by
 # hand -- is `mise run --force deps:js`.
+#
+# The stamp's name carries the resolved bun version, so a bun upgrade (or a
+# mise.local.toml override) looks for a stamp that does not exist yet and
+# reinstalls, even though no manifest changed. That is narrower than listing
+# mise.toml as a source, which would reinstall on every unrelated task edit.
+# The install removes every older stamp first: otherwise switching back to a
+# previous bun would find that version's stamp, still newer than the
+# manifests, and skip an install the other bun had since replaced.
 [tasks."deps:js"]
 description = "Install the JS workspace dependencies from bun.lock"
 sources = ["bun.lock", "package.json", "*/package.json"]
-outputs = ["node_modules/.beam-deps-js.stamp"]
-run = "bun install --frozen-lockfile && touch node_modules/.beam-deps-js.stamp"
+outputs = ["node_modules/.beam-deps-js-bun-{{ tools.bun.version }}.stamp"]
+run = "bun install --frozen-lockfile && rm -f node_modules/.beam-deps-js*.stamp && touch 'node_modules/.beam-deps-js-bun-{{ tools.bun.version }}.stamp'"
 
 # ---------------------------------------------------------------------------
 # Rust
@@ -391,6 +399,26 @@ run = "bun run check"
 description = "Apply biome lint and format fixes"
 depends = ["deps:js"]
 run = "bun run check:fix"
+
+# The pre-commit hook's biome step (hk.pkl), scoped to the files hk passes as
+# arguments -- mise appends them to the command, quoted. Routed through mise
+# rather than calling `bun biome` from the hook so the first JS commit in a
+# fresh checkout or worktree installs node_modules through `deps:js` instead of
+# failing with biome missing.
+#
+# --no-errors-on-unmatched: biome.json scopes `files.includes` to a subset of
+# the JS/TS tree, and biome exits non-zero when handed a path it is configured
+# to ignore. Without it, staging e.g. beam-web/tsconfig.json alone fails the
+# commit.
+[tasks."ts:biome"]
+description = "Lint and format-check the given JS/TS files with biome"
+depends = ["deps:js"]
+run = "bun biome check --no-errors-on-unmatched"
+
+[tasks."ts:biome:fix"]
+description = "Apply biome lint and format fixes to the given JS/TS files"
+depends = ["deps:js"]
+run = "bun biome check --write --no-errors-on-unmatched"
 
 [tasks."ts:typecheck"]
 description = "Type-check the beam-web SPA"

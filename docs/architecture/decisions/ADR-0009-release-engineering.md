@@ -96,6 +96,9 @@ setup` replaces the previous rustup/bun/`lefthook install` sequence. (Amended 20
 tasks install `node_modules` through `deps:js`, and the Android tasks install the pinned SDK and NDK
 through `android:sdk` into a mise-owned `ANDROID_SDK_ROOT`. Beyond `mise`, a contributor needs only
 rustup, plus Xcode on macOS for the Apple client, so a fresh macOS or Linux checkout passes the
-`pre-push` hook with no other setup.) Existing clones must delete the
+`pre-push` hook with no other setup. Amended again — issue #201 — the `pre-commit` biome step runs
+through `mise run ts:biome` too, so a fresh checkout's first JS commit installs `node_modules`
+rather than failing, and `deps:js` names its freshness stamp after the resolved Bun version so a
+Bun upgrade reinstalls.) Existing clones must delete the
 stale lefthook shims in `.git/hooks/`: `hk` installs via git's `hook.*` config on git 2.54+ rather
 than by writing hook files, so the old shims would otherwise keep running alongside it.
