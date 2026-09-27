@@ -5,9 +5,12 @@ description: >-
   PostgreSQL, media libraries mounted read-only, and an optional web client.
 type: application
 # Both versions are the release version, written by release-please
-# (release-please-config.json, extra-files) -- never edit them by hand.
-version: 0.1.0
-appVersion: "0.1.0"
+# (release-please-config.json, extra-files) -- never edit them by hand. The
+# generic updater rewrites the version on each line carrying the marker and
+# leaves the rest of the file alone; the yaml updater would re-serialise it
+# and drop these comments.
+version: 0.1.0 # x-release-please-version
+appVersion: "0.1.0" # x-release-please-version
 # startupProbe, seccompProfile and fsGroupChangePolicy are all GA well before
 # this; 1.29 is the oldest release still inside upstream's support window when
 # the chart was written. `helm:template` validates against the version pinned

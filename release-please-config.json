@@ -31,6 +31,10 @@
           "type": "json",
           "path": "beam-docs/package.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "generic",
+          "path": "charts/beam/Chart.yaml"
         }
       ]
     }
