@@ -153,8 +153,8 @@ A host with Docker or Podman and Compose, and an OIDC identity provider. See
 
 ### Can I run it on Kubernetes?
 
-Not in a supported way — [#76](https://github.com/justin13888/beam/issues/76). One host running
-Compose is the supported topology.
+Yes, with the Helm chart in the repository — see [Kubernetes](/operate/kubernetes/). It runs one
+server pod against a PostgreSQL you provide; Beam does not scale out across replicas.
 
 ### Do I have to run database migrations?
 

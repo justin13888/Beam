@@ -1,10 +1,12 @@
 # Deployment
 
-Beam's supported deployment is a single host running Podman/Docker Compose. Distributed and
-Kubernetes-native topologies are out of scope — tracked in
-[#76](https://github.com/justin13888/beam/issues/76); the modular-monolith design
-([ADR-0001](../architecture/decisions/ADR-0001-modular-monolith.md)) keeps a future split
-possible without a rewrite.
+Beam has two supported deployments, both running exactly one `beam-server` process: a single host
+running Podman/Docker Compose (below), and Kubernetes through the Helm chart in `charts/beam`
+([Kubernetes](#kubernetes-helm), [ADR-0018](../architecture/decisions/ADR-0018-kubernetes-helm-chart.md)).
+Running more than one server replica is not supported on either: the indexer and enrichment worker
+are not leader-elected. The modular-monolith design
+([ADR-0001](../architecture/decisions/ADR-0001-modular-monolith.md)) keeps a future split possible
+without a rewrite.
 
 **No release has been cut yet** — the repository has no tags and no published releases, so no
 images exist to pull today and `compose.beam.yaml` builds both from the in-repo Containerfiles.
@@ -118,3 +120,72 @@ rolling back to the previous image is safe after a failed upgrade. Only `up` is 
 Then `podman compose up -d`, and verify: `https://<your-domain>/v1/health` returns OK, the web
 app loads, login round-trips through your IdP, and an admin user can create a library pointing at
 a path under `BEAM_VIDEO_DIR` and trigger a scan.
+
+## Kubernetes (Helm)
+
+`charts/beam` deploys Beam on Kubernetes 1.29 or later. The decisions behind its shape are in
+[ADR-0018](../architecture/decisions/ADR-0018-kubernetes-helm-chart.md); `charts/beam/values.yaml`
+documents every value, and `values.schema.json` rejects unknown ones.
+
+| Object | Role |
+|---|---|
+| `Deployment` (server) | One `beam-server` pod, `replicas: 1`, strategy `Recreate`. There is no replica value: the indexer and enrichment worker run in-process without leader election, and rate limits and the admin event stream are in memory. Non-root (uid 1000), read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token. |
+| `Service` | `ClusterIP` on port 8000. |
+| `PersistentVolumeClaim` | `/data` (`BEAM_DATA_DIR`), 10Gi `ReadWriteOnce` by default, or `persistence.data.existingClaim`. Kept on uninstall (`helm.sh/resource-policy: keep`). `persistence.data.enabled: false` uses an `emptyDir`, lost whenever the pod is replaced. |
+| `Secret` | Only for secrets given inline (`database.url`, `oidc.clientSecret`, `tmdb.apiToken`); each also accepts an `existingSecret`. |
+| `Ingress` | Optional. Routes `/v1` to the server and, with the web client enabled, `/` to it. `/metrics` and `/openapi` are never routed. |
+| `Deployment` + `Service` (web) | Optional; see below. |
+
+**Database.** Postgres is external: set `database.url` or `database.existingSecret` (key
+`existingSecretKey`, default `url`). The chart refuses to render with neither. Use the version
+Compose and CI run (18); the database user needs `CREATE` in the database, because a migration
+creates the `pg_trgm` extension (a trusted extension, so the owner does not need superuser).
+[CloudNativePG](https://cloudnative-pg.io/) is the recommended way to run Postgres on the same
+cluster.
+
+**Migrations.** The server migrates on boot under the advisory lock described in
+[Database migrations](#database-migrations), so the old pod of a rollout, a rescheduled pod, and a
+`beam-migration up` run by hand cannot race it. The startup probe allows five minutes for the server's own
+database retry plus migrations before liveness takes over.
+
+**Libraries.** Each entry in `libraries` names a Kubernetes volume source and is mounted read-only
+at `/videos/<name>`; create the library in the admin UI with that path. A `persistentVolumeClaim` or
+`nfs` source is forced read-only as well. `BEAM_VIDEO_DIR` (`/videos`) and `BEAM_DATA_DIR` (`/data`)
+are fixed by the chart and cannot be overridden through `server.env`.
+
+**Probes.** Startup and readiness use `GET /v1/health`, which answers 503 while the database is
+unreachable -- the pod leaves the Service until it recovers. Liveness is a TCP check, so a database
+outage does not restart the server.
+
+**Ingress and proxies.** `ingress.host` is required with `ingress.enabled`. With an ingress the rate
+limiter keys on `X-Forwarded-For` (`rateLimit.trustForwardedFor`, which follows `ingress.enabled`
+unless set); that is only safe while clients cannot reach the Service directly. Set
+`server.publicUrl` to the origin clients use -- the OIDC redirect URI is derived from it.
+
+**Web client.** `web.enabled` is off by default. The published `beam-web` image bakes its API origin
+in at build time as `http://localhost:8000`, so enabling it requires an image built for your origin
+and pushed to a registry the cluster can pull from:
+
+```sh
+mise run codegen:openapi
+podman build -f beam-web/Containerfile \
+  --build-arg C_STREAM_SERVER_URL=https://beam.example.com \
+  -t registry.example.com/beam-web:beam.example.com-v0.1.0 .
+```
+
+then set `web.image.repository` and `web.image.tag`. With `web.enabled` and no `server.webUrl`, the
+chart sets `BEAM_WEB_URL` to `server.publicUrl`, since both are served from the same origin.
+
+**Metrics.** `metrics.enabled` sets `BEAM_ENABLE_METRICS` and adds `prometheus.io/*` annotations to
+the pod for an in-cluster scraper.
+
+**Images.** `image.tag` defaults to `v<appVersion>`, the tag the release that carries the chart
+publishes. No release has been cut yet, so until one is, build and push `beam-server/Containerfile`
+yourself and set `image.repository` and `image.tag`.
+
+The chart is gated by `mise run helm:lint`, `helm:template` (kubeconform against Kubernetes 1.29 and
+1.37), and `check:chart-invariants`, which asserts over the rendered manifests for every scenario in
+`charts/beam/ci/` that the server has one `Recreate` replica, every `/videos` mount and its
+PVC/NFS source is read-only, `/data` is never a library, every container is hardened, liveness does
+not probe `/v1/health`, and the ingress routes the server only under `/v1`. All three run in
+`mise run ci`, CI's `helm-chart` job, and the pre-push hook.

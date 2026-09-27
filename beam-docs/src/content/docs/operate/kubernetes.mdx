@@ -1,0 +1,167 @@
+---
+title: Kubernetes
+description: Run Beam on Kubernetes with the Helm chart.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Beam ships a Helm chart in [`charts/beam`](https://github.com/justin13888/beam/tree/master/charts/beam).
+It runs the same single server as Compose, on Kubernetes 1.29 or later.
+
+<Aside type="caution">
+Beam is pre-alpha with no released version, so the chart's default image tag does not exist yet.
+Build and push `beam-server/Containerfile` yourself and set `image.repository` and `image.tag`, and
+read [Backups and upgrades](/operate/backup-and-upgrade/) before you depend on an instance.
+</Aside>
+
+## What you get
+
+- **One server pod.** Beam's indexer runs inside the server with no leader election, so the chart
+  always runs exactly one replica and replaces it with the `Recreate` strategy. There is no replica
+  setting. An upgrade is a short outage while the old pod stops and the new one starts.
+- **Your libraries, read-only.** Each library is mounted read-only at `/videos/<name>`.
+- **State on a volume.** `/data` (the artwork cache and the like) is a 10Gi PersistentVolumeClaim by
+  default. It is kept when you uninstall the release.
+- **Migrations on boot.** They run when the server starts, and two servers starting at once wait for
+  each other rather than colliding.
+- **A locked-down pod.** Non-root, read-only root filesystem, no added capabilities, no Kubernetes
+  API token.
+
+## Before you install
+
+You need:
+
+1. **PostgreSQL.** The chart does not run a database. Use Postgres 18 whose user can `CREATE` in its
+   database (Beam enables the `pg_trgm` extension). On the same cluster,
+   [CloudNativePG](https://cloudnative-pg.io/) is the recommended way to run one.
+2. **An identity provider.** See [Identity and access](/operate/identity-and-access/). Register the
+   redirect URI `https://<your host>/v1/auth/callback`.
+3. **Your media** on volumes the cluster can mount: a PersistentVolumeClaim, an NFS export, or a
+   host path.
+
+## Install
+
+Write a values file. Keep secrets in Kubernetes Secrets rather than in it:
+
+```yaml title="beam-values.yaml"
+server:
+  publicUrl: https://beam.example.com
+database:
+  existingSecret: beam-database # key: url
+oidc:
+  issuer: https://auth.example.com/application/o/beam/
+  clientId: beam
+  existingSecret: beam-oidc # key: client-secret
+  adminClaim: groups
+  adminValue: beam-admin
+libraries:
+  - name: movies
+    volume:
+      persistentVolumeClaim:
+        claimName: media-movies
+  - name: shows
+    volume:
+      nfs:
+        server: nas.lan
+        path: /export/shows
+ingress:
+  enabled: true
+  className: nginx
+  host: beam.example.com
+  tls:
+    secretName: beam-tls
+```
+
+Create the secrets, then install from a checkout of the repository:
+
+```sh
+kubectl create namespace beam
+kubectl -n beam create secret generic beam-database \
+  --from-literal=url='postgres://beam:<password>@beam-db-rw:5432/beam'
+kubectl -n beam create secret generic beam-oidc \
+  --from-literal=client-secret='<client secret>'
+helm install beam ./charts/beam -n beam -f beam-values.yaml
+kubectl -n beam rollout status deployment/beam
+```
+
+Then sign in and add each library in the admin UI with its path: `/videos/movies`, `/videos/shows`.
+
+Every value is documented in
+[`values.yaml`](https://github.com/justin13888/beam/blob/master/charts/beam/values.yaml), and the
+chart rejects any key it does not know. Other server settings from the
+[configuration reference](/reference/configuration/) go under `server.env`; the ones the chart sets
+itself, such as `BEAM_VIDEO_DIR`, are refused there.
+
+## Health and restarts
+
+The server is taken out of rotation while it cannot reach the database, but it is not restarted: a
+restart would not bring the database back. It comes back into rotation on its own once the database
+does. The first start is allowed five minutes for the database to appear and migrations to run.
+
+## The web client
+
+The web client is off by default. The published web image is built to call the API at
+`http://localhost:8000`, so it cannot serve a cluster. To serve it, build one for your address and
+push it somewhere your cluster can pull from:
+
+```sh
+mise run codegen:openapi
+podman build -f beam-web/Containerfile \
+  --build-arg C_STREAM_SERVER_URL=https://beam.example.com \
+  -t registry.example.com/beam-web:v0.1.0 .
+```
+
+then enable it. The ingress serves it at `/` and the API at `/v1`, on the same host:
+
+```yaml
+web:
+  enabled: true
+  image:
+    repository: registry.example.com/beam-web
+    tag: v0.1.0
+```
+
+## Behind the ingress
+
+- Only `/v1` reaches the server. `/metrics` and `/openapi` are never exposed.
+- With an ingress enabled, the rate limiter counts requests per client using the
+  `X-Forwarded-For` header the ingress controller sets. That is only safe while clients cannot reach
+  the server's Service directly; set `rateLimit.trustForwardedFor: false` if they can.
+- `metrics.enabled: true` turns on `/metrics` and annotates the pod for a Prometheus scraper inside
+  the cluster. See [Monitoring and logs](/operate/monitoring/).
+
+## Argo CD
+
+The chart installs from the repository, so an Argo CD `Application` can point at it directly. Pin
+`targetRevision` to a tag once releases exist:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: beam
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/justin13888/beam.git
+    targetRevision: master
+    path: charts/beam
+    helm:
+      valuesObject:
+        server:
+          publicUrl: https://beam.example.com
+        database:
+          existingSecret: beam-database
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: beam
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+```
+
+## Uninstalling
+
+`helm uninstall beam -n beam` removes everything except the `/data` claim, which holds state you may
+want back. Delete it by hand to discard it. Your database and media are never touched.

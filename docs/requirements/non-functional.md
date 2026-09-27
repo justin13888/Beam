@@ -129,7 +129,8 @@ requirements (referenced below as FR-xxx).
   and API serving running in-process
   ([ADR-0001](../architecture/decisions/ADR-0001-modular-monolith.md)). Database migrations apply
   automatically at startup (`BEAM_AUTO_MIGRATE`, default `true`), so no separate migration step is
-  required to deploy.
+  required to deploy. Concurrent migrators against one database MUST serialise (a Postgres advisory
+  lock held for the batch), so overlapping processes never race the same migration.
 - **NFR-402**: All environment-specific configuration MUST be configurable via `BEAM_`-prefixed
   environment variables (e.g., `BEAM_VIDEO_DIR`, `BEAM_DATA_DIR`, `BEAM_DATABASE_URL`,
   `BEAM_OIDC_ISSUER`, `BEAM_OIDC_ADMIN_CLAIM`, `BEAM_TMDB_API_TOKEN`), with sensible behavior (per
@@ -148,6 +149,11 @@ requirements (referenced below as FR-xxx).
   compose profile so it is absent from the default stack (FR-110). No external service dependency
   may be added there without a corresponding in-memory trait implementation for the test suite
   (NFR-604).
+- **NFR-407**: Beam MUST be deployable on Kubernetes through the Helm chart in `charts/beam`, as
+  exactly one server replica against an external Postgres, with every media library mounted
+  read-only (FR-202) and a liveness probe that does not depend on the database. These properties are
+  asserted over the rendered chart by `check:chart-invariants`
+  ([ADR-0018](../architecture/decisions/ADR-0018-kubernetes-helm-chart.md)).
 
 ## NFR-5xx — Privacy
 
