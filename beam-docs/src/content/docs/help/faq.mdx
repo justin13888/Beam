@@ -35,15 +35,20 @@ explicitly out of scope ([#64](https://github.com/justin13888/beam/issues/64)).
 
 ### Does Beam send my data anywhere?
 
-There is no telemetry, analytics, crash reporting or update check of any kind. The server contacts
-only your identity provider and the metadata providers.
+Not unless you ask it to. A stock server has no analytics, crash reporting or update check, and
+contacts only your identity provider and the metadata providers.
 
-Two things are worth knowing, though:
+There is one opt-in report: set `BEAM_TELEMETRY_URL` and the server sends a weekly, anonymous
+summary of your libraries' shape — counts, codecs, containers and size ranges, never a title, path
+or identifier — to the collector *you* name. There is no default destination, and an admin can see
+the exact bytes before turning it on. See [Anonymous library report](/operate/telemetry/).
+
+Two more things are worth knowing:
 
 - **AniList enrichment is on by default**, so a stock server contacts AniList during enrichment
   even if you never configure TMDB. Turn it off with `BEAM_ANILIST_ENABLED=false`.
-- **Artwork is not proxied.** Posters are served as TMDB/AniList CDN URLs, so each viewer's
-  browser connects to those CDNs directly and they see viewers' IP addresses. No Beam cookie or
+- **Artwork is fetched by the server.** Beam downloads posters from TMDB/AniList itself and serves
+  them from its own cache, so viewers' devices never connect to those CDNs. No Beam cookie or
   credential is ever sent to them. See [Metadata and artwork](/operate/metadata/).
 
 ## Playback

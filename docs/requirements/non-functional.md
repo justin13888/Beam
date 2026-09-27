@@ -162,6 +162,13 @@ requirements (referenced below as FR-xxx).
   Beam-specific credential to TMDB/AniList — when resolving enrichment data, and when fetching an
   image for the artwork cache. The outbound artwork client is built with no cookie jar, so there is
   nowhere for a session cookie to be attached from even by accident.
+- **NFR-503**: The server MUST NOT send usage or library data anywhere unless the operator names a
+  destination (`BEAM_TELEMETRY_URL`); there is no default collector. What it then sends MUST be
+  aggregate only -- counts, codec and container distributions, size ranges, the server version --
+  and MUST NOT contain a title, path, library or user name, file hash, or any identifier of the
+  server, its users or its install, so no two reports can be linked. Playback progress and history
+  never leave the server
+  ([ADR-0019](../architecture/decisions/ADR-0019-telemetry-posture.md)).
 
 ## NFR-6xx — Extensibility
 

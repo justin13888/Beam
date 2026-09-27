@@ -46,7 +46,10 @@ hard (e.g. a cookie-Secure misconfiguration is a startup error) and logs redact 
   `api_error.rs` holds the one RFC 9457 error family every operation renders through.
 - `services/` — business logic behind traits (`library.rs`, `metadata.rs`, `playback.rs`,
   `admin_log.rs`, `notification.rs`, `hash.rs`, `media_info.rs`), each with a production
-  implementation and an in-memory fake for tests.
+  implementation and an in-memory fake for tests. `telemetry/` builds, encodes (OTLP/HTTP JSON) and
+  schedules the opt-in anonymous library report
+  ([ADR-0019](decisions/ADR-0019-telemetry-posture.md)); it is concrete, its two boundaries -- the
+  library shape and the outbound request -- being traits already.
 - `state.rs` — dependency-injection wiring. `AppServices` holds `Arc<dyn Trait>` for every
   service; this is the only place that constructs concrete (Postgres-backed) implementations.
 - `config.rs`, `logging.rs` — configuration and tracing/log setup.
@@ -105,9 +108,12 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   candidate matching/scoring); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
   `notification.rs` (the latter two back the admin log and SSE progress events).
 - `providers/cameo.rs` — the `cameo`-backed `EnrichmentProvider` implementation hitting TMDB and
-  AniList ([ADR-0006](decisions/ADR-0006-cameo-enrichment.md)).
+  AniList ([ADR-0006](decisions/ADR-0006-cameo-enrichment.md)). `providers/artwork.rs` and
+  `providers/telemetry.rs` are the `reqwest` adapters for artwork fetching and for delivering the
+  library report, each with its outbound request built by a pure, tested function.
 - `repositories/` — the SeaORM-backed implementations of every `beam-domain` repository trait
-  (library, file, movie, show, stream, genre, enrichment, playback-progress, admin-log).
+  (library, file, movie, show, stream, genre, enrichment, playback-progress, admin-log, and the
+  read-only library-shape aggregate the library report counts from).
 
 **Testing:** FFmpeg is confined to `probe/`; every other module is tested with synthetic
 metadata/filenames, `InMemory*` repositories, and `InMemoryFsWatcher::emit` — no real video files,
@@ -149,7 +155,7 @@ This crate is what lets services be tested purely against in-memory fakes.
   `#[cfg(feature = "entity")] impl From<beam_entity::X::Model>` conversions — the `entity` feature
   is optional so the crate compiles and tests without `sea-orm`.
 - `repositories/` — one trait per aggregate (movie, show, file, library, stream, genre,
-  enrichment, playback-progress, admin-log), each with an `InMemory*` fake and, behind
+  enrichment, playback-progress, admin-log, library-shape), each with an `InMemory*` fake and, behind
   `test-utils`, a `mockall` mock for strict contract tests.
 - `providers/` — `EnrichmentProvider`: search/get movie and show metadata by external ID, resolve
   image URLs. Ships `InMemoryEnrichmentProvider` (test-utils) and `NoopEnrichmentProvider` (a

@@ -57,6 +57,7 @@ optional variables unset/commented rather than blank.
 | `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Sustained request rate — and burst — per client for `/v1/auth/login` and `/v1/auth/callback`, in requests/minute. Must be ≥ 1. |
 | `BEAM_RATE_LIMIT_SEARCH_PER_MINUTE` | `60` | Sustained request rate — and burst — per client for `GET /v1/media` (browse/search), in requests/minute. Must be ≥ 1. |
 | `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR` | `false` | Whether to key the rate limiter off the first `X-Forwarded-For` IP instead of the peer socket IP. Only enable behind a trusted proxy that overwrites the header — it is otherwise trivially spoofable. |
+| `BEAM_TELEMETRY_URL` | (unset) | **Opt-in** anonymous library report ([ADR-0019](../architecture/decisions/ADR-0019-telemetry-posture.md)). An OTLP/HTTP metrics endpoint, used exactly as given (usually ending `/v1/metrics`); must be `http`/`https` with a host, or startup fails. Unset or empty, nothing is ever sent — there is no default collector. When set, aggregate library counts only (titles, files, containers, codecs, size ranges, server version; no title, path, name or identifier) are sent an hour after start and then weekly; the last delivery is recorded in `BEAM_DATA_DIR/telemetry/library-report.json`. Only the URL's origin is logged. Preview the exact payload at `GET /v1/admin/telemetry/library`. |
 | `RUST_LOG` | (tracing default) | Standard `tracing` filter, e.g. `beam_server=info`. |
 
 ## beam-web (build-time)

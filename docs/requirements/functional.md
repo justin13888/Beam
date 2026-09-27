@@ -213,6 +213,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-607**: All admin-only mutating endpoints (library CRUD, rescan trigger, re-enrich trigger)
   MUST require both a valid authenticated session and the admin role — authentication alone MUST NOT
   be sufficient.
+- **FR-608**: The server MUST provide an admin-only endpoint that returns the anonymous library
+  report it would send now -- the report and the exact request body, byte for byte -- with whether a
+  destination is configured and when the report was last and will next be sent, without sending
+  anything (NFR-503).
 
 ## FR-7xx — Client Behavior (Resume, Search, Player)
 

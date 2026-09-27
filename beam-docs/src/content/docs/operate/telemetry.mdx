@@ -1,0 +1,60 @@
+---
+title: Anonymous library report
+description: What Beam's opt-in library report contains, where it goes, and how to see it before you turn it on.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+Beam can send a small, anonymous report describing the *shape* of your libraries — how many titles
+and files, which containers and codecs, roughly how large — to a collector you choose. It helps
+decide which formats and library sizes Beam's development should care about.
+
+<Aside type="note" title="Off unless you turn it on">
+Nothing is sent unless you set `BEAM_TELEMETRY_URL`. There is no built-in destination: turning the
+report on means naming where it goes.
+</Aside>
+
+## What is in it
+
+Counts and ranges only:
+
+- how many libraries, movies, shows, seasons and episodes
+- how many files are movies, episodes or unclassified
+- how many files use each container (`matroska,webm`, `mov,mp4,m4a,3gp,3g2,mj2`, …)
+- how many video, audio and subtitle streams use each codec (`h264`, `aac`, `subrip`, …)
+- how many files fall into each size range (under 1 GiB, 1–4 GiB, … 50 GiB and over)
+- which range your total indexed size falls into (under 100 GiB, … 50 TiB and over)
+- the Beam version, and the day (not the time) the report describes
+
+## What is never in it
+
+No title, file name, path, library name or description. No user, no session, no playback progress
+or history. No file hash, host name, IP-derived value, or install or server identifier — so two
+reports from the same server cannot be linked to each other by anything they contain.
+
+## See it before you turn it on
+
+An admin can fetch the exact report — and the exact bytes that would be sent — at any time, whether
+or not the report is turned on:
+
+```bash
+curl -b "beam_session=…" http://localhost:8000/v1/admin/telemetry/library
+```
+
+The `payload` field is the request body, byte for byte. Previewing sends nothing.
+
+## Turning it on
+
+Set `BEAM_TELEMETRY_URL` to an [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/) metrics
+endpoint — for an OpenTelemetry Collector, usually `https://collector.example/v1/metrics`. The URL
+is used exactly as given.
+
+- The first report is sent an hour after the server starts, then once a week.
+- A failed delivery is retried after an hour, then two, four, and so on up to a day.
+- The time of the last successful delivery is kept in `BEAM_DATA_DIR/telemetry/`, so restarting the
+  server does not send an extra report.
+- Only the collector's `scheme://host` appears in logs and in the preview; anything in the URL's
+  path or query, such as an ingest token, is not shown.
+
+To turn it off, unset the variable and restart. See the
+[configuration reference](/reference/configuration/) for the exact semantics.
