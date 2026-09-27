@@ -337,17 +337,28 @@ error above them, and not refused by the empty-root guard) once they have been m
 user's resume point with it. A *title* whose every file is missing is hidden from browse and search
 by the liveness check above, and retired once its last file is purged.
 
-**Relink** (FR-221): a row follows its file when the file is moved or renamed within its library.
-A new path whose content hash (never the unhashed `0`) and `file_size` match a row of the same
-library whose file is gone — stamped missing, or simply no longer at its `file_path` — is that row:
-`FileRepository::relink` rewrites `file_path`, `file_size` and `mtime` and clears `missing_since` in
-one `UPDATE`, so `id`, and with it `playback_progress`, `movie_entry_id`/`episode_id` and
-`media_streams`, is kept, and the file is not probed or classified again. The candidates come from
-`find_by_library_and_hash_including_missing`, a reconcile read served by `idx_files_hash` and
-scoped to one library: a movie entry belongs to its library, so a file moved to another library is
-that library's new file. A row whose file is still on disk is never a candidate — the new path is a
-copy, and gets a row of its own. `idx_files_path_unique` refuses a relink onto a path another row
-holds.
+**Relink** (FR-221): a row follows its file's content within its library — through a move or a
+rename, two files swapping names, a rotation, or a rename onto the path of a row already missing. A
+path whose content hash (never the unhashed `0`) and `file_size` match a row of the same library
+whose own content has left its `file_path` is that row. `FileRepository::relink` takes every such
+move of one scan at once, in one transaction: it rewrites `file_path`, `file_size` and `mtime` and
+clears `missing_since`, so `id`, and with it `playback_progress`, `movie_entry_id`/`episode_id` and
+`media_streams`, is kept, and the file is not probed or classified again. Because
+`idx_files_path_unique` is checked per statement, each relinked row first steps aside to
+`<old path>.beam-relinking-<id>` and only then takes its new path, so rows can trade paths and the
+index holds at the end; a path held by a row outside the call still fails the index and rolls the
+whole call back. A row whose path a relink takes and whose content is nowhere is *displaced*: it
+keeps its id and is stamped missing (a first stamp is kept) at `<old path>.beam-displaced-<id>` —
+`displaced_path` — a name no scan indexes, having no video extension, and no other row can hold. It
+can still be relinked by content, and is purged after the grace period like any missing row. The
+watcher's candidates come from `find_by_library_and_hash_including_missing`, a reconcile read
+served by `idx_files_hash` and scoped to one library: a movie entry belongs to its library, so a
+file moved to another library is that library's new file. A row whose file is still at its path is
+never a candidate — the new path is a copy, and gets a row of its own. Ties between identical
+copies are broken by `PlaybackProgressRepository::last_played_at`, the latest `updated_at` of a
+file's `playback_progress` rows. The rows beneath a directory a watcher event names come from
+`find_beneath_including_missing`: one `LIKE` on `file_path` scoped to the library, with the
+directory's own `\`, `%` and `_` escaped and a trailing separator, so `S1` never matches `S10`.
 
 ### `media_streams`
 One row per elementary stream (video/audio/subtitle track) within a `files` row, populated by
