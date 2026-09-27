@@ -1043,6 +1043,40 @@ async fn an_unkeyed_husk_is_retired(enriched: bool) {
     );
 }
 
+/// A keyless show whose files a legacy title lookup gathered from a season
+/// folder and from a series folder is not a husk: releasing it would drop a
+/// title real files were attached to by name. Its files name two shows, so
+/// it is left keyless and reported like any title whose files disagree.
+#[tokio::test]
+async fn a_show_only_some_of_whose_files_sit_in_a_season_folder_is_not_a_husk() {
+    let h = Harness::keeping_missing_files().await;
+    let show = h
+        .legacy_show(
+            "The Office",
+            &[
+                "Show X/Season 01/Show.X.S01E01.mkv",
+                "The Office/The.Office.S01E01.mkv",
+            ],
+        )
+        .await;
+    h.enrich_show(show, 2316).await;
+
+    let report = h.service.backfill_identity_keys().await.unwrap();
+
+    assert_eq!(report.ambiguous_shows, vec![show], "not released as a husk");
+    let warning = h.backfill_warning().await.expect("the admin is told");
+    assert_eq!(warning["ambiguous_shows"], serde_json::json!([show]));
+    assert_eq!(
+        h.show_repo
+            .find_by_id(show)
+            .await
+            .unwrap()
+            .unwrap()
+            .identity_key,
+        None
+    );
+}
+
 // ─── keys an older fold or inference derived (issue #182) ──────────────────
 
 /// A deployment of #183 keyed `Grey's Anatomy` as `grey s anatomy|`; the
