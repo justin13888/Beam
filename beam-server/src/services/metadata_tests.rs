@@ -28,6 +28,7 @@ mod tests {
         Movie {
             id: Uuid::new_v4(),
             title: title.to_string(),
+            identity_key: None,
             title_localized: None,
             description: None,
             year,
@@ -159,6 +160,7 @@ mod tests {
         let show = Show {
             id: Uuid::new_v4(),
             title: "Test Show".to_string(),
+            identity_key: None,
             title_localized: None,
             description: Some("A test show".to_string()),
             year: Some(2022),
@@ -239,6 +241,7 @@ mod tests {
         let s1 = Show {
             id: Uuid::new_v4(),
             title: "Beta Show".to_string(),
+            identity_key: None,
             title_localized: None,
             description: None,
             year: None,
@@ -300,6 +303,7 @@ mod tests {
         let s1 = Show {
             id: Uuid::new_v4(),
             title: "Show One".to_string(),
+            identity_key: None,
             title_localized: None,
             description: None,
             year: None,
@@ -644,6 +648,7 @@ mod tests {
         let show = Show {
             id: Uuid::new_v4(),
             title: "Test Show".to_string(),
+            identity_key: None,
             title_localized: None,
             description: None,
             year: None,
@@ -780,6 +785,7 @@ mod tests {
         let show = Show {
             id: Uuid::new_v4(),
             title: "Test Show".to_string(),
+            identity_key: None,
             title_localized: None,
             description: None,
             year: None,
@@ -1028,6 +1034,7 @@ mod tests {
         let show = Show {
             id: Uuid::new_v4(),
             title: "Severance".to_string(),
+            identity_key: None,
             title_localized: None,
             description: None,
             year: Some(2022),
@@ -1110,10 +1117,7 @@ mod tests {
         use beam_domain::repositories::ShowRepository;
 
         let show = show_repo
-            .create(CreateShow {
-                title: "Severance".to_string(),
-                year: Some(2022),
-            })
+            .find_or_create_by_identity(CreateShow::new("Severance".to_string(), Some(2022)))
             .await
             .expect("in-memory create succeeds");
         show_repo

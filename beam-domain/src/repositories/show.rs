@@ -1,20 +1,48 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
 use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show, ShowSearchQuery};
 use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 
+/// Persistence for shows, their seasons and their episodes.
+///
+/// A show is keyed and kept live exactly as a movie is -- see
+/// [`crate::repositories::MovieRepository`]: the indexer matches a series
+/// folder to a show by its identity key, never its display title, and a show
+/// is live while at least one episode has a present file.
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait ShowRepository: Send + Sync + std::fmt::Debug {
+    /// Live or not.
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Show>, DbErr>;
-    async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr>;
+    /// Every show, live or not.
     async fn find_all(&self) -> Result<Vec<Show>, DbErr>;
     /// Server-side filtered/ranked search, mirroring
-    /// `MovieRepository::search`.
+    /// `MovieRepository::search`: only live shows.
     async fn search(&self, query: &ShowSearchQuery) -> Result<Vec<Show>, DbErr>;
-    async fn create(&self, create: CreateShow) -> Result<Show, DbErr>;
+    /// The show keyed `create.identity_key`, inserting it only if no show
+    /// carries that key yet. An existing show is returned unchanged; a show
+    /// with no key is never matched.
+    ///
+    /// Atomic: concurrent calls for one key all return the same row. This is
+    /// what lets two episodes of a new show be indexed at once without the
+    /// second failing on, or duplicating, the first's show.
+    async fn find_or_create_by_identity(&self, create: CreateShow) -> Result<Show, DbErr>;
+    /// Every show with no identity key, for the indexer's backfill.
+    async fn find_unkeyed(&self) -> Result<Vec<Show>, DbErr>;
+    /// Give the keyless show `show_id` the key `identity_key`. Returns
+    /// `false`, changing nothing, when the show does not exist, already has a
+    /// key, or another show already holds `identity_key`.
+    async fn assign_identity_key(&self, show_id: Uuid, identity_key: &str) -> Result<bool, DbErr>;
+    /// Delete every episode created before `created_before` that no file row
+    /// references, then every season left with no episode, then every show
+    /// created before `created_before` left with no season, returning how many
+    /// shows went. As for movies, a soft-deleted file row still counts.
+    /// Deleting a show takes its library associations, enrichment state and
+    /// genre links with it.
+    async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr>;
     async fn ensure_library_association(
         &self,
         library_id: Uuid,
@@ -37,7 +65,7 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// `create.title` and `create.runtime` are used only to populate a new row,
     /// so a later file's filename parse never overwrites what the first file
     /// (or enrichment since) established. Mirrors the movie side, where the
-    /// indexer reuses a movie found by title without touching it.
+    /// indexer reuses a movie found by identity key without touching it.
     ///
     /// Atomic: concurrent calls for one pair all return the same row.
     async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
@@ -49,7 +77,8 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// `Season::show_id`, the show).
     async fn find_season_by_id(&self, season_id: Uuid) -> Result<Option<Season>, DbErr>;
     /// Apply enrichment-provider data to an existing show. Overwrites the
-    /// current values, same as `MovieRepository::apply_enrichment`.
+    /// current values, same as `MovieRepository::apply_enrichment`, and
+    /// likewise never touches the identity key.
     async fn apply_enrichment(
         &self,
         show_id: Uuid,
@@ -70,30 +99,71 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use crate::models::file::MediaFileContent;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
 
+    /// The in-memory double. Linked to a file double with
+    /// [`InMemoryShowRepository::with_files`] it answers liveness and orphan
+    /// checks from those files; the unlinked `Default` treats every show as
+    /// live, exactly as `InMemoryMovieRepository` does.
     #[derive(Debug, Default)]
     pub struct InMemoryShowRepository {
         pub shows: Mutex<HashMap<Uuid, Show>>,
         pub seasons: Mutex<HashMap<Uuid, Season>>,
         pub episodes: Mutex<HashMap<Uuid, Episode>>,
+        files: Option<Arc<InMemoryFileRepository>>,
+    }
+
+    impl InMemoryShowRepository {
+        /// A double whose liveness and orphan checks read `files`.
+        pub fn with_files(files: Arc<InMemoryFileRepository>) -> Self {
+            Self {
+                files: Some(files),
+                ..Self::default()
+            }
+        }
+
+        /// Episode ids some file row references -- only present files when
+        /// `present_only`. `None` when unlinked.
+        fn referenced_episodes(&self, present_only: bool) -> Option<HashSet<Uuid>> {
+            let files = self.files.as_ref()?;
+            Some(
+                files
+                    .files
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|f| !present_only || f.missing_since.is_none())
+                    .filter_map(|f| match &f.content {
+                        Some(MediaFileContent::Episode { episode_id }) => Some(*episode_id),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        }
+
+        /// Show ids with an episode that has a present file, or `None` when
+        /// unlinked.
+        fn live_shows(&self) -> Option<HashSet<Uuid>> {
+            let live_episodes = self.referenced_episodes(true)?;
+            let episodes = self.episodes.lock().unwrap();
+            let seasons = self.seasons.lock().unwrap();
+            Some(
+                live_episodes
+                    .iter()
+                    .filter_map(|id| episodes.get(id))
+                    .filter_map(|e| seasons.get(&e.season_id).map(|s| s.show_id))
+                    .collect(),
+            )
+        }
     }
 
     #[async_trait]
     impl ShowRepository for InMemoryShowRepository {
         async fn find_by_id(&self, id: Uuid) -> Result<Option<Show>, DbErr> {
             Ok(self.shows.lock().unwrap().get(&id).cloned())
-        }
-
-        async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr> {
-            Ok(self
-                .shows
-                .lock()
-                .unwrap()
-                .values()
-                .find(|s| s.title == title)
-                .cloned())
         }
 
         async fn find_all(&self) -> Result<Vec<Show>, DbErr> {
@@ -103,11 +173,13 @@ pub mod in_memory {
         async fn search(&self, query: &ShowSearchQuery) -> Result<Vec<Show>, DbErr> {
             use crate::models::search::title_match_score;
 
+            let live = self.live_shows();
             let mut scored: Vec<(f64, Show)> = self
                 .shows
                 .lock()
                 .unwrap()
                 .values()
+                .filter(|s| live.as_ref().is_none_or(|live| live.contains(&s.id)))
                 .filter(|s| {
                     if query.year.is_some_and(|y| s.year != Some(y)) {
                         return false;
@@ -141,13 +213,27 @@ pub mod in_memory {
             Ok(scored.into_iter().map(|(_, s)| s).collect())
         }
 
-        async fn create(&self, create: CreateShow) -> Result<Show, DbErr> {
+        async fn find_or_create_by_identity(&self, create: CreateShow) -> Result<Show, DbErr> {
+            let CreateShow {
+                identity_key,
+                title,
+                year,
+            } = create;
+            // Lookup and insert under one lock, as atomic as `ON CONFLICT`.
+            let mut shows = self.shows.lock().unwrap();
+            if let Some(existing) = shows
+                .values()
+                .find(|s| s.identity_key.as_deref() == Some(identity_key.as_str()))
+            {
+                return Ok(existing.clone());
+            }
             let show = Show {
                 id: Uuid::new_v4(),
-                title: create.title,
+                title,
+                identity_key: Some(identity_key),
                 title_localized: None,
                 description: None,
-                year: create.year,
+                year,
                 poster_url: None,
                 backdrop_url: None,
                 tmdb_id: None,
@@ -157,8 +243,56 @@ pub mod in_memory {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
-            self.shows.lock().unwrap().insert(show.id, show.clone());
+            shows.insert(show.id, show.clone());
             Ok(show)
+        }
+
+        async fn find_unkeyed(&self) -> Result<Vec<Show>, DbErr> {
+            Ok(self
+                .shows
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|s| s.identity_key.is_none())
+                .cloned()
+                .collect())
+        }
+
+        async fn assign_identity_key(
+            &self,
+            show_id: Uuid,
+            identity_key: &str,
+        ) -> Result<bool, DbErr> {
+            let mut shows = self.shows.lock().unwrap();
+            if shows
+                .values()
+                .any(|s| s.identity_key.as_deref() == Some(identity_key))
+            {
+                return Ok(false);
+            }
+            match shows.get_mut(&show_id) {
+                Some(show) if show.identity_key.is_none() => {
+                    show.identity_key = Some(identity_key.to_string());
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+
+        async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
+            let Some(referenced) = self.referenced_episodes(false) else {
+                return Ok(0);
+            };
+            let mut episodes = self.episodes.lock().unwrap();
+            episodes.retain(|id, e| e.created_at >= created_before || referenced.contains(id));
+            let mut seasons = self.seasons.lock().unwrap();
+            seasons.retain(|id, _| episodes.values().any(|e| e.season_id == *id));
+            let mut shows = self.shows.lock().unwrap();
+            let before = shows.len();
+            shows.retain(|id, s| {
+                s.created_at >= created_before || seasons.values().any(|se| se.show_id == *id)
+            });
+            Ok((before - shows.len()) as u64)
         }
 
         async fn ensure_library_association(
@@ -332,24 +466,81 @@ pub mod in_memory {
     }
 }
 
-#[cfg(test)]
-mod contract_over_in_memory {
-    use super::in_memory::InMemoryShowRepository;
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory_fixture {
+    use std::sync::Arc;
 
-    struct InMemoryFixture {
+    use uuid::Uuid;
+
+    use super::ShowRepository;
+    use super::in_memory::InMemoryShowRepository;
+    use crate::models::show::Show;
+    use crate::repositories::FileRepository;
+    use crate::repositories::contract::fixture::ShowRepositoryFixture;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
+
+    /// The hermetic instantiation of the shared contract: a show double linked
+    /// to the file double the contract writes files through.
+    #[derive(Debug)]
+    pub struct InMemoryFixture {
         repo: InMemoryShowRepository,
+        files: Arc<InMemoryFileRepository>,
     }
 
-    impl crate::repositories::contract::fixture::ShowRepositoryFixture for InMemoryFixture {
-        fn repo(&self) -> &dyn crate::repositories::ShowRepository {
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            let files = Arc::new(InMemoryFileRepository::default());
+            Self {
+                repo: InMemoryShowRepository::with_files(files.clone()),
+                files,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ShowRepositoryFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn ShowRepository {
             &self.repo
         }
-    }
 
-    async fn setup() -> InMemoryFixture {
-        InMemoryFixture {
-            repo: InMemoryShowRepository::default(),
+        fn files(&self) -> &dyn FileRepository {
+            self.files.as_ref()
         }
+
+        async fn new_library(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+
+        async fn new_unkeyed_show(&self, title: &str) -> Uuid {
+            let now = chrono::Utc::now();
+            let show = Show {
+                id: Uuid::new_v4(),
+                title: title.to_string(),
+                identity_key: None,
+                title_localized: None,
+                description: None,
+                year: None,
+                poster_url: None,
+                backdrop_url: None,
+                tmdb_id: None,
+                imdb_id: None,
+                tvdb_id: None,
+                anilist_id: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let id = show.id;
+            self.repo.shows.lock().unwrap().insert(id, show);
+            id
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    async fn setup() -> super::in_memory_fixture::InMemoryFixture {
+        super::in_memory_fixture::InMemoryFixture::default()
     }
 
     crate::show_repository_contract!(setup);

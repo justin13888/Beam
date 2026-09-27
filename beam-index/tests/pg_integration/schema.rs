@@ -110,3 +110,40 @@ async fn playback_progress_rows_are_removed_with_their_user() {
         "a deleted user must not leave orphaned playback rows"
     );
 }
+
+/// `idx_movies_identity_key` and `idx_shows_identity_key` are what make
+/// find-or-create by identity key one atomic statement (issue #183): without
+/// them `ON CONFLICT (identity_key)` has no target. The column stays nullable
+/// with any number of `NULL`s, for titles that predate it.
+#[tokio::test]
+async fn identity_keys_are_unique_but_any_number_of_titles_may_lack_one() {
+    let db = connection().await;
+    let db = db.as_ref();
+
+    for table in ["movies", "shows"] {
+        let insert = |key: Option<String>| {
+            Statement::from_sql_and_values(
+                db.get_database_backend(),
+                format!(
+                    "INSERT INTO {table} (id, title, identity_key, created_at, updated_at) \
+                     VALUES ($1, 'pg-integration', $2, now(), now())"
+                ),
+                [uuid::Uuid::new_v4().into(), key.into()],
+            )
+        };
+        let key = format!("{table} {}|", uuid::Uuid::new_v4());
+
+        db.execute_raw(insert(Some(key.clone())))
+            .await
+            .expect("the first title with a key inserts");
+        assert!(
+            db.execute_raw(insert(Some(key))).await.is_err(),
+            "a second {table} row with the same identity key must be rejected"
+        );
+        for _ in 0..2 {
+            db.execute_raw(insert(None))
+                .await
+                .expect("titles without a key never collide");
+        }
+    }
+}

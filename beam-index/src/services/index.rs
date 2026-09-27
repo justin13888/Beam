@@ -26,6 +26,7 @@ use beam_domain::repositories::{
     MovieRepository, ShowRepository,
 };
 use beam_domain::services::{Clock, RealClock};
+use beam_domain::utils::identity::title_identity_key;
 
 // TODO: See if these can be improved. Ensure logic can detect all of them properly
 const KNOWN_VIDEO_EXTENSIONS: &[&str] = &[
@@ -198,6 +199,108 @@ fn is_known_video(path: &Path) -> bool {
         .is_some_and(|e| KNOWN_VIDEO_EXTENSIONS.contains(&e.as_str()))
 }
 
+/// What [`LocalIndexService::backfill_identity_keys`] did: how many legacy
+/// titles it keyed, and which it had to leave keyless and why.
+#[derive(Debug, Default)]
+struct IdentityBackfill {
+    keyed: u64,
+    /// Titles whose files derive more than one key.
+    ambiguous_movies: Vec<Uuid>,
+    ambiguous_shows: Vec<Uuid>,
+    /// Titles whose key another title already holds.
+    clashing_movies: Vec<Uuid>,
+    clashing_shows: Vec<Uuid>,
+}
+
+/// What a media file's path alone says it is: the parse classification
+/// matches it to a title by, before any row exists.
+///
+/// Pure, so the identity-key backfill derives a legacy title's key from its
+/// files' paths with exactly the function that keys new titles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathIdentity {
+    /// An `SxxEyy` file. The show is identified by its series folder -- the
+    /// parent directory's parse -- not by anything in the filename.
+    Episode {
+        show_title: String,
+        show_year: Option<u32>,
+        season: u32,
+        episode: u32,
+        episode_title: String,
+    },
+    /// Anything else: a movie identified by its filename's title and year.
+    Movie { title: String, year: Option<u32> },
+}
+
+impl PathIdentity {
+    /// The identity key of the movie this path belongs to, if it is a movie.
+    fn movie_key(&self) -> Option<String> {
+        match self {
+            PathIdentity::Movie { title, year } => Some(title_identity_key(title, *year)),
+            PathIdentity::Episode { .. } => None,
+        }
+    }
+
+    /// The identity key of the show this path belongs to, if it is an episode.
+    fn show_key(&self) -> Option<String> {
+        match self {
+            PathIdentity::Episode {
+                show_title,
+                show_year,
+                ..
+            } => Some(title_identity_key(show_title, *show_year)),
+            PathIdentity::Movie { .. } => None,
+        }
+    }
+}
+
+fn identify_path(path: &Path) -> PathIdentity {
+    use beam_domain::utils::filename::parse_media_filename;
+
+    let file_stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
+    let parsed = parse_media_filename(&file_stem);
+
+    if let (Some(season), Some(episode)) = (parsed.season, parsed.episode) {
+        // Show title/year guess: parent directory name, parsed the same way.
+        let dir_name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let parsed_show = parse_media_filename(&dir_name);
+        let show_title = if parsed_show.title.is_empty() {
+            "Unknown Show".to_string()
+        } else {
+            parsed_show.title
+        };
+        let episode_title = if parsed.title.is_empty() {
+            file_stem.to_string()
+        } else {
+            parsed.title
+        };
+        PathIdentity::Episode {
+            show_title,
+            show_year: parsed_show.year,
+            season,
+            episode,
+            episode_title,
+        }
+    } else {
+        let title = if parsed.title.is_empty() {
+            file_stem.to_string()
+        } else {
+            parsed.title
+        };
+        PathIdentity::Movie {
+            title,
+            year: parsed.year,
+        }
+    }
+}
+
 /// Records one processed-file outcome on the
 /// `beam_index_files_processed_total{result}` counter, covering both full
 /// scans and watcher-driven reconciles. `result` is one of `new`, `changed`,
@@ -293,6 +396,11 @@ pub struct LocalIndexService {
     divergence_policy: DivergencePolicy,
     clock: Arc<dyn Clock>,
     missing_file_grace: Duration,
+    /// Whether [`LocalIndexService::backfill_identity_keys`] has completed in
+    /// this process. A lock rather than a flag so two overlapping
+    /// `scan_all_libraries` calls cannot both backfill and report each
+    /// other's keys as clashes.
+    identity_backfill_done: tokio::sync::Mutex<bool>,
 }
 
 impl LocalIndexService {
@@ -323,6 +431,7 @@ impl LocalIndexService {
             divergence_policy: DivergencePolicy::default(),
             clock: Arc::new(RealClock),
             missing_file_grace: DEFAULT_MISSING_FILE_GRACE,
+            identity_backfill_done: tokio::sync::Mutex::new(false),
         }
     }
 
@@ -447,7 +556,8 @@ impl LocalIndexService {
         Ok(count)
     }
 
-    /// Classify media content (Movie vs Episode) using the scene-filename parser.
+    /// Classify media content (Movie vs Episode) using the scene-filename
+    /// parser, finding or creating the title by its identity key.
     async fn classify_media_content(
         &self,
         path: &Path,
@@ -457,132 +567,96 @@ impl LocalIndexService {
         use beam_domain::models::{
             CreateEpisode, CreateMovie, CreateMovieEntry, CreateShow, MediaFileContent,
         };
-        use beam_domain::utils::filename::parse_media_filename;
 
-        let file_stem = path
-            .file_stem()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default();
-        let parsed = parse_media_filename(&file_stem);
-
-        if let (Some(season_num), Some(episode_num)) = (parsed.season, parsed.episode) {
-            // IT IS AN EPISODE
-
-            // Show title/year guess: parent directory name, parsed the same way.
-            let dir_name = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let parsed_show = parse_media_filename(&dir_name);
-            let show_title = if parsed_show.title.is_empty() {
-                "Unknown Show".to_string()
-            } else {
-                parsed_show.title
-            };
-
-            // Find or create show using repository
-            let show = match self.show_repo.find_by_title(&show_title).await? {
-                Some(s) => s,
-                None => {
-                    self.show_repo
-                        .create(CreateShow {
-                            title: show_title.clone(),
-                            year: parsed_show.year,
-                        })
-                        .await?
-                }
-            };
-
-            // Ensure library-show association exists
-            self.show_repo
-                .ensure_library_association(lib_uuid, show.id)
-                .await?;
-
-            if let Some(enrichment_repo) = &self.enrichment_repo {
-                enrichment_repo
-                    .ensure_pending(beam_domain::models::enrichment::EnrichmentTargetId::Show(
-                        show.id,
-                    ))
+        match identify_path(path) {
+            PathIdentity::Episode {
+                show_title,
+                show_year,
+                season: season_num,
+                episode: episode_num,
+                episode_title,
+            } => {
+                // One `ON CONFLICT` statement on the show's identity key: the
+                // show is found however enrichment has since renamed it, and
+                // two episodes of a new show indexed at once share one row.
+                let show = self
+                    .show_repo
+                    .find_or_create_by_identity(CreateShow::new(show_title, show_year))
                     .await?;
-            }
 
-            // Find or create season
-            let season = self
-                .show_repo
-                .find_or_create_season(show.id, season_num)
-                .await?;
-
-            // Find or create the episode. A second file for the same
-            // (season, episode) -- another resolution, another encode --
-            // attaches to the existing episode as another source rather than
-            // colliding with it; the episode's title and runtime stay those
-            // the first file (or enrichment since) established.
-            let episode_title = if parsed.title.is_empty() {
-                file_stem.to_string()
-            } else {
-                parsed.title
-            };
-            let create_episode = CreateEpisode {
-                season_id: season.id,
-                episode_number: episode_num,
-                title: episode_title,
-                runtime: Some(duration),
-            };
-            let episode = self
-                .show_repo
-                .find_or_create_episode(create_episode)
-                .await?;
-
-            Ok(MediaFileContent::Episode {
-                episode_id: episode.id,
-            })
-        } else {
-            // IT IS A MOVIE
-            let movie_title = if parsed.title.is_empty() {
-                file_stem.to_string()
-            } else {
-                parsed.title
-            };
-
-            // Find or create movie using repository
-            let movie = match self.movie_repo.find_by_title(&movie_title).await? {
-                Some(m) => m,
-                None => {
-                    let create_movie = CreateMovie {
-                        title: movie_title,
-                        year: parsed.year,
-                        runtime: Some(duration),
-                    };
-                    self.movie_repo.create(create_movie).await?
-                }
-            };
-
-            // Ensure library-movie association exists
-            self.movie_repo
-                .ensure_library_association(lib_uuid, movie.id)
-                .await?;
-
-            if let Some(enrichment_repo) = &self.enrichment_repo {
-                enrichment_repo
-                    .ensure_pending(beam_domain::models::enrichment::EnrichmentTargetId::Movie(
-                        movie.id,
-                    ))
+                // Ensure library-show association exists
+                self.show_repo
+                    .ensure_library_association(lib_uuid, show.id)
                     .await?;
+
+                if let Some(enrichment_repo) = &self.enrichment_repo {
+                    enrichment_repo
+                        .ensure_pending(beam_domain::models::enrichment::EnrichmentTargetId::Show(
+                            show.id,
+                        ))
+                        .await?;
+                }
+
+                // Find or create season
+                let season = self
+                    .show_repo
+                    .find_or_create_season(show.id, season_num)
+                    .await?;
+
+                // Find or create the episode. A second file for the same
+                // (season, episode) -- another resolution, another encode --
+                // attaches to the existing episode as another source rather
+                // than colliding with it; the episode's title and runtime stay
+                // those the first file (or enrichment since) established.
+                let create_episode = CreateEpisode {
+                    season_id: season.id,
+                    episode_number: episode_num,
+                    title: episode_title,
+                    runtime: Some(duration),
+                };
+                let episode = self
+                    .show_repo
+                    .find_or_create_episode(create_episode)
+                    .await?;
+
+                Ok(MediaFileContent::Episode {
+                    episode_id: episode.id,
+                })
             }
+            PathIdentity::Movie { title, year } => {
+                // Found by identity key, never by display title: enrichment
+                // may have renamed the movie since its first file (#183).
+                let movie = self
+                    .movie_repo
+                    .find_or_create_by_identity(CreateMovie::new(title, year, Some(duration)))
+                    .await?;
 
-            // Create movie entry
-            let create_entry = CreateMovieEntry {
-                library_id: lib_uuid,
-                movie_id: movie.id,
-                edition: None,
-                is_primary: true,
-            };
-            let entry = self.movie_repo.create_entry(create_entry).await?;
+                // Ensure library-movie association exists
+                self.movie_repo
+                    .ensure_library_association(lib_uuid, movie.id)
+                    .await?;
 
-            Ok(MediaFileContent::Movie {
-                movie_entry_id: entry.id,
-            })
+                if let Some(enrichment_repo) = &self.enrichment_repo {
+                    enrichment_repo
+                        .ensure_pending(beam_domain::models::enrichment::EnrichmentTargetId::Movie(
+                            movie.id,
+                        ))
+                        .await?;
+                }
+
+                // Create movie entry
+                let create_entry = CreateMovieEntry {
+                    library_id: lib_uuid,
+                    movie_id: movie.id,
+                    edition: None,
+                    is_primary: true,
+                };
+                let entry = self.movie_repo.create_entry(create_entry).await?;
+
+                Ok(MediaFileContent::Movie {
+                    movie_entry_id: entry.id,
+                })
+            }
         }
     }
 
@@ -1152,9 +1226,128 @@ impl LocalIndexService {
             .await;
     }
 
+    /// Give every movie and show that predates identity keys the key its
+    /// files' paths derive (issue #183), so the next file of that title finds
+    /// it instead of creating a second one.
+    ///
+    /// The key comes from the paths, not the stored title: enrichment may
+    /// already have replaced the title with the provider's spelling, which is
+    /// the very thing the key exists to be independent of. A title whose files
+    /// all derive one key takes it; one with no present file takes the key of
+    /// its stored title and year (it is about to be deleted as orphaned
+    /// anyway). A title whose files disagree -- `Dune (1984)` and `Dune
+    /// (2021)` once merged under one title -- or whose key another title
+    /// already holds -- the duplicate the old title lookup created -- is left
+    /// keyless and named in an admin warning: it stays browsable, is never
+    /// matched, and new files of it go to the keyed title.
+    async fn backfill_identity_keys(&self) -> Result<IdentityBackfill, IndexError> {
+        let mut report = IdentityBackfill::default();
+
+        for movie in self.movie_repo.find_unkeyed().await? {
+            let mut keys = std::collections::BTreeSet::new();
+            for entry in self.movie_repo.find_entries_by_movie_id(movie.id).await? {
+                for file in self.file_repo.find_by_movie_entry_id(entry.id).await? {
+                    keys.extend(identify_path(&file.path).movie_key());
+                }
+            }
+            let key = match keys.len() {
+                0 => title_identity_key(&movie.title, movie.year),
+                1 => keys.pop_first().expect("one key"),
+                _ => {
+                    report.ambiguous_movies.push(movie.id);
+                    continue;
+                }
+            };
+            if self.movie_repo.assign_identity_key(movie.id, &key).await? {
+                report.keyed += 1;
+            } else {
+                report.clashing_movies.push(movie.id);
+            }
+        }
+
+        for show in self.show_repo.find_unkeyed().await? {
+            let mut keys = std::collections::BTreeSet::new();
+            for season in self.show_repo.find_seasons_by_show_id(show.id).await? {
+                for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                    for file in self.file_repo.find_by_episode_id(episode.id).await? {
+                        keys.extend(identify_path(&file.path).show_key());
+                    }
+                }
+            }
+            let key = match keys.len() {
+                0 => title_identity_key(&show.title, show.year),
+                1 => keys.pop_first().expect("one key"),
+                _ => {
+                    report.ambiguous_shows.push(show.id);
+                    continue;
+                }
+            };
+            if self.show_repo.assign_identity_key(show.id, &key).await? {
+                report.keyed += 1;
+            } else {
+                report.clashing_shows.push(show.id);
+            }
+        }
+
+        if report.keyed > 0 {
+            info!("Backfilled identity keys for {} titles", report.keyed);
+        }
+        let IdentityBackfill {
+            keyed: _,
+            ambiguous_movies,
+            ambiguous_shows,
+            clashing_movies,
+            clashing_shows,
+        } = &report;
+        let unkeyed = ambiguous_movies.len()
+            + ambiguous_shows.len()
+            + clashing_movies.len()
+            + clashing_shows.len();
+        if unkeyed > 0 {
+            warn!(
+                unkeyed,
+                "titles from before identity keys could not be keyed; they stay listed but new \
+                 files will not be matched to them"
+            );
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Warning,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "{unkeyed} titles indexed before identity keys could not be keyed: their \
+                         files disagree on the title, or another title already has it. They stay \
+                         listed, but new files will be matched to other titles."
+                    ),
+                    Some(serde_json::json!({
+                        "ambiguous_movies": ambiguous_movies,
+                        "ambiguous_shows": ambiguous_shows,
+                        "duplicate_movies": clashing_movies,
+                        "duplicate_shows": clashing_shows,
+                    })),
+                )
+                .await;
+        }
+        Ok(report)
+    }
+
     /// Scan every library. Used for the startup scan and the periodic backstop.
     /// A failure in one library is logged and does not abort the others.
+    ///
+    /// The first call in a process first backfills identity keys for titles
+    /// that predate them; a failed backfill is logged and retried by the next
+    /// call rather than holding up the scan.
     pub async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
+        {
+            let mut done = self.identity_backfill_done.lock().await;
+            if !*done {
+                match self.backfill_identity_keys().await {
+                    Ok(_) => *done = true,
+                    Err(e) => error!("Identity key backfill failed: {}", e),
+                }
+            }
+        }
+
         let libraries = self.library_repo.find_all().await?;
         let mut total_added = 0;
         for library in libraries {
@@ -1488,6 +1681,24 @@ impl IndexService for LocalIndexService {
                 .await;
         }
 
+        // Phase 5: Retire the titles no file row is left for -- a movie or
+        // show whose files have all been purged, now or by an earlier scan
+        // (issue #183). A title whose files are only soft-deleted keeps them,
+        // and so is kept; it is merely hidden from browse. Only a walk that
+        // read the whole tree gets here: one that failed anywhere has told us
+        // nothing reliable about what is on disk. `start_time` protects a
+        // title the watcher created while this scan ran, whose file row may
+        // not be written yet.
+        let titles_removed = if failed_subtrees.is_empty() && !unscoped_failure {
+            self.movie_repo.delete_orphaned(start_time).await?
+                + self.show_repo.delete_orphaned(start_time).await?
+        } else {
+            0
+        };
+        if titles_removed > 0 {
+            info!("Removed {} titles with no files left", titles_removed);
+        }
+
         // Update scan finish time
         let end_time = self.clock.now();
         let total_files = self.library_repo.count_files(lib_uuid).await?;
@@ -1525,6 +1736,7 @@ impl IndexService for LocalIndexService {
                     "marked_missing": marked_count,
                     "restored": restored_count,
                     "purged": purged_count,
+                    "titles_removed": titles_removed,
                     "total": total_files,
                 })),
             )
@@ -1537,6 +1749,10 @@ impl IndexService for LocalIndexService {
 #[cfg(test)]
 #[path = "index_missing_tests.rs"]
 mod missing_tests;
+
+#[cfg(test)]
+#[path = "index_identity_tests.rs"]
+mod identity_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2453,10 +2669,10 @@ mod tests {
         // An episode that already exists with no file behind it -- its old
         // file was replaced -- carrying a title enrichment established.
         let show = show_repo
-            .create(beam_domain::models::CreateShow {
-                title: "Severance".to_string(),
-                year: None,
-            })
+            .find_or_create_by_identity(beam_domain::models::CreateShow::new(
+                "Severance".to_string(),
+                None,
+            ))
             .await
             .unwrap();
         let season = show_repo.find_or_create_season(show.id, 1).await.unwrap();
@@ -2726,16 +2942,13 @@ mod tests {
 
         let movie_id = Uuid::new_v4();
         mock_movie_repo
-            .expect_find_by_title()
-            .times(1)
-            .returning(|_| Ok(None));
-        mock_movie_repo
-            .expect_create()
+            .expect_find_or_create_by_identity()
             .times(1)
             .returning(move |_| {
                 Ok(beam_domain::models::Movie {
                     id: movie_id,
                     title: "Avatar".to_string(),
+                    identity_key: None,
                     title_localized: None,
                     description: None,
                     year: None,
@@ -2867,26 +3080,26 @@ mod tests {
 
         let show_id = Uuid::new_v4();
         mock_show_repo
-            .expect_find_by_title()
+            .expect_find_or_create_by_identity()
             .times(1)
-            .returning(|_| Ok(None));
-        mock_show_repo.expect_create().times(1).returning(move |_| {
-            Ok(beam_domain::models::Show {
-                id: show_id,
-                title: "Season 1".to_string(),
-                title_localized: None,
-                description: None,
-                year: None,
-                poster_url: None,
-                backdrop_url: None,
-                tmdb_id: None,
-                imdb_id: None,
-                tvdb_id: None,
-                anilist_id: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-        });
+            .returning(move |_| {
+                Ok(beam_domain::models::Show {
+                    id: show_id,
+                    title: "Season 1".to_string(),
+                    identity_key: None,
+                    title_localized: None,
+                    description: None,
+                    year: None,
+                    poster_url: None,
+                    backdrop_url: None,
+                    tmdb_id: None,
+                    imdb_id: None,
+                    tvdb_id: None,
+                    anilist_id: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+            });
         mock_show_repo
             .expect_ensure_library_association()
             .times(1)
@@ -4666,11 +4879,7 @@ mod tests {
 
         let library_id = Uuid::new_v4();
         let movie = movie_repo
-            .create(CreateMovie {
-                title: "Some Movie".to_string(),
-                year: None,
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new("Some Movie".to_string(), None, None))
             .await
             .unwrap();
         let entry_a = movie_repo

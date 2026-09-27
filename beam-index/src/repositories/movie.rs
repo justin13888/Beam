@@ -1,12 +1,27 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
 use beam_domain::models::{CreateMovie, CreateMovieEntry, Movie, MovieEntry, MovieSearchQuery};
 use beam_domain::providers::enrichment::MovieEnrichment;
 use beam_domain::repositories::MovieRepository;
+
+/// The `search` condition that keeps only live movies: a present file behind
+/// one of the movie's entries.
+const LIVE_MOVIE: &str = "EXISTS (SELECT 1 FROM movie_entries me \
+     JOIN files f ON f.movie_entry_id = me.id \
+     WHERE me.movie_id = movies.id AND f.missing_since IS NULL)";
+
+/// Whether `err` is a unique-index violation.
+pub(crate) fn is_unique_violation(err: &DbErr) -> bool {
+    matches!(
+        err.sql_err(),
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
+    )
+}
 
 /// SQL-based implementation of the MovieRepository trait.
 #[derive(Debug, Clone)]
@@ -30,18 +45,6 @@ impl MovieRepository for SqlMovieRepository {
         Ok(model.map(Movie::from))
     }
 
-    async fn find_by_title(&self, title: &str) -> Result<Option<Movie>, DbErr> {
-        use beam_entity::movie;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-        let model = movie::Entity::find()
-            .filter(movie::Column::Title.eq(title))
-            .one(self.db.as_ref())
-            .await?;
-
-        Ok(model.map(Movie::from))
-    }
-
     async fn find_all(&self) -> Result<Vec<Movie>, DbErr> {
         use beam_entity::movie;
         use sea_orm::EntityTrait;
@@ -54,7 +57,10 @@ impl MovieRepository for SqlMovieRepository {
         use beam_entity::movie;
         use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
 
-        let mut conditions: Vec<String> = Vec::new();
+        // Only live movies: at least one present file behind one of their
+        // entries (issue #183). Binds nothing, so the placeholder numbering
+        // below is unaffected.
+        let mut conditions: Vec<String> = vec![LIVE_MOVIE.to_string()];
         let mut values: Vec<Value> = Vec::new();
 
         // Pushed first (when present) so its placeholder index is always $1,
@@ -84,11 +90,7 @@ impl MovieRepository for SqlMovieRepository {
             ));
         }
 
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
         let order_by = if query.query.is_some() {
             "ORDER BY similarity(title, $1) DESC, title ASC"
         } else {
@@ -103,29 +105,125 @@ impl MovieRepository for SqlMovieRepository {
         Ok(models.into_iter().map(Movie::from).collect())
     }
 
-    async fn create(&self, create: CreateMovie) -> Result<Movie, DbErr> {
+    async fn find_or_create_by_identity(&self, create: CreateMovie) -> Result<Movie, DbErr> {
         use beam_entity::movie;
-        use chrono::Utc;
-        use sea_orm::{ActiveModelTrait, Set};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
+        let CreateMovie {
+            identity_key,
+            title,
+            year,
+            runtime,
+        } = create;
+
+        // One `INSERT ... ON CONFLICT (identity_key) DO NOTHING`, then a read
+        // by key -- the same shape as `find_or_create_episode`. The former
+        // `find_by_title`-then-`create` let two files of one new movie, indexed
+        // at once by a scan and the watcher, both read "absent" and create two
+        // movies; the unique key makes that impossible. On conflict the stored
+        // row is left exactly as it is.
         let now = Utc::now();
-        let new_movie = movie::ActiveModel {
+        let active = movie::ActiveModel {
             id: Set(Uuid::new_v4()),
-            title: Set(create.title),
-            year: Set(create.year.map(|y| y as i32)),
-            runtime_mins: Set(create.runtime.map(|d| (d.as_secs() / 60) as i32)),
+            identity_key: Set(Some(identity_key.clone())),
+            title: Set(title),
+            year: Set(year.map(|y| y as i32)),
+            runtime_mins: Set(runtime.map(|d| (d.as_secs() / 60) as i32)),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
             ..Default::default()
         };
+        movie::Entity::insert(active)
+            .on_conflict_do_nothing_on([movie::Column::IdentityKey])
+            .exec_without_returning(self.db.as_ref())
+            .await?;
 
-        let result = new_movie.insert(self.db.as_ref()).await?;
-        Ok(Movie::from(result))
+        let stored = movie::Entity::find()
+            .filter(movie::Column::IdentityKey.eq(identity_key.as_str()))
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                DbErr::RecordNotFound(format!(
+                    "movie keyed {identity_key:?} is not readable after find-or-create"
+                ))
+            })?;
+        Ok(Movie::from(stored))
+    }
+
+    async fn find_unkeyed(&self) -> Result<Vec<Movie>, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let models = movie::Entity::find()
+            .filter(movie::Column::IdentityKey.is_null())
+            .all(self.db.as_ref())
+            .await?;
+        Ok(models.into_iter().map(Movie::from).collect())
+    }
+
+    async fn assign_identity_key(&self, movie_id: Uuid, identity_key: &str) -> Result<bool, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::sea_query::{Expr, Query};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        // The `NOT EXISTS` answers the ordinary clash without an error; the
+        // unique index still settles a race with a concurrent insert of the
+        // same key, which surfaces as a violation and is the same answer.
+        let result = movie::Entity::update_many()
+            .col_expr(
+                movie::Column::IdentityKey,
+                Expr::value(Some(identity_key.to_string())),
+            )
+            .filter(movie::Column::Id.eq(movie_id))
+            .filter(movie::Column::IdentityKey.is_null())
+            .filter(Expr::not_exists(
+                Query::select()
+                    .expr(Expr::val(1))
+                    .from(movie::Entity)
+                    .and_where(movie::Column::IdentityKey.eq(identity_key))
+                    .to_owned(),
+            ))
+            .exec(self.db.as_ref())
+            .await;
+        match result {
+            Ok(result) => Ok(result.rows_affected == 1),
+            Err(err) if is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+        let cutoff: sea_orm::prelude::DateTimeWithTimeZone = created_before.into();
+        // Entries first: a movie is orphaned once no entry is left, and an
+        // entry once no file row -- present or soft-deleted -- references it.
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM movie_entries me \
+                  WHERE me.created_at < $1 \
+                    AND NOT EXISTS (SELECT 1 FROM files f WHERE f.movie_entry_id = me.id)",
+                [cutoff.into()],
+            ))
+            .await?;
+        // `ON DELETE CASCADE` takes the library association, enrichment state
+        // and genre links with the movie.
+        let movies = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM movies m \
+                  WHERE m.created_at < $1 \
+                    AND NOT EXISTS (SELECT 1 FROM movie_entries me WHERE me.movie_id = m.id)",
+                [cutoff.into()],
+            ))
+            .await?;
+        Ok(movies.rows_affected())
     }
 
     async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
         use beam_entity::movie_entry;
-        use chrono::Utc;
         use sea_orm::{ActiveModelTrait, Set};
 
         let now = Utc::now();

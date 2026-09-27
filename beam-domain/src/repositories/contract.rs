@@ -77,12 +77,50 @@ pub mod fixture {
     }
 
     /// Everything the [`crate::show_repository_contract`] suite needs from a
-    /// backing store: only the repository. Every row the contract needs -- a
-    /// show, its seasons -- is created through the trait itself, so a real
-    /// Postgres sees the same foreign-key chain the indexer builds.
+    /// backing store. Every show, season and episode the contract needs is
+    /// created through the trait itself, so a real Postgres sees the same
+    /// foreign-key chain the indexer builds.
+    ///
+    /// Whether a show is live, or orphaned, is a question about its files, so
+    /// the fixture also hands out the file repository over the same store --
+    /// linked to `repo` so the one sees the other's rows -- and a library for
+    /// those files to belong to.
+    ///
+    /// `delete_orphaned` is global: over a database other tests share it
+    /// would delete their fileless shows mid-test. A Postgres fixture must
+    /// therefore give each test a store of its own.
+    #[async_trait::async_trait]
     pub trait ShowRepositoryFixture: Send + Sync {
         /// The repository under contract.
         fn repo(&self) -> &dyn crate::repositories::ShowRepository;
+
+        /// The file repository over the same store.
+        fn files(&self) -> &dyn crate::repositories::FileRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
+
+        /// A show titled `title` with no identity key -- a row from before
+        /// keys existed, which the trait itself can no longer create.
+        async fn new_unkeyed_show(&self, title: &str) -> Uuid;
+    }
+
+    /// Everything the [`crate::movie_repository_contract`] suite needs from a
+    /// backing store; the movie counterpart of [`ShowRepositoryFixture`], with
+    /// the same requirement that each Postgres test own its store.
+    #[async_trait::async_trait]
+    pub trait MovieRepositoryFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::MovieRepository;
+
+        /// The file repository over the same store.
+        fn files(&self) -> &dyn crate::repositories::FileRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
+
+        /// A movie titled `title` with no identity key.
+        async fn new_unkeyed_movie(&self, title: &str) -> Uuid;
     }
 }
 
@@ -794,24 +832,63 @@ macro_rules! show_repository_contract {
     ($setup:path) => {
         use ::std::time::Duration;
         use ::uuid::Uuid;
-        use $crate::models::show::{CreateEpisode, CreateShow};
+        use $crate::models::file::{CreateMediaFile, FileStatus, MediaFile, MediaFileContent};
+        use $crate::models::show::{CreateEpisode, CreateShow, ShowSearchQuery};
+        use $crate::providers::enrichment::ShowEnrichment;
         use $crate::repositories::ShowRepository;
-        use $crate::repositories::contract::fixture::ShowRepositoryFixture as _;
+        use $crate::repositories::contract::fixture::ShowRepositoryFixture;
 
         /// A show of its own -- the title carries a fresh UUID so parallel
         /// tests against one database never share a show -- and its seasons
         /// `1` and `2`.
         async fn new_seasons(repo: &dyn ShowRepository) -> (Uuid, Uuid) {
             let show = repo
-                .create(CreateShow {
-                    title: format!("contract show {}", Uuid::new_v4()),
-                    year: None,
-                })
+                .find_or_create_by_identity(CreateShow::new(
+                    format!("contract show {}", Uuid::new_v4()),
+                    None,
+                ))
                 .await
                 .unwrap();
             let one = repo.find_or_create_season(show.id, 1).await.unwrap();
             let two = repo.find_or_create_season(show.id, 2).await.unwrap();
             (one.id, two.id)
+        }
+
+        /// A present file for `episode_id`, in a library of its own.
+        async fn episode_file(fixture: &impl ShowRepositoryFixture, episode_id: Uuid) -> MediaFile {
+            let library_id = fixture.new_library().await;
+            let unique = Uuid::new_v4();
+            fixture
+                .files()
+                .create(CreateMediaFile {
+                    library_id,
+                    path: ::std::path::PathBuf::from(format!("/videos/{library_id}/{unique}.mkv")),
+                    // Positive and unique: the hash is a signed BIGINT column.
+                    hash: (unique.as_u128() as u64) >> 1,
+                    size_bytes: 1024,
+                    mtime: None,
+                    mime_type: Some("video/x-matroska".to_string()),
+                    duration: None,
+                    container_format: Some("matroska".to_string()),
+                    content: Some(MediaFileContent::Episode { episode_id }),
+                    status: FileStatus::Known,
+                })
+                .await
+                .expect("create an episode file")
+        }
+
+        /// Whether a filterless search lists `show_id`.
+        async fn listed(repo: &dyn ShowRepository, show_id: Uuid) -> bool {
+            repo.search(&ShowSearchQuery::default())
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.id == show_id)
+        }
+
+        /// A cutoff every row created so far falls before.
+        fn after_everything() -> ::chrono::DateTime<::chrono::Utc> {
+            ::chrono::Utc::now() + ::chrono::Duration::minutes(1)
         }
 
         /// Runtimes are whole minutes: the SQL schema stores `runtime_mins`.
@@ -923,6 +1000,628 @@ macro_rules! show_repository_contract {
             assert_eq!(s01e01.season_id, season_one);
             assert_eq!(s02e01.season_id, season_two);
             assert_eq!(s02e01.title, "S02E01");
+        }
+
+        #[tokio::test]
+        async fn find_or_create_show_by_identity_returns_one_unchanged_row_per_key() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let name = format!("Doctor Who {}", Uuid::new_v4());
+
+            let first = repo
+                .find_or_create_by_identity(CreateShow::new(name.clone(), Some(2005)))
+                .await
+                .unwrap();
+            // Another spelling of the same series folder: same key.
+            let mut respelled = CreateShow::new(name.to_uppercase().replace(' ', "."), Some(2005));
+            respelled.title = "some other folder spelling".to_string();
+            let again = repo.find_or_create_by_identity(respelled).await.unwrap();
+            let other_year = repo
+                .find_or_create_by_identity(CreateShow::new(name.clone(), Some(1963)))
+                .await
+                .unwrap();
+
+            assert_eq!(again.id, first.id, "one show per identity key");
+            assert_eq!(again.title, name, "an existing show is returned unchanged");
+            assert_ne!(
+                other_year.id, first.id,
+                "a different year is a different show"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_enriched_show_is_still_found_by_its_folder_key() {
+            // Issue #183: enrichment used to rewrite the column the indexer
+            // matched on, so the next episode of a renamed show made a second
+            // show.
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let parsed = CreateShow::new(format!("Shogun {}", Uuid::new_v4()), None);
+            let show = repo
+                .find_or_create_by_identity(parsed.clone())
+                .await
+                .unwrap();
+
+            repo.apply_enrichment(
+                show.id,
+                &ShowEnrichment {
+                    title: "Shōgun (Provider Title)".to_string(),
+                    year: Some(2024),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+            let found = repo.find_or_create_by_identity(parsed).await.unwrap();
+            assert_eq!(found.id, show.id, "the renamed show is still found");
+            assert_eq!(
+                found.title, "Shōgun (Provider Title)",
+                "enrichment's title stands"
+            );
+            assert_eq!(found.identity_key, show.identity_key);
+        }
+
+        #[tokio::test]
+        async fn search_lists_only_shows_with_a_present_episode_file() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (season, _) = new_seasons(repo).await;
+            let show = repo
+                .find_season_by_id(season)
+                .await
+                .unwrap()
+                .unwrap()
+                .show_id;
+            let ep = repo
+                .find_or_create_episode(episode(season, 1, "Pilot", 30))
+                .await
+                .unwrap();
+
+            assert!(
+                !listed(repo, show).await,
+                "a show with no file is not listed"
+            );
+
+            let file = episode_file(&fixture, ep.id).await;
+            assert!(listed(repo, show).await, "a present file makes it listed");
+
+            fixture
+                .files()
+                .mark_missing(vec![file.id], ::chrono::Utc::now())
+                .await
+                .unwrap();
+            assert!(
+                !listed(repo, show).await,
+                "hidden once its only file is missing"
+            );
+            assert!(
+                repo.find_by_id(show).await.unwrap().is_some(),
+                "a read by id still resolves the hidden show"
+            );
+
+            fixture.files().restore(file.id).await.unwrap();
+            assert!(
+                listed(repo, show).await,
+                "listed again when the file returns"
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_orphaned_removes_fileless_episodes_seasons_and_shows() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+
+            let (kept_season, emptied_season) = new_seasons(repo).await;
+            let kept_show = repo
+                .find_season_by_id(kept_season)
+                .await
+                .unwrap()
+                .unwrap()
+                .show_id;
+            let watched = repo
+                .find_or_create_episode(episode(kept_season, 1, "Watched", 30))
+                .await
+                .unwrap();
+            episode_file(&fixture, watched.id).await;
+            let fileless = repo
+                .find_or_create_episode(episode(kept_season, 2, "Fileless", 30))
+                .await
+                .unwrap();
+            repo.find_or_create_episode(episode(emptied_season, 1, "Also fileless", 30))
+                .await
+                .unwrap();
+
+            let (gone_season, _) = new_seasons(repo).await;
+            let gone_show = repo
+                .find_season_by_id(gone_season)
+                .await
+                .unwrap()
+                .unwrap()
+                .show_id;
+            repo.find_or_create_episode(episode(gone_season, 1, "Nothing", 30))
+                .await
+                .unwrap();
+
+            // Everything was created after this cutoff: nothing is old enough.
+            let created = repo
+                .find_by_id(kept_show)
+                .await
+                .unwrap()
+                .unwrap()
+                .created_at;
+            assert_eq!(
+                repo.delete_orphaned(created - ::chrono::Duration::seconds(1))
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert!(repo.find_by_id(gone_show).await.unwrap().is_some());
+
+            assert_eq!(repo.delete_orphaned(after_everything()).await.unwrap(), 1);
+
+            assert!(repo.find_by_id(gone_show).await.unwrap().is_none());
+            assert!(repo.find_by_id(kept_show).await.unwrap().is_some());
+            assert!(repo.find_episode_by_id(watched.id).await.unwrap().is_some());
+            assert!(
+                repo.find_episode_by_id(fileless.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let seasons: Vec<u32> = repo
+                .find_seasons_by_show_id(kept_show)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|s| s.season_number)
+                .collect();
+            assert_eq!(seasons, vec![1], "the season left without episodes goes");
+        }
+
+        #[tokio::test]
+        async fn a_soft_deleted_episode_file_keeps_its_show_until_it_is_purged() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (season, _) = new_seasons(repo).await;
+            let show = repo
+                .find_season_by_id(season)
+                .await
+                .unwrap()
+                .unwrap()
+                .show_id;
+            let ep = repo
+                .find_or_create_episode(episode(season, 1, "Pilot", 30))
+                .await
+                .unwrap();
+            let file = episode_file(&fixture, ep.id).await;
+            fixture
+                .files()
+                .mark_missing(vec![file.id], ::chrono::Utc::now())
+                .await
+                .unwrap();
+
+            assert_eq!(repo.delete_orphaned(after_everything()).await.unwrap(), 0);
+            assert!(repo.find_by_id(show).await.unwrap().is_some());
+
+            fixture.files().purge_missing(vec![file.id]).await.unwrap();
+            assert_eq!(repo.delete_orphaned(after_everything()).await.unwrap(), 1);
+            assert!(repo.find_by_id(show).await.unwrap().is_none());
+        }
+
+        #[tokio::test]
+        async fn an_unkeyed_show_is_never_matched_and_can_be_keyed_once() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let title = format!("Legacy Show {}", Uuid::new_v4());
+            let legacy = fixture.new_unkeyed_show(&title).await;
+            let parsed = CreateShow::new(title.clone(), None);
+
+            assert!(
+                repo.find_unkeyed()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.id == legacy)
+            );
+
+            assert!(
+                repo.assign_identity_key(legacy, &parsed.identity_key)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !repo
+                    .find_unkeyed()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.id == legacy),
+                "a keyed show is no longer unkeyed"
+            );
+            assert_eq!(
+                repo.find_or_create_by_identity(parsed).await.unwrap().id,
+                legacy,
+                "once keyed, the legacy show is found by its key"
+            );
+            assert!(
+                !repo
+                    .assign_identity_key(legacy, "another key|")
+                    .await
+                    .unwrap(),
+                "a key is assigned once, never replaced"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unkeyed_show_is_not_matched_and_cannot_take_a_held_key() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let title = format!("Duplicate Show {}", Uuid::new_v4());
+            let legacy = fixture.new_unkeyed_show(&title).await;
+
+            let keyed = repo
+                .find_or_create_by_identity(CreateShow::new(title.clone(), None))
+                .await
+                .unwrap();
+            assert_ne!(keyed.id, legacy, "a keyless row is never matched");
+
+            assert!(
+                !repo
+                    .assign_identity_key(legacy, keyed.identity_key.as_deref().unwrap())
+                    .await
+                    .unwrap(),
+                "a key another show holds is refused"
+            );
+            assert_eq!(
+                repo.find_by_id(legacy).await.unwrap().unwrap().identity_key,
+                None
+            );
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::MovieRepository`]: one
+/// movie per identity key whatever enrichment does to the display title
+/// (issue #183), search lists only movies with a present file, and orphaned
+/// movies are deleted only once no file row is left.
+///
+/// `$setup` names an `async fn() -> impl MovieRepositoryFixture`.
+#[macro_export]
+macro_rules! movie_repository_contract {
+    ($setup:path) => {
+        use ::uuid::Uuid;
+        use $crate::models::file::{CreateMediaFile, FileStatus, MediaFile, MediaFileContent};
+        use $crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieSearchQuery};
+        use $crate::providers::enrichment::MovieEnrichment;
+        use $crate::repositories::MovieRepository;
+        use $crate::repositories::contract::fixture::MovieRepositoryFixture;
+
+        /// A movie parsed as a title of its own -- a fresh UUID keeps tests
+        /// apart -- released in `year`.
+        fn parsed(name: &str, year: Option<u32>) -> CreateMovie {
+            CreateMovie::new(format!("{name} {}", Uuid::new_v4()), year, None)
+        }
+
+        /// Give `movie` an entry, and -- when `with_file` -- a present file
+        /// behind it, returning the file.
+        async fn entry_for(
+            fixture: &impl MovieRepositoryFixture,
+            movie: &Movie,
+            with_file: bool,
+        ) -> Option<MediaFile> {
+            let library_id = fixture.new_library().await;
+            let entry = fixture
+                .repo()
+                .create_entry(CreateMovieEntry {
+                    library_id,
+                    movie_id: movie.id,
+                    edition: None,
+                    is_primary: true,
+                })
+                .await
+                .expect("create an entry");
+            if !with_file {
+                return None;
+            }
+            let unique = Uuid::new_v4();
+            Some(
+                fixture
+                    .files()
+                    .create(CreateMediaFile {
+                        library_id,
+                        path: ::std::path::PathBuf::from(format!(
+                            "/videos/{library_id}/{unique}.mkv"
+                        )),
+                        hash: (unique.as_u128() as u64) >> 1,
+                        size_bytes: 1024,
+                        mtime: None,
+                        mime_type: Some("video/x-matroska".to_string()),
+                        duration: None,
+                        container_format: Some("matroska".to_string()),
+                        content: Some(MediaFileContent::Movie {
+                            movie_entry_id: entry.id,
+                        }),
+                        status: FileStatus::Known,
+                    })
+                    .await
+                    .expect("create a movie file"),
+            )
+        }
+
+        async fn listed(repo: &dyn MovieRepository, movie_id: Uuid) -> bool {
+            repo.search(&MovieSearchQuery::default())
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == movie_id)
+        }
+
+        fn after_everything() -> ::chrono::DateTime<::chrono::Utc> {
+            ::chrono::Utc::now() + ::chrono::Duration::minutes(1)
+        }
+
+        #[tokio::test]
+        async fn find_or_create_by_identity_returns_one_unchanged_row_per_key() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let create = parsed("Amelie", Some(2001));
+
+            let first = repo
+                .find_or_create_by_identity(create.clone())
+                .await
+                .unwrap();
+            let mut later = create.clone();
+            later.title = "Amélie.2001.1080p".to_string();
+            later.runtime = Some(::std::time::Duration::from_secs(90 * 60));
+            let again = repo.find_or_create_by_identity(later).await.unwrap();
+
+            assert_eq!(again.id, first.id, "one movie per identity key");
+            assert_eq!(
+                again.title, create.title,
+                "an existing movie is returned unchanged"
+            );
+            assert_eq!(again.runtime, None);
+            assert_eq!(
+                first.identity_key.as_deref(),
+                Some(create.identity_key.as_str())
+            );
+        }
+
+        #[tokio::test]
+        async fn movies_of_one_title_and_different_years_are_different_movies() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let dune = format!("Dune {}", Uuid::new_v4());
+
+            let lynch = repo
+                .find_or_create_by_identity(CreateMovie::new(dune.clone(), Some(1984), None))
+                .await
+                .unwrap();
+            let villeneuve = repo
+                .find_or_create_by_identity(CreateMovie::new(dune.clone(), Some(2021), None))
+                .await
+                .unwrap();
+
+            assert_ne!(lynch.id, villeneuve.id);
+        }
+
+        #[tokio::test]
+        async fn an_enriched_movie_is_still_found_by_its_original_key() {
+            // Issue #183: enrichment used to rewrite the column the indexer
+            // matched on, so the renamed movie's next file made a duplicate
+            // that then failed enrichment on the unique `tmdb_id`.
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let create = parsed("Leon", Some(1994));
+            let movie = repo
+                .find_or_create_by_identity(create.clone())
+                .await
+                .unwrap();
+
+            repo.apply_enrichment(
+                movie.id,
+                &MovieEnrichment {
+                    title: "Léon: The Professional".to_string(),
+                    year: Some(1995),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+            let found = repo.find_or_create_by_identity(create).await.unwrap();
+            assert_eq!(found.id, movie.id, "the renamed movie is still found");
+            assert_eq!(
+                found.title, "Léon: The Professional",
+                "enrichment's title stands"
+            );
+            assert_eq!(found.year, Some(1995));
+            assert_eq!(
+                found.identity_key, movie.identity_key,
+                "the key is untouched"
+            );
+        }
+
+        #[tokio::test]
+        async fn search_lists_only_movies_with_a_present_file() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let fileless = repo
+                .find_or_create_by_identity(parsed("Fileless", None))
+                .await
+                .unwrap();
+            entry_for(&fixture, &fileless, false).await;
+            let movie = repo
+                .find_or_create_by_identity(parsed("Present", None))
+                .await
+                .unwrap();
+            let file = entry_for(&fixture, &movie, true).await.unwrap();
+
+            assert!(
+                !listed(repo, fileless.id).await,
+                "a movie with no file is not listed"
+            );
+            assert!(listed(repo, movie.id).await);
+
+            fixture
+                .files()
+                .mark_missing(vec![file.id], ::chrono::Utc::now())
+                .await
+                .unwrap();
+            assert!(
+                !listed(repo, movie.id).await,
+                "hidden once its only file is missing"
+            );
+            assert!(
+                repo.find_by_id(movie.id).await.unwrap().is_some(),
+                "a read by id still resolves the hidden movie"
+            );
+
+            fixture.files().restore(file.id).await.unwrap();
+            assert!(
+                listed(repo, movie.id).await,
+                "listed again when the file returns"
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_orphaned_removes_only_fileless_movies_created_before_the_cutoff() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let bare = repo
+                .find_or_create_by_identity(parsed("No entry", None))
+                .await
+                .unwrap();
+            let entry_only = repo
+                .find_or_create_by_identity(parsed("Entry without file", None))
+                .await
+                .unwrap();
+            entry_for(&fixture, &entry_only, false).await;
+            let kept = repo
+                .find_or_create_by_identity(parsed("With file", None))
+                .await
+                .unwrap();
+            entry_for(&fixture, &kept, true).await;
+            // A fileless entry beside a present one goes; the movie stays.
+            entry_for(&fixture, &kept, false).await;
+
+            assert_eq!(
+                repo.delete_orphaned(bare.created_at - ::chrono::Duration::seconds(1))
+                    .await
+                    .unwrap(),
+                0,
+                "nothing was created before the cutoff"
+            );
+            assert!(repo.find_by_id(bare.id).await.unwrap().is_some());
+
+            assert_eq!(repo.delete_orphaned(after_everything()).await.unwrap(), 2);
+            assert!(repo.find_by_id(bare.id).await.unwrap().is_none());
+            assert!(repo.find_by_id(entry_only.id).await.unwrap().is_none());
+            assert!(repo.find_by_id(kept.id).await.unwrap().is_some());
+            assert_eq!(
+                repo.find_entries_by_movie_id(kept.id).await.unwrap().len(),
+                1,
+                "only the entry a file references survives"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_soft_deleted_file_keeps_its_movie_until_it_is_purged() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = repo
+                .find_or_create_by_identity(parsed("Away", None))
+                .await
+                .unwrap();
+            let file = entry_for(&fixture, &movie, true).await.unwrap();
+            fixture
+                .files()
+                .mark_missing(vec![file.id], ::chrono::Utc::now())
+                .await
+                .unwrap();
+
+            assert_eq!(repo.delete_orphaned(after_everything()).await.unwrap(), 0);
+            assert!(repo.find_by_id(movie.id).await.unwrap().is_some());
+
+            fixture.files().purge_missing(vec![file.id]).await.unwrap();
+            assert_eq!(repo.delete_orphaned(after_everything()).await.unwrap(), 1);
+            assert!(repo.find_by_id(movie.id).await.unwrap().is_none());
+        }
+
+        #[tokio::test]
+        async fn an_unkeyed_movie_is_never_matched_and_can_be_keyed_once() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let create = parsed("Legacy", Some(1999));
+            let legacy = fixture.new_unkeyed_movie(&create.title).await;
+
+            assert!(
+                repo.find_unkeyed()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.id == legacy)
+            );
+            assert!(
+                repo.assign_identity_key(legacy, &create.identity_key)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !repo
+                    .find_unkeyed()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.id == legacy),
+                "a keyed movie is no longer unkeyed"
+            );
+            assert_eq!(
+                repo.find_or_create_by_identity(create).await.unwrap().id,
+                legacy,
+                "once keyed, the legacy movie is found by its key"
+            );
+            assert!(
+                !repo
+                    .assign_identity_key(legacy, "another key|")
+                    .await
+                    .unwrap(),
+                "a key is assigned once, never replaced"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unkeyed_movie_is_not_matched_and_cannot_take_a_held_key() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let create = parsed("Duplicate", Some(2001));
+            let legacy = fixture.new_unkeyed_movie(&create.title).await;
+
+            let keyed = repo
+                .find_or_create_by_identity(create.clone())
+                .await
+                .unwrap();
+            assert_ne!(keyed.id, legacy, "a keyless row is never matched");
+
+            assert!(
+                !repo
+                    .assign_identity_key(legacy, &create.identity_key)
+                    .await
+                    .unwrap(),
+                "a key another movie holds is refused"
+            );
+            assert_eq!(
+                repo.find_by_id(legacy).await.unwrap().unwrap().identity_key,
+                None
+            );
+            assert!(
+                !repo
+                    .assign_identity_key(Uuid::new_v4(), "nobody|")
+                    .await
+                    .unwrap(),
+                "an unknown movie is not keyed"
+            );
         }
     };
 }

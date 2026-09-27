@@ -6,7 +6,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct Show {
     pub id: Uuid,
+    /// The display title: the series folder's parse until enrichment replaces
+    /// it with the provider's.
     pub title: String,
+    /// What the indexer matches an episode file's series folder to this show
+    /// by -- see [`crate::utils::identity`]. Never rewritten by enrichment.
+    /// `None` only on a row that predates the key and could not be
+    /// backfilled; such a row is never matched.
+    pub identity_key: Option<String>,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<u32>,
@@ -45,11 +52,26 @@ pub struct Episode {
     pub created_at: DateTime<Utc>,
 }
 
-/// Parameters for creating a show
+/// Parameters for finding or creating a show
 #[derive(Debug, Clone)]
 pub struct CreateShow {
+    /// The show's identity; see [`crate::utils::identity`].
+    pub identity_key: String,
     pub title: String,
     pub year: Option<u32>,
+}
+
+impl CreateShow {
+    /// A show whose series folder parsed as `title` (and `year`), keyed by
+    /// that parse.
+    pub fn new(title: impl Into<String>, year: Option<u32>) -> Self {
+        let title = title.into();
+        Self {
+            identity_key: crate::utils::identity::title_identity_key(&title, year),
+            title,
+            year,
+        }
+    }
 }
 
 /// Server-side search/filter parameters for shows. See
@@ -77,6 +99,7 @@ impl From<beam_entity::show::Model> for Show {
         Self {
             id: model.id,
             title: model.title,
+            identity_key: model.identity_key,
             title_localized: model.title_localized,
             description: model.description,
             year: model.year.map(|y| y as u32),
