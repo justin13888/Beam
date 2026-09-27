@@ -30,11 +30,19 @@ staticClients:
     name: "Beam"
     redirectURIs:
       - "http://localhost:8000/v1/auth/callback"
-      # Dex's own page for the device authorization grant (ADR-0017): after
-      # a user enters the code at /dex/device, Dex completes its internal
-      # authorization-code step here. Without it a device login cannot be
-      # approved -- Dex refuses the redirect.
-      - "http://dex.beam.localhost:5556/dex/device/callback"
+      # Dex's own step in the device authorization grant (ADR-0017): after a
+      # user enters the code at /dex/device, Dex completes an internal
+      # authorization-code round-trip to this relative URI, which it matches
+      # literally. Without it a device login cannot be approved -- Dex
+      # answers "Unregistered redirect_uri".
+      #
+      # Known Dex bug (dexidp/dex#4571, open against v2.44+, seen on v2.45.1):
+      # with the issuer on a sub-path, as here (/dex), Dex redirects the
+      # approving browser to /device/callback without the /dex prefix, which
+      # 404s. Approving a dev device login in a browser therefore needs the
+      # address bar edited to /dex/device/callback?... once; Beam's side of
+      # the flow is unaffected.
+      - "/device/callback"
 
 enablePasswordDB: true
 staticPasswords:
