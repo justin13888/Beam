@@ -1,6 +1,9 @@
+use std::path::{Component, Path};
+
 use chrono::{DateTime, Utc};
 use kynos::Schema;
 use serde::Serialize;
+use tracing::warn;
 
 /// File indexing status
 #[derive(Clone, Copy, Debug, Serialize, Schema, Eq, PartialEq)]
@@ -39,7 +42,8 @@ pub enum FileContentType {
 pub struct LibraryFile {
     pub id: String,
     pub library_id: String,
-    /// Filesystem path of the file
+    /// Path of the file relative to its library's root, '/'-separated. Never
+    /// absolute (NFR-108).
     pub path: String,
     /// File size in bytes
     pub size_bytes: i64,
@@ -62,8 +66,52 @@ pub struct LibraryFile {
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<beam_domain::models::MediaFile> for LibraryFile {
-    fn from(f: beam_domain::models::MediaFile) -> Self {
+/// `path` relative to `root`, with components joined by `/`.
+///
+/// This is what a client sees of a file's location: NFR-108 forbids a raw
+/// filesystem path in a client-facing response, and the library root is the
+/// part that would disclose the server's layout.
+///
+/// A path that is not under `root` -- which the indexer never produces, since
+/// it walks from the root -- degrades to the file name alone rather than
+/// leaking the absolute path, and is logged so the inconsistency is visible.
+/// The comparison is component-wise, so `/m/films2/x.mkv` is not under
+/// `/m/films`, and a `..` anywhere below the root counts as not under it.
+pub fn root_relative_path(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).ok().and_then(|relative| {
+        relative
+            .components()
+            .map(|component| match component {
+                Component::Normal(name) => Some(name.to_string_lossy()),
+                Component::Prefix(_)
+                | Component::RootDir
+                | Component::CurDir
+                | Component::ParentDir => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|components| !components.is_empty())
+            .map(|components| components.join("/"))
+    });
+
+    match relative {
+        Some(relative) => relative,
+        None => {
+            warn!(
+                path = %path.display(),
+                root = %root.display(),
+                "indexed file is not under its library root; exposing its file name only"
+            );
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        }
+    }
+}
+
+impl LibraryFile {
+    /// The client-facing view of `file`, whose location is reported relative
+    /// to `library_root` (see [`root_relative_path`]).
+    pub fn from_domain(file: beam_domain::models::MediaFile, library_root: &Path) -> Self {
         let beam_domain::models::MediaFile {
             id,
             library_id,
@@ -81,7 +129,7 @@ impl From<beam_domain::models::MediaFile> for LibraryFile {
             // Not exposed: every read that feeds this DTO is a visible read of
             // `FileRepository`, which never returns a missing file (#179).
             missing_since: _,
-        } = f;
+        } = file;
         let content_type = match &content {
             Some(beam_domain::models::MediaFileContent::Movie { .. }) => FileContentType::Movie,
             Some(beam_domain::models::MediaFileContent::Episode { .. }) => FileContentType::Episode,
@@ -91,7 +139,7 @@ impl From<beam_domain::models::MediaFile> for LibraryFile {
         LibraryFile {
             id: id.to_string(),
             library_id: library_id.to_string(),
-            path: path.to_string_lossy().to_string(),
+            path: root_relative_path(library_root, &path),
             size_bytes: size_bytes as i64,
             hash: hash.to_string(),
             mime_type,
@@ -104,3 +152,7 @@ impl From<beam_domain::models::MediaFile> for LibraryFile {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "file_tests.rs"]
+mod tests;

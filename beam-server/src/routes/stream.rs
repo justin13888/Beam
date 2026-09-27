@@ -30,7 +30,7 @@ use tracing::error;
 use crate::routes::api_error::{DeliveryError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::tags::Playback;
-use crate::services::library::LibraryError;
+use crate::services::library::{LibraryError, LocatedFile};
 use crate::state::AppState;
 
 /// What both delivery endpoints capture.
@@ -131,7 +131,11 @@ async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String
         }
     };
 
-    let path = PathBuf::from(&file.path);
+    let LocatedFile {
+        id: _,
+        path,
+        mime_type,
+    } = file;
     if !path.exists() {
         error!(?path, "source video file not found");
         return Err(DeliveryError::SourceFileMissing(
@@ -139,10 +143,7 @@ async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String
         ));
     }
 
-    let content_type = file
-        .mime_type
-        .clone()
-        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    let content_type = mime_type.unwrap_or_else(|| "application/octet-stream".to_owned());
 
     Ok((path, content_type))
 }
