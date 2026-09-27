@@ -134,9 +134,23 @@ pub(super) struct NfoRead {
     pub(super) nfo: Option<Nfo>,
 }
 
+/// Open `path` for reading, never through a symbolic link: on Unix with
+/// `O_NOFOLLOW`, so a link swapped in after the caller's `lstat` fails to open
+/// rather than being followed out of the library (issue #186).
+pub(super) fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+    options.open(path)
+}
+
 /// Read the NFO at `path`: `None` when there is no regular file there, or it
-/// is larger than [`MAX_NFO_BYTES`], or cannot be read. Opened read-only; a
-/// failure is logged, never raised -- a broken NFO
+/// is larger than [`MAX_NFO_BYTES`], or cannot be read. Opened read-only and
+/// never through a link; a failure is logged, never raised -- a broken NFO
 /// leaves the file classified by its path.
 pub(super) fn read_nfo_file(path: &Path) -> Option<NfoRead> {
     let meta = std::fs::symlink_metadata(path).ok()?;
@@ -147,7 +161,7 @@ pub(super) fn read_nfo_file(path: &Path) -> Option<NfoRead> {
         warn!(path = %path.display(), bytes = meta.len(), "NFO is larger than Beam reads; ignored");
         return None;
     }
-    let file = match std::fs::File::open(path) {
+    let file = match open_no_follow(path) {
         Ok(file) => file,
         Err(err) => {
             warn!(path = %path.display(), error = %err, "could not open an NFO; ignored");

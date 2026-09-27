@@ -589,6 +589,22 @@ async fn an_nfo_that_is_a_symlink_is_not_read() {
 /// `rsync -a`), or from a NAS whose clock runs behind the server's: whether
 /// it is applied turns on what it holds, never on when it says it was
 /// written.
+/// The open itself refuses a link, not just the `lstat` before it: a link
+/// swapped in between the two fails to open rather than being followed out
+/// of the library.
+#[cfg(unix)]
+#[test]
+fn an_nfo_is_opened_without_following_a_link() {
+    let dir = TempDir::new().unwrap();
+    let outside = dir.path().join("outside.nfo");
+    std::fs::write(&outside, MATRIX_NFO).unwrap();
+    let link = dir.path().join("movie.nfo");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    assert!(hints::open_no_follow(&outside).is_ok());
+    assert!(hints::open_no_follow(&link).is_err());
+}
+
 #[tokio::test]
 async fn an_nfo_added_after_indexing_pins_the_movie_on_the_next_scan() {
     let h = Harness::new().await;
