@@ -1403,6 +1403,19 @@ mod discovered {
                 assert_eq!(exchange.form_value("code"), Some("the-code"));
                 assert_eq!(exchange.form_value("code_verifier"), Some(PKCE_VERIFIER));
                 assert!(exchange.authenticated_with(method), "{exchange:?}");
+                // Basic carries the client id in the header alone, exactly as
+                // the code exchange did before the method was configurable --
+                // so existing deployments send an unchanged request. Post
+                // must name it in the form beside the secret.
+                let expected_client_id = match method {
+                    ClientAuthMethod::ClientSecretBasic => None,
+                    ClientAuthMethod::ClientSecretPost => Some(CLIENT_ID),
+                };
+                assert_eq!(
+                    exchange.form_value("client_id"),
+                    expected_client_id,
+                    "{method:?}: {exchange:?}"
+                );
             }
         }
 
