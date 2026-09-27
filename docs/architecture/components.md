@@ -100,14 +100,18 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   testable. `runtime.rs` calls the watcher on the blocking pool; registers every watch before the
   startup scan starts, and holds the poller until that scan finishes, so the startup scan is the
   one scan a library polled from startup gets (the poller's first snapshot hides earlier changes)
-  and the background indexer schedules no single-library scan alongside it (an admin-triggered
-  scan can still overlap it; serialising every scan of a library is
-  [#181](https://github.com/justin13888/beam/issues/181)); scans a library once when it starts being polled
+  and the background indexer schedules no single-library scan alongside it; scans a library once when it starts being polled
   after startup; and on each maintenance cycle unwatches libraries that no longer exist and
   re-registers any the watcher no longer holds, asking the watcher rather than remembering what it
   registered; the watcher keeps one registration per root, so a
   library re-created at a deleted one's root owns its events; `watch_status.rs` records each library's watch mode for the
-  admin status); `enrichment/` (queue-driven async worker with retry/backoff and
+  admin status); `scan.rs` (`ScanCoordinator`: one lock per library that every scan — startup,
+  periodic, newly polled, administrator's — and every watcher reconcile takes, the latest
+  `ScanJob` per library in memory, and a catalog gate the identity-key passes hold exclusively while
+  every scan and reconcile holds it shared; a scan is `begin_scan` then `run_scan`, so the server
+  answers before it runs; a reconcile never waits, but is handed back `Deferred` and retried by
+  `runtime.rs` on the injected `Clock`; a file is hashed only once it has gone
+  `BEAM_SCAN_SETTLE_SECS` without a write; issue #181); `enrichment/` (queue-driven async worker with retry/backoff and
   candidate matching/scoring); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
   `notification.rs` (the latter two back the admin log and SSE progress events).
 - `providers/cameo.rs` — the `cameo`-backed `EnrichmentProvider` implementation hitting TMDB and
