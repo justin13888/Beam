@@ -117,8 +117,9 @@ elif [ "$OIDC_SET" -lt 3 ]; then
     ERRORS=$((ERRORS + 1))
 fi
 # The method Beam's client is registered with at the IdP (ADR-0017 D151-9);
-# anything but the two RFC 7591 names fails startup.
-case "${BEAM_OIDC_CLIENT_AUTH_METHOD-client_secret_basic}" in
+# unset or empty means client_secret_basic, and anything but the two RFC 7591
+# names fails startup.
+case "${BEAM_OIDC_CLIENT_AUTH_METHOD:-client_secret_basic}" in
     client_secret_basic|client_secret_post) ;;
     *)
         echo "❌ BEAM_OIDC_CLIENT_AUTH_METHOD must be client_secret_basic or client_secret_post -- the server refuses to start"

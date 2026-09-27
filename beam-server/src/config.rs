@@ -198,7 +198,7 @@ pub struct ServerConfig {
     /// exchange and both device-grant requests alike. An IdP accepts only the
     /// method a client is registered with and publishes that nowhere, so it
     /// is set here rather than guessed (ADR-0017). Any other value is a
-    /// startup error.
+    /// startup error; an empty one is unset, so it means the default.
     #[config(env = "BEAM_OIDC_CLIENT_AUTH_METHOD", default = "client_secret_basic")]
     pub oidc_client_auth_method: ClientAuthMethod,
 
@@ -691,7 +691,9 @@ mod tests {
     /// `token_endpoint_auth_method` names for the two secret-based methods --
     /// what an operator copies from the IdP's client registration. Anything
     /// else, including a method Beam cannot speak, fails the load rather than
-    /// falling back to a method the IdP would refuse at the first login.
+    /// falling back to a method the IdP would refuse at the first login. The
+    /// empty string does not parse either, which is what makes confique treat
+    /// it as unset (pinned end to end below).
     ///
     /// Parsed through `str`'s `IntoDeserializer`, the path confique's env
     /// source takes for an enum (and its declared default).
@@ -725,6 +727,69 @@ mod tests {
         ] {
             assert_eq!(parse(raw), expected, "{raw:?}");
         }
+    }
+
+    /// The child half of
+    /// [`an_empty_client_auth_method_resolves_to_the_default`]: loads the
+    /// configuration from the environment that test hands it. Ignored because
+    /// it means nothing outside that environment, and refuses to pass there.
+    #[test]
+    #[ignore = "run by an_empty_client_auth_method_resolves_to_the_default in a child process"]
+    fn client_auth_method_loaded_from_an_empty_variable() {
+        assert_eq!(
+            std::env::var("BEAM_OIDC_CLIENT_AUTH_METHOD").as_deref(),
+            Ok(""),
+            "run through an_empty_client_auth_method_resolves_to_the_default"
+        );
+        let config = ServerConfig::builder()
+            .env()
+            .load()
+            .expect("an empty auth method loads");
+        assert_eq!(
+            config.oidc_client_auth_method,
+            ClientAuthMethod::ClientSecretBasic
+        );
+    }
+
+    /// A set-but-empty `BEAM_OIDC_CLIENT_AUTH_METHOD` is the default,
+    /// `client_secret_basic`, not a startup failure: confique treats an empty
+    /// value that does not deserialize as unset, the repo-wide rule for
+    /// optional settings that docs/operations/configuration.md states.
+    ///
+    /// Proven through the real env source, which reads the process
+    /// environment. Setting a variable in-process is `unsafe` in Rust 2024
+    /// because the suite runs in parallel, so this re-executes the test binary
+    /// for the one ignored child test, with every inherited `BEAM_*` variable
+    /// removed and only this one set.
+    #[test]
+    fn an_empty_client_auth_method_resolves_to_the_default() {
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("the test binary's own path"),
+        );
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("BEAM_") {
+                child.env_remove(key);
+            }
+        }
+        let output = child
+            .env("BEAM_OIDC_CLIENT_AUTH_METHOD", "")
+            .args([
+                "--exact",
+                "config::tests::client_auth_method_loaded_from_an_empty_variable",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("the test binary re-executes");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "stdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // An exact filter that matched nothing would also exit 0.
+        assert!(stdout.contains("1 passed"), "stdout: {stdout}");
     }
 
     #[test]
