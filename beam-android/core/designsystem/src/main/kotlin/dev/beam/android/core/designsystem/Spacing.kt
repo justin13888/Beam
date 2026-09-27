@@ -36,6 +36,9 @@ public object BeamSizes {
     /** Poster width in the catalog grid's smallest column. */
     public val GridPosterMinWidth: Dp = 116.dp
 
+    /** Poster width beside a row of text, as in the downloads list. */
+    public val ListPosterWidth: Dp = 48.dp
+
     /** Width of a landscape episode or continue-watching thumbnail. */
     public val ThumbnailWidth: Dp = 208.dp
 

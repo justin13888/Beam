@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
@@ -23,7 +24,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.beam.android.core.designsystem.BeamSizes
 import dev.beam.android.core.designsystem.BeamSpacing
+import dev.beam.android.core.designsystem.component.Artwork
 import dev.beam.android.core.designsystem.component.BeamEmptyState
 import dev.beam.android.core.designsystem.component.SectionHeader
 import dev.beam.android.core.model.DownloadRecord
@@ -109,6 +112,11 @@ private fun DownloadRow(
     onRemove: () -> Unit,
 ) {
     ListItem(
+        // Rendered from the copy pinned at enqueue time, so it still shows
+        // with no network -- see DownloadArtwork.
+        leadingContent = {
+            Artwork(url = record.posterUrl, modifier = Modifier.width(BeamSizes.ListPosterWidth))
+        },
         headlineContent = { Text(record.title) },
         supportingContent = {
             Text(record.statusLine())
