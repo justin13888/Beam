@@ -119,14 +119,14 @@ async fn drop_stale_scoped_schemas(db: &DatabaseConnection) -> Result<(), DbErr>
     use sea_orm::{ConnectionTrait, Statement};
 
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             db.get_database_backend(),
             "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'beam_test_%'",
         ))
         .await?;
     for row in rows {
         let name: String = row.try_get("", "nspname")?;
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             db.get_database_backend(),
             format!(r#"DROP SCHEMA IF EXISTS "{name}" CASCADE"#),
         ))
@@ -162,7 +162,7 @@ impl ScopedSchema {
             .sqlx_logging(false);
         let admin = Database::connect(admin_options).await?;
         admin
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 admin.get_database_backend(),
                 format!(r#"CREATE SCHEMA "{name}""#),
             ))
@@ -216,7 +216,7 @@ impl ScopedSchema {
         drop(db);
         let admin = Database::connect(database_url()).await?;
         admin
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 admin.get_database_backend(),
                 format!(r#"DROP SCHEMA IF EXISTS "{name}" CASCADE"#),
             ))
@@ -243,7 +243,7 @@ pub async fn table_names(db: &DatabaseConnection, schema: &str) -> Result<Vec<St
     use sea_orm::{ConnectionTrait, Statement};
 
     let rows = db
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             db.get_database_backend(),
             "SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY tablename",
             [schema.into()],

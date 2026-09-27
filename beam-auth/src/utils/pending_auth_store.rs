@@ -98,10 +98,12 @@ impl PendingAuthStore for SqlPendingAuthStore {
         // both would return `Some` for what's supposed to be a single-use
         // value. `exec_with_returning` deletes and returns the row in one
         // round trip, so at most one caller ever gets `Some` back.
-        let mut deleted = PendingAuthEntity::delete_by_id(state.to_string())
+        // sea-orm 2 types a by-primary-key delete as returning at most one
+        // row, so `exec_with_returning` yields an `Option` directly.
+        let deleted = PendingAuthEntity::delete_by_id(state.to_string())
             .exec_with_returning(self.db.as_ref())
             .await?;
-        let Some(model) = deleted.pop() else {
+        let Some(model) = deleted else {
             return Ok(None);
         };
 
