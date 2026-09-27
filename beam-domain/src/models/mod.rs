@@ -10,6 +10,7 @@ pub mod playback_progress;
 pub mod playback_telemetry;
 pub mod search;
 pub mod show;
+pub mod sidecar;
 pub mod stream;
 
 pub use admin_log::*;
@@ -24,4 +25,5 @@ pub use playback_progress::*;
 pub use playback_telemetry::*;
 pub use search::*;
 pub use show::*;
+pub use sidecar::*;
 pub use stream::*;
