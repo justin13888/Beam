@@ -484,14 +484,17 @@ fn a_played_rows_path_is_replaced_not_taken_by_an_unplayed_row() {
     let replaced = [row(1, "/lib/M.mkv", 10), row(2, "/lib/T.mkv", 20)];
     // T renamed onto M: M's path holds T's content, T's path is gone.
     let rename_onto_m = [("/lib/M.mkv", 20)];
-    let cases: [(
-        &str,
-        &[MediaFile],
-        &[(&str, u64)],
-        &[u128],
+    /// A case's name, its rows, what the scan found where, the rows played,
+    /// and the relinks and displaced rows planned.
+    type Case<'a> = (
+        &'a str,
+        &'a [MediaFile],
+        &'a [(&'a str, u64)],
+        &'a [u128],
         Vec<(u128, PathBuf)>,
         Vec<u128>,
-    ); 6] = [
+    );
+    let cases: [Case<'_>; 6] = [
         (
             "the played row keeps its path",
             &replaced,
