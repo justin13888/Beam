@@ -106,7 +106,7 @@ kind (NFR-502).
 |---|---|
 | Stricter privacy requirements, with no opt-out short of disabling enrichment | Answered here. No client contacts a provider CDN, so there is nothing left to opt out of. |
 | CDN instability or a hotlinking policy change | Answered here. A cached image survives a provider reorganising or removing a path; before, the poster simply broke until the next enrichment pass. |
-| Offline art requirements | **Made possible here, not finished here.** The URL is now stable and reachable over the client's authenticated session, so Coil's disk cache can hold it -- but priming that cache at download-enqueue time is [#152](https://github.com/justin13888/beam/issues/152). |
+| Offline art requirements | **Made possible here, finished on Android under [#152](https://github.com/justin13888/beam/issues/152).** The URL is stable and reachable over the client's authenticated session, so Coil's disk cache can hold it. `BeamDownloadManager.enqueue` fetches the poster into that cache (`DownloadArtwork`), and removing the last download that uses a poster evicts it. The cache is shared and size-capped, so enough browsing can still push a pinned poster out; the downloads screen refreshes the entry on every render, and a poster that is pushed out anyway is a placeholder offline, not a failed download. |
 
 **Closing [#152](https://github.com/justin13888/beam/issues/152) is a condition of this decision
 fully answering #70.** Until it is closed, Beam can say its artwork is private, cached and stable,

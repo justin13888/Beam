@@ -8,6 +8,16 @@ android {
     namespace = "dev.beam.android.core.media"
 }
 
+// The download tests run under Robolectric, and the API level it can run is
+// pinned once for every module in this shared file. Configured through the
+// typed DSL because the generated `android` accessor still names AGP's removed
+// source-set type.
+configure<com.android.build.api.dsl.LibraryExtension> {
+    sourceSets.getByName("test").resources.srcDir(
+        rootProject.layout.projectDirectory.dir("gradle/robolectric"),
+    )
+}
+
 dependencies {
     api(projects.core.model)
     implementation(projects.core.ffi)
@@ -22,9 +32,13 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.kotlinx.coroutines.android)
+    // A download's poster is kept in the app's own image loader, so the
+    // downloads screen renders it offline from the entry it would read anyway.
+    implementation(libs.coil.singleton)
 
     testImplementation(projects.core.testing)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.coil.network.okhttp)
 }

@@ -12,6 +12,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import coil3.SingletonImageLoader
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -20,6 +21,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.download.BeamDownloadManager
+import dev.beam.android.core.media.download.DownloadArtwork
 import dev.beam.android.core.media.download.DownloadManagerHolder
 import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.media.download.DownloadTitleStore
@@ -98,6 +100,16 @@ internal object MediaModule {
     fun downloadTitles(
         @ApplicationContext context: Context,
     ): DownloadTitleStore = FileDownloadTitleStore(context)
+
+    /**
+     * Pinned into the app's own image loader, so a poster kept for a download
+     * is the same cache entry the downloads screen renders from.
+     */
+    @Provides
+    @Singleton
+    fun downloadArtwork(
+        @ApplicationContext context: Context,
+    ): DownloadArtwork = DownloadArtwork(context) { SingletonImageLoader.get(context) }
 }
 
 @Module

@@ -47,6 +47,7 @@ import java.util.concurrent.Executors
 public class BeamDownloadManager internal constructor(
     private val manager: DownloadManager,
     private val titles: DownloadTitleStore,
+    private val artwork: DownloadArtwork,
 ) {
     /** The underlying manager, for the foreground service that drives it. */
     internal val raw: DownloadManager get() = manager
@@ -84,7 +85,12 @@ public class BeamDownloadManager internal constructor(
      *
      * The display fields are stored alongside, because the downloads screen has
      * to render with no network at all -- resolving a title over the network to
-     * show an offline download would defeat the feature.
+     * show an offline download would defeat the feature. The poster's bytes are
+     * fetched now for the same reason: a URL alone renders as a placeholder
+     * once the network is gone.
+     *
+     * The poster fetch is awaited but cannot fail the enqueue; it runs after
+     * the download is queued, so a slow poster never delays the bytes.
      */
     public suspend fun enqueue(
         fileId: String,
@@ -108,6 +114,9 @@ public class BeamDownloadManager internal constructor(
         )
         val request = DownloadRequest.Builder(fileId, config.url.toUri()).build()
         manager.addDownload(request)
+        if (posterUrl != null) {
+            artwork.pin(posterUrl)
+        }
     }
 
     /** Stop a download, keeping the bytes already fetched. */
@@ -120,15 +129,26 @@ public class BeamDownloadManager internal constructor(
         manager.setStopReason(fileId, Download.STOP_REASON_NONE)
     }
 
-    /** Delete a download and its bytes. */
+    /** Delete a download, its bytes, and the poster kept for it. */
     public suspend fun remove(fileId: String) {
+        val posterUrl = titles.get(fileId)?.posterUrl
         manager.removeDownload(fileId)
         titles.remove(fileId)
+        // Episodes of one series share a poster, so the poster outlives any
+        // one of them and is released with the last.
+        if (posterUrl != null && titles.all().none { it.posterUrl == posterUrl }) {
+            artwork.unpin(posterUrl)
+        }
     }
 
-    /** Delete every download. */
+    /** Delete every download, and every poster kept for one. */
     public fun removeAll() {
         manager.removeAllDownloads()
+        titles
+            .all()
+            .mapNotNull(DownloadTitle::posterUrl)
+            .distinct()
+            .forEach(artwork::unpin)
     }
 
     /**
@@ -163,6 +183,7 @@ public class BeamDownloadManager internal constructor(
             clients: BeamHttpClientFactory,
             cache: Cache,
             titles: DownloadTitleStore,
+            artwork: DownloadArtwork,
             server: ServerHttpConfig,
         ): BeamDownloadManager {
             val manager =
@@ -180,7 +201,7 @@ public class BeamDownloadManager internal constructor(
                 ).apply {
                     maxParallelDownloads = PARALLEL_DOWNLOADS
                 }
-            return BeamDownloadManager(manager, titles)
+            return BeamDownloadManager(manager, titles, artwork)
         }
 
         /**

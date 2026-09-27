@@ -128,6 +128,9 @@ androidx-hilt-work = { group = "androidx.hilt", name = "hilt-work", version.ref 
 androidx-hilt-compiler = { group = "androidx.hilt", name = "hilt-compiler", version.ref = "hiltWork" }
 
 # Libraries
+# The `coil` artifact (not `coil-core`) is the one that carries
+# SingletonImageLoader, which is how non-Compose code reaches the app's loader.
+coil-singleton = { group = "io.coil-kt.coil3", name = "coil", version.ref = "coil" }
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
 coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
