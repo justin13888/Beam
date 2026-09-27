@@ -1,0 +1,261 @@
+{{- include "beam.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "beam.fullname" . }}
+  labels:
+    {{- include "beam.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  # Not a value, on purpose. The indexer and the enrichment worker run
+  # in-process with no leader election, and rate limits and the admin event
+  # stream live in memory, so a second replica would double the background
+  # work and split that state. `check:chart-invariants` fails if this changes.
+  replicas: 1
+  # Recreate, not RollingUpdate: the old pod is gone before the new one starts,
+  # so two servers never index at once and a ReadWriteOnce data volume is never
+  # wanted by two pods. Migrations would be safe either way -- they serialise on
+  # a Postgres advisory lock.
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- include "beam.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pod when an inline secret changes.
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if .Values.metrics.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "beam.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "beam.serviceAccountName" . }}
+      # Beam never talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Derived from server.shutdownTimeoutSeconds, so in-flight streams drain
+      # before the kubelet's SIGKILL. `check:chart-invariants` fails if it is
+      # not longer than BEAM_SHUTDOWN_TIMEOUT_SECS.
+      terminationGracePeriodSeconds: {{ include "beam.terminationGracePeriodSeconds" . }}
+      securityContext:
+        # The image's `appuser`, which owns /data in the image. Fixed, not a
+        # value; media access is widened with supplemental groups instead.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        {{- with .Values.server.podSecurityContext.supplementalGroups }}
+        # Groups the library media is readable by (a NAS `media` group).
+        # `check:chart-invariants` fails if these are not what values set.
+        supplementalGroups:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: {{ include "beam.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            # Fixed by the chart: libraries mount under /videos and state lives
+            # on the /data volume, so neither is configurable.
+            - name: BEAM_BIND_ADDRESS
+              value: "0.0.0.0:8000"
+            - name: BEAM_VIDEO_DIR
+              value: /videos
+            - name: BEAM_DATA_DIR
+              value: /data
+            - name: BEAM_SERVER_URL
+              value: {{ .Values.server.publicUrl | quote }}
+            {{- with include "beam.webUrl" . }}
+            - name: BEAM_WEB_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.server.extraAllowedOrigins }}
+            - name: BEAM_EXTRA_ALLOWED_ORIGINS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if kindIs "bool" .Values.server.cookieSecure }}
+            - name: BEAM_COOKIE_SECURE
+              value: {{ .Values.server.cookieSecure | quote }}
+            {{- end }}
+            - name: BEAM_AUTO_MIGRATE
+              value: {{ .Values.server.autoMigrate | quote }}
+            - name: BEAM_SHUTDOWN_TIMEOUT_SECS
+              value: {{ .Values.server.shutdownTimeoutSeconds | quote }}
+            - name: BEAM_ENABLE_METRICS
+              value: {{ .Values.metrics.enabled | quote }}
+            - name: BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR
+              value: {{ include "beam.trustForwardedFor" . | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.server.logLevel | quote }}
+            - name: BEAM_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.database.existingSecret }}
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "beam.secretName" . }}
+                  key: database-url
+                  {{- end }}
+            {{- with .Values.oidc.issuer }}
+            - name: BEAM_OIDC_ISSUER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.oidc.clientId }}
+            - name: BEAM_OIDC_CLIENT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if or .Values.oidc.existingSecret .Values.oidc.clientSecret }}
+            - name: BEAM_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.oidc.existingSecret }}
+                  name: {{ .Values.oidc.existingSecret }}
+                  key: {{ .Values.oidc.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "beam.secretName" . }}
+                  key: oidc-client-secret
+                  {{- end }}
+            {{- end }}
+            {{- with .Values.oidc.clientAuthMethod }}
+            - name: BEAM_OIDC_CLIENT_AUTH_METHOD
+              value: {{ . | quote }}
+            {{- end }}
+            - name: BEAM_OIDC_SCOPES
+              value: {{ .Values.oidc.scopes | quote }}
+            {{- with .Values.oidc.adminClaim }}
+            - name: BEAM_OIDC_ADMIN_CLAIM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.oidc.adminValue }}
+            - name: BEAM_OIDC_ADMIN_VALUE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if or .Values.tmdb.existingSecret .Values.tmdb.apiToken }}
+            - name: BEAM_TMDB_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.tmdb.existingSecret }}
+                  name: {{ .Values.tmdb.existingSecret }}
+                  key: {{ .Values.tmdb.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "beam.secretName" . }}
+                  key: tmdb-api-token
+                  {{- end }}
+            {{- end }}
+            {{- range $name, $value := .Values.server.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          # Startup covers the server's own database retry (about 2.5 minutes)
+          # plus migrations: up to 5 minutes before liveness takes over.
+          startupProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          # /v1/health answers 503 while the database is unreachable, which
+          # should take the pod out of the Service...
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          # ...but not restart it: a database outage would otherwise become a
+          # restart loop that fixes nothing. Liveness asks only whether the
+          # process still accepts connections. `check:chart-invariants` fails
+          # if this becomes /v1/health.
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            {{- range .Values.libraries }}
+            # Read-only whatever the volume source says (FR-202).
+            # `check:chart-invariants` fails if any /videos mount is writable.
+            - name: library-{{ .name }}
+              mountPath: /videos/{{ .name }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.data.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "beam.dataClaimName" . }}
+          {{- else }}
+          # Lost whenever the pod is replaced.
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- $readOnlyWithoutFlag := include "beam.readOnlyWithoutFlag" . | fromJsonArray }}
+        {{- range .Values.libraries }}
+        {{- $source := deepCopy .volume }}
+        {{- /* Also read-only at the source. The schema admits only kinds with a
+               readOnly field plus the few that are read-only without one, so
+               every other kind gets the flag -- which also stops the kubelet
+               applying fsGroup (a recursive chgrp) to the media. */}}
+        {{- range $kind, $spec := $source }}
+        {{- if not (has $kind $readOnlyWithoutFlag) }}
+        {{- $_ := set $spec "readOnly" true }}
+        {{- end }}
+        {{- /* A hostPath must already be a directory. The default type ("")
+               skips the check, and the create types would have the kubelet
+               make an empty, root-owned library out of a mistyped path. The
+               schema refuses any other type. */}}
+        {{- if eq $kind "hostPath" }}
+        {{- $_ := set $spec "type" "Directory" }}
+        {{- end }}
+        {{- end }}
+        - name: library-{{ .name }}
+          {{- toYaml $source | nindent 10 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

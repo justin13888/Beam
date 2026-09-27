@@ -155,8 +155,10 @@ home-lab-class hardware (NAS, mini-PC, small VM). Internal modularity (trait bou
 fakes, crate separation) is preserved so a future split into separate processes remains possible
 without a rewrite — see [ADR-0001](decisions/ADR-0001-modular-monolith.md) for the full rationale.
 
-- Distributed / Kubernetes-native deployment: deferred — tracked in
-  [#76](https://github.com/justin13888/beam/issues/76).
+- Distributed deployment: deferred. Kubernetes is supported through the Helm chart in
+  `charts/beam`, but with the same single server process as Compose
+  ([ADR-0018](decisions/ADR-0018-kubernetes-helm-chart.md)); more than one replica needs leader
+  election for the in-process indexer first.
 - Remaining native clients: Android TV [#65](https://github.com/justin13888/beam/issues/65) and
   tvOS (the remainder of [#66](https://github.com/justin13888/beam/issues/66)) are deferred under
   [#78](https://github.com/justin13888/beam/issues/78); both inherit `beam-client-core`. Neither

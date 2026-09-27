@@ -124,6 +124,7 @@ export default defineConfig({
 						{ slug: "operate/monitoring", label: "Monitoring and logs" },
 						{ slug: "operate/backup-and-upgrade" },
 						{ slug: "operate/production" },
+						{ slug: "operate/kubernetes" },
 					],
 				},
 				{

@@ -1,0 +1,363 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Beam Helm chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "server", "database"],
+  "definitions": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] },
+    "serviceType": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests": { "type": "object" },
+        "limits": { "type": "object" },
+        "claims": { "type": "array" }
+      }
+    },
+    "secretRef": {
+      "type": "object",
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": { "$ref": "#/definitions/nonEmptyString" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "$ref": "#/definitions/pullPolicy" }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "$ref": "#/definitions/nonEmptyString" } }
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publicUrl"],
+      "properties": {
+        "publicUrl": {
+          "type": "string",
+          "pattern": "^https?://[^/\\s]+",
+          "description": "BEAM_SERVER_URL; required"
+        },
+        "webUrl": {
+          "type": "string",
+          "pattern": "^$|^https?://[^/\\s]+"
+        },
+        "extraAllowedOrigins": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[^,\\s]+$" }
+        },
+        "cookieSecure": { "type": ["boolean", "null"] },
+        "autoMigrate": { "type": "boolean" },
+        "shutdownTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "BEAM_SHUTDOWN_TIMEOUT_SECS; the pod's terminationGracePeriodSeconds is derived from it."
+        },
+        "logLevel": { "type": "string" },
+        "podSecurityContext": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "supplementalGroups": {
+              "type": "array",
+              "description": "Extra gids the server pod runs with, so library media readable by a group (a NAS `media` group) can be read. The uid and gid stay the image's 1000. Group 0 is refused: it is root's group, and reading media never needs it.",
+              "uniqueItems": true,
+              "items": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+            }
+          }
+        },
+        "env": {
+          "type": "object",
+          "description": "Extra beam-server settings. The names the chart sets itself are refused, so an override cannot fight a managed value or break an invariant (library mounts, data dir, bind port).",
+          "propertyNames": {
+            "pattern": "^(BEAM_[A-Z0-9_]+|RUST_[A-Z0-9_]+)$",
+            "not": {
+              "enum": [
+                "BEAM_BIND_ADDRESS",
+                "BEAM_SERVER_URL",
+                "BEAM_WEB_URL",
+                "BEAM_EXTRA_ALLOWED_ORIGINS",
+                "BEAM_COOKIE_SECURE",
+                "BEAM_VIDEO_DIR",
+                "BEAM_DATA_DIR",
+                "BEAM_DATABASE_URL",
+                "BEAM_AUTO_MIGRATE",
+                "BEAM_ENABLE_METRICS",
+                "BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR",
+                "BEAM_SHUTDOWN_TIMEOUT_SECS",
+                "BEAM_OIDC_ISSUER",
+                "BEAM_OIDC_CLIENT_ID",
+                "BEAM_OIDC_CLIENT_SECRET",
+                "BEAM_OIDC_CLIENT_AUTH_METHOD",
+                "BEAM_OIDC_SCOPES",
+                "BEAM_OIDC_ADMIN_CLAIM",
+                "BEAM_OIDC_ADMIN_VALUE",
+                "BEAM_TMDB_API_TOKEN",
+                "RUST_LOG"
+              ]
+            }
+          },
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "pattern": "^$|^postgres(ql)?://" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "$ref": "#/definitions/nonEmptyString" }
+      },
+      "oneOf": [
+        {
+          "required": ["url"],
+          "properties": {
+            "url": { "minLength": 1 },
+            "existingSecret": { "maxLength": 0 }
+          }
+        },
+        {
+          "required": ["existingSecret"],
+          "properties": {
+            "existingSecret": { "minLength": 1 },
+            "url": { "maxLength": 0 }
+          }
+        }
+      ]
+    },
+    "oidc": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "issuer": { "type": "string", "pattern": "^$|^https?://" },
+        "clientId": { "type": "string" },
+        "clientSecret": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "$ref": "#/definitions/nonEmptyString" },
+        "clientAuthMethod": {
+          "type": "string",
+          "enum": ["", "client_secret_basic", "client_secret_post"]
+        },
+        "scopes": { "type": "string" },
+        "adminClaim": { "type": "string" },
+        "adminValue": { "type": "string" }
+      },
+      "not": {
+        "properties": {
+          "clientSecret": { "minLength": 1 },
+          "existingSecret": { "minLength": 1 }
+        },
+        "required": ["clientSecret", "existingSecret"]
+      }
+    },
+    "tmdb": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiToken": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "$ref": "#/definitions/nonEmptyString" }
+      },
+      "not": {
+        "properties": {
+          "apiToken": { "minLength": 1 },
+          "existingSecret": { "minLength": 1 }
+        },
+        "required": ["apiToken", "existingSecret"]
+      }
+    },
+    "libraries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "volume"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "maxLength": 50,
+            "description": "Mounted at /videos/<name>; also names the pod volume library-<name>."
+          },
+          "volume": {
+            "type": "object",
+            "description": "One Kubernetes volume source, without `name`. Only kinds that can be made read-only are accepted: every kind with a readOnly field (the chart forces it true, which also stops the kubelet applying fsGroup to the media), plus hostPath and image, which the kubelet never chowns. Kinds that create an empty or generated volume (emptyDir, ephemeral, gitRepo, configMap, secret, downwardAPI, projected) or have no read-only guarantee (flocker, photonPersistentDisk, vsphereVolume) are refused.",
+            "minProperties": 1,
+            "maxProperties": 1,
+            "additionalProperties": { "type": "object" },
+            "properties": {
+              "hostPath": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                  "path": { "$ref": "#/definitions/nonEmptyString" },
+                  "type": {
+                    "const": "Directory",
+                    "description": "Always Directory; the chart sets it when omitted. The default (\"\") skips the check, and the create types would make an empty library out of a mistyped path."
+                  }
+                }
+              }
+            },
+            "propertyNames": {
+              "enum": [
+                "awsElasticBlockStore",
+                "azureDisk",
+                "azureFile",
+                "cephfs",
+                "cinder",
+                "csi",
+                "fc",
+                "flexVolume",
+                "gcePersistentDisk",
+                "glusterfs",
+                "iscsi",
+                "nfs",
+                "persistentVolumeClaim",
+                "portworxVolume",
+                "quobyte",
+                "rbd",
+                "scaleIO",
+                "storageos",
+                "hostPath",
+                "image"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingClaim": { "type": "string" },
+            "storageClass": { "type": "string" },
+            "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$" },
+            "accessModes": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "enum": ["ReadWriteOnce", "ReadWriteOncePod", "ReadWriteMany"] }
+            }
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "$ref": "#/definitions/serviceType" },
+        "port": { "$ref": "#/definitions/port" },
+        "annotations": { "$ref": "#/definitions/stringMap" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "$ref": "#/definitions/stringMap" },
+        "host": { "type": "string" },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "secretName": { "type": "string" } }
+        }
+      },
+      "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+      "then": { "required": ["host"], "properties": { "host": { "minLength": 1 } } }
+    },
+    "rateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "trustForwardedFor": { "type": ["boolean", "null"] } }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "$ref": "#/definitions/stringMap" }
+      }
+    },
+    "podAnnotations": { "$ref": "#/definitions/stringMap" },
+    "podLabels": { "$ref": "#/definitions/stringMap" },
+    "resources": { "$ref": "#/definitions/resources" },
+    "nodeSelector": { "$ref": "#/definitions/stringMap" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "web": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "$ref": "#/definitions/pullPolicy" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "$ref": "#/definitions/serviceType" },
+            "port": { "$ref": "#/definitions/port" }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      },
+      "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+      "then": {
+        "properties": {
+          "image": {
+            "required": ["repository", "tag"],
+            "properties": {
+              "repository": { "minLength": 1 },
+              "tag": { "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

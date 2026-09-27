@@ -39,7 +39,8 @@ that title as the commit release-please parses. `convco` does not generate the c
 release-please does, from the same commits.
 
 **Beam has one product version.** `[workspace.package].version` in the root `Cargo.toml` is
-inherited by all six crates; the three `package.json` versions and `version.txt` move in lockstep.
+inherited by all six crates; the three `package.json` versions, `version.txt`, and the Helm chart's
+`version` and `appVersion` (`charts/beam/Chart.yaml`) move in lockstep.
 One tag, `vX.Y.Z`; one GitHub Release; one `CHANGELOG.md`. This is honest about what Beam is: a
 server binary and a web image built from the same commit. No crate is published to crates.io, so
 per-crate versions would carry no information.

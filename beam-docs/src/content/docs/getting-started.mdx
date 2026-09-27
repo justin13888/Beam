@@ -49,5 +49,6 @@ Knowing these up front saves evaluating Beam for a job it will not do:
 - **No HLS or DASH**, and so no adaptive bitrate switching.
 - **No native mobile, TV or desktop apps.** The web app is the only client.
 - **No password login, sign-up, or password reset.** You bring an identity provider.
-- **No Kubernetes or Helm.** One host running Compose is the supported topology.
+- **One server, not a cluster.** Beam runs as a single server process, on one host with Compose or
+  on [Kubernetes](/operate/kubernetes/) with the Helm chart. It does not scale out across replicas.
 - **It never modifies your media.** Beam reads your library and writes nothing back to it.
