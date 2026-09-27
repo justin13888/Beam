@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
+use beam_domain::models::ProviderPin;
 use beam_domain::models::enrichment::{EnrichmentState, EnrichmentTargetId};
 use beam_domain::providers::enrichment::{
     EnrichmentError, EnrichmentProvider, ExternalMediaRef, MediaQuery,
@@ -66,6 +67,33 @@ impl EnrichmentPolicy {
             .copied()
             .unwrap_or(Duration::from_secs(60))
     }
+}
+
+/// Why a match a search found contradicts `pin`: the match carries an id
+/// of the pin's provider, and it is another. A match that carries no id of
+/// that provider -- no provider Beam uses reports a TheTVDB id -- cannot
+/// contradict it.
+fn contradiction(
+    pin: &ProviderPin,
+    tmdb_id: Option<u32>,
+    imdb_id: Option<&str>,
+    anilist_id: Option<u32>,
+) -> Option<String> {
+    let found = match pin {
+        ProviderPin::Tmdb(id) => tmdb_id
+            .filter(|found| found != id)
+            .map(|f| format!("tmdb:{f}")),
+        ProviderPin::Anilist(id) => anilist_id
+            .filter(|found| found != id)
+            .map(|f| format!("anilist:{f}")),
+        ProviderPin::Imdb(id) => imdb_id
+            .filter(|found| *found != id.as_str())
+            .map(|f| format!("imdb:{f}")),
+        ProviderPin::Tvdb(_) => None,
+    }?;
+    Some(format!(
+        "the NFO pins {pin}, but the best match found is {found}"
+    ))
 }
 
 /// Outcome of processing a single due row.
@@ -240,15 +268,26 @@ impl MetadataEnrichmentService {
             None
         };
 
-        let resolved = match external_ref {
-            Some(ref_id) => {
+        // A title an NFO pins (issue #184) is fetched by its pin when a
+        // configured provider resolves it, never searched for; one pinned
+        // to an id only a match can be checked against is searched, and the
+        // match must not contradict the pin. A match an administrator set
+        // (`force_refresh` with `matched_ref`) comes first.
+        let (pin, pinned_ref) = self.pin_of(movie.pinned_ref.as_deref());
+        let resolved = match (external_ref, pinned_ref) {
+            (Some(ref_id), _) => {
                 self.provider.invalidate(&ref_id).await;
                 self.provider
                     .movie_enrichment(&ref_id)
                     .await
                     .map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0)))
             }
-            None => {
+            (None, Some(ref_id)) => self
+                .provider
+                .movie_enrichment(&ref_id)
+                .await
+                .map(|e| (ref_id, e, 1.0)),
+            (None, None) => {
                 let query = MediaQuery {
                     title: movie.title.clone(),
                     year: movie.year,
@@ -262,10 +301,28 @@ impl MetadataEnrichmentService {
                     ) {
                         Some((hit, score)) => {
                             let ref_id = hit.external_ref.clone();
-                            self.provider
-                                .movie_enrichment(&ref_id)
-                                .await
-                                .map(|e| (ref_id, e, score.total_score as f32))
+                            match self.provider.movie_enrichment(&ref_id).await {
+                                Ok(e) => {
+                                    if let Some(reason) = pin.as_ref().and_then(|pin| {
+                                        contradiction(
+                                            pin,
+                                            e.tmdb_id,
+                                            e.imdb_id.as_deref(),
+                                            e.anilist_id,
+                                        )
+                                    }) {
+                                        warn!(
+                                            movie_id = %movie_id,
+                                            candidate = %ref_id,
+                                            reason,
+                                            "the best match contradicts the NFO's pin"
+                                        );
+                                        return self.mark_unmatched(row, &reason).await;
+                                    }
+                                    Ok((ref_id, e, score.total_score as f32))
+                                }
+                                Err(err) => Err(err),
+                            }
                         }
                         None => {
                             self.log_unmatched_movie(row.id, &movie.title, movie.year, &hits)
@@ -312,15 +369,26 @@ impl MetadataEnrichmentService {
             None
         };
 
-        let resolved = match external_ref {
-            Some(ref_id) => {
+        // A title an NFO pins (issue #184) is fetched by its pin when a
+        // configured provider resolves it, never searched for; one pinned
+        // to an id only a match can be checked against is searched, and the
+        // match must not contradict the pin. A match an administrator set
+        // (`force_refresh` with `matched_ref`) comes first.
+        let (pin, pinned_ref) = self.pin_of(show.pinned_ref.as_deref());
+        let resolved = match (external_ref, pinned_ref) {
+            (Some(ref_id), _) => {
                 self.provider.invalidate(&ref_id).await;
                 self.provider
                     .show_enrichment(&ref_id)
                     .await
                     .map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0)))
             }
-            None => {
+            (None, Some(ref_id)) => self
+                .provider
+                .show_enrichment(&ref_id)
+                .await
+                .map(|e| (ref_id, e, 1.0)),
+            (None, None) => {
                 let query = MediaQuery {
                     title: show.title.clone(),
                     year: show.year,
@@ -334,10 +402,28 @@ impl MetadataEnrichmentService {
                     ) {
                         Some((hit, score)) => {
                             let ref_id = hit.external_ref.clone();
-                            self.provider
-                                .show_enrichment(&ref_id)
-                                .await
-                                .map(|e| (ref_id, e, score.total_score as f32))
+                            match self.provider.show_enrichment(&ref_id).await {
+                                Ok(e) => {
+                                    if let Some(reason) = pin.as_ref().and_then(|pin| {
+                                        contradiction(
+                                            pin,
+                                            e.tmdb_id,
+                                            e.imdb_id.as_deref(),
+                                            e.anilist_id,
+                                        )
+                                    }) {
+                                        warn!(
+                                            show_id = %show_id,
+                                            candidate = %ref_id,
+                                            reason,
+                                            "the best match contradicts the NFO's pin"
+                                        );
+                                        return self.mark_unmatched(row, &reason).await;
+                                    }
+                                    Ok((ref_id, e, score.total_score as f32))
+                                }
+                                Err(err) => Err(err),
+                            }
                         }
                         None => {
                             self.log_unmatched_show(row.id, &show.title, show.year, &hits)
@@ -385,6 +471,24 @@ impl MetadataEnrichmentService {
             }
             Err(err) => self.handle_error(row, err).await,
         }
+    }
+
+    /// The pin a title carries, and the reference to fetch it by when a
+    /// configured provider resolves the pin's ids (decision D184-2: cameo
+    /// resolves TMDB and AniList ids; an IMDb or TheTVDB pin is only checked
+    /// against a match).
+    fn pin_of(&self, pinned_ref: Option<&str>) -> (Option<ProviderPin>, Option<ExternalMediaRef>) {
+        let pin = pinned_ref.and_then(ProviderPin::parse);
+        let fetchable = pin
+            .as_ref()
+            .filter(|pin| {
+                self.provider
+                    .available_providers()
+                    .iter()
+                    .any(|provider| provider == pin.provider())
+            })
+            .and_then(|pin| ExternalMediaRef::parse(&pin.to_ref_string()));
+        (pin, fetchable)
     }
 
     async fn handle_error(&self, row: &EnrichmentState, err: EnrichmentError) -> ProcessOutcome {
@@ -938,5 +1042,216 @@ mod tests {
         // Zero tallies must not mint a series at all.
         assert_eq!(outcome_count("unmatched"), None);
         assert_eq!(outcome_count("rate_limited"), None);
+    }
+
+    /// A pinned movie, queued as the indexer queues a newly pinned one.
+    async fn pinned_movie(
+        movie_repo: &InMemoryMovieRepository,
+        state_repo: &InMemoryEnrichmentStateRepository,
+        title: &str,
+        pin: ProviderPin,
+    ) -> uuid::Uuid {
+        let movie = movie_repo
+            .find_or_create_by_identity(CreateMovie::new(title.to_string(), None, None))
+            .await
+            .unwrap();
+        assert!(movie_repo.set_pinned_ref(movie.id, &pin).await.unwrap());
+        state_repo
+            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
+            .await
+            .unwrap();
+        state_repo
+            .request_refresh(EnrichmentTargetId::Movie(movie.id), true)
+            .await
+            .unwrap();
+        movie.id
+    }
+
+    #[tokio::test]
+    async fn a_pinned_movie_is_fetched_by_its_pin_and_never_searched_for() {
+        // No search result exists for the title at all: only a fetch by the
+        // pin can enrich it.
+        let provider =
+            InMemoryEnrichmentProvider::new(&["tmdb"]).with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(603),
+                title: "The Matrix".to_string(),
+                year: Some(1999),
+                ..Default::default()
+            });
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
+        let id = pinned_movie(&movie_repo, &state_repo, "matrix", ProviderPin::Tmdb(603)).await;
+
+        let report = service.sweep_once().await;
+
+        assert_eq!(report.enriched, 1, "{report:?}");
+        let movie = movie_repo.find_by_id(id).await.unwrap().unwrap();
+        assert_eq!(movie.tmdb_id, Some(603));
+        assert_eq!(movie.title, "The Matrix");
+        assert_eq!(movie.pinned_ref.as_deref(), Some("tmdb:603"));
+    }
+
+    #[tokio::test]
+    async fn a_match_an_administrator_set_wins_over_the_pin() {
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+            .with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(603),
+                title: "Pinned".to_string(),
+                ..Default::default()
+            })
+            .with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(604),
+                title: "Chosen".to_string(),
+                ..Default::default()
+            });
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
+        let id = pinned_movie(&movie_repo, &state_repo, "matrix", ProviderPin::Tmdb(603)).await;
+        let row = state_repo.fetch_due(chrono::Utc::now(), 25).await.unwrap()[0].id;
+        state_repo
+            .mark_enriched(row, "tmdb:604", 1.0, chrono::Utc::now())
+            .await
+            .unwrap();
+        state_repo
+            .request_refresh(EnrichmentTargetId::Movie(id), false)
+            .await
+            .unwrap();
+
+        service.sweep_once().await;
+
+        assert_eq!(
+            movie_repo.find_by_id(id).await.unwrap().unwrap().title,
+            "Chosen"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_imdb_pin_rejects_a_search_match_with_another_imdb_id() {
+        let hit = MovieSearchHit {
+            external_ref: ExternalMediaRef::new("tmdb", "949"),
+            title: "Heat".to_string(),
+            original_title: None,
+            year: Some(1995),
+            popularity: None,
+            vote_average: None,
+        };
+        let enrichment = |imdb: &str| MovieEnrichment {
+            tmdb_id: Some(949),
+            imdb_id: Some(imdb.to_string()),
+            title: "Heat".to_string(),
+            year: Some(1995),
+            ..Default::default()
+        };
+
+        for (pinned, matched, enriched) in [
+            ("tt0113277", "tt0113277", true),
+            ("tt0000001", "tt0113277", false),
+        ] {
+            let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+                .with_movie_search("Heat", vec![hit.clone()])
+                .with_movie_enrichment(enrichment(matched));
+            let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) =
+                harness(provider);
+            let id = pinned_movie(
+                &movie_repo,
+                &state_repo,
+                "Heat",
+                ProviderPin::Imdb(pinned.to_string()),
+            )
+            .await;
+
+            let report = service.sweep_once().await;
+
+            let movie = movie_repo.find_by_id(id).await.unwrap().unwrap();
+            if enriched {
+                assert_eq!(report.enriched, 1, "a match the pin agrees with");
+                assert_eq!(movie.tmdb_id, Some(949));
+            } else {
+                assert_eq!(report.unmatched, 1, "a match the pin contradicts");
+                assert_eq!(movie.tmdb_id, None, "nothing of it is applied");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pin_no_configured_provider_resolves_is_only_checked() {
+        // TMDB is pinned but only AniList is configured: the title is
+        // searched, and an AniList match carries no TMDB id to contradict.
+        let hit = MovieSearchHit {
+            external_ref: ExternalMediaRef::new("anilist", "5114"),
+            title: "Akira".to_string(),
+            original_title: None,
+            year: Some(1988),
+            popularity: None,
+            vote_average: None,
+        };
+        let provider = InMemoryEnrichmentProvider::new(&["anilist"])
+            .with_movie_search("Akira", vec![hit])
+            .with_movie_enrichment(MovieEnrichment {
+                anilist_id: Some(5114),
+                title: "Akira".to_string(),
+                year: Some(1988),
+                ..Default::default()
+            });
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
+        let id = pinned_movie(&movie_repo, &state_repo, "Akira", ProviderPin::Tmdb(149)).await;
+
+        assert_eq!(service.sweep_once().await.enriched, 1);
+        assert_eq!(
+            movie_repo.find_by_id(id).await.unwrap().unwrap().anilist_id,
+            Some(5114)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_show_is_fetched_by_its_pin() {
+        let show_ref = ExternalMediaRef::new("tmdb", "1399");
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"]).with_show_enrichment(
+            show_ref,
+            ShowEnrichment {
+                tmdb_id: Some(1399),
+                title: "Game of Thrones".to_string(),
+                ..Default::default()
+            },
+        );
+        let (service, _movie_repo, show_repo, state_repo, _genre_repo, _clock) = harness(provider);
+        let show = show_repo
+            .find_or_create_by_identity(CreateShow::new("GoT".to_string(), None))
+            .await
+            .unwrap();
+        assert!(
+            show_repo
+                .set_pinned_ref(show.id, &ProviderPin::Tmdb(1399))
+                .await
+                .unwrap()
+        );
+        state_repo
+            .ensure_pending(EnrichmentTargetId::Show(show.id))
+            .await
+            .unwrap();
+
+        assert_eq!(service.sweep_once().await.enriched, 1);
+        assert_eq!(
+            show_repo.find_by_id(show.id).await.unwrap().unwrap().title,
+            "Game of Thrones"
+        );
+    }
+
+    #[test]
+    fn a_match_contradicts_a_pin_only_with_another_id_of_the_pins_provider() {
+        let tmdb = ProviderPin::Tmdb(603);
+        assert_eq!(contradiction(&tmdb, Some(603), None, None), None);
+        assert!(contradiction(&tmdb, Some(604), None, None).is_some());
+        assert_eq!(
+            contradiction(&tmdb, None, Some("tt1"), Some(1)),
+            None,
+            "a match with no TMDB id cannot contradict a TMDB pin"
+        );
+        let anilist = ProviderPin::Anilist(5);
+        assert!(contradiction(&anilist, None, None, Some(6)).is_some());
+        assert_eq!(contradiction(&anilist, Some(1), None, Some(5)), None);
+        let tvdb = ProviderPin::Tvdb(81189);
+        assert_eq!(
+            contradiction(&tvdb, Some(1), Some("tt0000001"), Some(1)),
+            None
+        );
     }
 }
