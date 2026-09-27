@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use beam_domain::models::applied_nfo::AppliedNfo;
-use beam_domain::models::sidecar::{SubtitleFormat, UpsertSidecarSubtitle};
+use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat, UpsertSidecarSubtitle};
 use beam_domain::utils::sidecar::{is_subtitle_folder, match_sidecar};
 
 use super::*;
@@ -134,13 +134,13 @@ impl LocalIndexService {
         }
 
         let stored = repo.find_all_by_library(library.id).await?;
-        let stored_paths: HashSet<&Path> = stored.iter().map(|row| row.path.as_path()).collect();
+        let stored_by_path: HashMap<&Path, &SidecarSubtitle> =
+            stored.iter().map(|row| (row.path.as_path(), row)).collect();
         let mut written = 0usize;
         for (path, upsert) in &found {
-            let unchanged = stored_paths.contains(path)
-                && stored
-                    .iter()
-                    .any(|row| row.path == *path && upsert.matches(row));
+            let unchanged = stored_by_path
+                .get(path)
+                .is_some_and(|row| upsert.matches(row));
             if !unchanged {
                 repo.upsert_by_path(upsert.clone()).await?;
                 written += 1;
