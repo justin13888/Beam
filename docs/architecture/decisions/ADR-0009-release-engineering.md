@@ -99,6 +99,10 @@ rustup, plus Xcode on macOS for the Apple client, so a fresh macOS or Linux chec
 `pre-push` hook with no other setup. Amended again — issue #201 — the `pre-commit` biome step runs
 through `mise run ts:biome` too, so a fresh checkout's first JS commit installs `node_modules`
 rather than failing, and `deps:js` names its freshness stamp after the resolved Bun version so a
-Bun upgrade reinstalls.) Existing clones must delete the
+Bun upgrade reinstalls. Amended again — issue #204 — every hook step runs with `GIT_DIR` and
+`GIT_WORK_TREE` removed from its environment. Git exports `GIT_DIR` to hooks in a linked worktree
+and `hk` adds `GIT_WORK_TREE`; left in place they reached cargo build scripts, and the `git clone`
+in the vendored FFmpeg build failed on a fresh worktree's first push. `check:hook-git-env`, part of
+`mise run ci`, drives the hook under that environment to keep it so.) Existing clones must delete the
 stale lefthook shims in `.git/hooks/`: `hk` installs via git's `hook.*` config on git 2.54+ rather
 than by writing hook files, so the old shims would otherwise keep running alongside it.
