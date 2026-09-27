@@ -79,12 +79,12 @@ strength. Each requirement is independently testable. See `product.md` for narra
   - an episode is numbered by an `SxxEyy`, `S01.E01` or `1x02` marker (of several, the last one
     before the first release-noise token, merged into a range with the markers written back to back
     before it for the same season with rising episodes), by an air date (`2024-03-01`: season =
-    year, episode = `MMDD`), or by an absolute number (`Show - 012`, `E12`) only where the layout
-    is unambiguous (a season folder, or a folder naming the same title); the `<title> - <n>` form
-    also needs a season folder or a number of two or more digits; a year-shaped number (1900-2099) is an episode only in a
-    season folder of the show the title names; inside a season folder only, `Episode N` / `Ep N`
-    and a three- or four-digit number whose leading digits are the folder's season (`501`) number
-    it too; a marker contradicting its season folder wins;
+    year, episode = `MMDD`), or by an absolute number (`Show - 012`, `E12`) only where the layout is
+    unambiguous (a season folder, or a folder naming the same title); the `<title> - <n>` form also
+    needs a season folder or a number of two or more digits; a year-shaped number (1900-2099) is an
+    episode only in a season folder of the show the title names; inside a season folder only,
+    `Episode N` / `Ep N` and a three- or four-digit number whose leading digits are the folder's
+    season (`501`) number it too; a marker contradicting its season folder wins;
   - an episode's title is the text after its marker, else `Episode N`; a multi-episode file
     (`S01E01E02`, `S01E01-E03`, `S01E01.S01E02`) MUST attach to its first episode and record the
     last;
@@ -94,8 +94,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
     words such as `Director's Cut` or `Extended` after the title or its parenthesised year) of it in
     a library MUST be one `movie_entries` row however many copies exist;
   - a file in a season folder with no episode number, a `<title> - <n>` name no folder names as a
-    show, and a fractional `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title (status `unknown`) and reported through the admin
-    log, never guessed into a movie.
+    show, and a fractional `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title
+    (status `unknown`) and reported through the admin log, never guessed into a movie.
 
   Every row MUST record the version of these rules that classified it, and a scan MUST reclassify a
   row classified by an older version from its path -- keeping its id, hash and probe results -- so a
