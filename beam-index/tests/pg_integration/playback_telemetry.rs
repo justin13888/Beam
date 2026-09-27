@@ -48,21 +48,29 @@ beam_domain::playback_telemetry_repository_contract!(setup);
 
 /// Why every write is one `ON CONFLICT` statement: eight reports of one key
 /// arriving at once must count eight, not fail on the primary key or lose an
-/// increment to a read-modify-write race.
+/// increment to a read-modify-write race. The writes run on a pool of eight,
+/// so all eight transactions are open against the same row at once rather
+/// than queued behind the fixture's two connections.
 #[tokio::test]
 async fn concurrent_reports_of_one_key_all_count() {
-    let fixture = setup().await;
+    const WRITERS: u32 = 8;
+    let schema = ScopedSchema::create_migrated("playback_telemetry_concurrent")
+        .await
+        .expect("create a migrated schema");
+    let repo = SqlPlaybackTelemetryRepository::new(
+        schema.pool(WRITERS).await.expect("open a pool of eight"),
+    );
     let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
     let batch = [PlaybackTelemetryEvent::Start(start_key())];
 
-    let writes = (0..8).map(|_| fixture.repo.record_batch(day, &batch));
+    let writes = (0..WRITERS).map(|_| repo.record_batch(day, &batch));
     for result in futures::future::join_all(writes).await {
         result.expect("every concurrent upsert succeeds");
     }
 
-    let summary = fixture.repo.summarize(day, day).await.unwrap();
+    let summary = repo.summarize(day, day).await.unwrap();
     assert_eq!(summary.starts.len(), 1);
-    assert_eq!(summary.starts[0].count, 8);
+    assert_eq!(summary.starts[0].count, u64::from(WRITERS));
 }
 
 /// The table refuses a row no outcome describes -- a successful start with a
