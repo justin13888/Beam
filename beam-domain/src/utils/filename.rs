@@ -54,14 +54,16 @@ static PAREN_GROUP_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\(([^)]*)\)").expect("valid regex"));
 
 /// An `SxxEyy` marker, with an optional multi-episode tail: more `Eyy`s
-/// (`S01E01E02`, `S01E01-E02`) or a bare `-yy` (`S01E01-03`).
+/// (`S01E01E02`, `S01E01-E02`) or a bare `-yy` (`S01E01-03`). The season and
+/// episode may be split by one separator (`S01.E01`, `S01 E01`), which the
+/// separator normalisation has already made a space.
 ///
 /// `\b` so the marker has to start a word. Without it the pattern matched
 /// inside one: `as0E0 S01E01` parsed as season 0, episode 0. Only the leading
 /// boundary is anchored, so `S01E01v2` still parses; the bare `-yy` range
 /// needs a trailing one, or `S01E01-720p` would read as episodes 1 to 720.
 static EPISODE_MARKER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bS(\d{1,4})E(\d{1,4})((?:-?E\d{1,4})*)(?:-(\d{1,4})\b)?")
+    Regex::new(r"(?i)\bS(\d{1,4}) ?E(\d{1,4})((?:-?E\d{1,4})*)(?:-(\d{1,4})\b)?")
         .expect("valid regex")
 });
 
@@ -79,6 +81,10 @@ static DIGITS_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+").expec
 
 static YEAR_TOKEN_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:19|20)\d{2}$").expect("valid regex"));
+
+/// A `WIDTHxHEIGHT` resolution (`1920x1080`), matched against a cleaned token.
+static RESOLUTION_TOKEN_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{3,4}x\d{3,4}$").expect("valid regex"));
 
 /// How far past its first episode a multi-episode range may run. A larger
 /// "last episode" is almost always something else -- a year, a resolution.
@@ -175,7 +181,9 @@ fn clean_token(token: &str) -> String {
 
 fn is_noise_token(token: &str) -> bool {
     let cleaned = clean_token(token);
-    !cleaned.is_empty() && NOISE_TOKEN_PREFIXES.iter().any(|p| cleaned.starts_with(p))
+    !cleaned.is_empty()
+        && (NOISE_TOKEN_PREFIXES.iter().any(|p| cleaned.starts_with(p))
+            || RESOLUTION_TOKEN_REGEX.is_match(&cleaned))
 }
 
 fn is_year_token(token: &str) -> bool {
@@ -204,6 +212,21 @@ fn truncate_at_noise<'a>(tokens: &'a [&'a str]) -> &'a [&'a str] {
         Some(idx) => &tokens[..idx],
         None => tokens,
     }
+}
+
+/// A movie's title tokens: everything before the first noise token that
+/// follows a title word. Noise words that open the name are title words
+/// (`Uncut Gems`, `IMAX Hubble`): a release tag never comes first. Empty only
+/// when every token is noise.
+fn movie_title_span<'a>(tokens: &'a [&'a str]) -> &'a [&'a str] {
+    let Some(first_word) = tokens.iter().position(|t| !is_noise_token(t)) else {
+        return &[];
+    };
+    let end = tokens[first_word..]
+        .iter()
+        .position(|t| is_noise_token(t))
+        .map_or(tokens.len(), |offset| first_word + offset);
+    &tokens[..end]
 }
 
 /// Drops punctuation-only tokens from both ends.
@@ -297,13 +320,47 @@ fn first_noise_offset(normalized: &str) -> usize {
 /// carry one after the noise (`WEB-S00E00`); the real marker is the last one
 /// before the tail starts. With no marker before the noise, the first one
 /// after it is taken.
+///
+/// Markers written back to back for one season with rising episodes
+/// (`S01E01.S01E02`, `1x01.1x02`) are one multi-episode file, not a title and
+/// its marker: the run ending at the chosen marker becomes one range, from
+/// its first episode to its last.
 fn choose_marker(markers: &[Marker], normalized: &str) -> Option<Marker> {
     let noise = first_noise_offset(normalized);
-    markers
+    let chosen_at = markers
         .iter()
-        .rfind(|m| m.start < noise)
-        .or_else(|| markers.first())
-        .copied()
+        .rposition(|m| m.start < noise)
+        .or_else(|| (!markers.is_empty()).then_some(0))?;
+    let chosen = markers[chosen_at];
+    let mut first = chosen_at;
+    while first > 0 {
+        let (prev, next) = (markers[first - 1], markers[first]);
+        let adjacent = prev.end <= next.start
+            && normalized[prev.end..next.start]
+                .chars()
+                .all(|c| c == ' ' || c == '-');
+        let rising = prev.last_episode.unwrap_or(prev.episode) < next.episode;
+        if !(adjacent && rising && prev.season == chosen.season) {
+            break;
+        }
+        first -= 1;
+    }
+    if first == chosen_at {
+        return Some(chosen);
+    }
+    let opening = markers[first];
+    let last = chosen.last_episode.unwrap_or(chosen.episode);
+    // A run too wide to be one file is not merged: the chosen marker stands.
+    Some(match plausible_range_end(opening.episode, last) {
+        Some(last) => Marker {
+            start: opening.start,
+            end: chosen.end,
+            season: chosen.season,
+            episode: opening.episode,
+            last_episode: Some(last),
+        },
+        None => chosen,
+    })
 }
 
 /// The words after a marker or date, up to the first noise or year token,
@@ -381,21 +438,29 @@ pub fn parse_media_filename(stem: &str) -> ParsedFilename {
     let without_brackets = BRACKET_GROUP_REGEX.replace_all(stem, "");
 
     // 2. Parens: a bare-year group is captured and removed; anything else
-    // keeps its content but loses the parens.
-    let mut paren_year: Option<u32> = None;
-    let without_parens =
-        PAREN_GROUP_REGEX.replace_all(&without_brackets, |caps: &regex::Captures| {
+    // keeps its content but loses the parens. The last year group is the
+    // release year, and where it sat is remembered: what follows it may be
+    // the release's tail rather than its title.
+    let paren_year_group = PAREN_GROUP_REGEX
+        .captures_iter(&without_brackets)
+        .filter_map(|caps| {
             let content = caps[1].trim();
-            if YEAR_TOKEN_REGEX.is_match(content) {
-                paren_year = content.parse().ok();
-                String::new()
-            } else {
-                format!(" {content} ")
-            }
-        });
+            let whole = caps.get(0).expect("group 0 always present");
+            YEAR_TOKEN_REGEX
+                .is_match(content)
+                .then(|| {
+                    content
+                        .parse::<u32>()
+                        .ok()
+                        .map(|year| (year, whole.start()))
+                })
+                .flatten()
+        })
+        .last();
+    let paren_year = paren_year_group.map(|(year, _)| year);
 
     // 3. Normalize separators.
-    let normalized = normalize_separators(&without_parens);
+    let normalized = normalized_without_brackets(&without_brackets);
 
     // 4. Episode marker.
     if let Some(marker) = choose_marker(&find_markers(&normalized), &normalized) {
@@ -443,8 +508,16 @@ pub fn parse_media_filename(stem: &str) -> ParsedFilename {
     // 6. No episode marker: extract a year from the token stream unless a
     // parenthesized year was already found.
     let tokens: Vec<&str> = normalized.split_whitespace().collect();
-    let (year, title_end): (Option<u32>, usize) = if paren_year.is_some() {
-        (paren_year, tokens.len())
+    let (year, title_end): (Option<u32>, usize) = if let Some((year, start)) = paren_year_group {
+        // The title ends at the year group when edition words follow it
+        // (`Movie (2019) Director's Cut`); otherwise the words after it are
+        // still the title.
+        let at = normalized_without_brackets(&without_brackets[..start])
+            .split_whitespace()
+            .count()
+            .min(tokens.len());
+        let edition_after = at > 0 && edition_from_tail(&tokens[at..]).is_some();
+        (Some(year), if edition_after { at } else { tokens.len() })
     } else {
         match tokens
             .iter()
@@ -457,9 +530,15 @@ pub fn parse_media_filename(stem: &str) -> ParsedFilename {
         }
     };
 
-    let title_tokens = truncate_at_noise(&tokens[..title_end]);
+    let title_tokens = movie_title_span(&tokens[..title_end]);
     let title = finalize_title(trim_punctuation(title_tokens), &normalized);
-    let edition = edition_tag.or_else(|| edition_from_tail(&tokens[title_tokens.len()..]));
+    // Edition words are read only after a title word: a name that is all
+    // noise has no title for them to follow.
+    let edition = edition_tag.or_else(|| {
+        (!title_tokens.is_empty())
+            .then(|| edition_from_tail(&tokens[title_tokens.len()..]))
+            .flatten()
+    });
 
     ParsedFilename {
         title,
@@ -477,16 +556,21 @@ pub fn parse_media_filename(stem: &str) -> ParsedFilename {
 /// (other parentheses unwrapped), and separators normalised to single spaces
 /// -- the form [`parse_media_filename`] searches for markers in.
 pub(crate) fn normalized_stem(stem: &str) -> String {
-    let without_brackets = BRACKET_GROUP_REGEX.replace_all(stem, "");
-    let without_parens =
-        PAREN_GROUP_REGEX.replace_all(&without_brackets, |caps: &regex::Captures| {
-            let content = caps[1].trim();
-            if YEAR_TOKEN_REGEX.is_match(content) {
-                String::new()
-            } else {
-                format!(" {content} ")
-            }
-        });
+    normalized_without_brackets(&BRACKET_GROUP_REGEX.replace_all(stem, ""))
+}
+
+/// [`normalized_stem`] of text whose bracket and brace groups are already
+/// gone. A year group becomes a space, so the words either side of it stay
+/// two words and a prefix of the text normalises to a prefix of the tokens.
+fn normalized_without_brackets(text: &str) -> String {
+    let without_parens = PAREN_GROUP_REGEX.replace_all(text, |caps: &regex::Captures| {
+        let content = caps[1].trim();
+        if YEAR_TOKEN_REGEX.is_match(content) {
+            " ".to_string()
+        } else {
+            format!(" {content} ")
+        }
+    });
     normalize_separators(&without_parens)
 }
 
@@ -681,6 +765,21 @@ mod tests {
         assert_eq!(result.title, "Movie");
     }
 
+    /// A `WIDTHxHEIGHT` resolution is release noise, wherever it sits.
+    #[test]
+    fn a_width_by_height_resolution_is_noise() {
+        assert_eq!(
+            parse_media_filename("Movie.Name.1920x1080.x264"),
+            parsed("Movie Name", None)
+        );
+        assert_eq!(
+            parse_media_filename("Movie Name 720x480"),
+            parsed("Movie Name", None)
+        );
+        let result = parse_media_filename("Show.S01E02.Title.1280x720");
+        assert_eq!(result.episode_title.as_deref(), Some("Title"));
+    }
+
     #[test]
     fn multi_episode_ranges() {
         let cases = [
@@ -688,6 +787,12 @@ mod tests {
             ("Show.S01E01-E03", Some(3)),
             ("Show.S01E01-03", Some(3)),
             ("Show.S01E01E02E03", Some(3)),
+            // Separate markers written back to back are one range.
+            ("Show.S01E01.S01E02", Some(2)),
+            ("Show.1x01.1x02", Some(2)),
+            ("Show.S01E01-S01E02.720p", Some(2)),
+            ("Show.S01E01E02.S01E03", Some(3)),
+            ("Show.S01.E01.S01.E02", Some(2)),
             // Not ranges: backwards, too wide, or a resolution.
             ("Show.S01E05-E03", None),
             ("Show.S01E01-2019", None),
@@ -702,6 +807,57 @@ mod tests {
             );
             assert_eq!(result.last_episode, expected, "{stem}");
         }
+    }
+
+    /// Only back-to-back markers of one season with rising episodes merge:
+    /// anything else is a title marker and the real one (decision D182-1).
+    #[test]
+    fn markers_that_do_not_form_a_run_stay_apart() {
+        let cases = [
+            // Another season.
+            ("Show.S01E01.S02E02", "Show S01E01", (2, 2, None)),
+            // Falling episodes.
+            ("Show.S01E03.S01E02", "Show S01E03", (1, 2, None)),
+            // A word between them.
+            (
+                "Show.S01E01.Title.S01E02",
+                "Show S01E01 Title",
+                (1, 2, None),
+            ),
+            // Too wide to be one file.
+            ("Show.S01E01.S01E60", "Show S01E01", (1, 60, None)),
+        ];
+        for (stem, title, (season, episode, last)) in cases {
+            let result = parse_media_filename(stem);
+            assert_eq!(result.title, title, "{stem}");
+            assert_eq!(
+                (result.season, result.episode, result.last_episode),
+                (Some(season), Some(episode), last),
+                "{stem}"
+            );
+        }
+    }
+
+    /// `S01.E01` and `S01 E01` are the `S01E01` marker with a separator in it.
+    #[test]
+    fn a_split_marker_parses() {
+        for stem in [
+            "Show.S01.E02.Title",
+            "Show S01 E02 Title",
+            "Show_s01_e02_Title",
+        ] {
+            let result = parse_media_filename(stem);
+            assert_eq!(
+                (result.season, result.episode),
+                (Some(1), Some(2)),
+                "{stem}"
+            );
+            assert_eq!(result.title, "Show", "{stem}");
+            assert_eq!(result.episode_title.as_deref(), Some("Title"), "{stem}");
+        }
+        // A season on its own is not a marker.
+        let result = parse_media_filename("Show.S01.Extras");
+        assert_eq!((result.season, result.episode), (None, None));
     }
 
     #[test]
@@ -755,6 +911,17 @@ mod tests {
             ("Movie.2019.1080p", None),
             // An edition word in the title is not an edition.
             ("The.Ultimate.Gift.2006", None),
+            // Edition words after a parenthesised year (Plex/Radarr naming).
+            ("Movie (2019) Director's Cut", Some("Director's Cut")),
+            ("Blade Runner (1982) The Final Cut", Some("Final Cut")),
+            ("Movie (2019) Extended", Some("Extended")),
+            // A noise word opening the title is a title word, not an edition.
+            ("Uncut Gems (2019)", None),
+            ("Uncut.Gems.2019.1080p", None),
+            ("IMAX Hubble (2010)", None),
+            ("Uncut.Gems.2019.Directors.Cut", Some("Director's Cut")),
+            // A name that is all noise has no title for an edition to follow.
+            ("Extended.1080p", None),
             // Episodes carry no edition.
             ("Show.S01E01.Extended", None),
         ];
@@ -762,6 +929,39 @@ mod tests {
             assert_eq!(
                 parse_media_filename(stem).edition.as_deref(),
                 expected,
+                "{stem}"
+            );
+        }
+    }
+
+    /// Edition words after a parenthesised year are the edition, not the
+    /// title, so every edition of a film keys the same title; other words
+    /// after the year are still the title. A noise word that opens a title is
+    /// part of it.
+    #[test]
+    fn the_title_around_a_year_and_opening_noise_words() {
+        let cases = [
+            ("Movie (2019) Director's Cut", "Movie", Some(2019)),
+            (
+                "Blade Runner (1982) The Final Cut",
+                "Blade Runner",
+                Some(1982),
+            ),
+            ("Kill Bill (2003) Vol 1", "Kill Bill Vol 1", Some(2003)),
+            ("Uncut Gems (2019)", "Uncut Gems", Some(2019)),
+            ("Uncut.Gems.2019.1080p", "Uncut Gems", Some(2019)),
+            ("IMAX Hubble (2010)", "IMAX Hubble", Some(2010)),
+            (
+                "REPACK.Movie.Name.2019.1080p",
+                "REPACK Movie Name",
+                Some(2019),
+            ),
+        ];
+        for (stem, title, year) in cases {
+            let result = parse_media_filename(stem);
+            assert_eq!(
+                (result.title.as_str(), result.year),
+                (title, year),
                 "{stem}"
             );
         }
@@ -913,14 +1113,18 @@ mod properties {
 
         // With several word-initial markers and no release noise, the last is
         // the real one. Words start with `j`, `k` or `q`, which no noise
-        // prefix does, and cannot spell a marker or a year.
+        // prefix does, and cannot spell a marker or a year. A word separates
+        // each marker from the next, so none of them form a run.
         #[test]
         fn k_markers_without_noise_resolve_to_the_last(
             words in proptest::collection::vec("[jkq][a-z]{2,5}", 1..4),
             markers in proptest::collection::vec((0u32..40, 0u32..40), 1..4),
         ) {
             let mut parts: Vec<String> = words.clone();
-            for (season, episode) in &markers {
+            for (n, (season, episode)) in markers.iter().enumerate() {
+                if n > 0 {
+                    parts.push("jkq".to_string());
+                }
                 parts.push(format!("S{season:02}E{episode:02}"));
             }
             let stem = parts.join(".");
@@ -928,6 +1132,37 @@ mod properties {
             let (season, episode) = *markers.last().expect("at least one marker");
             prop_assert_eq!(parsed.season, Some(season));
             prop_assert_eq!(parsed.episode, Some(episode));
+        }
+
+        // Back-to-back markers of one season with rising episodes are one
+        // file: it starts at the first and ends at the last, however many
+        // there are and however they are written.
+        #[test]
+        fn a_run_of_rising_markers_is_one_range(
+            season in 1u32..30,
+            first in 1u32..40,
+            steps in proptest::collection::vec(1u32..5, 1..4),
+            cross in any::<bool>(),
+        ) {
+            let mut episodes = vec![first];
+            for step in &steps {
+                episodes.push(episodes.last().expect("non-empty") + step);
+            }
+            let markers: Vec<String> = episodes
+                .iter()
+                .map(|episode| if cross {
+                    format!("{season}x{episode:02}")
+                } else {
+                    format!("S{season:02}E{episode:02}")
+                })
+                .collect();
+            let stem = format!("Show.{}.720p", markers.join("."));
+            let parsed = parse_media_filename(&stem);
+            let last = *episodes.last().expect("non-empty");
+            prop_assert_eq!(parsed.season, Some(season));
+            prop_assert_eq!(parsed.episode, Some(first));
+            prop_assert_eq!(parsed.last_episode, Some(last));
+            prop_assert_eq!(parsed.title, "Show");
         }
 
         // `.`, `_` and space all separate words, so which one a release uses
