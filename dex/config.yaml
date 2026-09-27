@@ -42,6 +42,14 @@ staticClients:
       # 404s. Approving a dev device login in a browser therefore needs the
       # address bar edited to /dex/device/callback?... once; Beam's side of
       # the flow is unaffected.
+      #
+      # Known Dex limit (ADR-0017 D151-9): Dex's device endpoint reads the
+      # client secret from the form only, and Beam authenticates device
+      # requests with HTTP Basic as it does the code exchange. Dex never
+      # rejects the request, so Beam cannot fall back; approval then fails at
+      # /dex/device/callback with "Invalid client credentials.". A dev device
+      # login therefore starts (the smoke test checks that much) but does not
+      # complete against this Dex.
       - "/device/callback"
 
 enablePasswordDB: true

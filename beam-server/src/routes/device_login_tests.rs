@@ -17,7 +17,9 @@ use beam_auth::utils::device_auth_store::in_memory::InMemoryDeviceAuthStore;
 use beam_auth::utils::oidc::fake::{
     FAKE_DEVICE_EXPIRES_IN_SECS, FAKE_DEVICE_INTERVAL_SECS, FAKE_USER_CODE, FakeOidcClient,
 };
-use beam_auth::utils::oidc::{DevicePoll, NotConfiguredOidcClient, OidcClient, OidcIdentity};
+use beam_auth::utils::oidc::{
+    DevicePoll, NotConfiguredOidcClient, OidcClient, OidcError, OidcIdentity,
+};
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::repository::UserRepository;
 use beam_auth::utils::repository::in_memory::InMemoryUserRepository;
@@ -371,7 +373,7 @@ async fn an_unknown_handle_is_400() {
 #[tokio::test]
 async fn an_idp_outage_is_503_and_keeps_the_flow_for_the_next_poll() {
     let harness = harness(FakeOidcClient::default().with_device_script(vec![
-        Err("connection refused".to_owned()),
+        Err(OidcError::Exchange("connection refused".to_owned())),
         Ok(DevicePoll::Complete(identity(json!({})))),
     ]));
     let handle = started(&harness).await;

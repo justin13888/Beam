@@ -138,10 +138,10 @@ mod discovered {
     use async_trait::async_trait;
     use openidconnect::core::{
         CoreAuthDisplay, CoreAuthenticationFlow, CoreClaimName, CoreClaimType, CoreClient,
-        CoreClientAuthMethod, CoreDeviceAuthorizationResponse, CoreGrantType, CoreIdToken,
-        CoreIdTokenClaims, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm,
-        CoreJweKeyManagementAlgorithm, CoreResponseMode, CoreResponseType,
-        CoreSubjectIdentifierType, CoreTokenResponse,
+        CoreClientAuthMethod, CoreDeviceAuthorizationResponse, CoreErrorResponseType,
+        CoreGrantType, CoreIdToken, CoreIdTokenClaims, CoreJsonWebKey,
+        CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm, CoreResponseMode,
+        CoreResponseType, CoreSubjectIdentifierType, CoreTokenResponse,
     };
     use openidconnect::{
         AdditionalProviderMetadata, AsyncHttpClient, HttpClientError, HttpRequest, HttpResponse,
@@ -150,8 +150,8 @@ mod discovered {
     use openidconnect::{
         AuthorizationCode, ClientId, ClientSecret, CsrfToken, DeviceAuthorizationUrl,
         DeviceCodeErrorResponse, DeviceCodeErrorResponseType, EndpointMaybeSet, EndpointNotSet,
-        EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
-        TokenResponse,
+        EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
+        RequestTokenError, Scope, TokenResponse,
     };
     use serde::{Deserialize, Serialize};
     use std::future::Future;
@@ -289,32 +289,14 @@ mod discovered {
     /// How Beam authenticates its device-grant requests to the IdP.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum DeviceClientAuth {
-        /// `client_secret_post`: `client_id` and `client_secret` in the form.
-        Post,
         /// `client_secret_basic`: the credentials in an `Authorization`
-        /// header, `client_id` repeated in the form as an identifier.
+        /// header, `client_id` repeated in the form as an identifier. What
+        /// the code exchange uses, so what every device login starts with.
         Basic,
-    }
-
-    /// Picks the device-grant client authentication from discovery.
-    ///
-    /// `client_secret_post` whenever the IdP advertises it. The device
-    /// authorization request carries `client_id` in its form regardless (RFC
-    /// 8628 section 3.1), and Dex -- found driving v2.45.1 -- reads the client
-    /// secret only from that form: given Basic credentials it records an
-    /// empty secret with the device request, then fails its own internal code
-    /// exchange at approval with `invalid_client`. Otherwise
-    /// `client_secret_basic`, which RFC 8414 section 2 makes the default when
-    /// the document lists nothing.
-    pub(crate) fn device_client_auth(metadata: &DeviceAwareProviderMetadata) -> DeviceClientAuth {
-        let advertises_post = metadata
-            .token_endpoint_auth_methods_supported()
-            .is_some_and(|methods| methods.contains(&CoreClientAuthMethod::ClientSecretPost));
-        if advertises_post {
-            DeviceClientAuth::Post
-        } else {
-            DeviceClientAuth::Basic
-        }
+        /// `client_secret_post`: `client_id` and `client_secret` in the form.
+        /// Only ever reached by [`DiscoveredOidcClient::begin_device_auth`]'s
+        /// one retry after the IdP refused Basic with `invalid_client`.
+        Post,
     }
 
     /// RFC 8628 section 3.4's grant type for polling the token endpoint.
@@ -330,8 +312,17 @@ mod discovered {
         scopes: Vec<String>,
         /// From discovery; `None` when the IdP does not offer the grant.
         device_url: Option<DeviceAuthorizationUrl>,
-        /// From discovery: how the device-grant requests authenticate.
-        device_auth: DeviceClientAuth,
+        /// How the device-grant requests authenticate: Basic, exactly as the
+        /// code exchange does, until the IdP refuses it with
+        /// `invalid_client` and a `client_secret_post` retry succeeds. Then
+        /// Post, for every later device request this process sends.
+        ///
+        /// Not read from discovery. `token_endpoint_auth_methods_supported`
+        /// lists what the IdP can accept from *some* client (RFC 8414
+        /// section 2); the method *this* client is registered with is not
+        /// published anywhere, and IdPs that pin one per client (Authelia,
+        /// Zitadel) refuse the other.
+        device_auth: std::sync::Mutex<DeviceClientAuth>,
         /// Kept for the device-token poll, which Beam sends itself (see
         /// `poll_device_token`).
         client_id: String,
@@ -356,7 +347,6 @@ mod discovered {
                     .await
                     .map_err(|e| OidcError::Discovery(e.to_string()))?;
             let device_url = device_endpoint(&provider_metadata);
-            let device_auth = device_client_auth(&provider_metadata);
 
             let redirect_url = RedirectUrl::new(redirect_url.to_string())
                 .map_err(|e| OidcError::Discovery(e.to_string()))?;
@@ -373,14 +363,22 @@ mod discovered {
                 http_client,
                 scopes,
                 device_url,
-                device_auth,
+                device_auth: std::sync::Mutex::new(DeviceClientAuth::Basic),
                 client_id: client_id.to_owned(),
                 client_secret: client_secret.to_owned(),
             })
         }
 
+        /// The method device requests authenticate with now.
+        fn device_auth(&self) -> DeviceClientAuth {
+            *self
+                .device_auth
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
         /// The one form POST RFC 8628 section 3.4 describes, authenticated
-        /// the way the device authorization request was.
+        /// the way the device authorization request last succeeded.
         fn device_token_request(
             &self,
             token_url: &str,
@@ -391,8 +389,72 @@ mod discovered {
                 &self.client_id,
                 &self.client_secret,
                 device_code,
-                self.device_auth,
+                self.device_auth(),
             )
+        }
+
+        /// One device authorization request (RFC 8628 section 3.1),
+        /// authenticated with `auth`.
+        async fn request_device_authorization(
+            &self,
+            device_url: DeviceAuthorizationUrl,
+            auth: DeviceClientAuth,
+        ) -> Result<CoreDeviceAuthorizationResponse, DeviceAuthorizationFailure> {
+            let client = self.client.clone().set_device_authorization_url(device_url);
+            let client = match auth {
+                // oauth2 puts `client_id` and `client_secret` in the form.
+                DeviceClientAuth::Post => {
+                    client.set_auth_type(openidconnect::AuthType::RequestBody)
+                }
+                DeviceClientAuth::Basic => client,
+            };
+            let mut request = client.exchange_device_code();
+            if auth == DeviceClientAuth::Basic {
+                // `client_id` in the form as well as in the Basic header: RFC
+                // 8628 section 3.1 makes it optional for an authenticated
+                // client, but some IdPs (Dex) read it from the form only. It
+                // is an identifier, not a second authentication method.
+                request = request.add_extra_param("client_id", self.client_id.clone());
+            }
+            // `openid` is skipped because openidconnect already adds it.
+            for scope in self
+                .scopes
+                .iter()
+                .filter(|scope| scope.as_str() != "openid")
+            {
+                request = request.add_scope(Scope::new(scope.clone()));
+            }
+            request
+                .request_async(&self.http_client)
+                .await
+                .map_err(|e| match e {
+                    RequestTokenError::ServerResponse(ref response)
+                        if *response.error() == CoreErrorResponseType::InvalidClient =>
+                    {
+                        DeviceAuthorizationFailure::InvalidClient(e.to_string())
+                    }
+                    other => DeviceAuthorizationFailure::Other(other.to_string()),
+                })
+        }
+    }
+
+    /// Why a device authorization request failed, split where
+    /// `begin_device_auth` decides whether to retry.
+    #[derive(Debug)]
+    enum DeviceAuthorizationFailure {
+        /// The IdP answered `invalid_client`: it refused how Beam
+        /// authenticated, which the other method may fix.
+        InvalidClient(String),
+        /// Anything else, which the other method would not.
+        Other(String),
+    }
+
+    impl From<DeviceAuthorizationFailure> for OidcError {
+        fn from(failure: DeviceAuthorizationFailure) -> Self {
+            match failure {
+                DeviceAuthorizationFailure::InvalidClient(message)
+                | DeviceAuthorizationFailure::Other(message) => OidcError::Exchange(message),
+            }
         }
     }
 
@@ -568,40 +630,39 @@ mod discovered {
             Ok(identity_from(id_token, claims))
         }
 
+        /// Authenticates the way the code exchange does -- HTTP Basic -- and
+        /// retries **once** with `client_secret_post` when the IdP answers
+        /// `invalid_client`, the answer of an IdP whose registration for this
+        /// client names the other method. Whichever succeeds is kept for the
+        /// rest of the process, so the polls and later logins do not pay for
+        /// the refusal again.
         async fn begin_device_auth(&self) -> Result<DeviceAuthStart, OidcError> {
             let device_url = self
                 .device_url
                 .clone()
                 .ok_or(OidcError::DeviceFlowUnsupported)?;
-            let client = self.client.clone().set_device_authorization_url(device_url);
 
-            // `openid` is skipped below because openidconnect already adds it.
-            let client = match self.device_auth {
-                // oauth2 puts `client_id` and `client_secret` in the form.
-                DeviceClientAuth::Post => {
-                    client.set_auth_type(openidconnect::AuthType::RequestBody)
-                }
-                DeviceClientAuth::Basic => client,
-            };
-            let mut request = client.exchange_device_code();
-            if self.device_auth == DeviceClientAuth::Basic {
-                // `client_id` in the form as well as in the Basic header: RFC
-                // 8628 section 3.1 makes it optional for an authenticated
-                // client, but some IdPs read it from the form only. It is an
-                // identifier, not a second authentication method.
-                request = request.add_extra_param("client_id", self.client_id.clone());
-            }
-            for scope in self
-                .scopes
-                .iter()
-                .filter(|scope| scope.as_str() != "openid")
-            {
-                request = request.add_scope(Scope::new(scope.clone()));
-            }
-            let details: CoreDeviceAuthorizationResponse = request
-                .request_async(&self.http_client)
+            let auth = self.device_auth();
+            let details = match self
+                .request_device_authorization(device_url.clone(), auth)
                 .await
-                .map_err(|e| OidcError::Exchange(e.to_string()))?;
+            {
+                Ok(details) => details,
+                Err(DeviceAuthorizationFailure::InvalidClient(_))
+                    if auth == DeviceClientAuth::Basic =>
+                {
+                    let details = self
+                        .request_device_authorization(device_url, DeviceClientAuth::Post)
+                        .await?;
+                    *self
+                        .device_auth
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        DeviceClientAuth::Post;
+                    details
+                }
+                Err(failure) => return Err(failure.into()),
+            };
 
             Ok(DeviceAuthStart {
                 device_code: details.device_code().secret().clone(),
@@ -696,7 +757,7 @@ mod discovered {
 
         /// Reads one HTTP/1.1 request (head plus a `Content-Length` body)
         /// off `stream` and returns it raw.
-        async fn read_request(stream: &mut TcpStream) -> String {
+        pub(super) async fn read_request(stream: &mut TcpStream) -> String {
             let mut raw = Vec::new();
             let mut chunk = [0u8; 1024];
             loop {
@@ -867,8 +928,7 @@ mod discovered {
     mod device_grant_tests {
         use super::{
             DeviceAwareProviderMetadata, DeviceClientAuth, DeviceTokenOutcome,
-            classify_device_token_response, device_client_auth, device_endpoint,
-            device_token_request,
+            classify_device_token_response, device_endpoint, device_token_request,
         };
         use crate::utils::oidc::OidcError;
         use base64::Engine as _;
@@ -909,28 +969,6 @@ mod discovered {
             // Most IdPs that do not offer the grant simply omit the field; that
             // must not fail discovery and take the browser login down with it.
             assert!(device_endpoint(&discovery(json!({}))).is_none());
-        }
-
-        #[test]
-        fn device_requests_post_the_secret_when_the_idp_advertises_it() {
-            // Dex advertises both and needs the form: with Basic it approves
-            // the user and then fails its own exchange with invalid_client.
-            let both = discovery(json!({
-                "token_endpoint_auth_methods_supported":
-                    ["client_secret_basic", "client_secret_post"],
-            }));
-            assert_eq!(device_client_auth(&both), DeviceClientAuth::Post);
-
-            let basic_only = discovery(json!({
-                "token_endpoint_auth_methods_supported": ["client_secret_basic"],
-            }));
-            assert_eq!(device_client_auth(&basic_only), DeviceClientAuth::Basic);
-
-            // RFC 8414: an absent list means client_secret_basic.
-            assert_eq!(
-                device_client_auth(&discovery(json!({}))),
-                DeviceClientAuth::Basic
-            );
         }
 
         fn body(value: Value) -> Vec<u8> {
@@ -1114,6 +1152,441 @@ mod discovered {
         }
     }
 
+    /// `begin_device_auth` and `poll_device_token` against a loopback IdP.
+    ///
+    /// The fake IdP is a real HTTP listener on 127.0.0.1 serving discovery, a
+    /// JWKS, a device authorization endpoint and a token endpoint, so these
+    /// drive the whole [`DiscoveredOidcClient`] -- discovery, how it
+    /// authenticates each request, the retry, the ID token verifier -- rather
+    /// than the pure helpers above. It signs ID tokens with a test-only RSA
+    /// key whose public half it serves as its JWKS.
+    #[cfg(test)]
+    mod device_grant_wire_tests {
+        use super::DiscoveredOidcClient;
+        use super::http_client_tests::read_request;
+        use crate::utils::oidc::{DevicePoll, OidcClient, OidcError};
+        use base64::Engine as _;
+        use openidconnect::core::{
+            CoreIdToken, CoreIdTokenClaims, CoreJwsSigningAlgorithm, CoreRsaPrivateSigningKey,
+        };
+        use openidconnect::{
+            Audience, EmptyAdditionalClaims, IssuerUrl, JsonWebKeyId, PrivateSigningKey,
+            StandardClaims, SubjectIdentifier,
+        };
+        use serde_json::json;
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        /// A key used for nothing but signing these tests' ID tokens.
+        const SIGNING_KEY_PEM: &str = include_str!("testdata/fake-idp-rs256.pem");
+        const KEY_ID: &str = "fake-idp-key";
+        const CLIENT_ID: &str = "beam";
+        const CLIENT_SECRET: &str = "s3cret:with&odd=chars";
+
+        fn signing_key() -> CoreRsaPrivateSigningKey {
+            CoreRsaPrivateSigningKey::from_pem(
+                SIGNING_KEY_PEM,
+                Some(JsonWebKeyId::new(KEY_ID.to_owned())),
+            )
+            .expect("the test key parses")
+        }
+
+        /// Which client authentication the fake IdP's registration for Beam
+        /// names. Either way it advertises both in discovery, as a real IdP
+        /// that supports both does.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Registered {
+            /// `client_secret_basic`, as Authelia is configured in Beam's
+            /// docs: the secret in the form is refused.
+            Basic,
+            /// `client_secret_post`: a Basic header is refused.
+            Post,
+            /// Refuses every request with `invalid_client`.
+            Nothing,
+        }
+
+        /// One request the fake IdP received.
+        #[derive(Clone, Debug)]
+        struct Received {
+            path: String,
+            authorization: Option<String>,
+            form: Vec<(String, String)>,
+        }
+
+        impl Received {
+            fn form_value(&self, name: &str) -> Option<&str> {
+                self.form
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.as_str())
+            }
+
+            fn basic_credentials(&self) -> Option<String> {
+                let encoded = self.authorization.as_deref()?.strip_prefix("Basic ")?;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()?;
+                String::from_utf8(decoded).ok()
+            }
+        }
+
+        struct FakeIdp {
+            issuer: String,
+            received: Arc<Mutex<Vec<Received>>>,
+            /// Bodies the token endpoint answers with, front first, once the
+            /// request authenticated. Empty: `authorization_pending`.
+            tokens: Arc<Mutex<VecDeque<String>>>,
+        }
+
+        impl FakeIdp {
+            async fn start(registered: Registered) -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let issuer = format!("http://{}", listener.local_addr().unwrap());
+                let received = Arc::new(Mutex::new(Vec::new()));
+                let tokens = Arc::new(Mutex::new(VecDeque::new()));
+                let jwks = json!({ "keys": [signing_key().as_verification_key()] });
+
+                let (server_issuer, server_received, server_tokens) =
+                    (issuer.clone(), received.clone(), tokens.clone());
+                tokio::spawn(async move {
+                    loop {
+                        let Ok((mut stream, _)) = listener.accept().await else {
+                            return;
+                        };
+                        let raw = read_request(&mut stream).await;
+                        let request = parse(&raw);
+                        let (status, body) =
+                            answer(registered, &server_issuer, &jwks, &request, &server_tokens);
+                        if request.path != "/.well-known/openid-configuration"
+                            && request.path != "/keys"
+                        {
+                            server_received.lock().unwrap().push(request);
+                        }
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                });
+
+                Self {
+                    issuer,
+                    received,
+                    tokens,
+                }
+            }
+
+            async fn client(&self) -> DiscoveredOidcClient {
+                DiscoveredOidcClient::discover(
+                    &self.issuer,
+                    CLIENT_ID,
+                    CLIENT_SECRET,
+                    "http://127.0.0.1/v1/auth/callback",
+                    vec!["openid".to_owned(), "email".to_owned()],
+                )
+                .await
+                .expect("discovery against the fake IdP")
+            }
+
+            /// Every device-grant request it received, in order.
+            fn received(&self) -> Vec<Received> {
+                self.received.lock().unwrap().clone()
+            }
+
+            fn will_issue(&self, body: String) {
+                self.tokens.lock().unwrap().push_back(body);
+            }
+
+            /// A token response carrying an ID token with these claims,
+            /// signed with the key the JWKS serves.
+            fn id_token(&self, issuer: &str, audience: &str) -> String {
+                let now = chrono::Utc::now();
+                let claims = CoreIdTokenClaims::new(
+                    IssuerUrl::new(issuer.to_owned()).unwrap(),
+                    vec![Audience::new(audience.to_owned())],
+                    now + chrono::Duration::minutes(5),
+                    now,
+                    StandardClaims::new(SubjectIdentifier::new("tv-user".to_owned())),
+                    EmptyAdditionalClaims {},
+                );
+                let token = CoreIdToken::new(
+                    claims,
+                    &signing_key(),
+                    CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+                    None,
+                    None,
+                )
+                .unwrap();
+                json!({
+                    "access_token": "access",
+                    "token_type": "Bearer",
+                    "id_token": token.to_string(),
+                })
+                .to_string()
+            }
+        }
+
+        fn parse(raw: &str) -> Received {
+            let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
+            let mut lines = head.lines();
+            let path = lines
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default()
+                .to_owned();
+            let authorization = lines.find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("authorization")
+                    .then(|| value.trim().to_owned())
+            });
+            let form = openidconnect::url::form_urlencoded::parse(body.as_bytes())
+                .into_owned()
+                .collect();
+            Received {
+                path,
+                authorization,
+                form,
+            }
+        }
+
+        /// Whether `request` authenticated the way `registered` demands --
+        /// and only that way (RFC 6749 section 2.3).
+        fn authenticated(registered: Registered, request: &Received) -> bool {
+            let secret_in_form = request.form_value("client_secret");
+            match registered {
+                Registered::Basic => {
+                    let expected = format!("{CLIENT_ID}:s3cret%3Awith%26odd%3Dchars");
+                    request.basic_credentials() == Some(expected) && secret_in_form.is_none()
+                }
+                Registered::Post => {
+                    request.authorization.is_none()
+                        && request.form_value("client_id") == Some(CLIENT_ID)
+                        && secret_in_form == Some(CLIENT_SECRET)
+                }
+                Registered::Nothing => false,
+            }
+        }
+
+        fn answer(
+            registered: Registered,
+            issuer: &str,
+            jwks: &serde_json::Value,
+            request: &Received,
+            tokens: &Mutex<VecDeque<String>>,
+        ) -> (&'static str, String) {
+            let invalid_client = || {
+                (
+                    "401 Unauthorized",
+                    json!({ "error": "invalid_client" }).to_string(),
+                )
+            };
+            match request.path.as_str() {
+                "/.well-known/openid-configuration" => (
+                    "200 OK",
+                    json!({
+                        "issuer": issuer,
+                        "authorization_endpoint": format!("{issuer}/auth"),
+                        "token_endpoint": format!("{issuer}/token"),
+                        "jwks_uri": format!("{issuer}/keys"),
+                        "device_authorization_endpoint": format!("{issuer}/device/code"),
+                        "response_types_supported": ["code"],
+                        "subject_types_supported": ["public"],
+                        "id_token_signing_alg_values_supported": ["RS256"],
+                        // Capability, not this client's registration: both
+                        // are listed whichever one `registered` names.
+                        "token_endpoint_auth_methods_supported":
+                            ["client_secret_basic", "client_secret_post"],
+                    })
+                    .to_string(),
+                ),
+                "/keys" => ("200 OK", jwks.to_string()),
+                "/device/code" if authenticated(registered, request) => (
+                    "200 OK",
+                    json!({
+                        "device_code": "the-device-code",
+                        "user_code": "BCDF-GHJK",
+                        "verification_uri": format!("{issuer}/device"),
+                        "expires_in": 600,
+                        "interval": 5,
+                    })
+                    .to_string(),
+                ),
+                "/token" if authenticated(registered, request) => {
+                    match tokens.lock().unwrap().pop_front() {
+                        Some(body) => ("200 OK", body),
+                        None => (
+                            "400 Bad Request",
+                            json!({ "error": "authorization_pending" }).to_string(),
+                        ),
+                    }
+                }
+                "/device/code" | "/token" => invalid_client(),
+                _ => ("404 Not Found", "{}".to_owned()),
+            }
+        }
+
+        #[tokio::test]
+        async fn an_idp_registered_for_basic_is_sent_basic_even_when_it_lists_post() {
+            // Authelia configured as Beam's docs say (client_secret_basic)
+            // advertises both methods and refuses the unregistered one.
+            let idp = FakeIdp::start(Registered::Basic).await;
+            let client = idp.client().await;
+
+            let start = client
+                .begin_device_auth()
+                .await
+                .expect("device login starts");
+            assert_eq!(start.user_code, "BCDF-GHJK");
+
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID));
+            let poll = client.poll_device_token(&start.device_code).await;
+            assert!(
+                matches!(poll, Ok(DevicePoll::Complete(ref identity)) if identity.subject == "tv-user"),
+                "{poll:?}"
+            );
+
+            let received = idp.received();
+            assert_eq!(
+                received.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+                ["/device/code", "/token"],
+                "one request each: Basic is accepted first time"
+            );
+            for request in &received {
+                assert!(request.authorization.is_some(), "{request:?}");
+                assert_eq!(request.form_value("client_secret"), None, "{request:?}");
+            }
+            assert_eq!(
+                received[1].form_value("device_code"),
+                Some("the-device-code")
+            );
+        }
+
+        #[tokio::test]
+        async fn client_id_is_in_every_device_request_form_whichever_method_authenticates() {
+            // Dex reads `client_id` from the form only and answers "Invalid
+            // client_id" to a Basic-only request.
+            for registered in [Registered::Basic, Registered::Post] {
+                let idp = FakeIdp::start(registered).await;
+                let client = idp.client().await;
+
+                let start = client
+                    .begin_device_auth()
+                    .await
+                    .expect("device login starts");
+                client.poll_device_token(&start.device_code).await.unwrap();
+
+                for request in idp.received() {
+                    assert_eq!(
+                        request.form_value("client_id"),
+                        Some(CLIENT_ID),
+                        "{registered:?}: {request:?}"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn an_idp_refusing_basic_gets_one_post_retry_which_every_later_request_keeps() {
+            let idp = FakeIdp::start(Registered::Post).await;
+            let client = idp.client().await;
+
+            let start = client
+                .begin_device_auth()
+                .await
+                .expect("the retry succeeds");
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID));
+            let poll = client.poll_device_token(&start.device_code).await;
+            assert!(matches!(poll, Ok(DevicePoll::Complete(_))), "{poll:?}");
+            // A second login goes straight to the method that worked.
+            client.begin_device_auth().await.expect("a second login");
+
+            let received = idp.received();
+            let summary: Vec<_> = received
+                .iter()
+                .map(|r| (r.path.as_str(), r.authorization.is_some()))
+                .collect();
+            assert_eq!(
+                summary,
+                [
+                    ("/device/code", true),
+                    ("/device/code", false),
+                    ("/token", false),
+                    ("/device/code", false),
+                ],
+                "Basic first, then client_secret_post, remembered"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_idp_refusing_both_methods_is_asked_twice_and_no_more() {
+            let idp = FakeIdp::start(Registered::Nothing).await;
+            let client = idp.client().await;
+
+            let result = client.begin_device_auth().await;
+
+            assert!(
+                matches!(result, Err(OidcError::Exchange(ref message)) if message.contains("invalid_client")),
+                "{result:?}"
+            );
+            assert_eq!(idp.received().len(), 2, "Basic, then one post retry");
+        }
+
+        #[tokio::test]
+        async fn an_id_token_for_another_audience_or_issuer_is_refused() {
+            let idp = FakeIdp::start(Registered::Basic).await;
+            let client = idp.client().await;
+            let start = client.begin_device_auth().await.unwrap();
+
+            for (issuer, audience) in [
+                (idp.issuer.clone(), "some-other-client".to_owned()),
+                ("https://impostor.test".to_owned(), CLIENT_ID.to_owned()),
+            ] {
+                idp.will_issue(idp.id_token(&issuer, &audience));
+                let poll = client.poll_device_token(&start.device_code).await;
+                assert!(
+                    matches!(poll, Err(OidcError::ClaimsVerification(_))),
+                    "iss {issuer}, aud {audience}: {poll:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_device_grant_id_token_needs_no_nonce() {
+            // The device grant has no authorization request to bind a nonce
+            // into; a verifier demanding one would refuse every approval.
+            // `id_token` mints no `nonce` claim.
+            let idp = FakeIdp::start(Registered::Basic).await;
+            let client = idp.client().await;
+            let start = client.begin_device_auth().await.unwrap();
+
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID));
+            let poll = client.poll_device_token(&start.device_code).await;
+
+            match poll {
+                Ok(DevicePoll::Complete(identity)) => {
+                    assert_eq!(identity.issuer, idp.issuer);
+                    assert!(identity.claims.get("nonce").is_none());
+                }
+                other => panic!("expected a verified identity, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_poll_before_approval_is_pending() {
+            let idp = FakeIdp::start(Registered::Basic).await;
+            let client = idp.client().await;
+            let start = client.begin_device_auth().await.unwrap();
+
+            let poll = client.poll_device_token(&start.device_code).await;
+
+            assert!(matches!(poll, Ok(DevicePoll::Pending)), "{poll:?}");
+        }
+    }
+
     #[cfg(test)]
     mod claims_payload_tests {
         use super::decode_claims_payload;
@@ -1242,7 +1715,10 @@ pub mod fake {
         device_flow: bool,
         /// Answers for successive device polls, front first. Once empty,
         /// every poll is `Pending` -- the user simply has not decided.
-        device_script: Mutex<VecDeque<Result<DevicePoll, String>>>,
+        device_script: Mutex<VecDeque<Result<DevicePoll, OidcError>>>,
+        /// `(expires_in_secs, interval_secs)` every device authorization
+        /// grants.
+        device_grant: (u64, u64),
         device_polls: Mutex<u64>,
         device_begins: Mutex<u64>,
         /// Every device code the server polled with, in order.
@@ -1257,6 +1733,7 @@ pub mod fake {
                 begin_counter: Mutex::new(0),
                 device_flow: true,
                 device_script: Mutex::new(VecDeque::new()),
+                device_grant: (FAKE_DEVICE_EXPIRES_IN_SECS, FAKE_DEVICE_INTERVAL_SECS),
                 device_polls: Mutex::new(0),
                 device_begins: Mutex::new(0),
                 polled_codes: Mutex::new(Vec::new()),
@@ -1295,12 +1772,21 @@ pub mod fake {
             self.last_begin.lock().unwrap().clone()
         }
 
-        /// Scripts what successive device-token polls answer. An `Err` is an
-        /// IdP failure (`OidcError::Exchange`). Polls past the end of the
-        /// script are `Pending`.
+        /// Scripts what successive device-token polls answer, errors
+        /// included: `OidcError::Exchange` for an IdP that could not be
+        /// asked, `MissingIdToken`/`ClaimsVerification` for an answer that
+        /// did not verify. Polls past the end of the script are `Pending`.
         #[must_use]
-        pub fn with_device_script(self, script: Vec<Result<DevicePoll, String>>) -> Self {
+        pub fn with_device_script(self, script: Vec<Result<DevicePoll, OidcError>>) -> Self {
             *self.device_script.lock().unwrap() = script.into();
+            self
+        }
+
+        /// Makes every device authorization grant this lifetime and poll
+        /// interval, in seconds, in place of the defaults.
+        #[must_use]
+        pub fn with_device_grant(mut self, expires_in_secs: u64, interval_secs: u64) -> Self {
+            self.device_grant = (expires_in_secs, interval_secs);
             self
         }
 
@@ -1374,8 +1860,8 @@ pub mod fake {
                 verification_uri_complete: Some(format!(
                     "https://fake-idp.test/device?user_code={FAKE_USER_CODE}"
                 )),
-                expires_in_secs: FAKE_DEVICE_EXPIRES_IN_SECS,
-                interval_secs: FAKE_DEVICE_INTERVAL_SECS,
+                expires_in_secs: self.device_grant.0,
+                interval_secs: self.device_grant.1,
             })
         }
 
@@ -1393,7 +1879,6 @@ pub mod fake {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Ok(DevicePoll::Pending))
-                .map_err(OidcError::Exchange)
         }
     }
 }

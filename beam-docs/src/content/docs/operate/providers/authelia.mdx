@@ -51,7 +51,10 @@ authority.
    ```
 
    Beam always sends a PKCE `S256` challenge and authenticates to the token endpoint with HTTP
-   Basic, which is what `client_secret_basic` names.
+   Basic, which is what `client_secret_basic` names. Device sign-in authenticates the same way.
+   Only if the provider refuses Basic with `invalid_client` does Beam retry a device sign-in once
+   with `client_secret_post`, and it keeps using whichever method worked until it restarts. The
+   browser sign-in never falls back, so keep `client_secret_basic` here.
 
 4. **Configure Beam.** The issuer is Authelia's root URL. Add `groups` to the requested scopes —
    Authelia only releases the `groups` claim when that scope is asked for:
