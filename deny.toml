@@ -78,11 +78,6 @@ ignore = [
     # doesn't apply to our usage. No safe upgrade exists upstream as of this
     # writing; re-evaluate when RustCrypto/RSA ships a constant-time impl.
     { id = "RUSTSEC-2023-0071", reason = "timing side-channel only affects RSA private-key ops; beam only verifies signatures against public JWKS keys as an OIDC relying party" },
-    # proc-macro-error2 (via sea-orm-macros -> sea-bae): compile-time-only
-    # proc-macro dependency of our ORM, flagged unmaintained (not a
-    # vulnerability). Not part of the runtime attack surface; revisit if
-    # sea-orm moves off it.
-    { id = "RUSTSEC-2026-0173", reason = "compile-time-only proc-macro dep of sea-orm-macros; unmaintained, not a vulnerability, no runtime exposure" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
