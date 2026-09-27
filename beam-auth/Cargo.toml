@@ -58,12 +58,13 @@ base64 = { version = "0.23.1", optional = true }
 beam-domain = { path = "../beam-domain", optional = true }
 beam-entity = { path = "../beam-entity", optional = true }
 chrono = { workspace = true, features = ["serde"], optional = true }
-openidconnect = { version = "4.0.1", optional = true }
+# Default features off: they select oauth2's built-in `AsyncHttpClient` impl,
+# which exists only for reqwest 0.12 (openidconnect 4.0.1 and oauth2 5.0.0 are
+# the latest releases). `OidcHttpClient` in `src/utils/oidc.rs` is the same
+# adapter over the workspace's reqwest 0.13 (issue #132).
+openidconnect = { version = "4.0.1", default-features = false, optional = true }
 rand = { workspace = true, optional = true }
-reqwest = { version = "0.12", default-features = false, features = [
-    "json",
-    "rustls-tls",
-], optional = true }
+reqwest = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }

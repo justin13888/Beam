@@ -53,6 +53,9 @@ and points `BEAM_OIDC_ADMIN_CLAIM` at `groups`, so `user@beam.localhost` signs i
 </Aside>
 
 Beam must be able to reach the issuer's `.well-known/openid-configuration` at startup.
+Beam verifies the provider's TLS certificate against the system trust store, so a provider behind a
+private CA works once that CA is installed on the host or in the image. Requests to the provider
+give up after 30 seconds, so a provider that never answers fails discovery instead of hanging startup.
 
 ## Accounts appear on first sign-in
 

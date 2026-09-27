@@ -589,7 +589,7 @@ dependencies = [
  "mutants",
  "openidconnect",
  "rand 0.10.2",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "sea-orm",
  "serde",
  "serde_json",
@@ -2427,7 +2427,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -3462,7 +3461,6 @@ dependencies = [
  "getrandom 0.2.17",
  "http",
  "rand 0.8.8",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -4294,7 +4292,6 @@ dependencies = [
  "mime",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -4312,7 +4309,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots",
 ]
 
 [[package]]
