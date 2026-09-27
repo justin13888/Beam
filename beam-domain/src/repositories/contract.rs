@@ -2651,6 +2651,40 @@ macro_rules! library_shape_repository_contract {
             assert_eq!(shape.total_bytes, 40);
         }
 
+        /// A multi-episode file (`S01E01E02`, issue #182) is attached to its
+        /// first episode and records the rest of its range on the file, not as
+        /// episode rows. The report counts what a user could browse: one
+        /// episode file and one episode, not one per number in the range.
+        #[tokio::test]
+        async fn a_multi_episode_file_counts_as_one_file_of_one_episode() {
+            let fixture = $setup().await;
+            let library = new_library(&fixture).await;
+            let episodes = new_episodes(&fixture, &[1]).await;
+            new_file(
+                &fixture,
+                library,
+                Some(MediaFileContent::Episode {
+                    episode_id: episodes[0],
+                    last_episode_number: Some(2),
+                }),
+                Some("matroska,webm"),
+                10,
+            )
+            .await;
+
+            let shape = fixture.repo().shape().await.unwrap();
+
+            assert_eq!(
+                shape.files,
+                FilesByContentType {
+                    movie: 0,
+                    episode: 1,
+                    unclassified: 0,
+                }
+            );
+            assert_eq!((shape.shows, shape.seasons, shape.episodes), (1, 1, 1));
+        }
+
         #[tokio::test]
         async fn a_missing_file_and_its_streams_are_not_counted() {
             let fixture = $setup().await;
