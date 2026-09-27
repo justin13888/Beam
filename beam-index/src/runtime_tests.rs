@@ -490,6 +490,15 @@ async fn the_startup_scan_starts_after_the_watches_and_no_library_scan_overlaps_
         config(3600, 2000),
     );
     until("the startup scan to start", || indexer.scan_count() == 1).await;
+    // The maintenance task is in the scan and the consumer waits on events, so
+    // a sleeper here could only be the poller -- which must wait on the startup
+    // scan, not on its interval. The poller was spawned first, so it has parked
+    // by now on whichever it waits for.
+    assert_eq!(
+        clock.waiter_count(),
+        0,
+        "the poller waits for the startup scan before it starts its interval"
+    );
 
     let mut watched_at_start = indexer.watched_at_scan_start()[0].clone();
     watched_at_start.sort();
@@ -982,6 +991,42 @@ async fn the_watcher_is_polled_once_per_poll_interval_and_not_before() {
         1,
         "a poll is not a rescan: only the startup scan has run"
     );
+
+    tasks.abort();
+}
+
+/// A maintenance task that dies before the startup scan finishes drops the
+/// poller's release; the poller must poll on rather than leave the polled
+/// libraries unwatched.
+#[tokio::test]
+async fn the_poller_still_polls_when_maintenance_dies_before_the_startup_scan_finishes() {
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let indexer = Arc::new(RecordingIndexer {
+        scan_gate: Some(gate),
+        ..Default::default()
+    });
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    until("the startup scan to start", || indexer.scan_count() == 1).await;
+    tasks.periodic_maintenance.abort();
+    until("the maintenance task to stop", || {
+        tasks.periodic_maintenance.is_finished()
+    })
+    .await;
+
+    until("the poller to start its interval", || {
+        clock.waiter_count() == 1
+    })
+    .await;
+    clock.advance(Duration::from_secs(300));
+    until("the first poll", || watcher.poll_count() == 1).await;
 
     tasks.abort();
 }
