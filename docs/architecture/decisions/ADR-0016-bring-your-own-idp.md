@@ -24,9 +24,9 @@ builtin connector could not emit `groups` for static users
 [#3958](https://github.com/dexidp/dex/issues/3958)). **That blocker no longer holds.**
 [dexidp/dex#4456](https://github.com/dexidp/dex/pull/4456) added `groups` and `preferredUsername`
 to `staticPasswords`, released in Dex v2.45.0; #1080 was closed as completed on 2026-02-23, and
-`compose.dependencies.yaml` already pins v2.45.1. The dev fixture still points
-`BEAM_OIDC_ADMIN_CLAIM` at `email_verified`, making every dev user an admin, but that is now a
-fixture choice rather than a Dex limitation.
+`compose.dependencies.yaml` already pins v2.45.1. The dev fixture at the time still pointed
+`BEAM_OIDC_ADMIN_CLAIM` at `email_verified`, making every dev user an admin, but that was by then a
+fixture choice rather than a Dex limitation (since changed, see the follow-up below).
 
 So the question has to be decided on what remains. #149 listed that too.
 
@@ -86,7 +86,7 @@ page each and no security promise.
 - Now that Dex v2.45+ can assert `groups` for static users, the dev fixture could give only its
   admin user a `beam-admin` group and point `BEAM_OIDC_ADMIN_CLAIM` at `groups`, so the dev stack
   exercises a non-admin user. That is a change to `dex/config.yaml` and `mise run dev:up`, and it
-  does not reopen this decision.
+  does not reopen this decision. Done in #195.
 
 **Reversing this decision** means a new ADR adopting a bundled IdP that supersedes this one. That
 ADR would have to answer the user-management, password-lifecycle and secret-rotation questions

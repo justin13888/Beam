@@ -47,8 +47,9 @@ not a missing feature — see
 `mise run dev:up` starts Dex with static test users, so you can develop without an external
 provider. It is opt-in: it sits behind the `dev-idp` Compose profile and is absent from the
 default stack. It is **not** for production — the users and the client secret are fixed and
-committed to the repo. The dev setup also aims `BEAM_OIDC_ADMIN_CLAIM` at `email_verified`, which
-makes *every* Dex user an admin.
+committed to the repo. It models admin the same way a real provider would: only
+`admin@beam.localhost` is in the `beam-admin` group, and the dev setup requests the `groups` scope
+and points `BEAM_OIDC_ADMIN_CLAIM` at `groups`, so `user@beam.localhost` signs in as a non-admin.
 </Aside>
 
 Beam must be able to reach the issuer's `.well-known/openid-configuration` at startup.

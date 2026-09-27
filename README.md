@@ -151,8 +151,9 @@ mise run dev:up
 
 That brings up Postgres, Traefik, the server, the web client, and the bundled
 [Dex](https://dexidp.io/) dev OIDC provider, then prints where to reach them. Sign in as
-`admin@beam.localhost` / `password` (or `user@beam.localhost`). `mise run dev:down` tears it back
-down, and `mise run dev:verify-oidc` smoke-tests the OIDC wiring.
+`admin@beam.localhost` / `password` for an admin, or `user@beam.localhost` / `password` for a
+non-admin (admin comes from Dex's `groups` claim, as it would from a real IdP). `mise run dev:down`
+tears it back down, and `mise run dev:verify-oidc` smoke-tests the OIDC wiring.
 
 Beam is bring-your-own-IdP, so the bundled Dex is **opt-in**: it sits behind the `dev-idp` compose
 profile and `mise run dev:up` is what enables it. A plain `podman compose up -d` brings up
