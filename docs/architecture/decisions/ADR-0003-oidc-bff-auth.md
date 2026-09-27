@@ -34,6 +34,13 @@ from `compose.dependencies.yaml`. (Amended 2026-09-01 — see issue #73 — Dex 
 `dev-idp` compose profile, enabled by `mise run dev:up`; the default stack starts no IdP, which is
 the production shape.)
 
+(Amended 2026-09-27 — see issue #151 — a client with no browser signs in by the OAuth 2.0 device
+authorization grant, which the server likewise runs against the IdP itself: the client receives an
+opaque handle and a user code, never an IdP token, and the server mints the same session on
+approval, presented by the client as the same cookie. The BFF property this ADR establishes -- only
+the server holds IdP tokens -- is unchanged. See
+[ADR-0017](ADR-0017-device-authorization-grant.md).)
+
 ## Consequences
 
 **Positive:**

@@ -159,9 +159,10 @@ without a rewrite — see [ADR-0001](decisions/ADR-0001-modular-monolith.md) for
   [#76](https://github.com/justin13888/beam/issues/76).
 - Remaining native clients: Android TV [#65](https://github.com/justin13888/beam/issues/65) and
   tvOS (the remainder of [#66](https://github.com/justin13888/beam/issues/66)) are deferred under
-  [#78](https://github.com/justin13888/beam/issues/78); both inherit `beam-client-core`, and both
-  are blocked on the same thing — a native token mint, since neither platform has a web view to
-  lift a session cookie from (NFR-605). Android mobile
+  [#78](https://github.com/justin13888/beam/issues/78); both inherit `beam-client-core`. Neither
+  platform has a web view to lift a session cookie from, and neither needs one any more: the server
+  mints a session through the OAuth 2.0 device authorization grant wherever the IdP offers it
+  (FR-111, [ADR-0017](decisions/ADR-0017-device-authorization-grant.md)). Android mobile
   [#67](https://github.com/justin13888/beam/issues/67) and Apple iOS/macOS
   [#66](https://github.com/justin13888/beam/issues/66) have shipped.
 - Adaptive-bitrate streaming (HLS/DASH): rejected, not deferred — see

@@ -13,9 +13,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   ([ADR-0016](../architecture/decisions/ADR-0016-bring-your-own-idp.md)).
 - **FR-102**: The server MUST implement the OIDC Authorization Code flow with PKCE, performed
   entirely server-side. The browser MUST NOT receive, store, or handle ID tokens, access tokens, or
-  refresh tokens at any point.
+  refresh tokens at any point. The same holds for a native client signing in by the device
+  authorization grant (FR-111): no client ever receives an IdP token.
 - **FR-103**: On successful OIDC authentication, the server MUST establish a session identified by an
-  opaque session cookie. The cookie MUST be `httpOnly` and MUST use `SameSite=Lax`.
+  opaque session credential, `beam_session`. A browser receives it as a cookie, which MUST be
+  `httpOnly` and MUST use `SameSite=Lax`; a native client signing in by FR-111 receives the same
+  opaque value in the response body and presents it as that cookie. Either way it is one session
+  row with the same idle and absolute expiry.
 - **FR-104**: Session state MUST be persisted server-side in Postgres
   ([ADR-0005](../architecture/decisions/ADR-0005-sessions-in-postgres.md)).
 - **FR-105**: On a user's first successful login, the server MUST just-in-time (JIT) provision a
@@ -27,7 +31,7 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-107**: The web client MUST initiate login by redirecting the browser to `/v1/auth/login`. The
   client MUST NOT embed or invoke any OIDC client-side library.
 - **FR-108**: The web client MUST determine current-session identity and role by calling
-  `/v1/auth/me`, and MUST treat a non-2xx response as "not authenticated."
+  `/v1/me`, and MUST treat a non-2xx response as "not authenticated."
 - **FR-109**: The server MUST provide a logout endpoint that invalidates the server-side session and
   clears the session cookie.
 - **FR-110**: For local development, the identity provider MUST be satisfiable by Dex running via
@@ -36,6 +40,15 @@ strength. Each requirement is independently testable. See `product.md` for narra
   bring-your-own-IdP (FR-101), so a default `compose up` MUST start no identity provider. When
   enabled, the bundled Dex MUST be reachable at one issuer URL that is valid both from the browser
   and from inside the server container.
+- **FR-111**: The server MUST let a client with no browser sign in by the OAuth 2.0 device
+  authorization grant (RFC 8628) against the configured IdP, run server-side:
+  `POST /v1/auth/device` returns a user code, a verification URI and an opaque device handle, and
+  `POST /v1/auth/device/token` polls with the handle, reaching the IdP at most once per poll interval
+  and minting an FR-103 session on approval through the same admin (FR-106), provisioning (FR-105)
+  and disabled-account rules as the browser callback. The IdP's device code MUST NOT leave the
+  server, and only a hash of the handle MUST be stored. When the IdP's discovery document names no
+  `device_authorization_endpoint`, `POST /v1/auth/device` MUST answer `501` so a client can fall
+  back to the browser flow. See [ADR-0017](../architecture/decisions/ADR-0017-device-authorization-grant.md).
 
 ## FR-2xx — Library & Indexing
 

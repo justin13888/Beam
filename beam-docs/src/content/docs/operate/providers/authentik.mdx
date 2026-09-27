@@ -57,6 +57,11 @@ The value Beam matches is the group's **name**, exactly and case-sensitively. If
 Authentik's scope mappings, check that a `groups` claim is still emitted for the `profile` scope.
 </Aside>
 
+**Signing in on a TV.** Authentik serves the device authorization grant once a **device code
+flow** is set on your brand. Set one, check that the discovery document now names a
+`device_authorization_endpoint`, then restart Beam. See
+[Sign-in on a TV](/operate/identity-and-access/#sign-in-on-a-tv-or-another-device-without-a-browser).
+
 See [Identity and admin access](/operate/identity-and-access/) for how admin is recalculated and
 revoked, and [troubleshooting](/help/troubleshooting/#i-am-not-an-admin) if `is_admin` stays
 `false`.

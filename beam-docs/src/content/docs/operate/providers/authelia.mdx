@@ -70,6 +70,11 @@ authority.
 
 </Steps>
 
+**Signing in on a TV.** Add `urn:ietf:params:oauth:grant-type:device_code` to the client's
+`grant_types` if your Authelia version supports the device authorization grant, then check that the
+discovery document names a `device_authorization_endpoint` and restart Beam. See
+[Sign-in on a TV](/operate/identity-and-access/#sign-in-on-a-tv-or-another-device-without-a-browser).
+
 See [Identity and admin access](/operate/identity-and-access/) for how admin is recalculated and
 revoked, and [troubleshooting](/help/troubleshooting/#i-am-not-an-admin) if `is_admin` stays
 `false` — the usual cause with Authelia is `groups` arriving in userinfo but not in the ID token.

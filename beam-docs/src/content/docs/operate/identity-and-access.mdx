@@ -9,7 +9,9 @@ Beam has no user database of its own to speak of and no passwords. Authenticatio
 Connect, exclusively. Without a working provider, nobody can sign in — including you.
 
 The browser never receives a token. Beam performs the whole flow server-side and gives the browser
-only an opaque session cookie.
+only an opaque session cookie. Apps without a browser — a TV, for instance — sign in with a short
+code instead, and receive the same kind of session; see
+[Sign-in on a TV](#sign-in-on-a-tv-or-another-device-without-a-browser).
 
 ## Register Beam with your provider
 
@@ -57,6 +59,32 @@ Beam verifies the provider's TLS certificate against the system trust store, so 
 private CA works once that CA is installed on the host or in the image. Requests to the provider
 give up after 30 seconds, so a provider that never answers fails discovery instead of hanging startup.
 
+## Sign-in on a TV or another device without a browser
+
+A device with no browser — Android TV, Apple TV — cannot complete a redirect. For those, Beam uses
+the OAuth 2.0 **device authorization grant**: the app shows a short code and an address, you open
+the address on your phone or computer, sign in at your provider as usual, and enter the code. Beam
+then gives the app a session exactly like a browser's — same lifetime, same admin rule, and it
+appears under your sessions and can be revoked the same way. The Android app tries this first and
+falls back to its built-in browser when your provider does not offer it.
+
+Beam turns this on automatically when your provider's discovery document names a
+`device_authorization_endpoint`. Check with:
+
+```sh
+curl -s <BEAM_OIDC_ISSUER>/.well-known/openid-configuration | grep device_authorization_endpoint
+```
+
+If nothing is printed, the provider does not offer the grant (or it is switched off for Beam's
+client), and devices without a browser cannot sign in. Enable it at your provider — each provider
+guide below says where — and **restart Beam**, which reads the discovery document at startup.
+Nothing needs to be set in Beam itself.
+
+<Aside type="caution" title="Only enter a code you started yourself">
+Whoever started a device sign-in gets the session its code approves. Never enter a code someone
+else sent you. A code expires after at most 30 minutes, and each can be used once.
+</Aside>
+
 ## Accounts appear on first sign-in
 
 There is no user list to populate. The first time someone authenticates, Beam creates a local user
@@ -82,8 +110,8 @@ no button in Beam's own UI.
 
 ## Disabling an account
 
-An admin can disable a user. A disabled user gets stopped at the callback with a clear message and
-no session is created — the identity still verifies, but Beam refuses it. Their existing sessions
+An admin can disable a user. A disabled user gets stopped at sign-in — in the browser or on a
+device — with a clear message and no session is created — the identity still verifies, but Beam refuses it. Their existing sessions
 are revoked.
 
 ## Sessions

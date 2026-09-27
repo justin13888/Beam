@@ -53,7 +53,8 @@ optional variables unset/commented rather than blank.
 | `BEAM_SESSION_IDLE_DAYS` | `14` | Session idle timeout (slides forward on activity, capped by the absolute lifetime). |
 | `BEAM_SESSION_MAX_DAYS` | `60` | Absolute session lifetime. |
 | `BEAM_RATE_LIMIT_ENABLED` | `true` | Whether the in-process rate limiter is installed on the auth and search endpoints (NFR-107). When `false`, no limiter middleware is mounted at all. |
-| `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Sustained request rate — and burst — per client for `/v1/auth/login` and `/v1/auth/callback`, in requests/minute. Must be ≥ 1. |
+| `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Sustained request rate — and burst — per client for `/v1/auth/login`, `/v1/auth/callback` and `/v1/auth/device`, in requests/minute. Must be ≥ 1. |
+| `BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE` | `30` | Sustained request rate — and burst — per client for device-login polls (`/v1/auth/device/token`), in requests/minute. Its own budget because a waiting device polls every few seconds; each flow's poll interval separately paces what reaches the IdP. Must be ≥ 1. |
 | `BEAM_RATE_LIMIT_SEARCH_PER_MINUTE` | `60` | Sustained request rate — and burst — per client for `GET /v1/media` (browse/search), in requests/minute. Must be ≥ 1. |
 | `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR` | `false` | Whether to key the rate limiter off the first `X-Forwarded-For` IP instead of the peer socket IP. Only enable behind a trusted proxy that overwrites the header — it is otherwise trivially spoofable. |
 | `RUST_LOG` | (tracing default) | Standard `tracing` filter, e.g. `beam_server=info`. |

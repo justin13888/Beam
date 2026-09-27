@@ -3,7 +3,10 @@
 `beam-server` authenticates users via OIDC in the backend-for-frontend (BFF) pattern: the *server*
 holds the OIDC client credentials and performs the Authorization Code + PKCE exchange; the browser
 never sees an ID, access, or refresh token. The browser holds exactly one credential — the
-`beam_session` httpOnly, `SameSite=Lax` cookie — for everything, including video playback. See
+`beam_session` httpOnly, `SameSite=Lax` cookie — for everything, including video playback. A native
+client with no browser signs in by the device authorization grant, which the server also runs
+against the IdP itself, and holds the same opaque credential (see
+[below](#device-authorization-grant) and [ADR-0017](decisions/ADR-0017-device-authorization-grant.md)). See
 [ADR-0003](decisions/ADR-0003-oidc-bff-auth.md) for why OIDC/BFF and
 [ADR-0005](decisions/ADR-0005-sessions-in-postgres.md) for why sessions live in Postgres.
 
@@ -36,6 +39,35 @@ never sees an ID, access, or refresh token. The browser holds exactly one creden
    useless after logout) and clears the cookie; `POST /v1/logout-all` and
    `DELETE /v1/sessions/{id}` revoke other sessions.
 
+## Device authorization grant
+
+For a client with no browser (a TV), the server runs RFC 8628 against the IdP on the client's
+behalf:
+
+1. **Start.** `POST /v1/auth/device` calls the IdP's device authorization endpoint (read from
+   discovery; absent → `501 device-login-unsupported`), stores the IdP's device code in
+   `device_auths` keyed by the SHA-256 of a fresh 256-bit **device handle**, and returns the handle,
+   the user code and the verification URI. The device code never leaves the server, so the client
+   can only ever turn an approval into a Beam session — never into IdP tokens.
+2. **Approve.** The user opens the verification URI on another device and signs in at the IdP.
+3. **Poll.** `POST /v1/auth/device/token` claims the flow with a conditional `UPDATE` on
+   `next_poll_at`: a poll inside the interval is answered `slow_down` by Beam without contacting the
+   IdP, and the interval grows. A claimed poll makes exactly one token-endpoint request through
+   `OidcHttpClient`, authenticated `client_secret_basic`. On approval the ID token is verified
+   (signature, issuer, audience, expiry — there is no nonce in this grant), the flow row is deleted
+   with `DELETE ... RETURNING` (so one approval mints one session), and steps 4–5 of the browser
+   flow run unchanged through the shared `complete_login`. The session value is returned in the
+   body; the client presents it as the `beam_session` cookie.
+
+**Phishing (RFC 8628 section 5.4).** Whoever starts a flow receives the session its user code
+approves, so an attacker can start a flow and try to talk a victim into entering the code. Beam caps
+a flow's lifetime at 30 minutes, makes every flow single-use, and relies on the IdP's approval
+screen naming the client; the operator documentation tells users never to enter a code they did not
+start. The residual risk is inherent to the grant.
+
+**Handles are hashed at rest** like session tokens: a dump of `device_auths` cannot be replayed as a
+poll.
+
 ## Session model
 
 - **Hashed at rest:** only `SHA-256(token)` is stored; a database dump does not expose usable
@@ -66,7 +98,8 @@ Two deliberate layers protect cookie-authenticated state changes:
 - The `/v1` router additionally enforces same-origin on every unsafe method: a request presenting
   an `Origin` (or `Referer`, as fallback) that doesn't match `BEAM_WEB_URL`, `BEAM_SERVER_URL`, or
   `BEAM_EXTRA_ALLOWED_ORIGINS` is rejected with `403` before reaching a handler. Requests with
-  neither header pass — legitimate non-browser clients send neither and never carry the cookie,
+  neither header pass (NFR-104): browsers always send `Origin` on a non-GET request, so its
+  absence marks a non-browser client — a native app signing in by the device grant sends neither —
   while SameSite already stops the browser-based attack.
 
 ## Admin gating
@@ -109,7 +142,8 @@ server-internal type (`LocatedFile`) that cannot be serialized into a response.
 - Request handlers return `500` instead of panicking when expected injected state is missing —
   a wiring bug degrades one request, not the process.
 - Rate limiting: in-process token buckets (see `beam-server/src/routes/rate_limit.rs`) guard the auth
-  endpoints (`/v1/auth/login`, `/v1/auth/callback`) and the browse/search endpoint (`GET /v1/media`),
+  endpoints (`/v1/auth/login`, `/v1/auth/callback`, `/v1/auth/device`), device-login polls
+  (`/v1/auth/device/token`, their own class) and the browse/search endpoint (`GET /v1/media`),
   keyed per client IP, returning `429` with a `Retry-After` header when exceeded. Streaming/download
   paths are excluded on purpose. Enforced since [#69](https://github.com/justin13888/beam/issues/69);
   tunable via `BEAM_RATE_LIMIT_*` (see [configuration](../operations/configuration.md)).
