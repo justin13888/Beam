@@ -148,7 +148,8 @@ not by language, so it also merges letters some languages treat as distinct — 
 the accepted cost of `Amélie` and `Amelie` being one (decision D183-6 on
 [#214](https://github.com/justin13888/beam/pull/214)). A movie is keyed by its filename (with its folder's year, or its
 folder's title for a noise-only name), a show by its series folder: the parent of a season folder
-(or the season folder's own leading text, for a season pack), else the episode file's parent folder
+(or the season folder's own leading text, for a season pack; a multi-season pack's range of
+seasons ends the title it names), else the episode file's parent folder
 unless the filename names another show, else the filename
 (`beam_domain::utils::media_path::infer_media`, FR-204). Builds before
 [#182](https://github.com/justin13888/beam/issues/182) took the immediate parent, so a

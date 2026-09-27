@@ -118,6 +118,27 @@ static SEASON_WORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static SEASON_SHORT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,4})\b").expect("valid regex"));
 
+/// A range of seasons: `S01-S05`, `S01-05`, `Season 1-5`, `Seasons 1 to 5`,
+/// optionally after `Complete` (`Complete S01-S05`). A multi-season pack's
+/// folder carries one after the show's name; everything from it on is not
+/// the title.
+static SEASON_RANGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:complete[ ._-]+)?(?:s(\d{1,2})[ ._-]*(?:-|to)[ ._-]*s?(\d{1,2})|(?:seasons?|series|saison|staffel|temporada)[ ._-]*(\d{1,2})[ ._-]*(?:-|to)[ ._-]*(\d{1,2}))\b",
+    )
+    .expect("valid regex")
+});
+
+/// Where a season range starts in `text`, if it carries one whose last
+/// season is after its first.
+fn season_range_start(text: &str) -> Option<usize> {
+    SEASON_RANGE_REGEX.captures_iter(text).find_map(|caps| {
+        let first: u32 = caps.get(1).or_else(|| caps.get(3))?.as_str().parse().ok()?;
+        let last: u32 = caps.get(2).or_else(|| caps.get(4))?.as_str().parse().ok()?;
+        (last > first).then(|| caps.get(0).expect("group 0 always present").start())
+    })
+}
+
 static SPECIALS_FOLDER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^specials?$").expect("valid regex"));
 
@@ -159,6 +180,11 @@ struct SeasonFolder<'a> {
 
 fn season_folder(name: &str) -> Option<SeasonFolder<'_>> {
     let name = name.trim();
+    // A multi-season pack is not one season's folder: its first season
+    // would be read as every file's.
+    if season_range_start(name).is_some() {
+        return None;
+    }
     if SPECIALS_FOLDER_REGEX.is_match(name) {
         return Some(SeasonFolder {
             season: 0,
@@ -179,13 +205,17 @@ fn season_folder(name: &str) -> Option<SeasonFolder<'_>> {
 /// it (`Season 01`, `Series 2`, `Saison 3`, `Staffel 4`, `Temporada 5`,
 /// `Breaking Bad Season 1`, `Season 1 (2008)`), a lone `S06` with no episode
 /// after it (`S06`, a season pack's `Show.S06.1080p`), or `Specials` (season
-/// 0). Case and the separators between word and number are ignored.
+/// 0). Case and the separators between word and number are ignored. A range
+/// of seasons (`Show.S01-S05`, `Show Season 1-5`) designates none.
 pub fn season_folder_number(name: &str) -> Option<u32> {
     season_folder(name).map(|folder| folder.season)
 }
 
 /// The title and year a folder or name spells, if it spells a title at all.
+/// A season range ends the title, as a season token does in a season
+/// folder: `Breaking.Bad.S01-S05.COMPLETE.1080p` is *Breaking Bad*.
 fn title_of(text: &str) -> Option<TitleGuess> {
+    let text = season_range_start(text).map_or(text, |start| &text[..start]);
     let ParsedFilename { title, year, .. } = parse_media_filename(text);
     (!title.is_empty()).then_some(TitleGuess { title, year })
 }

@@ -153,6 +153,51 @@ const CORPUS: &[(&str, &str)] = &[
         "Doctor Who Classic/Season 1/Doctor.Who.S01E01.mkv",
         "episode Doctor Who Classic|- s1 e1 Standard",
     ),
+    // A multi-season pack: its season range ends the show's name, as a
+    // season token does, so the pack names the same show as its flat and
+    // per-season forms.
+    (
+        "Breaking.Bad.S01-S05.COMPLETE.1080p.BluRay/Season 1/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "Breaking.Bad.S01-S05.1080p.BluRay.x264-GRP/Season 1/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "The.Wire.S01-S05.1080p/Season 01/The.Wire.S01E01.mkv",
+        "episode The Wire|- s1 e1 Standard",
+    ),
+    (
+        "Breaking Bad Seasons 1-5/Season 1/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "Breaking Bad Seasons 1 to 5/Season 2/Breaking.Bad.S02E01.mkv",
+        "episode Breaking Bad|- s2 e1 Standard",
+    ),
+    (
+        "Breaking Bad (2008) Season 1-5/Season 1/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|2008 s1 e1 Standard",
+    ),
+    (
+        "Breaking.Bad.S01-05.720p/Season 3/Breaking.Bad.S03E01.mkv",
+        "episode Breaking Bad|- s3 e1 Standard",
+    ),
+    (
+        "Breaking Bad Complete S01-S05/Season 1/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    (
+        "TV/Breaking Bad/Breaking.Bad.S01-S05.1080p/Season 1/Breaking.Bad.S01E01.mkv",
+        "episode Breaking Bad|- s1 e1 Standard",
+    ),
+    // Flat in the pack: the range is no one season's folder, so no file's
+    // season contradicts it.
+    (
+        "Breaking.Bad.S01-S05.1080p.BluRay/Breaking.Bad.S03E01.mkv",
+        "episode Breaking Bad|- s3 e1 Standard",
+    ),
     // A season pack: the text before the season token names the show when
     // there is no series folder, or when the folder above is a category.
     (
@@ -481,6 +526,11 @@ fn season_folder_names() {
         ("Doctor Who Series 11", Some(11)),
         ("The.Office.US.S02.1080p.BluRay.x264-GRP", Some(2)),
         ("Seasons", None),
+        // A range of seasons is a multi-season pack, not one season.
+        ("Breaking.Bad.S01-S05.1080p", None),
+        ("Breaking.Bad.S01-05", None),
+        ("Breaking Bad Season 1-5", None),
+        ("Seasons 1 to 5", None),
         ("Show.S02E01", None),
         ("S1m0ne (2002)", None),
         ("A Series of Unfortunate Events", None),

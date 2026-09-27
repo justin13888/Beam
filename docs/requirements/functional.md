@@ -65,7 +65,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   - a season folder is one whose name carries a season word and number anywhere (`Season 01`,
     `Series 2`, `Saison`, `Staffel`, `Temporada`, `Breaking Bad Season 1`, `Season 1 (2008)`), a
     lone `S01` with no episode after it (`S01`, a season pack's `Show.S02.1080p`), or `Specials`
-    (season 0);
+    (season 0); a folder carrying a range of seasons (`S01-S05`, `S01-05`, `Season(s) 1-5`,
+    `Seasons 1 to 5`, optionally after `Complete`) is a multi-season pack, not a season folder, and
+    the range ends the title it names (`Breaking.Bad.S01-S05.1080p` names *Breaking Bad*);
   - a show in a season folder is named by its series folder (the season folder's parent), unless
     the season folder's own text before its season token names another title or there is no
     series folder, when that text names it; else by the filename; a series folder that is the
