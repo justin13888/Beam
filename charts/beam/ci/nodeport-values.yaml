@@ -1,0 +1,11 @@
+# An ingress in front of a NodePort Service: clients can reach the server
+# without the ingress, so X-Forwarded-For must not be trusted by default.
+server:
+  publicUrl: https://beam.example.test
+database:
+  url: postgres://beam:password@postgres.example.test:5432/beam
+service:
+  type: NodePort
+ingress:
+  enabled: true
+  host: beam.example.test

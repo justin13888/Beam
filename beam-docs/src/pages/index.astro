@@ -66,9 +66,7 @@ const notDoing = [
 	},
 	{ text: "No password login, registration or password reset. You bring an identity provider." },
 	{
-		text: "No Kubernetes or Helm. One host running Compose is the supported topology.",
-		href: `${site.repo}/issues/76`,
-		hrefLabel: "#76",
+		text: "One server, not a cluster: Beam runs as a single process, under Compose or the Helm chart. It does not scale out across replicas.",
 	},
 	{ text: "No recommendations, no watch analytics, no plugin ecosystem." },
 ];

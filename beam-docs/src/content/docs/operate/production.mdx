@@ -51,9 +51,9 @@ before you depend on an instance.
 
 ## What Beam does not do for you
 
-- **No multi-node deployment.** One host running Compose is the supported topology; Kubernetes is
-  [#76](https://github.com/justin13888/beam/issues/76). Rate limiting is per-process and in-memory,
-  so it does not coordinate across replicas anyway.
+- **No multi-node deployment.** Beam runs as one server process, whether on one host with Compose
+  or on [Kubernetes](/operate/kubernetes/) with the Helm chart. Rate limiting is per-process and
+  in-memory, so it would not coordinate across replicas anyway.
 - **No built-in TLS.** That is the proxy's job.
 - **No bandwidth limits or per-user quotas.** Beam serves files at whatever rate the network
   allows.

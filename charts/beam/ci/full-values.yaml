@@ -1,0 +1,62 @@
+# Every optional server feature on, secrets from existing Secrets, media
+# readable through a supplemental group, and libraries on three source kinds
+# the chart forces read-only (a claim, NFS and a CSI driver) plus a hostPath,
+# which has no readOnly field and whose type the chart pins to Directory.
+server:
+  publicUrl: https://beam.example.test
+  podSecurityContext:
+    supplementalGroups:
+      - 1500
+  extraAllowedOrigins:
+    - https://other.example.test
+  cookieSecure: true
+  shutdownTimeoutSeconds: 120
+  logLevel: beam_server=debug
+  env:
+    BEAM_SCAN_INTERVAL_SECS: "600"
+database:
+  existingSecret: beam-database
+oidc:
+  issuer: https://idp.example.test/realms/beam
+  clientId: beam
+  existingSecret: beam-oidc
+  clientAuthMethod: client_secret_post
+  adminClaim: groups
+  adminValue: beam-admin
+tmdb:
+  existingSecret: beam-tmdb
+libraries:
+  - name: movies
+    volume:
+      persistentVolumeClaim:
+        claimName: media-movies
+  - name: anime
+    volume:
+      nfs:
+        server: nas.example.test
+        path: /export/anime
+  - name: shows
+    volume:
+      csi:
+        driver: smb.csi.k8s.io
+        volumeAttributes:
+          source: //nas.example.test/shows
+        nodePublishSecretRef:
+          name: smb-credentials
+  - name: local
+    volume:
+      hostPath:
+        path: /srv/media/local
+persistence:
+  data:
+    existingClaim: beam-data
+ingress:
+  enabled: true
+  className: nginx
+  host: beam.example.test
+  tls:
+    secretName: beam-tls
+metrics:
+  enabled: true
+imagePullSecrets:
+  - name: ghcr

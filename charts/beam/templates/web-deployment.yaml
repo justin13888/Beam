@@ -1,0 +1,85 @@
+{{- if .Values.web.enabled }}
+{{- if not (and .Values.web.image.repository .Values.web.image.tag) }}
+{{- fail "web.enabled requires web.image.repository and web.image.tag: the published beam-web image is built for http://localhost:8000, so build one for your origin (docs/operations/deployment.md)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "beam.webFullname" . }}
+  labels:
+    {{- include "beam.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  # Static files only: nothing stateful, and no reason for more.
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- include "beam.webSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "beam.labels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: {{ printf "%s:%s" .Values.web.image.repository .Values.web.image.tag | quote }}
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          # The Caddy image runs as root to bind :80. It keeps the one
+          # capability that needs and nothing else, and writes only to the two
+          # emptyDirs below.
+          securityContext:
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          volumeMounts:
+            # XDG_DATA_HOME and XDG_CONFIG_HOME in the official Caddy image.
+            - name: caddy-data
+              mountPath: /data
+            - name: caddy-config
+              mountPath: /config
+      volumes:
+        - name: caddy-data
+          emptyDir: {}
+        - name: caddy-config
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

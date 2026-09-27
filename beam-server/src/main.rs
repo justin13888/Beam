@@ -58,21 +58,18 @@ async fn main() -> Result<()> {
         .map_err(|e| eyre!("Failed to connect to database after retries: {}", e))?;
     info!("Connected to database");
 
-    // Apply pending migrations. The supported topology is a single server
-    // process against one Postgres (see docs/operations/deployment.md), so
-    // there is no concurrent-migrator race to coordinate.
+    // Apply pending migrations. `apply_pending` holds a Postgres advisory lock
+    // for the whole batch -- ledger read, ledger install and every migration --
+    // so a second process migrating the same database (an overlapping restart,
+    // a replaced Kubernetes pod, the `beam-migration` CLI) waits and then finds
+    // nothing pending instead of racing this one. All-or-nothing: a failure
+    // anywhere in the batch leaves the database at the version the previous
+    // image expects.
     if config.auto_migrate {
-        use beam_migration::MigratorTrait;
-        let pending = beam_migration::Migrator::get_pending_migrations(&db)
-            .await
-            .map_err(|e| eyre!("Failed to check pending migrations: {e}"))?
-            .len();
-        // All-or-nothing: a failure anywhere in the pending batch leaves the
-        // database at the version the previous image expects.
-        beam_migration::up_all_or_nothing::<beam_migration::Migrator, _>(&db, None)
+        let applied = beam_migration::apply_pending::<beam_migration::Migrator>(&db)
             .await
             .map_err(|e| eyre!("Failed to apply database migrations: {e}"))?;
-        info!("Database migrations up to date ({pending} applied at startup)");
+        info!("Database migrations up to date ({applied} applied at startup)");
     } else {
         info!(
             "BEAM_AUTO_MIGRATE=false -- migrations are operator-managed via the beam-migration CLI"

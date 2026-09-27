@@ -61,6 +61,9 @@ another source ([#142](https://github.com/justin13888/beam/issues/142)).
 - A single modular-monolith server binary (`beam-server`): HTTP API, OIDC auth, in-process indexing
   and enrichment, direct-play streaming
   ([ADR-0001](../architecture/decisions/ADR-0001-modular-monolith.md)).
+- Two supported deployments of that one server process: Compose on a single host, and Kubernetes
+  through the Helm chart in `charts/beam`
+  ([ADR-0018](../architecture/decisions/ADR-0018-kubernetes-helm-chart.md)).
 - A single OpenAPI-first REST API
   ([ADR-0010](../architecture/decisions/ADR-0010-openapi-3-2-kynos.md)),
   with real-time scan and enrichment progress over Server-Sent Events (SSE).
@@ -94,7 +97,6 @@ another source ([#142](https://github.com/justin13888/beam/issues/142)).
   [#66](https://github.com/justin13888/beam/issues/66) have shipped; both remaining clients inherit
   `beam-client-core`, and both need a native token mint before they can sign in at all.
 - Automated browser e2e tests (Playwright) — [#74](https://github.com/justin13888/beam/issues/74).
-- Kubernetes/Helm deployment — [#76](https://github.com/justin13888/beam/issues/76).
 
 ## Non-goals
 

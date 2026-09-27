@@ -176,7 +176,16 @@ impl ScopedSchema {
             // Every statement on this pool resolves unqualified names inside the
             // scoped schema; `public` stays on the path so shared extensions
             // (pg_trgm) remain reachable.
-            .set_schema_search_path(format!("{name},public"));
+            .set_schema_search_path(format!("{name},public"))
+            // Every backend on this pool reports the schema's name as its
+            // `application_name`, so a test can pick its own connections out of
+            // `pg_stat_activity` among those of tests running beside it (see
+            // [`Self::name`]). Schema names are at most 63 bytes, which is also
+            // Postgres's limit for this setting.
+            .map_sqlx_postgres_opts({
+                let application_name = name.clone();
+                move |pg_options| pg_options.application_name(&application_name)
+            });
         let db = Database::connect(options).await?;
 
         Ok(Self {
@@ -190,6 +199,8 @@ impl ScopedSchema {
         self.db.clone()
     }
 
+    /// The schema's name, which is also the `application_name` every backend
+    /// on [`Self::db`]'s pool reports in `pg_stat_activity`.
     pub fn name(&self) -> &str {
         &self.name
     }

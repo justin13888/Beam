@@ -1,0 +1,22 @@
+{{- if and .Values.persistence.data.enabled (not .Values.persistence.data.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "beam.dataClaimName" . }}
+  labels:
+    {{- include "beam.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  annotations:
+    # Uninstalling the release leaves Beam's state behind; delete the claim by
+    # hand to discard it.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.data.accessModes | nindent 4 }}
+  {{- with .Values.persistence.data.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.data.size }}
+{{- end }}

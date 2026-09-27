@@ -1,0 +1,48 @@
+Beam is starting as {{ include "beam.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+The first start applies database migrations. Watch it with:
+
+  kubectl --namespace {{ .Release.Namespace }} rollout status deployment/{{ include "beam.fullname" . }}
+{{- $scheme := ternary "https" "http" (ne .Values.ingress.tls.secretName "") }}
+{{- if .Values.ingress.enabled }}
+
+The API is served at {{ $scheme }}://{{ .Values.ingress.host }}/v1
+{{- if .Values.web.enabled }}, the web client at {{ $scheme }}://{{ .Values.ingress.host }}/{{ end }}.
+{{- else }}
+
+No ingress is enabled. To reach the API from this machine:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ include "beam.fullname" . }} 8000:{{ .Values.service.port }}
+{{- end }}
+
+server.publicUrl is {{ .Values.server.publicUrl }}. It must be the origin clients actually
+use: the OIDC redirect URI is derived from it.
+{{- if not (include "beam.webUrl" .) }}
+
+NOTE: BEAM_WEB_URL is not set (web.enabled is false and server.webUrl is empty), so the server
+falls back to its development default, http://localhost:5173, for the post-login redirect and
+the CSRF allow-list. That is fine for native clients alone. If a browser client is served from
+anywhere else, set server.webUrl to its origin.
+{{- end }}
+{{- if ne .Values.service.type "ClusterIP" }}
+
+WARNING: service.type is {{ .Values.service.type }}. The whole API port is reachable without the
+ingress -- /metrics (when metrics.enabled) and /openapi included -- and clients can bypass any
+ingress-level controls.
+{{- end }}
+{{- if .Values.libraries }}
+
+Libraries are mounted read-only. Create each in Beam's admin UI with its path:
+{{- range .Values.libraries }}
+  /videos/{{ .name }}
+{{- end }}
+{{- else }}
+
+No libraries are mounted. Add entries under `libraries` to mount media read-only at
+/videos/<name>.
+{{- end }}
+{{- if not .Values.persistence.data.enabled }}
+
+WARNING: persistence.data.enabled is false. /data is an emptyDir, lost whenever the pod is
+replaced.
+{{- end }}
