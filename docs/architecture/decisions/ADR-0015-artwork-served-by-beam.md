@@ -150,5 +150,6 @@ but not that a downloaded title renders on a plane.
   underlying gap is real and is filed as
   [getkono/spargen#82](https://github.com/getkono/spargen/issues/82): `classify_media` has no arm for
   a media type range, so `image/*` is rejected, and naming an exact `image/jpeg` does not help.
+  spargen 0.5.0 fixes it; the omission stays for the first reason.
 - This is a breaking API change. `poster_url` and its siblings changed meaning, and every client had
   to be updated in step.

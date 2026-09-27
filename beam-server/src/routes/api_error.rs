@@ -41,7 +41,7 @@ pub const SESSION_COOKIE: &str = "beam_session";
 /// It cannot appear in the attributes below: kynos parses `#[problem(type =
 /// ...)]` and `#[problem(base = ...)]` as string literals, not paths. The
 /// prefix is therefore written out per variant, and `taxonomy_tests` asserts
-/// that every literal starts with this constant.
+/// that every `type` the exported document declares starts with this constant.
 pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -53,10 +53,11 @@ pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 // that into dead retry logic.
 //
 // Sharpening the codes made the split load-bearing rather than merely tidy.
-// Kynos carries one response per status and titles it from the *first* variant
-// declaring that status, so a `MutationError` holding both `MediaNotFound` and
-// `LibraryNotFound` would document `deleteLibrary`'s 404 as "Media not found".
-// One enum per operation shape is what keeps each description true.
+// Kynos describes a status by every variant declaring it -- the titles joined,
+// the `type` narrowed to their codes -- so a `MutationError` holding both
+// `MediaNotFound` and `LibraryNotFound` would tell a client that
+// `deleteLibrary` can answer "Media not found". One enum per operation shape is
+// what keeps each description true.
 //
 // The `type` URI is written out per variant rather than derived from the
 // variant name. Kynos can compose one from `#[problem(base = ...)]` plus the
@@ -67,10 +68,9 @@ pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 //
 // 401 and 403 are almost always absent here: they arrive from `SessionAuth`
 // and `AdminAuth`, which is what makes taking the extractor and documenting the
-// requirement one act. Those carry no `type` of their own -- kynos renders
-// every rejection as `about:blank`, which is the right reading of RFC 9457
-// where the status is the whole story, and a gap only for the admin 403
-// (getkono/kynos#105, and the note on `SessionAuthenticator::authorize`).
+// requirement one act. The 401 is `about:blank`, which is the right reading of
+// RFC 9457 where the status is the whole story. The admin 403 is the one
+// refusal with a next step of its own, so it is named: see [`ADMIN_REQUIRED`].
 
 /// A read whose only failure is infrastructural.
 ///
@@ -126,17 +126,9 @@ pub enum MediaLookupError {
 
 /// `GET /v1/media/{id}/sources`.
 ///
-/// Two 400s share one declared response, and neither titles it. Kynos carries
-/// one response per status and titles it from the first declaration it meets,
-/// and the `Path` extractor's own 400 ("Bad Request") is met before anything
-/// the handler returns -- just as `SessionAuth`'s 401 is for that status. So
-/// variant order decides a title only for a status no extractor or
-/// authenticator declares, which is why the 404-carrying enums and
-/// `CrossOriginRejected`'s 403 are careful about it and this pair need not
-/// be. Narrowing `type` per branch is what a `oneOf` of const-constrained
-/// problems would express, which kynos cannot emit -- getkono/kynos#103.
-/// Until it can, the codes below are correct on the wire and absent from the
-/// contract, and `taxonomy_tests` is what pins them.
+/// Two 400s share one declared response with the `Path` extractor's own. Kynos
+/// joins the three titles into its description and narrows its `type` to a
+/// `oneOf` of the two codes below beside the extractor's `about:blank`.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum MediaSourcesError {
     #[error("{0}")]
@@ -575,7 +567,18 @@ pub struct Admin;
 
 impl Scopes for Admin {
     const SCOPES: &'static [&'static str] = &["admin"];
+    const FORBIDDEN_TYPE: Option<&'static str> = Some(ADMIN_REQUIRED);
 }
+
+/// The `type` of the 403 a signed-in non-administrator gets from an admin
+/// operation.
+///
+/// Named because it is the 403 with the clearest next step -- admin is
+/// recalculated only at sign-in -- and without a name it is indistinguishable
+/// from the same-origin refusals. Declared through [`Admin`]'s
+/// `FORBIDDEN_TYPE` and sent through `AuthRejection::forbidden_as`, which is
+/// the pair Kynos reads for the document and the wire respectively.
+pub const ADMIN_REQUIRED: &str = "https://beam.justinchung.net/reference/errors/#admin-required";
 
 /// Convenience alias for the fourteen `/v1/admin/*` operations.
 pub type AdminAuth = Scoped<SessionCookie, Admin>;
@@ -638,13 +641,8 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
     /// against anything carried in the credential -- a session outlives a
     /// change to the flag, and the row is the truth.
     ///
-    /// The `Forbidden` returned below is the one condition on the whole
-    /// surface Beam would like to name and cannot. `AuthRejection` carries no
-    /// type, so this 403 reaches a client as `about:blank` and is
-    /// indistinguishable from the same-origin refusals -- and it is the 403
-    /// with the clearest next step for a user, since admin is recalculated
-    /// only at sign-in. Filed as getkono/kynos#105; there is no local fix that
-    /// would not be a second error path around the extractor that declares it.
+    /// A non-administrator is refused as [`ADMIN_REQUIRED`], which [`Admin`]
+    /// declares, so the 403 a client receives is the one the document names.
     async fn authorize(
         &self,
         credential: &AuthenticatedUser,
@@ -674,7 +672,7 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
         if user.is_admin {
             Ok(())
         } else {
-            Err(AuthRejection::Forbidden)
+            Err(AuthRejection::forbidden_as(ADMIN_REQUIRED))
         }
     }
 }

@@ -576,7 +576,6 @@ dependencies = [
  "mutants",
  "proptest",
  "rand 0.10.2",
- "regex",
  "rust_decimal",
  "sea-orm",
  "serde",
@@ -893,6 +892,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
 dependencies = [
  "nom",
+]
+
+[[package]]
+name = "cfg-expr"
+version = "0.20.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe4ece8474b5f766c63426647e7b4b316b67431ade1036a8313cee24a03ae917"
+dependencies = [
+ "smallvec",
 ]
 
 [[package]]
@@ -2680,9 +2688,9 @@ dependencies = [
 
 [[package]]
 name = "kynos"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e2870b13f4836a8fdf9eef13f4342bddb74e4a78ef7cb350481df6e685a1a29"
+checksum = "ec370787aadf21dc6871dbb157e1828c225553f03ca051cfc9ee15b256e4a158"
 dependencies = [
  "async-compression",
  "bytes",
@@ -2709,9 +2717,9 @@ dependencies = [
 
 [[package]]
 name = "kynos-macros"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17bf779f93eeb6c3942519f261573f47483c79f51d721fff7ec120f6cda949b5"
+checksum = "980b2739d2bd5bce1fb50ed5e7870b802bf513759e4e4b4fc1cfb628a791c660"
 dependencies = [
  "kynos-openapi",
  "proc-macro2",
@@ -2721,9 +2729,9 @@ dependencies = [
 
 [[package]]
 name = "kynos-openapi"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ce3286ca0f45019fd229a2a467a2d0ddeb074843614f09fee9b7370a0cb3eb9"
+checksum = "73224d588f5764bbed94dc94de738c7c3451a4f9017166cbd7000c0483cef0ed"
 dependencies = [
  "http",
  "indexmap 2.14.1",
@@ -4239,9 +4247,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -4914,11 +4922,12 @@ dependencies = [
 
 [[package]]
 name = "spargen"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5baebe002620b367fea87f77f911a9de77031f7d9072d8da238624df2a7b413"
+checksum = "1a556a87dced0db1cbfed1c1b788dfd20c40371a5debfe3e94598e8baa358e90"
 dependencies = [
  "camino",
+ "cfg-expr",
  "indexmap 2.14.1",
  "jsonschema",
  "prettyplease",
@@ -5309,7 +5318,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

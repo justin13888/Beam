@@ -143,17 +143,15 @@ impl Middleware for SessionMiddleware {
             // request whose caller never reads the document; there is nowhere
             // to put it and nothing lost by not doing so.
             //
-            // Read here rather than out of the generated error because spargen
-            // gives each operation its own error enum -- `GetMediaDetailError`,
-            // `DeleteLibraryError`, thirty-odd of them -- each holding
-            // `Box<types::Problem>` behind a `StatusNNN` variant, and none of
-            // them exposing an accessor. There is no generic way to reach the
-            // body from `Error::Api`, so the middleware -- which sees every
-            // response through one function -- reads it instead. That gap is
-            // filed upstream as getkono/spargen#85 ("Generated per-operation
-            // error enums expose no accessor for the problem document they
-            // carry"); until a release carries it, this is where the document
-            // comes from.
+            // Read here rather than out of the generated error. spargen gives
+            // each operation its own error enum -- `GetMediaDetailError`,
+            // `DeleteLibraryError`, thirty-odd of them -- and since the contract
+            // narrows each status to the `type` values its operation emits,
+            // every `StatusNNN` variant holds a body type of its own rather
+            // than a shared `Problem`. `Error::api_body` (getkono/spargen#85)
+            // reaches that body, but as `E::Body`, which names no field a
+            // generic reader can use. The middleware sees every response
+            // through one function, so it reads the document instead.
             let parsed = ProblemDetail::parse(&body);
             let _ = PROBLEM_SLOT.try_with(|slot| *slot.lock().expect("problem slot") = parsed);
 
@@ -207,14 +205,16 @@ impl ProblemDetail {
 /// caller may do about it, so choosing the variant from the status needs no
 /// table for anyone to maintain. The `type` is what beam-server adds on top --
 /// *which* 404 this is -- and it is carried through opaquely rather than
-/// matched on, so a code added on the server reaches a caller without a change
-/// here.
+/// matched on here. It does not follow that a code added on the server reaches
+/// a caller: the generated client decodes each status's `type` as the closed
+/// set the contract lists, and one outside it arrives as `Error::Decode`,
+/// which carries no status -- getkono/spargen#268.
 ///
 /// `code` is `about:blank` when the response carried no problem document, and
 /// when the framework answered rather than the application: the 401 from the
-/// session check, the 429 from the rate limiter, the 404 for a URL matching no
-/// route. RFC 9457 gives that exact reading -- the status code is the whole
-/// story -- so it is an answer rather than a gap.
+/// session check, the 404 for a URL matching no route. RFC 9457 gives that
+/// exact reading -- the status code is the whole story -- so it is an answer
+/// rather than a gap.
 #[must_use]
 pub fn classify(
     status: u16,
@@ -344,7 +344,9 @@ impl TransportFailure {
 
             // A body that will not decode is permanent: the identical request
             // produces the identical failure, so offering a retry would be a
-            // dead end.
+            // dead end. That includes a documented error status whose problem
+            // `type` the contract did not list, which `Decode` reports without
+            // its status (getkono/spargen#268).
             Error::Protocol(_) | Error::Decode { .. } => (FailureKind::Malformed, None),
 
             // `RequestConstruction` covers two unrelated things, and which one

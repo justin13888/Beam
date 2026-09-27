@@ -255,6 +255,36 @@ Beam on a hostname it was never told about. A request carrying *neither* header 
 non-browser clients send neither, and `SameSite=Lax` on the session cookie is what actually stops
 the browser case.
 
+### admin-required
+
+**403.** An administrator-only endpoint -- anything under `/v1/admin` -- was called by a signed-in
+user who is not an administrator.
+
+**What to do.** Fix the admin claim at your identity provider, then **sign out and back in**: admin
+is recalculated only at sign-in, so a session that began before the claim changed keeps the old
+answer.
+
+### rate-limited
+
+**429.** The client spent its request budget for this class of endpoint.
+
+Carries **`Retry-After`** in seconds, plus `X-RateLimit-Limit`, `-Remaining` and `-Reset`.
+
+| Class | Endpoints | Default |
+|---|---|---|
+| Auth | `/v1/auth/login`, `/v1/auth/callback` | 10 per minute |
+| Search | `/v1/media` (browse and search) | 60 per minute |
+
+The allowance is also the burst: a client starts with a full bucket that refills steadily, so the
+auth default is ten immediately and then one more every six seconds. **Streaming and download are
+deliberately never limited** — a player legitimately issues a burst of range requests, and limiting
+it would break seeking.
+
+**What to do.** Wait for `Retry-After`. Operators: raise `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` or
+`BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`. If every user shares one bucket because they arrive through a
+proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only behind a proxy that **overwrites**
+`X-Forwarded-For`, since a proxy that appends lets a client forge the header and evade the limit.
+
 ### metrics-unavailable
 
 **503.** `GET /metrics` was called and no metrics recorder is installed.
@@ -282,20 +312,10 @@ status code is the whole story, and for each of these there is no finer distinct
 |---|---|---|
 | `400` | A path or query parameter, header, cookie or body could not be parsed | Fix the request |
 | `401` | No session cookie, or one the server does not recognise | Sign in |
-| `403` | An administrator-only endpoint called by a non-administrator | Fix the admin claim at your identity provider, then **sign out and back in** — admin is recalculated only at sign-in |
 | `404` | The URL matches no route at all | Check the path |
 | `405` | A real path, wrong method | Check the method |
 | `415` / `422` | Unsupported request media type, or a body that does not satisfy the schema | Fix the request |
 | `416` | The requested byte range cannot be satisfied | See below |
-| `429` | Rate limited | See below |
-
-<Aside type="caution" title="The admin 403 cannot be identified yet">
-The `403` for "administrator access required" is one Beam would like to name, and currently cannot:
-it is produced by the framework's authorization layer, which offers no way for the application to
-supply a `type`. It is [filed upstream](https://github.com/getkono/kynos/issues/105). Until it lands, a
-client tells it apart from [`cross-origin-rejected`](#cross-origin-rejected) and
-[`account-disabled`](#account-disabled) by their codes rather than by its own.
-</Aside>
 
 ### 416 Range Not Satisfiable
 
@@ -308,25 +328,6 @@ for.
 broken symlink. Otherwise this is typically a player working from a stale cached length, so
 hard-reload; if it persists, the file changed since it was indexed and the library needs a rescan.
 
-### 429 Too Many Requests
-
-Carries **`Retry-After`** in seconds, plus `X-RateLimit-Limit`, `-Remaining` and `-Reset`.
-
-| Class | Endpoints | Default |
-|---|---|---|
-| Auth | `/v1/auth/login`, `/v1/auth/callback` | 10 per minute |
-| Search | `/v1/media` (browse and search) | 60 per minute |
-
-The allowance is also the burst: a client starts with a full bucket that refills steadily, so the
-auth default is ten immediately and then one more every six seconds. **Streaming and download are
-deliberately never limited** — a player legitimately issues a burst of range requests, and limiting
-it would break seeking.
-
-**What to do.** Wait for `Retry-After`. Operators: raise `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` or
-`BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`. If every user shares one bucket because they arrive through a
-proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only behind a proxy that **overwrites**
-`X-Forwarded-For`, since a proxy that appends lets a client forge the header and evade the limit.
-
 ## The one endpoint that does not use this shape
 
 `GET /v1/health` answers **both** `200` and `503` with the full health object rather than a problem
@@ -338,6 +339,14 @@ dependency is unhealthy — in practice, the database.
 - **`type` and `status` are the contract.** Branch on `type`; fall back to `status`.
 - **`detail` is not.** It is diagnostic text and it will change.
 - A code is never repurposed. If a condition splits into two, the new one gets a new code.
+
+<Aside type="caution" title="Native clients see only the codes they were built with">
+The Android and Apple apps decode `type` against the codes the server declared when the app was
+built. A code added later — or a `429` from a proxy in front of Beam rather than from Beam — reaches
+an older app as an unreadable response rather than as its status, until the client generator can
+fall back ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)). Web clients read the
+body directly and are unaffected.
+</Aside>
 
 <LinkCard
 	title="API conventions"

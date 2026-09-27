@@ -93,6 +93,12 @@ impl std::str::FromStr for ArtworkVariant {
     }
 }
 
+// Both are path segments of `/v1/artwork/{kind}/{id}/{variant}`, so both are
+// one string value on the wire. Kynos asks for the opt-in because it cannot see
+// that from the schema alone.
+impl kynos::schema::ParamValue for ArtworkKind {}
+impl kynos::schema::ParamValue for ArtworkVariant {}
+
 /// The path a client fetches one title's artwork from.
 ///
 /// Relative, exactly as `stream_url` is: the client resolves it against the

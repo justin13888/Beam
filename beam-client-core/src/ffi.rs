@@ -2918,7 +2918,7 @@ mod tests {
         let missing = Arc::new(CannedBackend::answering(
             404,
             "application/problem+json",
-            r#"{"type":"about:blank","status":404,"detail":"no such title"}"#,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404,"detail":"no such title"}"#,
         ));
         client
             .use_transport(
@@ -3045,7 +3045,7 @@ mod tests {
     async fn a_progress_sample_the_server_refuses_is_dropped() {
         let (client, _) = client_answering(
             400,
-            r#"{"type":"https://beam.justinchung.net/reference/errors/#validation","status":400,"detail":"position_secs must be finite"}"#,
+            r#"{"type":"about:blank","status":400,"detail":"position_secs must be finite"}"#,
         )
         .await;
 
@@ -3061,6 +3061,61 @@ mod tests {
         assert_eq!(client.pending_progress_count().await.expect("countable"), 0);
     }
 
+    /// A problem `type` the contract does not list for the status is lost,
+    /// status and all.
+    ///
+    /// This pins a gap, not a preference: the generated client decodes the
+    /// `type` as a closed set and reports anything else as a decode failure
+    /// that carries no status, so a code the server adds after a client ships
+    /// turns a documented 404 into a malformed response (getkono/spargen#268).
+    /// Expected to fail when that is fixed -- the failure is the reminder to
+    /// classify this as the 404 it is.
+    #[tokio::test]
+    async fn a_problem_type_the_contract_does_not_list_loses_its_status() {
+        let (client, _) = client_answering(
+            404,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404}"#,
+        )
+        .await;
+
+        let error = client
+            .media_sources("7".to_owned())
+            .await
+            .expect_err("the canned 404 fails the call");
+
+        assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
+    }
+
+    /// A 429 whose body is not Beam's `rate-limited` problem -- a reverse
+    /// proxy's own limiter answering in HTML -- is lost the same way.
+    ///
+    /// `browse_media` declares its 429 as that problem, so the generated
+    /// client decodes the body, fails, and reports a decode failure with no
+    /// status: the caller sees a malformed response rather than
+    /// `RateLimited`, and loses `Retry-After` (getkono/spargen#268). Expected
+    /// to fail when that is fixed.
+    #[tokio::test]
+    async fn a_429_a_proxy_wrote_is_not_recognised_as_rate_limiting() {
+        let (client, id, _) = signed_in_client().await;
+        client
+            .use_transport(
+                &id,
+                Arc::new(CannedBackend::answering(
+                    429,
+                    "text/html",
+                    "<html><body>Too Many Requests</body></html>",
+                )),
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .browse_media(BrowseQuery::default())
+            .await
+            .expect_err("the canned 429 fails the call");
+
+        assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
+    }
+
     /// The document the middleware captured is the one the error carries.
     ///
     /// Two 404s a viewer must be told about differently is what issue #123
@@ -3070,7 +3125,7 @@ mod tests {
     async fn a_failed_call_carries_its_own_problem_document_into_the_error() {
         let (client, _) = client_answering(
             404,
-            r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404,"detail":"Source video file not found"}"#,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#media-not-found","status":404,"detail":"Media not found"}"#,
         )
         .await;
 
@@ -3082,9 +3137,8 @@ mod tests {
         assert_eq!(
             error,
             BeamError::NotFound {
-                detail: "Source video file not found".to_owned(),
-                code: "https://beam.justinchung.net/reference/errors/#source-file-missing"
-                    .to_owned(),
+                detail: "Media not found".to_owned(),
+                code: "https://beam.justinchung.net/reference/errors/#media-not-found".to_owned(),
             }
         );
     }

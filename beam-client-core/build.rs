@@ -19,16 +19,11 @@ use spargen::{OmitMethod, OmitRule};
 /// response into memory would be generating something no caller may use.
 ///
 /// So these are omitted because they are genuinely not part of this client's
-/// surface -- not to route around the diagnostic they currently raise. That
-/// diagnostic is real and is filed upstream: Kynos describes a binary body as
-/// `"schema": {}`, which is the idiomatic 3.1+ spelling now that `format:
-/// binary` is deprecated in favour of `contentMediaType`, and spargen's E009
-/// rejects it for wanting a string-like or binary schema. Two first-party tools
-/// disagreeing about one media type is exactly the case AGENTS.md says to fix
-/// upstream, and is filed as getkono/spargen#72. When it lands, these rules
-/// stay: the paragraph above is reason enough on its own, and dropping them
-/// would generate the four methods this client is deliberately without. What
-/// the fix retires is the second half of this rationale, not the omission.
+/// surface. They once also raised a spargen diagnostic -- E009 rejected the
+/// `"schema": {}` Kynos writes for a binary body, getkono/spargen#72 -- which
+/// spargen 0.5 fixes. The rules stay: the paragraph above is reason enough on
+/// its own, and dropping them would generate the four methods this client is
+/// deliberately without.
 const MEDIA_DELIVERY: [(OmitMethod, &str); 4] = [
     (OmitMethod::Get, "/v1/files/{file_id}/stream"),
     (OmitMethod::Head, "/v1/files/{file_id}/stream"),
@@ -46,12 +41,9 @@ const MEDIA_DELIVERY: [(OmitMethod, &str); 4] = [
 /// `catalog.rs`). A generated method returning a `Vec<u8>` of a poster would
 /// be a method with no caller, for the same reason as the four above.
 ///
-/// The spargen gap here is real and separate, and is filed as
-/// getkono/spargen#82: `classify_media` has no arm for a media type *range*,
-/// so `image/*` -- the only honest description of a response whose concrete
-/// type is chosen per request -- is rejected as `E009`. Naming an exact type
-/// instead does not help; `image/jpeg` is not classified either. When that
-/// lands, these rules stay for the reason in the paragraph above.
+/// These too once raised E009, because spargen could not classify a media type
+/// range such as `image/*` (getkono/spargen#82, fixed in spargen 0.5). The
+/// rules stay for the reason in the paragraph above.
 const ARTWORK: [(OmitMethod, &str); 2] = [
     (OmitMethod::Get, "/v1/artwork/{kind}/{id}/{variant}"),
     (OmitMethod::Head, "/v1/artwork/{kind}/{id}/{variant}"),

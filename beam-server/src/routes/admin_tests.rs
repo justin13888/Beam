@@ -447,7 +447,11 @@ async fn creating_a_library_as_a_regular_user_is_403() {
         .send()
         .await;
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    // Named, so a client can tell "sign in again as an admin" apart from the
+    // same-origin 403s this operation can also answer with.
+    response
+        .assert_status(StatusCode::FORBIDDEN)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#admin-required");
 }
 
 #[tokio::test]
