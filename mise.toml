@@ -1214,7 +1214,7 @@ description = "Assert the compose topology keeps the dev IdP opt-in, declares it
 # Six properties the dev stack depends on, none of which any other gate sees.
 # `dev:verify-oidc` asserts the first two, but it needs a container runtime and
 # so sits outside `ci` (NFR-201) -- which means nothing runs them automatically.
-# These five are pure configuration, hermetic, and belong here:
+# These six are pure configuration, hermetic, and belong here:
 #
 #   1. `dex` stays behind the `dev-idp` profile, so a bare `compose up` is the
 #      production shape and starts no IdP (FR-110, NFR-406).
