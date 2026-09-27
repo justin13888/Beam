@@ -123,6 +123,20 @@ async fn main() -> Result<()> {
         info!("Anonymous library report enabled -- first report in one hour, then weekly");
     }
 
+    // Playback telemetry retention runs whether or not collection is enabled
+    // (issue #143): turning collection off stops new counts, and the counts
+    // already kept still age out on schedule.
+    {
+        let playback_telemetry = services.playback_telemetry.clone();
+        tokio::spawn(async move { playback_telemetry.run_retention().await });
+    }
+    if config.playback_telemetry_enabled {
+        info!(
+            "Playback telemetry enabled -- counts kept {} days, read at /v1/admin/telemetry/playback",
+            config.playback_telemetry_retention_days
+        );
+    }
+
     // Install the global Prometheus recorder when metrics are enabled. Done
     // once at startup: every `metrics::counter!`/`histogram!` call anywhere in
     // the process (the HTTP observer, beam-index domain counters) records into

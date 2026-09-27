@@ -358,6 +358,67 @@ pub enum ProgressError {
     Internal(String),
 }
 
+/// `POST /v1/telemetry/playback` (issue #143).
+///
+/// The 409 is how a client learns to stop reporting: collection is off, and
+/// retrying will not turn it on. It is not a 5xx precisely so that a client's
+/// transport does not retry it.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum PlaybackTelemetryError {
+    #[error("{0}")]
+    #[problem(
+        status = 409,
+        type = "https://beam.justinchung.net/reference/errors/#playback-telemetry-disabled",
+        title = "Playback telemetry disabled"
+    )]
+    Disabled(String),
+
+    /// The body deserialised but broke a rule the server enforces: each
+    /// broken rule is one entry of `errors`, at the JSON Pointer of what broke
+    /// it -- the shape of RFC 9457's own validation example, and of the 422
+    /// Kynos answers when a body does not fit its type.
+    #[error("the request body breaks {} rule(s)", errors.len())]
+    #[problem(
+        status = 422,
+        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
+        title = "Validation failed"
+    )]
+    ValidationFailed {
+        #[problem(extension)]
+        errors: Vec<crate::models::FieldError>,
+    },
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/admin/telemetry/playback` (issue #143).
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum PlaybackTelemetryReportError {
+    /// `from` is after `to`, or the range spans more days than one report
+    /// covers.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-date-range",
+        title = "Invalid date range"
+    )]
+    InvalidDateRange(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// Byte-range file delivery.
 ///
 /// Three of the statuses these operations answer with are not here, and each

@@ -87,6 +87,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             playback::report_playback_progress,
             playback::get_continue_watching,
             playback::get_history,
+            playback::report_playback_telemetry,
         ])
         .mount(kynos::routes![
             stream::stream_file,
@@ -112,6 +113,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             admin::update_admin_user,
             admin::get_admin_status,
             admin::preview_library_telemetry,
+            admin::get_playback_telemetry,
         ])
         .mount(kynos::routes![
             auth::oidc_me,

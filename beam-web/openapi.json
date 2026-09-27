@@ -2105,6 +2105,221 @@
         ]
       }
     },
+    "/v1/telemetry/playback": {
+      "post": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Report playback starts, failures, rebuffers and source switches.",
+        "description": "Each event is counted per UTC day under coarse dimensions of the file it\nnames -- container, codecs, resolution and bitrate class -- after which\nthe file id is discarded; who reported is never recorded. Answers 409\nwhen the operator has not enabled playback telemetry: stop reporting.",
+        "operationId": "reportPlaybackTelemetry",
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackTelemetryBatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity; Validation failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#validation-failed"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "409": {
+            "description": "Playback telemetry disabled",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#playback-telemetry-disabled"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
     "/v1/files/{file_id}/stream": {
       "get": {
         "tags": [
@@ -6499,6 +6714,243 @@
         ]
       }
     },
+    "/v1/admin/telemetry/playback": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Playback telemetry counts, summed over a range of days.",
+        "description": "The starts, start failures, rebuffers and source switches clients\nreported. Operator-local: none of it is part of the anonymous library\nreport, and no row names a user, file or title. Readable whether or not\ncollection is enabled.",
+        "operationId": "getPlaybackTelemetry",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First day, inclusive (default: 29 days before `to`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last day, inclusive (default: today, UTC). At most 366 days after\n`from`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Invalid date range",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-date-range"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybackTelemetryReport"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": [
+              "admin"
+            ]
+          }
+        ]
+      }
+    },
     "/v1/me": {
       "get": {
         "tags": [
@@ -9666,6 +10118,190 @@
         ],
         "description": "A page of watch history. `total` counts the user's history rows (completed\nand in-progress) whose file is present, so the client can paginate; a row\nwhose file is missing from disk is in neither `items` nor `total`. `items`\nmay still hold fewer than the requested `limit` when a row's title can no\nlonger be resolved (that row is skipped here but still counted in\n`total`)."
       },
+      "PlaybackClientKind": {
+        "type": "string",
+        "enum": [
+          "web_chromium",
+          "web_firefox",
+          "web_safari",
+          "web_other",
+          "android",
+          "android_tv",
+          "apple_ios",
+          "apple_tvos",
+          "apple_macos",
+          "other"
+        ],
+        "description": "What kind of client reported: a browser family or a native platform,\nnever a version or user agent."
+      },
+      "PlaybackStartEvent": {
+        "properties": {
+          "file_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The source (file) that started. Resolved to its container, codecs and\nresolution class, then discarded."
+          },
+          "audio_track_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "Which of the source's `audio_tracks` (as `GET /v1/media/{id}/sources`\nlists them, from 0) played. Absent, or out of range: the default track,\nelse the first."
+          }
+        },
+        "type": "object",
+        "required": [
+          "file_id"
+        ],
+        "description": "A playback that started."
+      },
+      "PlaybackFailureReason": {
+        "type": "string",
+        "enum": [
+          "container",
+          "video_codec",
+          "audio_codec",
+          "network",
+          "other"
+        ],
+        "description": "Why a playback start failed."
+      },
+      "PlaybackFailureStage": {
+        "type": "string",
+        "enum": [
+          "preflight",
+          "playback"
+        ],
+        "description": "Where a playback start failed."
+      },
+      "PlaybackStartFailureEvent": {
+        "properties": {
+          "file_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The source (file) that failed. Resolved, then discarded."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/PlaybackFailureReason"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/PlaybackFailureStage"
+          },
+          "audio_track_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "Which of the source's `audio_tracks` was chosen, as for a start."
+          }
+        },
+        "type": "object",
+        "required": [
+          "file_id",
+          "reason",
+          "stage"
+        ],
+        "description": "A playback that failed to start."
+      },
+      "PlaybackRebufferEvent": {
+        "properties": {
+          "file_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The source (file) that was playing. Resolved, then discarded."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "maximum": 600000.0,
+            "minimum": 1.0,
+            "format": "uint32",
+            "description": "How long playback stalled, 1 ms to 10 minutes."
+          }
+        },
+        "type": "object",
+        "required": [
+          "file_id",
+          "duration_ms"
+        ],
+        "description": "Playback stalled mid-stream waiting for data. A stall before the first\nframe is part of starting, not a rebuffer."
+      },
+      "PlaybackSwitchTrigger": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "auto"
+        ],
+        "description": "What made the player switch source."
+      },
+      "PlaybackSourceSwitchEvent": {
+        "properties": {
+          "from_file_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "to_file_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Must differ from `from_file_id`."
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/PlaybackSwitchTrigger"
+          }
+        },
+        "type": "object",
+        "required": [
+          "from_file_id",
+          "to_file_id",
+          "trigger"
+        ],
+        "description": "The player moved from one source of a title to another."
+      },
+      "PlaybackTelemetryBatch": {
+        "properties": {
+          "client_kind": {
+            "$ref": "#/components/schemas/PlaybackClientKind"
+          },
+          "starts": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackStartEvent"
+            },
+            "type": "array",
+            "maxItems": 50
+          },
+          "start_failures": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackStartFailureEvent"
+            },
+            "type": "array",
+            "maxItems": 50
+          },
+          "rebuffers": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackRebufferEvent"
+            },
+            "type": "array",
+            "maxItems": 50
+          },
+          "source_switches": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackSourceSwitchEvent"
+            },
+            "type": "array",
+            "maxItems": 50
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_kind"
+        ],
+        "description": "What `POST /v1/telemetry/playback` takes: one client's events since its\nlast report, at most 50 in total. An omitted list is empty.\n\nA client batches and flushes on its own schedule; the server counts each\nevent under the UTC day it arrives and forgets the file it named. An event\nwhose file the server cannot resolve -- unknown, or missing from disk -- is\ndropped, not refused."
+      },
       "Library": {
         "properties": {
           "id": {
@@ -10487,6 +11123,317 @@
           "payload"
         ],
         "description": "What `GET /v1/admin/telemetry/library` answers: the report this server\nwould send now, byte for byte, and whether and where it would go."
+      },
+      "PlaybackTelemetryTotals": {
+        "properties": {
+          "started_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          },
+          "failed_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          },
+          "rebuffer_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          },
+          "rebuffer_total_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Summed duration of every rebuffer."
+          },
+          "source_switch_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          }
+        },
+        "type": "object",
+        "required": [
+          "started_count",
+          "failed_count",
+          "rebuffer_count",
+          "rebuffer_total_ms",
+          "source_switch_count"
+        ],
+        "description": "Totals across every row of the report."
+      },
+      "PlaybackHeightClass": {
+        "type": "string",
+        "enum": [
+          "sd",
+          "hd",
+          "fhd",
+          "uhd",
+          "unknown"
+        ],
+        "description": "The vertical resolution class of a file's video: `sd` under 720\nlines, `hd` from 720, `fhd` from 1080, `uhd` from 2160."
+      },
+      "PlaybackStartCount": {
+        "properties": {
+          "client_kind": {
+            "$ref": "#/components/schemas/PlaybackClientKind"
+          },
+          "container": {
+            "type": "string",
+            "description": "Container, lowercased as FFmpeg names it; `unknown` when unnamed."
+          },
+          "video_codec": {
+            "type": "string",
+            "description": "Codec of the first video stream; `none` when there is none."
+          },
+          "audio_codec": {
+            "type": "string",
+            "description": "Codec of the audio stream that played; `none` when there is none."
+          },
+          "height_class": {
+            "$ref": "#/components/schemas/PlaybackHeightClass"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_kind",
+          "container",
+          "video_codec",
+          "audio_codec",
+          "height_class",
+          "count"
+        ],
+        "description": "Successful starts under one combination of dimensions."
+      },
+      "PlaybackStartFailureCount": {
+        "properties": {
+          "client_kind": {
+            "$ref": "#/components/schemas/PlaybackClientKind"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/PlaybackFailureReason"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/PlaybackFailureStage"
+          },
+          "container": {
+            "type": "string"
+          },
+          "video_codec": {
+            "type": "string"
+          },
+          "audio_codec": {
+            "type": "string"
+          },
+          "height_class": {
+            "$ref": "#/components/schemas/PlaybackHeightClass"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_kind",
+          "reason",
+          "stage",
+          "container",
+          "video_codec",
+          "audio_codec",
+          "height_class",
+          "count"
+        ],
+        "description": "Failed starts under one combination of dimensions and one reason."
+      },
+      "PlaybackBitrateClass": {
+        "type": "string",
+        "enum": [
+          "under_2_mbps",
+          "from_2_to_8_mbps",
+          "from_8_to_20_mbps",
+          "from_20_to_50_mbps",
+          "at_least_50_mbps",
+          "unknown"
+        ],
+        "description": "The average bitrate class of a whole file."
+      },
+      "PlaybackRebufferBucket": {
+        "type": "string",
+        "enum": [
+          "under_1_secs",
+          "from_1_to_3_secs",
+          "from_3_to_10_secs",
+          "from_10_to_30_secs",
+          "at_least_30_secs"
+        ],
+        "description": "The duration range one rebuffer fell into."
+      },
+      "PlaybackRebufferBucketCount": {
+        "properties": {
+          "bucket": {
+            "$ref": "#/components/schemas/PlaybackRebufferBucket"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bucket",
+          "count"
+        ],
+        "description": "How many rebuffers fell into one duration range."
+      },
+      "PlaybackRebufferCount": {
+        "properties": {
+          "client_kind": {
+            "$ref": "#/components/schemas/PlaybackClientKind"
+          },
+          "container": {
+            "type": "string"
+          },
+          "video_codec": {
+            "type": "string"
+          },
+          "height_class": {
+            "$ref": "#/components/schemas/PlaybackHeightClass"
+          },
+          "bitrate_class": {
+            "$ref": "#/components/schemas/PlaybackBitrateClass"
+          },
+          "event_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          },
+          "total_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          },
+          "histogram": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackRebufferBucketCount"
+            },
+            "type": "array",
+            "description": "Every duration range, shortest first, including empty ones."
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_kind",
+          "container",
+          "video_codec",
+          "height_class",
+          "bitrate_class",
+          "event_count",
+          "total_ms",
+          "histogram"
+        ],
+        "description": "Rebuffers under one combination of dimensions."
+      },
+      "PlaybackSourceSwitchCount": {
+        "properties": {
+          "client_kind": {
+            "$ref": "#/components/schemas/PlaybackClientKind"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/PlaybackSwitchTrigger"
+          },
+          "from_height_class": {
+            "$ref": "#/components/schemas/PlaybackHeightClass"
+          },
+          "to_height_class": {
+            "$ref": "#/components/schemas/PlaybackHeightClass"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_kind",
+          "trigger",
+          "from_height_class",
+          "to_height_class",
+          "count"
+        ],
+        "description": "Source switches under one combination of dimensions."
+      },
+      "PlaybackTelemetryReport": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether `BEAM_PLAYBACK_TELEMETRY_ENABLED` is on -- whether clients'\nreports are being counted now. Counts kept while it was on remain\nreadable after it is turned off."
+          },
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "retention_days": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "How many days counts are kept after the day they count."
+          },
+          "totals": {
+            "$ref": "#/components/schemas/PlaybackTelemetryTotals"
+          },
+          "starts": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackStartCount"
+            },
+            "type": "array"
+          },
+          "start_failures": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackStartFailureCount"
+            },
+            "type": "array"
+          },
+          "rebuffers": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackRebufferCount"
+            },
+            "type": "array"
+          },
+          "source_switches": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackSourceSwitchCount"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled",
+          "from",
+          "to",
+          "retention_days",
+          "totals",
+          "starts",
+          "start_failures",
+          "rebuffers",
+          "source_switches"
+        ],
+        "description": "What `GET /v1/admin/telemetry/playback` answers: the daily counts from\n`from` to `to` (UTC days, both inclusive), summed across the days.\n\nEvery list is sorted by its count, largest first, then by its dimensions.\nNo row names a user, a file or a title."
       },
       "MeResponse": {
         "properties": {

@@ -33,6 +33,7 @@ use crate::{
         metadata::{DbMetadataService, MetadataService},
         notification::{LocalNotificationService, NotificationService},
         playback::{DbPlaybackService, PlaybackService},
+        playback_telemetry::PlaybackTelemetryService,
         telemetry::LibraryReportService,
     },
 };
@@ -169,6 +170,11 @@ pub struct AppServices {
     /// `GET /v1/admin/telemetry/library`, and run on its weekly schedule by
     /// `main` only when `BEAM_TELEMETRY_URL` is set.
     pub telemetry: Arc<LibraryReportService>,
+    /// Operator-local playback telemetry (issue #143): counted by
+    /// `POST /v1/telemetry/playback` when `BEAM_PLAYBACK_TELEMETRY_ENABLED`
+    /// is on, read by `GET /v1/admin/telemetry/playback`, and pruned daily by
+    /// the retention loop `main` always runs.
+    pub playback_telemetry: Arc<PlaybackTelemetryService>,
 }
 
 impl AppServices {
@@ -233,6 +239,9 @@ impl AppServices {
         );
         let playback_repo: Arc<dyn beam_domain::repositories::PlaybackProgressRepository> =
             Arc::new(beam_index::repositories::SqlPlaybackProgressRepository::new(db.clone()));
+        let playback_telemetry_repo: Arc<
+            dyn beam_domain::repositories::PlaybackTelemetryRepository,
+        > = Arc::new(beam_index::repositories::SqlPlaybackTelemetryRepository::new(db.clone()));
         let library_shape_repo: Arc<dyn beam_domain::repositories::LibraryShapeRepository> =
             Arc::new(beam_index::repositories::SqlLibraryShapeRepository::new(
                 db.clone(),
@@ -370,6 +379,14 @@ impl AppServices {
             clock.clone(),
         ));
 
+        let playback_telemetry = Arc::new(PlaybackTelemetryService::new(
+            config.playback_telemetry_config(),
+            playback_telemetry_repo,
+            file_repo.clone(),
+            stream_repo.clone(),
+            clock.clone(),
+        ));
+
         let services = Self {
             hash: hash_service.clone() as Arc<dyn HashService>,
             library: Arc::new(LocalLibraryService::new(
@@ -408,6 +425,7 @@ impl AppServices {
             oidc_config,
             watch_status: Arc::new(WatchStatus::new()),
             telemetry,
+            playback_telemetry,
         };
 
         Ok((services, index_service, enrichment_service))
