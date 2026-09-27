@@ -325,11 +325,11 @@ pub mod in_memory {
         }
 
         async fn find_keyed_before_version(&self, version: u16) -> Result<Vec<Show>, DbErr> {
+            // `shows` before `key_versions`, the order every method takes
+            // them in, so no two calls can deadlock.
+            let shows = self.shows.lock().unwrap();
             let versions = self.key_versions.lock().unwrap();
-            let mut stale: Vec<_> = self
-                .shows
-                .lock()
-                .unwrap()
+            let mut stale: Vec<_> = shows
                 .values()
                 .filter(|s| s.identity_key.is_some())
                 .filter(|s| versions.get(&s.id).copied().unwrap_or(0) < version)
