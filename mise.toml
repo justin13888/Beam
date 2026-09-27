@@ -5,7 +5,9 @@
 # and the hooks in hk.pkl must invoke `mise run <task>` rather than restating a
 # command inline -- that duplication is what let CI and the hooks drift apart.
 
-min_version = "2025.1.0"
+# 2026.5.0 is the first release in which the conda backend (nasm, below) is out
+# of experimental; an older mise refuses the tool rather than installing it.
+min_version = "2026.5.0"
 
 [tools]
 bun = "1.4.0"
@@ -36,6 +38,14 @@ hk = "1.57.0"
 # requirement of `cargo mutants` here, not an optional speedup. nextest tags its
 # releases as `cargo-nextest-<semver>`, which is the version string mise wants.
 "github:nextest-rs/nextest" = "cargo-nextest-0.9.143"
+# The vendored FFmpeg build (ADR-0007, BEAM_CARGO_FEATURES below) assembles its
+# x86 SIMD with nasm, so every Rust task -- and so every Rust pre-push step --
+# needs it on PATH. Pinned here rather than left to the host's package manager
+# so a fresh macOS or Linux checkout needs nothing mise does not provide.
+# conda-forge is the source because it is the one registry that publishes nasm
+# for linux-64, linux-aarch64, osx-64 and osx-arm64 alike; nasm.us ships Linux
+# builds only as RPMs. CI's system-FFmpeg jobs never call it, and it is ~1 MB.
+"conda:nasm" = "2.16.03"
 # Rust is deliberately absent: rust-toolchain.toml pins 1.91.0 and is honored by
 # rustup, rust-analyzer, and CI's setup-rust-toolchain action. Duplicating the
 # pin here would create a second source of truth for the same thing.
