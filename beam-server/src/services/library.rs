@@ -155,6 +155,48 @@ pub mod in_memory {
 #[cfg(any(test, feature = "test-utils"))]
 pub use in_memory::{InMemoryPathValidator, InMemoryPathValidatorResult};
 
+/// A catalogued file resolved to where it lives on disk.
+///
+/// Server-internal on purpose: it carries the absolute path the delivery
+/// routes open, which NFR-108 keeps out of every client-facing response. It is
+/// deliberately neither `Serialize` nor a `Schema`, so it cannot be returned
+/// from a handler by accident; the client-facing view of a file is
+/// [`LibraryFile`], whose path is relative to the library root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedFile {
+    pub id: Uuid,
+    /// Absolute path of the file on the server's filesystem.
+    pub path: PathBuf,
+    /// Detected MIME type (e.g. "video/mp4"), if known.
+    pub mime_type: Option<String>,
+}
+
+impl From<beam_domain::models::MediaFile> for LocatedFile {
+    fn from(file: beam_domain::models::MediaFile) -> Self {
+        let beam_domain::models::MediaFile {
+            id,
+            library_id: _,
+            path,
+            hash: _,
+            size_bytes: _,
+            mtime: _,
+            mime_type,
+            duration: _,
+            container_format: _,
+            status: _,
+            content: _,
+            scanned_at: _,
+            updated_at: _,
+            missing_since: _,
+        } = file;
+        LocatedFile {
+            id,
+            path,
+            mime_type,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// Get all libraries by user ID
@@ -174,7 +216,7 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// `Ok(None)`: the caller sent something malformed rather than named a
     /// file that does not exist, and the delivery routes answer the two
     /// differently (400 against 404).
-    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LibraryFile>, LibraryError>;
+    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LocatedFile>, LibraryError>;
 
     /// Create a new library
     async fn create_library(
@@ -281,19 +323,25 @@ impl LibraryService for LocalLibraryService {
     ) -> Result<Vec<LibraryFile>, LibraryError> {
         let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
 
-        self.library_repo
+        let library = self
+            .library_repo
             .find_by_id(lib_uuid)
             .await?
             .ok_or(LibraryError::LibraryNotFound)?;
 
+        // Reported relative to the library's root, never as the absolute path
+        // the file is stored under (NFR-108).
         let files = self.file_repo.find_all_by_library(lib_uuid).await?;
-        Ok(files.into_iter().map(LibraryFile::from).collect())
+        Ok(files
+            .into_iter()
+            .map(|file| LibraryFile::from_domain(file, &library.root_path))
+            .collect())
     }
 
-    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LibraryFile>, LibraryError> {
+    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LocatedFile>, LibraryError> {
         let file_uuid = Uuid::parse_str(&file_id).map_err(|_| LibraryError::InvalidId)?;
         let file = self.file_repo.find_by_id(file_uuid).await?;
-        Ok(file.map(LibraryFile::from))
+        Ok(file.map(LocatedFile::from))
     }
 
     async fn create_library(

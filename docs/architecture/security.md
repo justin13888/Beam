@@ -96,11 +96,10 @@ server-side against the catalog. The AdminAuth-gated operational surface is a sa
 that the operator can fix it. Nothing there is a resource reference — no request path is ever
 resolved from a client-supplied string.
 
-One endpoint escapes both the rule and that exemption: `getLibraryFiles`
-(`GET /v1/libraries/{id}/files`) is `SessionAuth`, so it hands `LibraryFile.path` to any signed-in
-user rather than to an admin. It is tracked as [#168](https://github.com/justin13888/Beam/issues/168)
-and is named here because a reader checking this section against the server would otherwise find it
-contradicted — the opaque-ID claim above describes the intent and every other surface, not that one.
+File listings open to every signed-in user (`getLibraryFiles`, `GET /v1/libraries/{id}/files`)
+carry each file's path relative to its library root, for display only — never the absolute path,
+and never something a request resolves. The absolute path the delivery routes open stays in a
+server-internal type (`LocatedFile`) that cannot be serialized into a response.
 
 ## Operational hardening
 
