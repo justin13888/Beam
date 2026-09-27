@@ -157,9 +157,16 @@ Consequences for playback telemetry:
   five-range duration histogram, `source_switches`) summed over at most 366 days, largest count
   first. None of it names a user, file or title.
 - `validation-failed` enters the error vocabulary as a generic 422 with RFC 9457's per-pointer
-  `errors` extension. Kynos's `Json<T>` enforces serde only, not the `maxItems`/`minimum`/`maximum`
-  its `Schema` derive publishes, so the service enforces every bound itself until a Kynos release
-  does (CLAUDE.md rule 3; the gap is noted on `PlaybackTelemetryBatch`).
+  `errors` extension. Two Kynos 0.3.0 gaps bear on it, both tracked in #223 pending the upstream
+  getkono/kynos issue, and neither is worked around locally (CLAUDE.md rule 3: recorded in a comment
+  naming the tracking issue until a release carries the fix):
+  - Kynos's `Json<T>` enforces serde only, not the `maxItems`/`minimum`/`maximum` its `Schema`
+    derive publishes, so the service enforces every bound itself (`validate_batch`) until a Kynos
+    release does. The gap is noted on `PlaybackTelemetryBatch`.
+  - The derived problem responses describe `type` and `title` only, not `#[problem(extension)]`
+    members, so the OpenAPI document's 422 carries no `errors` or `FieldError` and a generated
+    client cannot type them; the wire and the reference docs carry them regardless. The gap is noted
+    on `PlaybackTelemetryError::ValidationFailed`, and the document is regenerated, never patched.
 - Where a file's container and codecs come from is one function (`ResolvedFile::of`) over today's
   stream model, so the unified stream model (#189) replaces it in one place.
 

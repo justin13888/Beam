@@ -384,6 +384,11 @@ pub enum PlaybackTelemetryError {
         title = "Validation failed"
     )]
     ValidationFailed {
+        // kynos gap: the derived responses describe a problem's `type` and
+        // `title` only, never its `#[problem(extension)]` members, so the
+        // OpenAPI document's 422 omits `errors` and `FieldError` and a
+        // generated client cannot type them. Tracked in #223, pending the
+        // upstream getkono/kynos issue; the document is not patched locally.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },

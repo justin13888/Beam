@@ -204,8 +204,8 @@ pub struct PlaybackSourceSwitchEvent {
 // derive publishes (`max_items`, `minimum`, `maximum`), although its
 // documentation says a schema violation is a 422. The service validates every
 // bound below itself (`validate_batch`), answering 422 #validation-failed
-// until a kynos release enforces them (upstream issue to be filed against
-// getkono/kynos).
+// until a kynos release enforces them. Tracked in #223, pending the upstream
+// getkono/kynos issue.
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct PlaybackTelemetryBatch {
     pub client_kind: PlaybackClientKind,
