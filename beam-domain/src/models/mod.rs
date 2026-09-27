@@ -1,4 +1,5 @@
 pub mod admin_log;
+pub mod applied_nfo;
 pub mod enrichment;
 pub mod file;
 pub mod genre;
@@ -14,6 +15,7 @@ pub mod sidecar;
 pub mod stream;
 
 pub use admin_log::*;
+pub use applied_nfo::*;
 pub use enrichment::*;
 pub use file::*;
 pub use genre::*;

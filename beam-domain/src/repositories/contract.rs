@@ -159,6 +159,18 @@ pub mod fixture {
         fn repo(&self) -> &dyn crate::repositories::PlaybackTelemetryRepository;
     }
 
+    /// Everything the [`crate::applied_nfo_repository_contract`] suite needs
+    /// from a backing store: the libraries a record hangs off, which Postgres
+    /// holds to a foreign key.
+    #[async_trait::async_trait]
+    pub trait AppliedNfoFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::AppliedNfoRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
+    }
+
     /// Everything the [`crate::sidecar_subtitle_repository_contract`] suite
     /// needs from a backing store: the libraries and video files a subtitle
     /// row hangs off, which Postgres holds to foreign keys.
@@ -4086,6 +4098,134 @@ macro_rules! sidecar_subtitle_repository_contract {
         async fn an_unknown_path_finds_nothing() {
             let fixture = $setup().await;
             let path = PathBuf::from(format!("/videos/{}/None.srt", Uuid::new_v4()));
+            assert_eq!(fixture.repo().find_by_path(&path).await.unwrap(), None);
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::AppliedNfoRepository`]
+/// (issue #184): one record per NFO path, recorded in place, listed by
+/// library in path order, and deleted by id.
+///
+/// `$setup` names an `async fn() -> impl AppliedNfoFixture`.
+#[macro_export]
+macro_rules! applied_nfo_repository_contract {
+    ($setup:path) => {
+        use ::std::path::PathBuf;
+        use ::uuid::Uuid;
+        use $crate::models::applied_nfo::{AppliedNfo, RecordAppliedNfo};
+        use $crate::repositories::contract::fixture::AppliedNfoFixture;
+
+        /// The NFO `name` in a folder of its own -- a fresh UUID keeps
+        /// concurrently running Postgres tests apart.
+        fn nfo(library_id: Uuid, dir: &str, name: &str) -> RecordAppliedNfo {
+            RecordAppliedNfo {
+                library_id,
+                path: PathBuf::from(format!("/videos/{dir}/{name}")),
+                size_bytes: 120,
+                content_hash: "0f1e2d3c4b5a69788796a5b4c3d2e1f0".to_string(),
+                change_stamp: Some("120:1700000000000000000:1700000000000000000".to_string()),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_record_inserts_once_then_updates_the_row_at_its_path_in_place() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let dir = Uuid::new_v4().to_string();
+            let first = nfo(library, &dir, "movie.nfo");
+
+            let inserted = repo.record_by_path(first.clone()).await.unwrap();
+            assert!(first.matches(&inserted), "{inserted:?}");
+            assert_eq!(
+                repo.find_by_path(&first.path).await.unwrap().map(|r| r.id),
+                Some(inserted.id)
+            );
+
+            let edited = RecordAppliedNfo {
+                size_bytes: 64,
+                content_hash: "ffeeddccbbaa99887766554433221100".to_string(),
+                change_stamp: None,
+                ..first.clone()
+            };
+            assert!(!edited.same_content(&inserted));
+            let updated = repo.record_by_path(edited.clone()).await.unwrap();
+            assert_eq!(updated.id, inserted.id, "one row per path, kept in place");
+            assert_eq!(updated.created_at, inserted.created_at);
+            let stored = repo.find_by_path(&first.path).await.unwrap().unwrap();
+            assert!(edited.matches(&stored), "{stored:?}");
+            assert!(!first.same_content(&stored), "the edit is what is recorded");
+        }
+
+        #[tokio::test]
+        async fn records_are_listed_by_library_in_path_order() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let other_library = fixture.new_library().await;
+            let dir = Uuid::new_v4().to_string();
+            for record in [
+                nfo(library, &dir, "tvshow.nfo"),
+                nfo(library, &dir, "movie.nfo"),
+                nfo(other_library, &dir, "Elsewhere.nfo"),
+            ] {
+                repo.record_by_path(record).await.unwrap();
+            }
+            let names = |rows: Vec<AppliedNfo>| {
+                rows.into_iter()
+                    .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                names(repo.find_all_by_library(library).await.unwrap()),
+                vec!["movie.nfo", "tvshow.nfo"]
+            );
+            assert_eq!(
+                names(repo.find_all_by_library(other_library).await.unwrap()),
+                vec!["Elsewhere.nfo"]
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_by_ids_removes_exactly_those_rows() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let dir = Uuid::new_v4().to_string();
+            let keep = repo
+                .record_by_path(nfo(library, &dir, "movie.nfo"))
+                .await
+                .unwrap();
+            let gone = repo
+                .record_by_path(nfo(library, &dir, "tvshow.nfo"))
+                .await
+                .unwrap();
+
+            assert_eq!(repo.delete_by_ids(Vec::new()).await.unwrap(), 0);
+            assert_eq!(
+                repo.delete_by_ids(vec![gone.id, Uuid::new_v4()])
+                    .await
+                    .unwrap(),
+                1,
+                "an unknown id deletes nothing"
+            );
+            assert_eq!(repo.find_by_path(&gone.path).await.unwrap(), None);
+            assert_eq!(
+                repo.find_all_by_library(library)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<_>>(),
+                vec![keep.id]
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unknown_path_finds_nothing() {
+            let fixture = $setup().await;
+            let path = PathBuf::from(format!("/videos/{}/movie.nfo", Uuid::new_v4()));
             assert_eq!(fixture.repo().find_by_path(&path).await.unwrap(), None);
         }
     };

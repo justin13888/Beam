@@ -18,6 +18,11 @@ use sea_orm_migration::prelude::*;
 ///   its video file (`ON DELETE CASCADE`), and with its library. `path` is
 ///   unique so a scan upserts by it. `format` is one of the text formats
 ///   Beam indexes (decision D184-4); `language` is ISO 639-2/B.
+/// - `applied_nfos`: what each NFO held -- its size and a hash of its content
+///   -- when the indexer last applied it, and the stat stamp that lets a scan
+///   skip re-reading an NFO that was not written since. An NFO is re-applied
+///   exactly when its content differs from its record, whatever its
+///   modification time says. `path` is unique; a row goes with its library.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -74,12 +79,33 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
+        db.execute_unprepared(
+            "CREATE TABLE applied_nfos ( \
+                 id UUID PRIMARY KEY, \
+                 library_id UUID NOT NULL REFERENCES libraries (id) ON DELETE CASCADE, \
+                 path TEXT NOT NULL, \
+                 size_bytes BIGINT NOT NULL \
+                     CONSTRAINT applied_nfos_size CHECK (size_bytes >= 0), \
+                 content_hash TEXT NOT NULL, \
+                 change_stamp TEXT, \
+                 created_at TIMESTAMPTZ NOT NULL, \
+                 updated_at TIMESTAMPTZ NOT NULL, \
+                 CONSTRAINT applied_nfos_path_unique UNIQUE (path) \
+             )",
+        )
+        .await?;
+        db.execute_unprepared(
+            "CREATE INDEX idx_applied_nfos_library_id ON applied_nfos (library_id)",
+        )
+        .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
+        db.execute_unprepared("DROP TABLE applied_nfos").await?;
         db.execute_unprepared("DROP TABLE sidecar_subtitles")
             .await?;
         // Dropping a column drops the index and the constraints on it.

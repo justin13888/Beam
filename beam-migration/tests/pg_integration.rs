@@ -979,6 +979,10 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
                                         size_bytes, created_at, updated_at) VALUES \
          (gen_random_uuid(), '00000000-0000-0000-0000-0000000000f1', \
           '00000000-0000-0000-0000-00000000000a', '/videos/m.en.srt', 'srt', 'eng', 10, now(), now())",
+        "INSERT INTO applied_nfos (id, library_id, path, size_bytes, content_hash, created_at, \
+                                   updated_at) VALUES \
+         (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', '/videos/movie.nfo', 2, \
+          'c0ffee', now(), now())",
     ];
     for sql in seed {
         db.execute_unprepared(sql).await.expect("seed rows");
@@ -1019,6 +1023,20 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
               '00000000-0000-0000-0000-00000000000a', '/videos/m.en.srt', 'srt', 1, now(), now())",
             "one row per subtitle path",
         ),
+        (
+            "INSERT INTO applied_nfos (id, library_id, path, size_bytes, content_hash, \
+                                       created_at, updated_at) VALUES \
+             (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', '/videos/movie.nfo', \
+              2, 'c0ffee', now(), now())",
+            "one record per NFO path",
+        ),
+        (
+            "INSERT INTO applied_nfos (id, library_id, path, size_bytes, content_hash, \
+                                       created_at, updated_at) VALUES \
+             (gen_random_uuid(), '00000000-0000-0000-0000-0000000000ff', '/videos/other.nfo', \
+              2, 'c0ffee', now(), now())",
+            "an NFO record belongs to a library",
+        ),
     ] {
         assert!(db.execute_unprepared(refused).await.is_err(), "{why}");
     }
@@ -1047,11 +1065,11 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
                FROM information_schema.columns \
               WHERE table_schema = current_schema() \
                 AND (column_name IN ('pinned_ref', 'pin_source') \
-                     OR table_name = 'sidecar_subtitles')"
+                     OR table_name IN ('sidecar_subtitles', 'applied_nfos'))"
         )
         .await
         .is_empty(),
-        "down() drops the table and every column it added"
+        "down() drops the tables and every column it added"
     );
     up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
         .await

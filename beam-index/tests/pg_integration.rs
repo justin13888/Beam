@@ -15,6 +15,8 @@
 //! the migrations declare are really there, and that the migrations reverse.
 #![cfg(feature = "pg-integration")]
 
+#[path = "pg_integration/applied_nfo.rs"]
+mod applied_nfo;
 #[path = "pg_integration/file_repository.rs"]
 mod file_repository;
 #[path = "pg_integration/library_shape.rs"]
