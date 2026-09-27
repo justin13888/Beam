@@ -45,6 +45,7 @@ optional variables unset/commented rather than blank.
 | `BEAM_OIDC_ISSUER` | unset | OIDC issuer URL. All three `BEAM_OIDC_*` values are required together; until then login is disabled with a clear error (not a crash). |
 | `BEAM_OIDC_CLIENT_ID` | unset | OIDC client id registered with the IdP. |
 | `BEAM_OIDC_CLIENT_SECRET` | unset | OIDC client secret. Secret — never logged (startup config logging redacts it). |
+| `BEAM_OIDC_CLIENT_AUTH_METHOD` | `client_secret_basic` | How Beam's client authenticates to the IdP, as its registration there names it (RFC 7591 `token_endpoint_auth_method`): `client_secret_basic` (HTTP Basic) or `client_secret_post` (the secret in the form body). Used for the browser sign-in's code exchange and both device sign-in requests alike; never guessed or retried with the other method (ADR-0017 D151-9). Any other value **fails startup**; an empty one is treated as unset, so it means `client_secret_basic`. The bundled dev Dex needs `client_secret_post`, which `mise run dev:up` sets. |
 | `BEAM_OIDC_SCOPES` | `openid profile email` | Space-separated scopes requested at login. |
 | `BEAM_WEB_URL` | `http://localhost:5173` | Web client origin: OIDC success redirect target and an implicitly allowed CSRF Origin. The default suits a host-run server against the Vite dev server; the compose stack overrides it to `http://localhost:8080`, where the containerized web client is served. Running Vite on `:5173` against a containerized server therefore needs `BEAM_EXTRA_ALLOWED_ORIGINS=http://localhost:5173`, or writes are rejected with 403 while reads still succeed. |
 | `BEAM_EXTRA_ALLOWED_ORIGINS` | unset | Comma-separated extra Origins accepted on state-changing requests. |
@@ -54,7 +55,8 @@ optional variables unset/commented rather than blank.
 | `BEAM_SESSION_IDLE_DAYS` | `14` | Session idle timeout (slides forward on activity, capped by the absolute lifetime). |
 | `BEAM_SESSION_MAX_DAYS` | `60` | Absolute session lifetime. |
 | `BEAM_RATE_LIMIT_ENABLED` | `true` | Whether the in-process rate limiter is installed on the auth and search endpoints (NFR-107). When `false`, no limiter middleware is mounted at all. |
-| `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Sustained request rate — and burst — per client for `/v1/auth/login` and `/v1/auth/callback`, in requests/minute. Must be ≥ 1. |
+| `BEAM_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Sustained request rate — and burst — per client for `/v1/auth/login`, `/v1/auth/callback` and `/v1/auth/device`, in requests/minute. Must be ≥ 1. |
+| `BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE` | `30` | Sustained request rate — and burst — per client for device-login polls (`/v1/auth/device/token`), in requests/minute. Its own budget because a waiting device polls every few seconds; each flow's poll interval separately paces what reaches the IdP. Must be ≥ 1. |
 | `BEAM_RATE_LIMIT_SEARCH_PER_MINUTE` | `60` | Sustained request rate — and burst — per client for `GET /v1/media` (browse/search), in requests/minute. Must be ≥ 1. |
 | `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR` | `false` | Whether to key the rate limiter off the first `X-Forwarded-For` IP instead of the peer socket IP. Only enable behind a trusted proxy that overwrites the header — it is otherwise trivially spoofable. |
 | `RUST_LOG` | (tracing default) | Standard `tracing` filter, e.g. `beam_server=info`. |

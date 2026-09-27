@@ -100,6 +100,12 @@ The second blocker is the more interesting one: on tvOS the native token mint NF
 "should" becomes a hard prerequisite. It is the same endpoint Android TV
 ([#65](https://github.com/justin13888/beam/issues/65)) needs.
 
+*Amended for [#151](https://github.com/justin13888/beam/issues/151):* the second blocker is lifted
+on the server side. The OAuth 2.0 device authorization grant
+([ADR-0017](ADR-0017-device-authorization-grant.md)) mints a session for a client with no web view,
+wherever the deployment's IdP offers the grant -- so for tvOS it is now a condition on the IdP, not
+a missing Beam capability. The first blocker, the Tier 3 target, is unchanged.
+
 ## Consequences
 
 Apple users get hardware-decoded playback of the Matroska files that make up much of a self-hosted

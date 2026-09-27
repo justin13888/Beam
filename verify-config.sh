@@ -95,6 +95,7 @@ echo "Checking OIDC Auth Configuration (see ADR-0003):"
 check_var "BEAM_OIDC_ISSUER"
 check_var "BEAM_OIDC_CLIENT_ID"
 check_secret "BEAM_OIDC_CLIENT_SECRET"
+check_var "BEAM_OIDC_CLIENT_AUTH_METHOD"
 check_var "BEAM_OIDC_SCOPES"
 check_var "BEAM_WEB_URL"
 check_var "BEAM_EXTRA_ALLOWED_ORIGINS"
@@ -115,6 +116,16 @@ elif [ "$OIDC_SET" -lt 3 ]; then
     echo "❌ OIDC is partially configured ($OIDC_SET of 3): issuer, client_id, and client_secret must all be set -- login will be disabled"
     ERRORS=$((ERRORS + 1))
 fi
+# The method Beam's client is registered with at the IdP (ADR-0017 D151-9);
+# unset or empty means client_secret_basic, and anything but the two RFC 7591
+# names fails startup.
+case "${BEAM_OIDC_CLIENT_AUTH_METHOD:-client_secret_basic}" in
+    client_secret_basic|client_secret_post) ;;
+    *)
+        echo "❌ BEAM_OIDC_CLIENT_AUTH_METHOD must be client_secret_basic or client_secret_post -- the server refuses to start"
+        ERRORS=$((ERRORS + 1))
+        ;;
+esac
 # Admin is derived solely from an IdP-asserted claim (issue #85). A value with
 # no claim to read it from is a startup error; no claim at all means no admins.
 if [ -n "$BEAM_OIDC_ADMIN_VALUE" ] && [ -z "$BEAM_OIDC_ADMIN_CLAIM" ]; then

@@ -5,6 +5,8 @@
 //! Run with `mise run rust:test:pg`.
 #![cfg(feature = "pg-integration")]
 
+#[path = "pg_integration/device_auth_store.rs"]
+mod device_auth_store;
 #[path = "pg_integration/pending_auth_store.rs"]
 mod pending_auth_store;
 #[path = "pg_integration/session_store.rs"]

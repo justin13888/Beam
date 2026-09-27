@@ -65,6 +65,12 @@ services:
       - BEAM_OIDC_ISSUER
       - BEAM_OIDC_CLIENT_ID
       - BEAM_OIDC_CLIENT_SECRET
+      # How the client is registered to authenticate at the IdP:
+      # client_secret_basic (the default) or client_secret_post. An empty value
+      # means the default, like any optional setting's (see the header above);
+      # it is spelled out here so the effective method is visible.
+      # `mise run dev:up` sets client_secret_post for the bundled Dex.
+      - BEAM_OIDC_CLIENT_AUTH_METHOD=${BEAM_OIDC_CLIENT_AUTH_METHOD:-client_secret_basic}
       - BEAM_OIDC_SCOPES=${BEAM_OIDC_SCOPES:-openid profile email}
       # The containerized web client is served on :8080 (see the `web` service
       # below); beam-server's own default is Vite's :5173, which is right for a

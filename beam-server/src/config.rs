@@ -1,3 +1,4 @@
+use beam_auth::utils::oidc::ClientAuthMethod;
 use confique::Config;
 use std::fmt;
 use std::path::PathBuf;
@@ -190,6 +191,17 @@ pub struct ServerConfig {
     #[config(env = "BEAM_OIDC_CLIENT_SECRET")]
     pub oidc_client_secret: Option<String>,
 
+    /// How Beam's client authenticates to the IdP, as its registration there
+    /// names it: `client_secret_basic` (HTTP Basic, the default) or
+    /// `client_secret_post` (the secret in the form body) -- RFC 7591's
+    /// `token_endpoint_auth_method` values. Applies to the authorization-code
+    /// exchange and both device-grant requests alike. An IdP accepts only the
+    /// method a client is registered with and publishes that nowhere, so it
+    /// is set here rather than guessed (ADR-0017). Any other value is a
+    /// startup error; an empty one is unset, so it means the default.
+    #[config(env = "BEAM_OIDC_CLIENT_AUTH_METHOD", default = "client_secret_basic")]
+    pub oidc_client_auth_method: ClientAuthMethod,
+
     /// Space-separated OIDC scopes requested at login.
     #[config(env = "BEAM_OIDC_SCOPES", default = "openid profile email")]
     pub oidc_scopes: String,
@@ -245,9 +257,10 @@ pub struct ServerConfig {
     #[config(env = "BEAM_RATE_LIMIT_ENABLED", default = true)]
     pub rate_limit_enabled: bool,
 
-    /// Sustained request rate — and burst capacity — for the auth endpoints
-    /// (`/v1/auth/login`, `/v1/auth/callback`), per client key, in requests per
-    /// minute. Must be at least 1.
+    /// Sustained request rate — and burst capacity — for the endpoints that
+    /// begin a login (`/v1/auth/login`, `/v1/auth/callback`,
+    /// `/v1/auth/device`), per client key, in requests per minute. Must be at
+    /// least 1.
     #[config(env = "BEAM_RATE_LIMIT_AUTH_PER_MINUTE", default = 10)]
     pub rate_limit_auth_per_minute: u32,
 
@@ -256,6 +269,15 @@ pub struct ServerConfig {
     /// per minute. Must be at least 1.
     #[config(env = "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE", default = 60)]
     pub rate_limit_search_per_minute: u32,
+
+    /// Sustained request rate — and burst capacity — for device-login polls
+    /// (`POST /v1/auth/device/token`), per client key, in requests per
+    /// minute. Must be at least 1. Its own budget because a waiting TV polls
+    /// every few seconds for minutes -- far more than the login budget allows
+    /// -- while each flow's own interval (ADR-0017) already paces what reaches
+    /// the IdP.
+    #[config(env = "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE", default = 30)]
+    pub rate_limit_device_poll_per_minute: u32,
 
     /// Whether to trust a client-supplied `X-Forwarded-For` header when
     /// deriving the rate-limit client key. Off by default: the header is
@@ -301,6 +323,7 @@ impl fmt::Debug for ServerConfig {
             oidc_issuer,
             oidc_client_id,
             oidc_client_secret,
+            oidc_client_auth_method,
             oidc_scopes,
             oidc_admin_claim,
             oidc_admin_value,
@@ -312,6 +335,7 @@ impl fmt::Debug for ServerConfig {
             rate_limit_enabled,
             rate_limit_auth_per_minute,
             rate_limit_search_per_minute,
+            rate_limit_device_poll_per_minute,
             rate_limit_trust_forwarded_for,
         } = self;
         f.debug_struct("ServerConfig")
@@ -344,6 +368,7 @@ impl fmt::Debug for ServerConfig {
             .field("oidc_issuer", oidc_issuer)
             .field("oidc_client_id", oidc_client_id)
             .field("oidc_client_secret", &redact_option(oidc_client_secret))
+            .field("oidc_client_auth_method", oidc_client_auth_method)
             .field("oidc_scopes", oidc_scopes)
             .field("oidc_admin_claim", oidc_admin_claim)
             .field("oidc_admin_value", oidc_admin_value)
@@ -355,6 +380,10 @@ impl fmt::Debug for ServerConfig {
             .field("rate_limit_enabled", rate_limit_enabled)
             .field("rate_limit_auth_per_minute", rate_limit_auth_per_minute)
             .field("rate_limit_search_per_minute", rate_limit_search_per_minute)
+            .field(
+                "rate_limit_device_poll_per_minute",
+                rate_limit_device_poll_per_minute,
+            )
             .field(
                 "rate_limit_trust_forwarded_for",
                 rate_limit_trust_forwarded_for,
@@ -564,6 +593,13 @@ impl ServerConfig {
             ));
         }
 
+        if self.rate_limit_device_poll_per_minute == 0 {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+
         // Zero would poll in a tight loop, walking every polled library
         // back to back.
         if self.watch_poll_interval_secs == 0 {
@@ -649,6 +685,124 @@ mod tests {
         // Non-secret fields stay visible for operator debugging.
         assert!(output.contains("beam.example.com"), "output: {output}");
         assert!(output.contains("beam-client"), "output: {output}");
+    }
+
+    /// `BEAM_OIDC_CLIENT_AUTH_METHOD` takes exactly RFC 7591's
+    /// `token_endpoint_auth_method` names for the two secret-based methods --
+    /// what an operator copies from the IdP's client registration. Anything
+    /// else, including a method Beam cannot speak, fails the load rather than
+    /// falling back to a method the IdP would refuse at the first login. The
+    /// empty string does not parse either, which is what makes confique treat
+    /// it as unset (pinned end to end below).
+    ///
+    /// Parsed through `str`'s `IntoDeserializer`, the path confique's env
+    /// source takes for an enum (and its declared default).
+    #[test]
+    fn the_client_auth_method_setting_accepts_only_the_rfc_7591_names() {
+        use serde::Deserialize as _;
+        use serde::de::IntoDeserializer as _;
+        use serde::de::value::{Error, StrDeserializer};
+
+        let parse = |raw: &str| {
+            let deserializer: StrDeserializer<'_, Error> = raw.into_deserializer();
+            ClientAuthMethod::deserialize(deserializer).ok()
+        };
+
+        for (raw, expected) in [
+            (
+                "client_secret_basic",
+                Some(ClientAuthMethod::ClientSecretBasic),
+            ),
+            (
+                "client_secret_post",
+                Some(ClientAuthMethod::ClientSecretPost),
+            ),
+            ("CLIENT_SECRET_POST", None),
+            ("basic", None),
+            ("post", None),
+            ("client_secret_jwt", None),
+            ("private_key_jwt", None),
+            ("none", None),
+            ("", None),
+        ] {
+            assert_eq!(parse(raw), expected, "{raw:?}");
+        }
+    }
+
+    /// The child half of
+    /// [`an_empty_client_auth_method_resolves_to_the_default`]: loads the
+    /// configuration from the environment that test hands it. Ignored because
+    /// it means nothing outside that environment, and refuses to pass there.
+    #[test]
+    #[ignore = "run by an_empty_client_auth_method_resolves_to_the_default in a child process"]
+    fn client_auth_method_loaded_from_an_empty_variable() {
+        assert_eq!(
+            std::env::var("BEAM_OIDC_CLIENT_AUTH_METHOD").as_deref(),
+            Ok(""),
+            "run through an_empty_client_auth_method_resolves_to_the_default"
+        );
+        let config = ServerConfig::builder()
+            .env()
+            .load()
+            .expect("an empty auth method loads");
+        assert_eq!(
+            config.oidc_client_auth_method,
+            ClientAuthMethod::ClientSecretBasic
+        );
+    }
+
+    /// A set-but-empty `BEAM_OIDC_CLIENT_AUTH_METHOD` is the default,
+    /// `client_secret_basic`, not a startup failure: confique treats an empty
+    /// value that does not deserialize as unset, the repo-wide rule for
+    /// optional settings that docs/operations/configuration.md states.
+    ///
+    /// Proven through the real env source, which reads the process
+    /// environment. Setting a variable in-process is `unsafe` in Rust 2024
+    /// because the suite runs in parallel, so this re-executes the test binary
+    /// for the one ignored child test, with every inherited `BEAM_*` variable
+    /// removed and only this one set.
+    #[test]
+    fn an_empty_client_auth_method_resolves_to_the_default() {
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("the test binary's own path"),
+        );
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("BEAM_") {
+                child.env_remove(key);
+            }
+        }
+        let output = child
+            .env("BEAM_OIDC_CLIENT_AUTH_METHOD", "")
+            .args([
+                "--exact",
+                "config::tests::client_auth_method_loaded_from_an_empty_variable",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("the test binary re-executes");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "stdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // An exact filter that matched nothing would also exit 0.
+        assert!(stdout.contains("1 passed"), "stdout: {stdout}");
+    }
+
+    #[test]
+    fn debug_output_names_the_client_auth_method() {
+        let config = ServerConfig {
+            oidc_client_auth_method: ClientAuthMethod::ClientSecretPost,
+            ..config_with_secrets()
+        };
+        let output = format!("{config:?}");
+        assert!(
+            output.contains("oidc_client_auth_method: ClientSecretPost"),
+            "output: {output}"
+        );
     }
 
     #[test]
@@ -992,10 +1146,12 @@ mod tests {
         for field in [
             "BEAM_RATE_LIMIT_AUTH_PER_MINUTE",
             "BEAM_RATE_LIMIT_SEARCH_PER_MINUTE",
+            "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE",
         ] {
             let config = ServerConfig {
                 rate_limit_auth_per_minute: if field.contains("AUTH") { 0 } else { 10 },
                 rate_limit_search_per_minute: if field.contains("SEARCH") { 0 } else { 60 },
+                rate_limit_device_poll_per_minute: if field.contains("DEVICE") { 0 } else { 30 },
                 ..config_with_secrets()
             };
             let err = config

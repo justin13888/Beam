@@ -37,6 +37,8 @@ role.
 | `/v1/continue-watching` | GET | Resume list for the current user |
 | `/v1/history` | GET | Watch history for the current user (limit/offset paged) |
 | `/v1/auth/login`, `/v1/auth/callback` | GET | OIDC login redirect and callback |
+| `/v1/auth/device` | POST | Start a device login (RFC 8628) for a client with no browser: user code, verification URI, opaque device handle. `501` when the IdP does not offer the grant ([ADR-0017](decisions/ADR-0017-device-authorization-grant.md)) |
+| `/v1/auth/device/token` | POST | Poll a device login once: `202` while waiting (`authorization_pending` / `slow_down`), `200` with the `beam_session` value on approval |
 | `/v1/me` | GET | Current user |
 | `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions |
 | `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List / revoke own sessions |

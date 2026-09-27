@@ -22,6 +22,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,6 +54,8 @@ public fun AuthRoute(
         onDeclineCertificate = viewModel::declineCertificate,
         onSessionCookie = viewModel::onSessionCookie,
         onSignInCancelled = viewModel::onSignInCancelled,
+        onDeviceLoginCancelled = viewModel::onDeviceLoginCancelled,
+        onSignInWithCode = viewModel::signInWithCode,
         onSignedIn = onSignedIn,
         modifier = modifier,
     )
@@ -72,6 +75,8 @@ internal fun AuthScreen(
     onSignInCancelled: () -> Unit,
     onSignedIn: () -> Unit,
     modifier: Modifier = Modifier,
+    onDeviceLoginCancelled: () -> Unit = {},
+    onSignInWithCode: () -> Unit = {},
 ) {
     // A LaunchedEffect rather than a bare call: navigating from composition
     // fires again on every recomposition, and on configuration change it would
@@ -88,13 +93,53 @@ internal fun AuthScreen(
         )
     }
 
+    val devicePrompt = state.devicePrompt
+    if (devicePrompt != null) {
+        Column(
+            modifier = modifier.fillMaxSize().padding(BeamSpacing.Large),
+            verticalArrangement = Arrangement.spacedBy(BeamSpacing.Medium),
+        ) {
+            Text(
+                text = "Approve this device",
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            Text(
+                text = "On a phone or computer, open ${devicePrompt.verificationUri} and enter:",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                text = devicePrompt.userCode,
+                style = MaterialTheme.typography.displaySmall,
+            )
+            CircularProgressIndicator()
+            Button(onClick = onDeviceLoginCancelled) { Text("Cancel") }
+        }
+        return
+    }
+
     val loginUrl = state.loginUrl
     if (loginUrl != null) {
-        SignInWebView(
-            url = loginUrl,
-            onSessionCookie = onSessionCookie,
-            modifier = modifier.fillMaxSize(),
-        )
+        Column(modifier = modifier.fillMaxSize()) {
+            // The browser sign-in is the phone's default and stays as it was;
+            // this is the second way in, by the device authorization grant.
+            TextButton(
+                onClick = onSignInWithCode,
+                modifier = Modifier.padding(horizontal = BeamSpacing.Small),
+            ) { Text("Sign in with a code") }
+            state.error?.let { error ->
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = BeamSpacing.Large),
+                )
+            }
+            SignInWebView(
+                url = loginUrl,
+                onSessionCookie = onSessionCookie,
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+        }
         return
     }
 
