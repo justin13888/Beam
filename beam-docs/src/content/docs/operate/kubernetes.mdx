@@ -19,13 +19,15 @@ read [Backups and upgrades](/operate/backup-and-upgrade/) before you depend on a
 - **One server pod.** Beam's indexer runs inside the server with no leader election, so the chart
   always runs exactly one replica and replaces it with the `Recreate` strategy. There is no replica
   setting. An upgrade is a short outage while the old pod stops and the new one starts.
-- **Your libraries, read-only.** Each library is mounted read-only at `/videos/<name>`.
+- **Your libraries, read-only.** Each library is mounted read-only at `/videos/<name>`, and its
+  volume is read-only at the source too, so Kubernetes never changes the ownership of your media.
 - **State on a volume.** `/data` (the artwork cache and the like) is a 10Gi PersistentVolumeClaim by
   default. It is kept when you uninstall the release.
 - **Migrations on boot.** They run when the server starts, and two servers starting at once wait for
   each other rather than colliding.
-- **A locked-down pod.** Non-root, read-only root filesystem, no added capabilities, no Kubernetes
-  API token.
+- **A locked-down server pod.** Non-root, read-only root filesystem, every capability dropped, no
+  Kubernetes API token. (The optional web client's Caddy container runs as root and keeps only the
+  capability to bind port 80.)
 
 ## Before you install
 
@@ -36,8 +38,10 @@ You need:
    [CloudNativePG](https://cloudnative-pg.io/) is the recommended way to run one.
 2. **An identity provider.** See [Identity and access](/operate/identity-and-access/). Register the
    redirect URI `https://<your host>/v1/auth/callback`.
-3. **Your media** on volumes the cluster can mount: a PersistentVolumeClaim, an NFS export, or a
-   host path.
+3. **Your media** on volumes the cluster can mount: a PersistentVolumeClaim, an NFS export, a CSI
+   volume (SMB, for example), another network volume such as iSCSI or CephFS, or a host path. The
+   chart mounts each read-only and refuses volume kinds it cannot make read-only, such as
+   `emptyDir` or `configMap`.
 
 ## Install
 
@@ -98,6 +102,10 @@ The server is taken out of rotation while it cannot reach the database, but it i
 restart would not bring the database back. It comes back into rotation on its own once the database
 does. The first start is allowed five minutes for the database to appear and migrations to run.
 
+When the pod stops, the server lets in-flight requests and streams finish for up to
+`server.shutdownTimeoutSeconds` (30 by default). Kubernetes is told to wait 15 seconds longer than
+that before killing it, so raising the value is all it takes to give long streams more time.
+
 ## The web client
 
 The web client is off by default. The published web image is built to call the API at
@@ -121,19 +129,32 @@ web:
     tag: v0.1.0
 ```
 
+With the web client enabled, the server sends the browser back to `server.publicUrl` after sign-in.
+If you leave it disabled and serve a browser client somewhere else, set `server.webUrl` to that
+client's origin: it is where sign-in returns to, and one of the browser origins the server
+accepts requests from. Left empty with the web client disabled, it falls back to a
+development default (`http://localhost:5173`), which is fine when only the native apps sign in.
+
 ## Behind the ingress
 
-- Only `/v1` reaches the server. `/metrics` and `/openapi` are never exposed.
-- With an ingress enabled, the rate limiter counts requests per client using the
-  `X-Forwarded-For` header the ingress controller sets. That is only safe while clients cannot reach
-  the server's Service directly; set `rateLimit.trustForwardedFor: false` if they can.
+- Only `/v1` reaches the server through the ingress. `/metrics` and `/openapi` are never routed.
+- Keep `service.type` at `ClusterIP`. A `NodePort` or `LoadBalancer` Service exposes the server's
+  whole port directly, `/metrics` (when enabled) and `/openapi` included, and lets clients bypass
+  the ingress.
+- With an ingress in front of a `ClusterIP` Service, the rate limiter counts requests per client
+  using the `X-Forwarded-For` header the ingress controller sets. With a `NodePort` or
+  `LoadBalancer` Service it uses the connecting address instead, since a client reaching the server
+  directly could forge that header. `rateLimit.trustForwardedFor` overrides either default.
 - `metrics.enabled: true` turns on `/metrics` and annotates the pod for a Prometheus scraper inside
   the cluster. See [Monitoring and logs](/operate/monitoring/).
 
 ## Argo CD
 
 The chart installs from the repository, so an Argo CD `Application` can point at it directly. Pin
-`targetRevision` to a tag once releases exist:
+`targetRevision` to a release tag, never `master`: the chart at a tag defaults to the server image
+published for that same release, while `master` moves both under you. No release exists yet, so
+until one does, pin `targetRevision` to a commit and set `image.repository` and `image.tag` to an
+image you built from that commit.
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -145,7 +166,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/justin13888/beam.git
-    targetRevision: master
+    targetRevision: v0.2.0 # a release tag -- none is published yet
     path: charts/beam
     helm:
       valuesObject:

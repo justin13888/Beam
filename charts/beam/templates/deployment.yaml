@@ -49,9 +49,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      # Longer than BEAM_SHUTDOWN_TIMEOUT_SECS (30 by default), so in-flight
-      # streams drain before the kubelet's SIGKILL.
-      terminationGracePeriodSeconds: 45
+      # Derived from server.shutdownTimeoutSeconds, so in-flight streams drain
+      # before the kubelet's SIGKILL. `check:chart-invariants` fails if it is
+      # not longer than BEAM_SHUTDOWN_TIMEOUT_SECS.
+      terminationGracePeriodSeconds: {{ include "beam.terminationGracePeriodSeconds" . }}
       securityContext:
         # The image's `appuser`.
         runAsNonRoot: true
@@ -99,6 +100,8 @@ spec:
             {{- end }}
             - name: BEAM_AUTO_MIGRATE
               value: {{ .Values.server.autoMigrate | quote }}
+            - name: BEAM_SHUTDOWN_TIMEOUT_SECS
+              value: {{ .Values.server.shutdownTimeoutSeconds | quote }}
             - name: BEAM_ENABLE_METRICS
               value: {{ .Values.metrics.enabled | quote }}
             - name: BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR
@@ -211,12 +214,16 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- $readOnlyWithoutFlag := include "beam.readOnlyWithoutFlag" . | fromJsonArray }}
         {{- range .Values.libraries }}
         {{- $source := deepCopy .volume }}
-        {{- /* Also read-only at the source where the source can say so. */}}
-        {{- range $kind := list "persistentVolumeClaim" "nfs" }}
-        {{- if hasKey $source $kind }}
-        {{- $_ := set (get $source $kind) "readOnly" true }}
+        {{- /* Also read-only at the source. The schema admits only kinds with a
+               readOnly field plus the few that are read-only without one, so
+               every other kind gets the flag -- which also stops the kubelet
+               applying fsGroup (a recursive chgrp) to the media. */}}
+        {{- range $kind, $spec := $source }}
+        {{- if not (has $kind $readOnlyWithoutFlag) }}
+        {{- $_ := set $spec "readOnly" true }}
         {{- end }}
         {{- end }}
         - name: library-{{ .name }}

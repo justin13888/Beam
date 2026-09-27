@@ -1390,7 +1390,7 @@ done
 '''
 
 [tasks."check:chart-invariants"]
-description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, and an ingress that exposes only the API"
+description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, an ingress that exposes only the API, a forwarded-for trust that needs the ingress, and a grace period longer than the drain"
 # The properties Beam's design depends on that neither the schema nor
 # kubeconform can see, asserted over what the chart actually renders for every
 # scenario in ci/ -- never over the templates' text:
@@ -1399,9 +1399,13 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #      strategy. The indexer and enrichment worker are not leader-elected, and
 #      rate limits and the admin event stream are in memory (ADR-0018).
 #   2. Every mount under /videos is readOnly, every library the scenario lists
-#      is mounted there, and a persistentVolumeClaim or nfs source behind one
-#      is readOnly too (FR-202) -- the same promise check:compose-invariants
-#      keeps for compose.
+#      is mounted there, and the volume source behind one is readOnly too
+#      unless it is a hostPath or image source, which have no readOnly field
+#      and which the kubelet never chowns (FR-202) -- the same promise
+#      check:compose-invariants keeps for compose. A readOnly source is also
+#      what stops the kubelet applying the pod's fsGroup (a recursive chgrp)
+#      to the media. The chart must refuse a library whose source can be
+#      neither.
 #   3. The /data volume is not also mounted under /videos, and BEAM_VIDEO_DIR
 #      and BEAM_DATA_DIR are the paths the mounts use.
 #   4. Every container has a read-only root filesystem and no privilege
@@ -1412,6 +1416,13 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #   6. An Ingress routes the server only under /v1: never `/` or `/metrics`.
 #   7. The chart refuses to render with its defaults (no database, no
 #      public URL) rather than rendering a server that cannot start.
+#   8. Unless the scenario sets rateLimit.trustForwardedFor, the rate limiter
+#      trusts X-Forwarded-For only when an Ingress routes to a ClusterIP
+#      server Service: through a NodePort or LoadBalancer a client reaches the
+#      server directly and could forge the header.
+#   9. The server pod's terminationGracePeriodSeconds is longer than
+#      BEAM_SHUTDOWN_TIMEOUT_SECS, so the kubelet's SIGKILL never cuts a drain
+#      short.
 #
 # The directory argument points the gate at a copy of the chart; that is how
 # its negative cases are exercised without editing the tracked one.
@@ -1429,6 +1440,27 @@ if helm template beam "$chart" > /dev/null 2>&1; then
 else
   echo "ok    the chart refuses to render with its default values"
 fi
+
+# 2, refusal half: a library on a source that is neither read-only-capable nor
+# read-only by nature (a generated or empty volume, or an in-tree kind with no
+# readOnly field) must not render. Each is layered over a scenario that
+# renders, so the refusal is the library's doing.
+base="$chart/ci/minimal-values.yaml"
+if ! helm template beam "$chart" -f "$base" > /dev/null 2>&1; then
+  echo "FAIL  $base must render for the library refusal checks to mean anything"
+  status=1
+fi
+for source in '{"emptyDir":{}}' '{"ephemeral":{"volumeClaimTemplate":{"spec":{}}}}' \
+  '{"gitRepo":{"repository":"https://example.test/media.git"}}' \
+  '{"vsphereVolume":{"volumePath":"[ds] media"}}' '{"configMap":{"name":"media"}}'; do
+  if helm template beam "$chart" -f "$base" \
+    --set-json "libraries=[{\"name\":\"media\",\"volume\":$source}]" > /dev/null 2>&1; then
+    echo "FAIL  the chart renders a library on $source, which cannot be mounted read-only"
+    status=1
+  else
+    echo "ok    the chart refuses a library on $source"
+  fi
+done
 
 for values in "$chart"/ci/*-values.yaml; do
   name="$(basename "$values" .yaml)"
@@ -1474,12 +1506,17 @@ for (const scenario of scenarios.sort()) {
   // 2.
   const mounts = main.volumeMounts ?? [];
   const libraryMounts = mounts.filter((m) => m.mountPath === "/videos" || m.mountPath.startsWith("/videos/"));
+  const readOnlyByNature = new Set(["hostPath", "image"]);
   for (const m of libraryMounts) {
     check(m.readOnly === true, `${tag} ${m.mountPath} is mounted readOnly`);
-    const source = volumes.get(m.name) ?? {};
-    for (const kind of ["persistentVolumeClaim", "nfs"])
-      if (source[kind] !== undefined)
-        check(source[kind].readOnly === true, `${tag} ${kind} volume ${m.name} behind ${m.mountPath} is readOnly`);
+    const { name: _name, ...source } = volumes.get(m.name) ?? {};
+    const kinds = Object.keys(source);
+    check(kinds.length === 1, `${tag} volume ${m.name} behind ${m.mountPath} has one source (got ${JSON.stringify(kinds)})`);
+    for (const kind of kinds)
+      check(
+        readOnlyByNature.has(kind) || source[kind]?.readOnly === true,
+        `${tag} ${kind} volume ${m.name} behind ${m.mountPath} is ${readOnlyByNature.has(kind) ? "a kind with no readOnly field that the kubelet never chowns" : "readOnly at the source"}`,
+      );
   }
   for (const library of values.libraries ?? [])
     check(
@@ -1528,6 +1565,29 @@ for (const scenario of scenarios.sort()) {
           `${tag} ingress ${ingress.metadata.name} routes the server only under /v1 (path ${JSON.stringify(p.path)})`,
         );
       }
+
+  // 8.
+  if (typeof values.rateLimit?.trustForwardedFor !== "boolean") {
+    const serverService = rendered.find((d) => d.kind === "Service" && component(d) === "server");
+    const clusterIpOnly = (serverService?.spec?.type ?? "ClusterIP") === "ClusterIP";
+    const fronted = rendered.some((d) =>
+      d.kind === "Ingress" &&
+      (d.spec?.rules ?? []).some((r) => (r.http?.paths ?? []).some((p) => serverServices.has(p.backend?.service?.name))),
+    );
+    const trusted = env.get("BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR");
+    check(
+      trusted === String(fronted && clusterIpOnly),
+      `${tag} X-Forwarded-For is trusted by default only behind an ingress with a ClusterIP Service (ingress ${fronted}, service ${JSON.stringify(serverService?.spec?.type)}, trust ${JSON.stringify(trusted)})`,
+    );
+  }
+
+  // 9.
+  const drain = Number(env.get("BEAM_SHUTDOWN_TIMEOUT_SECS"));
+  const grace = pod.terminationGracePeriodSeconds;
+  check(
+    Number.isInteger(drain) && Number.isInteger(grace) && grace > drain,
+    `${tag} terminationGracePeriodSeconds (${grace}) outlasts BEAM_SHUTDOWN_TIMEOUT_SECS (${JSON.stringify(env.get("BEAM_SHUTDOWN_TIMEOUT_SECS"))})`,
+  );
 }
 process.exit(status);
 ' "$out" || status=1

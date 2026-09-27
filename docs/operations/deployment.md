@@ -131,8 +131,8 @@ documents every value, and `values.schema.json` rejects unknown ones.
 
 | Object | Role |
 |---|---|
-| `Deployment` (server) | One `beam-server` pod, `replicas: 1`, strategy `Recreate`. There is no replica value: the indexer and enrichment worker run in-process without leader election, and rate limits and the admin event stream are in memory. Non-root (uid 1000), read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token. |
-| `Service` | `ClusterIP` on port 8000. |
+| `Deployment` (server) | One `beam-server` pod, `replicas: 1`, strategy `Recreate`. There is no replica value: the indexer and enrichment worker run in-process without leader election, and rate limits and the admin event stream are in memory. Non-root (uid 1000), read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token. `terminationGracePeriodSeconds` is `server.shutdownTimeoutSeconds` (`BEAM_SHUTDOWN_TIMEOUT_SECS`, default 30) plus 15, so a stopping server always finishes its drain before the kubelet's SIGKILL. |
+| `Service` | `ClusterIP` on port 8000 by default. A `NodePort` or `LoadBalancer` type exposes the whole API port -- `/metrics` (with `metrics.enabled`) and `/openapi` included -- and lets clients bypass the ingress; `NOTES.txt` warns when it is set. |
 | `PersistentVolumeClaim` | `/data` (`BEAM_DATA_DIR`), 10Gi `ReadWriteOnce` by default, or `persistence.data.existingClaim`. Kept on uninstall (`helm.sh/resource-policy: keep`). `persistence.data.enabled: false` uses an `emptyDir`, lost whenever the pod is replaced. |
 | `Secret` | Only for secrets given inline (`database.url`, `oidc.clientSecret`, `tmdb.apiToken`); each also accepts an `existingSecret`. |
 | `Ingress` | Optional. Routes `/v1` to the server and, with the web client enabled, `/` to it. `/metrics` and `/openapi` are never routed. |
@@ -151,17 +151,23 @@ cluster.
 database retry plus migrations before liveness takes over.
 
 **Libraries.** Each entry in `libraries` names a Kubernetes volume source and is mounted read-only
-at `/videos/<name>`; create the library in the admin UI with that path. A `persistentVolumeClaim` or
-`nfs` source is forced read-only as well. `BEAM_VIDEO_DIR` (`/videos`) and `BEAM_DATA_DIR` (`/data`)
+at `/videos/<name>`; create the library in the admin UI with that path. Every source kind with a
+`readOnly` field (`persistentVolumeClaim`, `nfs`, `csi`, `iscsi`, `rbd`, `cephfs`, ...) is forced to
+`readOnly: true` as well, which also keeps the kubelet from applying the pod's `fsGroup` -- a
+recursive `chgrp` -- to the media. `hostPath` and `image` sources, which have no such field and
+which the kubelet never chowns, are accepted as they are; every other kind (`emptyDir`,
+`ephemeral`, `gitRepo`, `configMap`, `secret`, `projected`, `downwardAPI`, and the in-tree
+`flocker`, `photonPersistentDisk` and `vsphereVolume`) is refused by the schema. `BEAM_VIDEO_DIR` (`/videos`) and `BEAM_DATA_DIR` (`/data`)
 are fixed by the chart and cannot be overridden through `server.env`.
 
 **Probes.** Startup and readiness use `GET /v1/health`, which answers 503 while the database is
 unreachable -- the pod leaves the Service until it recovers. Liveness is a TCP check, so a database
 outage does not restart the server.
 
-**Ingress and proxies.** `ingress.host` is required with `ingress.enabled`. With an ingress the rate
-limiter keys on `X-Forwarded-For` (`rateLimit.trustForwardedFor`, which follows `ingress.enabled`
-unless set); that is only safe while clients cannot reach the Service directly. Set
+**Ingress and proxies.** `ingress.host` is required with `ingress.enabled`. With an ingress in front
+of a `ClusterIP` Service the rate limiter keys on `X-Forwarded-For`; with a `NodePort` or
+`LoadBalancer` Service, which clients can reach directly and forge the header through, it keys on
+the peer address (`rateLimit.trustForwardedFor` overrides either default). Set
 `server.publicUrl` to the origin clients use -- the OIDC redirect URI is derived from it.
 
 **Web client.** `web.enabled` is off by default. The published `beam-web` image bakes its API origin
@@ -176,7 +182,12 @@ podman build -f beam-web/Containerfile \
 ```
 
 then set `web.image.repository` and `web.image.tag`. With `web.enabled` and no `server.webUrl`, the
-chart sets `BEAM_WEB_URL` to `server.publicUrl`, since both are served from the same origin.
+chart sets `BEAM_WEB_URL` to `server.publicUrl`, since both are served from the same origin. With
+the web client disabled and no `server.webUrl`, the chart leaves `BEAM_WEB_URL` unset, so the server
+uses its development default (`http://localhost:5173`) for the post-login redirect and the CSRF
+allow-list. That suits a native-only (device-grant) deployment, which is why the schema does not
+require it; a browser client served elsewhere needs `server.webUrl` set to its origin, and
+`NOTES.txt` says so on install.
 
 **Metrics.** `metrics.enabled` sets `BEAM_ENABLE_METRICS` and adds `prometheus.io/*` annotations to
 the pod for an in-cluster scraper.
@@ -187,7 +198,10 @@ yourself and set `image.repository` and `image.tag`.
 
 The chart is gated by `mise run helm:lint`, `helm:template` (kubeconform against Kubernetes 1.29 and
 1.37), and `check:chart-invariants`, which asserts over the rendered manifests for every scenario in
-`charts/beam/ci/` that the server has one `Recreate` replica, every `/videos` mount and its
-PVC/NFS source is read-only, `/data` is never a library, every container is hardened, liveness does
-not probe `/v1/health`, and the ingress routes the server only under `/v1`. All three run in
+`charts/beam/ci/` that the server has one `Recreate` replica, every `/videos` mount and its volume
+source is read-only (or a `hostPath`/`image` source), `/data` is never a library, every container
+is hardened, liveness does not probe `/v1/health`, the ingress routes the server only under `/v1`,
+`X-Forwarded-For` is trusted by default only behind an ingress with a `ClusterIP` Service, and the
+grace period outlasts `BEAM_SHUTDOWN_TIMEOUT_SECS` -- and that the chart refuses to render a library
+on a source it cannot make read-only. All three run in
 `mise run ci`, CI's `helm-chart` job, and the pre-push hook.

@@ -95,15 +95,35 @@ the same origin, else unset (the server's own default).
 {{- end }}
 
 {{/*
-BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR: explicit, else whether an ingress fronts
-the server.
+BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR: explicit, else whether an ingress is the
+only way in -- an ingress, and a ClusterIP Service that clients cannot reach
+directly. A NodePort or LoadBalancer Service would let a client forge the
+header and pick its own rate-limit bucket.
 */}}
 {{- define "beam.trustForwardedFor" -}}
 {{- if kindIs "bool" .Values.rateLimit.trustForwardedFor }}
 {{- .Values.rateLimit.trustForwardedFor }}
 {{- else }}
-{{- .Values.ingress.enabled }}
+{{- and .Values.ingress.enabled (eq .Values.service.type "ClusterIP") }}
 {{- end }}
+{{- end }}
+
+{{/*
+The server pod's terminationGracePeriodSeconds: BEAM_SHUTDOWN_TIMEOUT_SECS plus
+a margin for the process to exit after draining, so the kubelet's SIGKILL never
+cuts a drain short.
+*/}}
+{{- define "beam.terminationGracePeriodSeconds" -}}
+{{- add (int .Values.server.shutdownTimeoutSeconds) 15 }}
+{{- end }}
+
+{{/*
+Volume source kinds with no readOnly field that are still safe as a library:
+the kubelet never applies fsGroup to them and never writes to them. Every other
+kind the schema accepts has a readOnly field, which the chart forces true.
+*/}}
+{{- define "beam.readOnlyWithoutFlag" -}}
+{{- list "hostPath" "image" | toJson }}
 {{- end }}
 
 {{/*

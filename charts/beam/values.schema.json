@@ -71,6 +71,11 @@
         },
         "cookieSecure": { "type": ["boolean", "null"] },
         "autoMigrate": { "type": "boolean" },
+        "shutdownTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "BEAM_SHUTDOWN_TIMEOUT_SECS; the pod's terminationGracePeriodSeconds is derived from it."
+        },
         "logLevel": { "type": "string" },
         "env": {
           "type": "object",
@@ -90,6 +95,7 @@
                 "BEAM_AUTO_MIGRATE",
                 "BEAM_ENABLE_METRICS",
                 "BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR",
+              "BEAM_SHUTDOWN_TIMEOUT_SECS",
                 "BEAM_OIDC_ISSUER",
                 "BEAM_OIDC_CLIENT_ID",
                 "BEAM_OIDC_CLIENT_SECRET",
@@ -182,12 +188,33 @@
           },
           "volume": {
             "type": "object",
-            "description": "A Kubernetes volume source (persistentVolumeClaim, nfs, hostPath, csi, ...), without `name`.",
+            "description": "One Kubernetes volume source, without `name`. Only kinds that can be made read-only are accepted: every kind with a readOnly field (the chart forces it true, which also stops the kubelet applying fsGroup to the media), plus hostPath and image, which the kubelet never chowns. Kinds that create an empty or generated volume (emptyDir, ephemeral, gitRepo, configMap, secret, downwardAPI, projected) or have no read-only guarantee (flocker, photonPersistentDisk, vsphereVolume) are refused.",
             "minProperties": 1,
             "maxProperties": 1,
-            "not": { "required": ["name"] },
-            "properties": {
-              "emptyDir": false
+            "additionalProperties": { "type": "object" },
+            "propertyNames": {
+              "enum": [
+                "awsElasticBlockStore",
+                "azureDisk",
+                "azureFile",
+                "cephfs",
+                "cinder",
+                "csi",
+                "fc",
+                "flexVolume",
+                "gcePersistentDisk",
+                "glusterfs",
+                "iscsi",
+                "nfs",
+                "persistentVolumeClaim",
+                "portworxVolume",
+                "quobyte",
+                "rbd",
+                "scaleIO",
+                "storageos",
+                "hostPath",
+                "image"
+              ]
             }
           }
         }

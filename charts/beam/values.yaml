@@ -26,9 +26,13 @@ server:
   # the OIDC redirect URI is derived from it, it is an allowed CSRF origin, and
   # its scheme decides whether auth cookies are Secure.
   publicUrl: ""
-  # BEAM_WEB_URL: where the OIDC callback sends the browser on success, and an
-  # allowed CSRF origin. Empty means publicUrl when web.enabled (the web client
-  # is then served from the same origin), otherwise the server's own default.
+  # BEAM_WEB_URL: the browser client's origin -- where the OIDC callback sends
+  # the browser on success, and an allowed CSRF origin. Empty means publicUrl
+  # when web.enabled (the web client is then served from the same origin).
+  # With web.enabled false and this empty, BEAM_WEB_URL is left unset and the
+  # server falls back to its development default (http://localhost:5173):
+  # fine for native-only (device-grant) clients, but set it if a browser
+  # client is served from anywhere else.
   webUrl: ""
   # BEAM_EXTRA_ALLOWED_ORIGINS, joined with commas.
   extraAllowedOrigins: []
@@ -37,6 +41,11 @@ server:
   # BEAM_AUTO_MIGRATE. Migrations run at startup under a Postgres advisory
   # lock, so an overlapping old and new pod cannot race them.
   autoMigrate: true
+  # BEAM_SHUTDOWN_TIMEOUT_SECS: how long a stopping server waits for in-flight
+  # requests (streams included) to drain. The pod's
+  # terminationGracePeriodSeconds is this plus 15, so the server always
+  # finishes draining before the kubelet's SIGKILL.
+  shutdownTimeoutSeconds: 30
   logLevel: "beam_server=info,tower_http=info"
   # Any other beam-server setting (docs/operations/configuration.md), as
   # NAME: "value". Names the chart manages itself are rejected by the schema.
@@ -78,8 +87,12 @@ tmdb:
 
 # Media libraries. Each is mounted read-only at /videos/<name> (Beam never
 # writes under a library root, FR-202); create the library in Beam's admin UI
-# with that path. `volume` is any Kubernetes volume source; a
-# persistentVolumeClaim or nfs source is also forced to readOnly.
+# with that path. `volume` is one Kubernetes volume source. Every source kind
+# with a readOnly field (persistentVolumeClaim, nfs, csi, iscsi, rbd, cephfs,
+# ...) is forced to readOnly: true, which also keeps the kubelet from
+# applying the pod's fsGroup to your media. hostPath and image volumes are
+# accepted too; kinds that cannot be read-only media (emptyDir, ephemeral,
+# gitRepo, configMap, ...) are refused by the schema.
 #
 # libraries:
 #   - name: movies
@@ -107,6 +120,11 @@ persistence:
       - ReadWriteOnce
 
 service:
+  # ClusterIP keeps the server reachable only through the ingress. NodePort or
+  # LoadBalancer expose the whole API port directly -- /metrics (when
+  # metrics.enabled) and the /openapi docs included, which the ingress never
+  # routes -- and let clients bypass the ingress, so rateLimit.trustForwardedFor
+  # then defaults to false.
   type: ClusterIP
   port: 8000
   annotations: {}
@@ -124,9 +142,11 @@ ingress:
 
 rateLimit:
   # BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR: key the rate limiter on
-  # X-Forwarded-For rather than the peer address. null follows
-  # ingress.enabled -- behind an ingress controller every peer is the
-  # controller. Only safe when clients cannot reach the Service directly.
+  # X-Forwarded-For rather than the peer address. null means true only when
+  # ingress.enabled and service.type is ClusterIP -- every peer is then the
+  # ingress controller. A NodePort or LoadBalancer Service lets clients reach
+  # the server directly and forge the header, so null means false there. Only
+  # set it true when clients cannot reach the Service directly.
   trustForwardedFor: null
 
 metrics:

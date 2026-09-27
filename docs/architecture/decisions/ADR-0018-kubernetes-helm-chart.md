@@ -49,8 +49,12 @@ serialisation) and for shared rate-limit and event state; it is not a chart sett
 an operator such as CloudNativePG, not of an application chart.
 
 **Libraries are read-only by construction.** Each entry in `libraries` is any Kubernetes volume
-source, mounted at `/videos/<name>` with `readOnly: true`; a `persistentVolumeClaim` or `nfs` source
-is forced read-only as well. `BEAM_VIDEO_DIR` and `BEAM_DATA_DIR` are fixed, not values, so no
+source, mounted at `/videos/<name>` with `readOnly: true`. Every source kind with a `readOnly` field
+(`persistentVolumeClaim`, `nfs`, `csi`, `iscsi`, `rbd`, ...) is forced to `readOnly: true` as well --
+which is also what keeps the kubelet from applying the pod's `fsGroup`, a recursive `chgrp`, to the
+media. The schema admits only those kinds plus `hostPath` and `image`, which have no such field and
+which the kubelet never chowns; empty or generated volumes (`emptyDir`, `ephemeral`, `gitRepo`,
+`configMap`, ...) and in-tree kinds with no read-only guarantee are refused. `BEAM_VIDEO_DIR` and `BEAM_DATA_DIR` are fixed, not values, so no
 override can move a library outside `/videos` or the state onto a library. This is FR-202's promise,
 kept on Kubernetes the way `check:compose-invariants` keeps it on Compose.
 
@@ -59,14 +63,19 @@ server's own database retry plus migrations. Readiness is `/v1/health`, which an
 database is down, taking the pod out of the Service. Liveness is a TCP check: `/v1/health` there
 would turn a database outage into a restart loop that fixes nothing.
 
-**The pod is hardened by default.** Non-root (the image's uid 1000), read-only root filesystem,
-every capability dropped, no privilege escalation, `RuntimeDefault` seccomp, and no service-account
-token -- Beam never calls the Kubernetes API.
+**The server pod is hardened by default.** Non-root (the image's uid 1000), read-only root
+filesystem, every capability dropped, no privilege escalation, `RuntimeDefault` seccomp, and no
+service-account token -- Beam never calls the Kubernetes API. (The optional web client's Caddy runs
+as root and keeps `NET_BIND_SERVICE` alone, to bind port 80.) Its termination grace period is
+derived from `server.shutdownTimeoutSeconds` (`BEAM_SHUTDOWN_TIMEOUT_SECS`) plus a margin, so the
+server's own drain always finishes before the kubelet's SIGKILL.
 
 **The ingress exposes the API only.** `/v1` routes to the server and, when the web client is
 enabled, `/` to it. `/metrics` and the `/openapi` docs are never routed; `metrics.enabled` annotates
-the pod for an in-cluster scraper instead. With an ingress, the rate limiter trusts
-`X-Forwarded-For` by default, since every peer is the ingress controller.
+the pod for an in-cluster scraper instead. With an ingress in front of a `ClusterIP` Service, the
+rate limiter trusts `X-Forwarded-For` by default, since every peer is the ingress controller. A
+`NodePort` or `LoadBalancer` Service lets clients reach the server directly -- `/metrics` and
+`/openapi` included -- and forge that header, so there the default is not to trust it.
 
 **The web client is opt-in and needs an operator-built image.** The published `beam-web` image
 bakes its API origin in at build time as `http://localhost:8000`, which cannot serve a cluster.

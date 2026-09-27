@@ -1,10 +1,12 @@
-# Every optional server feature on, secrets from existing Secrets, and one
-# library of each source kind the chart forces read-only plus one it cannot.
+# Every optional server feature on, secrets from existing Secrets, and
+# libraries on three source kinds the chart forces read-only (a claim, NFS and
+# a CSI driver) plus a hostPath, which has no readOnly field.
 server:
   publicUrl: https://beam.example.test
   extraAllowedOrigins:
     - https://other.example.test
   cookieSecure: true
+  shutdownTimeoutSeconds: 120
   logLevel: beam_server=debug
   env:
     BEAM_SCAN_INTERVAL_SECS: "600"
@@ -28,6 +30,14 @@ libraries:
       nfs:
         server: nas.example.test
         path: /export/anime
+  - name: shows
+    volume:
+      csi:
+        driver: smb.csi.k8s.io
+        volumeAttributes:
+          source: //nas.example.test/shows
+        nodePublishSecretRef:
+          name: smb-credentials
   - name: local
     volume:
       hostPath:
