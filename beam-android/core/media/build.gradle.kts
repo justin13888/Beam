@@ -25,9 +25,10 @@ dependencies {
     api(libs.androidx.media3.exoplayer)
     api(libs.androidx.media3.session)
     api(libs.androidx.media3.common)
-    // The same OkHttp client carries the session cookie and the trust
-    // decision the core resolved, so playback and the API agree about who
-    // the user is and which certificate is acceptable.
+    // Playback's data sources run on OkHttp clients derived from one shared
+    // base, each built for the trust decision the core resolved and sent with
+    // the session it resolved, so playback and the API agree about who the
+    // user is and which certificate is acceptable.
     implementation(libs.androidx.media3.datasource.okhttp)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
