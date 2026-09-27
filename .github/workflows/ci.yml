@@ -666,17 +666,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-      # The macOS runner image ships Xcode with the macOS platform only: every
-      # other destination reports "iOS 26.0 is not installed" and
-      # `xcodebuild`'s available-destinations list comes back empty. This
-      # downloads the simulator runtime, and is a no-op when it is already
-      # present.
-      - name: Install the iOS simulator runtime
-        run: |
-          xcodebuild -downloadPlatform iOS
-          # Printed so that if the pinned device name ever stops existing, the
-          # log says what does rather than only that nothing matched.
-          xcrun simctl list devices available
+      # The runner image has no iOS simulator runtime; the action explains why
+      # the install is retried.
+      - uses: ./.github/actions/install-ios-simulator-runtime
 
       - run: mise run apple:test
 
@@ -694,17 +686,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-      # The macOS runner image ships Xcode with the macOS platform only: every
-      # other destination reports "iOS 26.0 is not installed" and
-      # `xcodebuild`'s available-destinations list comes back empty. This
-      # downloads the simulator runtime, and is a no-op when it is already
-      # present.
-      - name: Install the iOS simulator runtime
-        run: |
-          xcodebuild -downloadPlatform iOS
-          # Printed so that if the pinned device name ever stops existing, the
-          # log says what does rather than only that nothing matched.
-          xcrun simctl list devices available
+      # The runner image has no iOS simulator runtime; the action explains why
+      # the install is retried.
+      - uses: ./.github/actions/install-ios-simulator-runtime
 
       - run: mise run apple:snapshot
 
@@ -735,17 +719,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-      # The macOS runner image ships Xcode with the macOS platform only: every
-      # other destination reports "iOS 26.0 is not installed" and
-      # `xcodebuild`'s available-destinations list comes back empty. This
-      # downloads the simulator runtime, and is a no-op when it is already
-      # present.
-      - name: Install the iOS simulator runtime
-        run: |
-          xcodebuild -downloadPlatform iOS
-          # Printed so that if the pinned device name ever stops existing, the
-          # log says what does rather than only that nothing matched.
-          xcrun simctl list devices available
+      # The runner image has no iOS simulator runtime; the action explains why
+      # the install is retried.
+      - uses: ./.github/actions/install-ios-simulator-runtime
 
       - run: mise run apple:build
 
