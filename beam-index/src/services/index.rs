@@ -684,8 +684,6 @@ impl LocalIndexService {
         runtime: Option<Duration>,
         tags: &ContainerTags,
     ) -> Result<Option<MediaFileContent>, IndexError> {
-        use beam_domain::models::{CreateEpisode, CreateMovie, CreateMovieEntry, CreateShow};
-
         let hints::NfoFiles {
             file: file_nfo,
             show: show_nfo,
