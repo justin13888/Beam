@@ -1,21 +1,61 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
 use crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry, MovieSearchQuery};
 use crate::providers::enrichment::MovieEnrichment;
 
+/// Persistence for movies and their entries.
+///
+/// A movie has two names (issue #183). Its **identity key** is what the
+/// indexer matches a file to it by: derived once from the filename parse and
+/// never rewritten. Its **display title** is what a user sees, and enrichment
+/// replaces it with the provider's spelling. Looking a movie up by its display
+/// title is exactly how a renamed movie used to be missed and duplicated, so
+/// the trait offers no such lookup.
+///
+/// A movie is **live** while at least one of its files is present (not
+/// soft-deleted, issue #179). Browse and search show only live movies; a read
+/// by id still resolves a movie that is not live, so a bookmark or a
+/// continue-watching entry does not dangle while its file is away.
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait MovieRepository: Send + Sync + std::fmt::Debug {
+    /// Live or not.
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Movie>, DbErr>;
-    async fn find_by_title(&self, title: &str) -> Result<Option<Movie>, DbErr>;
+    /// Every movie, live or not.
     async fn find_all(&self) -> Result<Vec<Movie>, DbErr>;
     /// Server-side filtered/ranked search, replacing `find_all` + in-memory
-    /// filtering for the browse/search API. Results are ordered
-    /// best-match-first when `query.query` is set, else by title.
+    /// filtering for the browse/search API. Returns only live movies. Results
+    /// are ordered best-match-first when `query.query` is set, else by title.
     async fn search(&self, query: &MovieSearchQuery) -> Result<Vec<Movie>, DbErr>;
-    async fn create(&self, create: CreateMovie) -> Result<Movie, DbErr>;
+    /// The movie keyed `create.identity_key`, inserting it only if no movie
+    /// carries that key yet. An existing movie is returned **unchanged**:
+    /// `create.title`, `year` and `runtime` only populate a new row, so a
+    /// later file's parse never overwrites what the first file or enrichment
+    /// established. A movie with no key is never matched.
+    ///
+    /// Atomic: concurrent calls for one key all return the same row.
+    async fn find_or_create_by_identity(&self, create: CreateMovie) -> Result<Movie, DbErr>;
+    /// Every movie with no identity key -- rows that predate the key, for the
+    /// indexer's backfill -- oldest first (`created_at`, then `id`), so of two
+    /// legacy duplicates the backfill keys the original.
+    async fn find_unkeyed(&self) -> Result<Vec<Movie>, DbErr>;
+    /// Give the keyless movie `movie_id` the key `identity_key`. Returns
+    /// `false`, changing nothing, when the movie does not exist, already has a
+    /// key, or another movie already holds `identity_key`.
+    async fn assign_identity_key(&self, movie_id: Uuid, identity_key: &str) -> Result<bool, DbErr>;
+    /// Delete every movie entry created before `created_before` that no file
+    /// row references, then every movie created before `created_before` left
+    /// with no entry, returning how many movies went. A file row that is only
+    /// soft-deleted still counts: a title outlives its files' grace period,
+    /// never the other way round. Deleting a movie takes its library
+    /// associations, enrichment state and genre links with it.
+    ///
+    /// `created_before` protects a movie or entry the indexer created while
+    /// the caller was running, whose file row may not be written yet.
+    async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr>;
     async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr>;
     async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr>;
     /// Reverse lookup from a `MediaFileContent::Movie { movie_entry_id }` back
@@ -27,10 +67,12 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
         library_id: Uuid,
         movie_id: Uuid,
     ) -> Result<(), DbErr>;
-    /// Apply enrichment-provider data to an existing movie (title, year,
-    /// description, external IDs, artwork, rating). Overwrites the current
-    /// values -- enrichment is treated as the more authoritative source once
-    /// a match is accepted.
+    /// Apply enrichment-provider data to an existing movie (display title,
+    /// year, description, external IDs, artwork, rating). Overwrites the
+    /// current values -- enrichment is treated as the more authoritative
+    /// source once a match is accepted. Never touches the identity key, so the
+    /// next file of this movie still finds it however the provider spells the
+    /// title.
     async fn apply_enrichment(
         &self,
         movie_id: Uuid,
@@ -42,29 +84,71 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use crate::models::file::MediaFileContent;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
 
+    /// The in-memory double.
+    ///
+    /// Whether a movie is live depends on its files, which live in another
+    /// repository. [`InMemoryMovieRepository::with_files`] links the double to
+    /// the file double the test uses, and then it answers `search` and
+    /// `delete_orphaned` from those files exactly as the SQL joins do. The
+    /// unlinked `Default` knows of no files and so treats every movie as live:
+    /// `search` hides nothing and `delete_orphaned` removes nothing.
     #[derive(Debug, Default)]
     pub struct InMemoryMovieRepository {
         pub movies: Mutex<HashMap<Uuid, Movie>>,
         pub entries: Mutex<HashMap<Uuid, MovieEntry>>,
+        files: Option<Arc<InMemoryFileRepository>>,
+    }
+
+    impl InMemoryMovieRepository {
+        /// A double whose liveness and orphan checks read `files`.
+        pub fn with_files(files: Arc<InMemoryFileRepository>) -> Self {
+            Self {
+                files: Some(files),
+                ..Self::default()
+            }
+        }
+
+        /// Entry ids some file row references -- only present files when
+        /// `present_only`. `None` when unlinked.
+        fn referenced_entries(&self, present_only: bool) -> Option<HashSet<Uuid>> {
+            let files = self.files.as_ref()?;
+            Some(
+                files
+                    .files
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|f| !present_only || f.missing_since.is_none())
+                    .filter_map(|f| match &f.content {
+                        Some(MediaFileContent::Movie { movie_entry_id }) => Some(*movie_entry_id),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        }
+
+        /// Movie ids with a present file, or `None` when unlinked.
+        fn live_movies(&self) -> Option<HashSet<Uuid>> {
+            let live_entries = self.referenced_entries(true)?;
+            let entries = self.entries.lock().unwrap();
+            Some(
+                live_entries
+                    .iter()
+                    .filter_map(|id| entries.get(id).map(|e| e.movie_id))
+                    .collect(),
+            )
+        }
     }
 
     #[async_trait]
     impl MovieRepository for InMemoryMovieRepository {
         async fn find_by_id(&self, id: Uuid) -> Result<Option<Movie>, DbErr> {
             Ok(self.movies.lock().unwrap().get(&id).cloned())
-        }
-
-        async fn find_by_title(&self, title: &str) -> Result<Option<Movie>, DbErr> {
-            Ok(self
-                .movies
-                .lock()
-                .unwrap()
-                .values()
-                .find(|m| m.title == title)
-                .cloned())
         }
 
         async fn find_all(&self) -> Result<Vec<Movie>, DbErr> {
@@ -74,11 +158,13 @@ pub mod in_memory {
         async fn search(&self, query: &MovieSearchQuery) -> Result<Vec<Movie>, DbErr> {
             use crate::models::search::title_match_score;
 
+            let live = self.live_movies();
             let mut scored: Vec<(f64, Movie)> = self
                 .movies
                 .lock()
                 .unwrap()
                 .values()
+                .filter(|m| live.as_ref().is_none_or(|live| live.contains(&m.id)))
                 .filter(|m| {
                     if query.year.is_some_and(|y| m.year != Some(y)) {
                         return false;
@@ -118,15 +204,31 @@ pub mod in_memory {
             Ok(scored.into_iter().map(|(_, m)| m).collect())
         }
 
-        async fn create(&self, create: CreateMovie) -> Result<Movie, DbErr> {
+        async fn find_or_create_by_identity(&self, create: CreateMovie) -> Result<Movie, DbErr> {
+            let CreateMovie {
+                identity_key,
+                title,
+                year,
+                runtime,
+            } = create;
+            // Lookup and insert under one lock, so the double is as atomic as
+            // the `ON CONFLICT` statement it stands in for.
+            let mut movies = self.movies.lock().unwrap();
+            if let Some(existing) = movies
+                .values()
+                .find(|m| m.identity_key.as_deref() == Some(identity_key.as_str()))
+            {
+                return Ok(existing.clone());
+            }
             let movie = Movie {
                 id: Uuid::new_v4(),
-                title: create.title,
+                title,
+                identity_key: Some(identity_key),
                 title_localized: None,
                 description: None,
-                year: create.year,
+                year,
                 release_date: None,
-                runtime: create.runtime,
+                runtime,
                 poster_url: None,
                 backdrop_url: None,
                 tmdb_id: None,
@@ -138,8 +240,56 @@ pub mod in_memory {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
-            self.movies.lock().unwrap().insert(movie.id, movie.clone());
+            movies.insert(movie.id, movie.clone());
             Ok(movie)
+        }
+
+        async fn find_unkeyed(&self) -> Result<Vec<Movie>, DbErr> {
+            let mut unkeyed: Vec<_> = self
+                .movies
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|m| m.identity_key.is_none())
+                .cloned()
+                .collect();
+            unkeyed.sort_by_key(|m| (m.created_at, m.id));
+            Ok(unkeyed)
+        }
+
+        async fn assign_identity_key(
+            &self,
+            movie_id: Uuid,
+            identity_key: &str,
+        ) -> Result<bool, DbErr> {
+            let mut movies = self.movies.lock().unwrap();
+            if movies
+                .values()
+                .any(|m| m.identity_key.as_deref() == Some(identity_key))
+            {
+                return Ok(false);
+            }
+            match movies.get_mut(&movie_id) {
+                Some(movie) if movie.identity_key.is_none() => {
+                    movie.identity_key = Some(identity_key.to_string());
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+
+        async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
+            let Some(referenced) = self.referenced_entries(false) else {
+                return Ok(0);
+            };
+            let mut entries = self.entries.lock().unwrap();
+            entries.retain(|id, e| e.created_at >= created_before || referenced.contains(id));
+            let mut movies = self.movies.lock().unwrap();
+            let before = movies.len();
+            movies.retain(|id, m| {
+                m.created_at >= created_before || entries.values().any(|e| e.movie_id == *id)
+            });
+            Ok((before - movies.len()) as u64)
         }
 
         async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
@@ -201,4 +351,92 @@ pub mod in_memory {
             Ok(())
         }
     }
+}
+
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory_fixture {
+    use std::sync::Arc;
+
+    use uuid::Uuid;
+
+    use super::MovieRepository;
+    use super::in_memory::InMemoryMovieRepository;
+    use crate::models::movie::Movie;
+    use crate::repositories::FileRepository;
+    use crate::repositories::contract::fixture::MovieRepositoryFixture;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
+
+    /// The hermetic instantiation of the shared contract: a movie double
+    /// linked to the file double the contract writes files through.
+    #[derive(Debug)]
+    pub struct InMemoryFixture {
+        repo: InMemoryMovieRepository,
+        files: Arc<InMemoryFileRepository>,
+    }
+
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            let files = Arc::new(InMemoryFileRepository::default());
+            Self {
+                repo: InMemoryMovieRepository::with_files(files.clone()),
+                files,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MovieRepositoryFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn MovieRepository {
+            &self.repo
+        }
+
+        fn files(&self) -> &dyn FileRepository {
+            self.files.as_ref()
+        }
+
+        async fn new_library(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+
+        async fn new_unkeyed_movie(
+            &self,
+            title: &str,
+            created_at: chrono::DateTime<chrono::Utc>,
+        ) -> Uuid {
+            let now = created_at;
+            let movie = Movie {
+                id: Uuid::new_v4(),
+                title: title.to_string(),
+                identity_key: None,
+                title_localized: None,
+                description: None,
+                year: None,
+                release_date: None,
+                runtime: None,
+                poster_url: None,
+                backdrop_url: None,
+                tmdb_id: None,
+                imdb_id: None,
+                tvdb_id: None,
+                anilist_id: None,
+                rating_tmdb: None,
+                rating_imdb: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let id = movie.id;
+            self.repo.movies.lock().unwrap().insert(id, movie);
+            id
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    async fn setup() -> super::in_memory_fixture::InMemoryFixture {
+        super::in_memory_fixture::InMemoryFixture::default()
+    }
+
+    crate::movie_repository_contract!(setup);
 }

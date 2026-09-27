@@ -104,9 +104,16 @@ sequential numbering classify as movies. Rename to include an `SxxEyy` marker an
 
 ## Two different films merged into one entry
 
-Movies are grouped by their cleaned title, and the **year is not part of the key**, so two films
-with the same name become one. Distinguish them in the filename beyond the year — there is no
-setting for this.
+Movies are grouped by their cleaned title **and year**, so two films with the same name stay apart
+as long as each filename carries its year — `Dune.1984.mkv` and `Dune.2021.mkv`. Add the year to
+any filename that lacks one and rescan.
+
+Films a Beam version before this grouping merged stay merged: the upgrade cannot tell which file
+belongs to which film, so it leaves the entry as it is and names it in an admin-log warning
+("could not be keyed"). To split it, move or rename the files so each carries its year — a new
+path is indexed afresh under the right title, and the old entry is removed once its files are.
+The same warning names duplicate entries an older version created when enrichment renamed a title;
+those resolve the same way.
 
 ## A title has no poster
 

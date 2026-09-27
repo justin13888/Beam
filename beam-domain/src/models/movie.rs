@@ -6,7 +6,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct Movie {
     pub id: Uuid,
+    /// The display title: the filename parse until enrichment replaces it
+    /// with the provider's.
     pub title: String,
+    /// What the indexer matches a file to this movie by -- see
+    /// [`crate::utils::identity`]. Never rewritten by enrichment. `None` only
+    /// on a row that predates the key and could not be backfilled; such a row
+    /// is never matched.
+    pub identity_key: Option<String>,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<u32>,
@@ -35,12 +42,27 @@ pub struct MovieEntry {
     pub created_at: DateTime<Utc>,
 }
 
-/// Parameters for creating a movie
+/// Parameters for finding or creating a movie
 #[derive(Debug, Clone)]
 pub struct CreateMovie {
+    /// The movie's identity; see [`crate::utils::identity`].
+    pub identity_key: String,
     pub title: String,
     pub year: Option<u32>,
     pub runtime: Option<Duration>,
+}
+
+impl CreateMovie {
+    /// A movie parsed as `title` released in `year`, keyed by that parse.
+    pub fn new(title: impl Into<String>, year: Option<u32>, runtime: Option<Duration>) -> Self {
+        let title = title.into();
+        Self {
+            identity_key: crate::utils::identity::title_identity_key(&title, year),
+            title,
+            year,
+            runtime,
+        }
+    }
 }
 
 /// Server-side search/filter parameters for movies. `Sql*Repository` scores
@@ -71,6 +93,7 @@ impl From<beam_entity::movie::Model> for Movie {
         Self {
             id: model.id,
             title: model.title,
+            identity_key: model.identity_key,
             title_localized: model.title_localized,
             description: model.description,
             year: model.year.map(|y| y as u32),
@@ -115,6 +138,7 @@ mod entity_conversion_tests {
         beam_entity::movie::Model {
             id: Uuid::new_v4(),
             title: "Arrival".to_string(),
+            identity_key: Some("arrival|2016".to_string()),
             title_localized: None,
             description: None,
             year: Some(2016),

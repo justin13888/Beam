@@ -609,3 +609,272 @@ mod show {
         assert_bound(&sql[1], "7");
     }
 }
+
+/// Title identity and liveness (issue #183), for movies and shows alike.
+mod title_identity {
+    use super::*;
+    use beam_domain::models::{CreateMovie, CreateShow, MovieSearchQuery, ShowSearchQuery};
+    use beam_domain::providers::enrichment::{MovieEnrichment, ShowEnrichment};
+    use beam_domain::repositories::{MovieRepository, ShowRepository};
+
+    use crate::repositories::{SqlMovieRepository, SqlShowRepository};
+
+    fn stored_movie() -> beam_entity::movie::Model {
+        let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+        beam_entity::movie::Model {
+            id: Uuid::from_u128(81),
+            title: "Amelie".to_string(),
+            identity_key: Some("amelie|2001".to_string()),
+            title_localized: None,
+            description: None,
+            year: Some(2001),
+            release_date: None,
+            runtime_mins: None,
+            poster_url: None,
+            backdrop_url: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            anilist_id: None,
+            rating_tmdb: None,
+            rating_imdb: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn stored_show() -> beam_entity::show::Model {
+        let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+        beam_entity::show::Model {
+            id: Uuid::from_u128(82),
+            title: "Shogun".to_string(),
+            identity_key: Some("shogun|".to_string()),
+            title_localized: None,
+            description: None,
+            year: None,
+            poster_url: None,
+            backdrop_url: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            anilist_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Find-or-create is the atomic insert on the identity key, then a read
+    /// by that key -- never a lookup by display title, and never an update of
+    /// the row that already holds the key.
+    #[tokio::test]
+    async fn find_or_create_inserts_with_do_nothing_on_the_identity_key_then_reads_by_it() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies
+            .find_or_create_by_identity(CreateMovie::new("Amélie", Some(2001), None))
+            .await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows
+            .find_or_create_by_identity(CreateShow::new("Shogun", None))
+            .await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 4, "an insert and a read-back each: {sql:?}");
+        for (insert, read, table, key) in [
+            (&sql[0], &sql[1], "movies", "amelie|2001"),
+            (&sql[2], &sql[3], "shows", "shogun|"),
+        ] {
+            assert_contains(insert, r#"ON CONFLICT ("identity_key") DO NOTHING"#);
+            assert!(!insert.sql.contains("DO UPDATE"), "{}", insert.sql);
+            assert_filters(read, table, "identity_key", "=");
+            assert_bound(read, key);
+            assert!(
+                !read.sql.contains(r#""title" ="#),
+                "a title is never looked up by its display title:\n{}",
+                read.sql
+            );
+        }
+    }
+
+    /// Browse and search list only titles with a present file: the
+    /// soft-delete filter sits inside the liveness join of every search.
+    #[tokio::test]
+    async fn search_keeps_only_titles_with_a_present_file() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies.search(&MovieSearchQuery::default()).await;
+        let _ = movies
+            .search(&MovieSearchQuery {
+                query: Some("amelie".to_string()),
+                year: Some(2001),
+                ..Default::default()
+            })
+            .await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows.search(&ShowSearchQuery::default()).await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        for statement in &sql[..2] {
+            assert_contains(statement, "JOIN files f ON f.movie_entry_id = me.id");
+            assert_contains(statement, "me.movie_id = movies.id");
+            assert_contains(statement, "f.missing_since IS NULL");
+        }
+        assert_contains(&sql[2], "JOIN files f ON f.episode_id = e.id");
+        assert_contains(&sql[2], "se.show_id = shows.id");
+        assert_contains(&sql[2], "f.missing_since IS NULL");
+        // The liveness condition binds nothing, so the query text stays `$1`
+        // and ORDER BY's reuse of it still ranks by the search text.
+        assert_bound(&sql[1], "amelie");
+        assert_contains(&sql[1], "similarity(title, $1)");
+    }
+
+    /// Enrichment writes display fields only. An `UPDATE` that set
+    /// `identity_key` -- even to the value it had -- is the bug this issue
+    /// removed, waiting to come back.
+    #[tokio::test]
+    async fn apply_enrichment_never_writes_the_identity_key() {
+        let db = connection(
+            MockDatabase::new(DbBackend::Postgres)
+                .append_query_results([vec![stored_movie()], vec![stored_movie()]])
+                .append_query_results([vec![stored_show()], vec![stored_show()]])
+                .append_exec_results((0..4).map(|_| sea_orm::MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected: 1,
+                })),
+        );
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies
+            .apply_enrichment(
+                Uuid::from_u128(81),
+                &MovieEnrichment {
+                    title: "Amélie".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows
+            .apply_enrichment(
+                Uuid::from_u128(82),
+                &ShowEnrichment {
+                    title: "Shōgun".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        drop((movies, shows));
+
+        let updates: Vec<Statement> = statements(db)
+            .into_iter()
+            .filter(|s| s.sql.starts_with("UPDATE"))
+            .collect();
+        assert_eq!(updates.len(), 2, "one update per title: {updates:?}");
+        for update in &updates {
+            assert_contains(update, r#""title" ="#);
+            // Only the `SET` list: `RETURNING` names every column.
+            let set_list = update.sql.split(" WHERE ").next().unwrap_or_default();
+            assert!(
+                !set_list.contains("identity_key"),
+                "enrichment must not write the identity key:\n{}",
+                update.sql
+            );
+        }
+    }
+
+    /// The backfill only ever keys a keyless row, and only with a key no
+    /// other row holds.
+    #[tokio::test]
+    async fn assign_identity_key_touches_only_a_keyless_row_and_a_free_key() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies
+            .assign_identity_key(Uuid::from_u128(83), "dune|1984")
+            .await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows
+            .assign_identity_key(Uuid::from_u128(84), "shogun|")
+            .await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        for (statement, table, id, key) in [
+            (&sql[0], "movies", Uuid::from_u128(83), "dune|1984"),
+            (&sql[1], "shows", Uuid::from_u128(84), "shogun|"),
+        ] {
+            assert!(statement.sql.starts_with("UPDATE"), "{}", statement.sql);
+            assert_filters(statement, table, "id", "=");
+            assert_bound(statement, &id.to_string());
+            assert_filters(statement, table, "identity_key", "IS NULL");
+            assert_contains(statement, "NOT EXISTS");
+            assert_bound(statement, key);
+        }
+    }
+
+    /// The backfill reads keyless titles oldest first, so of two legacy
+    /// duplicates the original -- not whichever the planner returns first --
+    /// takes the key.
+    #[tokio::test]
+    async fn find_unkeyed_reads_keyless_titles_oldest_first() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies.find_unkeyed().await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows.find_unkeyed().await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        for (statement, table) in [(&sql[0], "movies"), (&sql[1], "shows")] {
+            assert_filters(statement, table, "identity_key", "IS NULL");
+            assert_contains(
+                statement,
+                &format!(r#"ORDER BY "{table}"."created_at" ASC, "{table}"."id" ASC"#),
+            );
+        }
+    }
+
+    /// Orphan deletion walks down from the file rows -- entries (episodes)
+    /// before titles -- counts any file row, soft-deleted or not, and binds
+    /// the caller's cutoff to every step that has a `created_at`.
+    #[tokio::test]
+    async fn delete_orphaned_deletes_children_first_and_binds_the_cutoff() {
+        let cutoff = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies.delete_orphaned(cutoff).await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows.delete_orphaned(cutoff).await;
+        drop((movies, shows));
+
+        let sql = statements(db);
+        let tables: Vec<&str> = sql
+            .iter()
+            .map(|s| {
+                s.sql
+                    .strip_prefix("DELETE FROM ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .unwrap_or("")
+            })
+            .collect();
+        assert_eq!(
+            tables,
+            vec!["movie_entries", "movies", "episodes", "seasons", "shows"],
+            "children first, so a title is orphaned once its last child goes"
+        );
+        for statement in sql
+            .iter()
+            .filter(|s| !s.sql.starts_with("DELETE FROM seasons"))
+        {
+            assert_contains(statement, "created_at < $1");
+            assert_bound(statement, "2023-11-14");
+        }
+        for statement in [&sql[0], &sql[2]] {
+            assert!(
+                !statement.sql.contains("missing_since"),
+                "a soft-deleted file still holds its title:\n{}",
+                statement.sql
+            );
+        }
+    }
+}
