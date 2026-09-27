@@ -119,11 +119,15 @@ A movie or show has two names (FR-212, FR-213;
 overwrites it with the provider's spelling. `identity_key` is what the indexer finds the title by,
 and nothing but the indexer's own backfill ever writes it after insert: enrichment's `UPDATE` does
 not name the column. It is `beam_domain::utils::identity::title_identity_key` of the filename
-parse — NFKD-decomposed, the Latin-script accents of the Combining Diacritical Marks block
-(U+0300–U+036F) dropped, punctuation dropped, lowercased, `&` read as `and`, and recomposed (NFC) —
-followed by `|` and the parsed year (empty when there is none). Every other combining mark is kept:
-a kana voicing mark or an Indic vowel sign is part of its letter, so `かぎ` and `かき`, or `दिल` and
-`दल`, stay two titles. A movie is keyed by its filename, a show by its series folder (the episode
+parse — NFKD-decomposed, every combining mark in the Combining Diacritical Marks block
+(U+0300–U+036F: Latin, Greek and Cyrillic accents alike) dropped, punctuation dropped, lowercased,
+`&` read as `and`, and recomposed (NFC) — followed by `|` and the parsed year (empty when there is
+none). Every combining mark outside that block is kept: a kana voicing mark or an Indic vowel sign
+is part of its letter, so `かぎ` and `かき`, or `दिल` and `दल`, stay two titles. The fold is by block,
+not by language, so it also merges letters some languages treat as distinct — Cyrillic `й`/`и`,
+`ї`/`і`, `ў`/`у`, Latin `ñ`/`n`, `ä`/`a` — and `Мой` and `Мои` of one year are one title. That is
+the accepted cost of `Amélie` and `Amelie` being one (decision D183-6 on
+[#214](https://github.com/justin13888/beam/pull/214)). A movie is keyed by its filename, a show by its series folder (the episode
 file's immediate parent directory, so a `Show/Season 01/` layout keys the show as `season 01|`
 until [#182](https://github.com/justin13888/beam/issues/182) improves the inference; files then
 re-classify to the correctly keyed show and the husk is retired below). The year is part of the
@@ -138,8 +142,8 @@ resolve to one row rather than racing a SELECT against an INSERT. A NULL key is 
 `title` may already be the provider's. On the first `scan_all_libraries` in a process the indexer
 derives each such title's key from the paths of all its file rows — soft-deleted ones included, so a
 title whose files are away at upgrade is still keyed by them — with the same function classification
-uses. Every file agreeing sets it; only a title with no file row at all takes the key of its stored
-title and year. Titles are keyed oldest first (`created_at`, then `id`), so of two duplicates the
+uses. Every file agreeing sets it; only a title with no file row that parses as its kind (a movie
+filename for a movie, an episode path for a show) takes the key of its stored title and year. Titles are keyed oldest first (`created_at`, then `id`), so of two duplicates the
 display-title lookup created, the original takes the key. Files that disagree (two films once merged
 under one title) or a key another row already holds (the later duplicate) leave the key NULL and are
 named in an admin-log warning; such a row stays listed but is never matched again. A backfill that
@@ -154,7 +158,10 @@ a bookmark or continue-watching tile still resolves while its file is away.
 **Retirement.** A scan whose walk read the whole tree finishes by deleting orphans:
 `movie_entries` (and `episodes`) no `files` row references, then `seasons` with no episodes, then
 `movies` and `shows` with no child left. Entries, episodes, movies and shows go only if created
-before the scan started, which protects a title the watcher is creating concurrently. `seasons` has
+before the scan started, which protects a title the watcher is creating concurrently. It does not
+protect a title that was already orphaned when the scan started: one the watcher is attaching a new
+file to can still be deleted under it, and that file drops out of the index until the next scan
+re-indexes it. `seasons` has
 no `created_at`, so an empty season goes whenever the scan finds it — including one the watcher has
 just created and not yet given its first episode. That episode's insert then fails on the missing
 season, the watcher logs a warning (not an admin-log entry) for that file, and the next scan

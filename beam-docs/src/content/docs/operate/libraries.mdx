@@ -154,8 +154,10 @@ Movies are grouped by their **cleaned title and year**. Index two files that cle
 title and year and Beam treats them as two sources of one movie, and viewers get a picker labelled
 with each one's resolution and codec. The comparison ignores case, accents on Latin, Greek and
 Cyrillic letters, and punctuation, and reads `&` as `and`: `Amelie.2001.mkv` and
-`Amélie (2001).mkv` are one movie. A mark that is part of a letter in its own script, such as a
-Japanese voicing mark or a Devanagari vowel sign, still counts: `かぎ` and `かき` are two titles. Shows are grouped
+`Amélie (2001).mkv` are one movie. That includes marks some languages count as separate letters:
+`ñ` matches `n`, `ä` matches `a` and `й` matches `и`, so `Мой (2010)` and `Мои (2010)` are one
+movie. Marks in other scripts, such as a Japanese voicing mark or a Devanagari vowel sign, still
+count: `かぎ` and `かき` are two titles. Shows are grouped
 the same way by their **folder name** (and a year in it, such as `Doctor Who (2005)`).
 
 The grouping comes from the filenames and never changes afterwards. When metadata enrichment gives

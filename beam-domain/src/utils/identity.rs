@@ -8,10 +8,18 @@
 //! filename parse, stored in its own column, and never touched by enrichment.
 //!
 //! The key is deliberately forgiving about spelling and strict about year:
-//! case, Latin-script accents, punctuation and `&`/`and` do not separate two
-//! titles, a different release year does (`Dune (1984)` and `Dune (2021)` are
-//! two films), and so does every mark that is part of a letter in its own
-//! script (`かぎ` and `かき`, `दिल` and `दल` are different words).
+//! case, punctuation, `&`/`and` and every combining mark in the Combining
+//! Diacritical Marks block (U+0300-U+036F: the accents NFKD splits off Latin,
+//! Greek and Cyrillic letters) do not separate two titles; a different
+//! release year does (`Dune (1984)` and `Dune (2021)` are two films), and so
+//! does every combining mark outside that block (`かぎ` and `かき`, `दिल` and
+//! `दल` are different words).
+//!
+//! The fold is by block, not by language, so it also merges letters some
+//! languages treat as distinct: Cyrillic `й`/`и`, `ї`/`і`, `ў`/`у`, and Latin
+//! `ñ`/`n`, `ä`/`a`. `Мой` and `Мои` of one year share a key. That is the
+//! accepted cost of `Amélie` and `Amelie` sharing one (decision D183-6 on
+//! PR #214).
 
 use std::ops::RangeInclusive;
 
@@ -22,7 +30,9 @@ use unicode_normalization::char::is_combining_mark;
 /// Greek and Cyrillic letters (`é` -> `e` + U+0301). These, and only these,
 /// are folded away. Every other combining mark -- a kana voicing mark, an
 /// Indic vowel sign, a Hebrew point -- distinguishes words in its script, so
-/// dropping it would merge different titles.
+/// dropping it would merge different titles. Some marks inside the block do
+/// too (the breve of Cyrillic `й`); folding them is the cost the module docs
+/// name.
 const FOLDED_DIACRITICS: RangeInclusive<char> = '\u{0300}'..='\u{036F}';
 
 /// Separates the normalised title from the year inside a key. Never produced
@@ -32,9 +42,11 @@ const KEY_SEPARATOR: char = '|';
 
 /// Fold a title into the form two spellings of one title share.
 ///
-/// Compatibility-decomposes (NFKD), drops the Latin-script diacritics that
-/// leaves behind (`é` -> `e`, see [`FOLDED_DIACRITICS`]) while keeping every
-/// other combining mark, lowercases, spells `&` as `and`, turns every other
+/// Compatibility-decomposes (NFKD), drops every combining mark that leaves
+/// behind in the Combining Diacritical Marks block -- Latin, Greek and
+/// Cyrillic accents alike (`é` -> `e`, but also `й` -> `и`; see
+/// [`FOLDED_DIACRITICS`] and the module docs for that accepted cost) -- while
+/// keeping every other combining mark, lowercases, spells `&` as `and`, turns every other
 /// non-alphanumeric character into a space, collapses runs of spaces, and
 /// recomposes (NFC) what is left, so `が` stays `が` whether the filename
 /// spelled it precomposed or decomposed. Articles are kept: `The Thing` and
@@ -119,6 +131,10 @@ mod tests {
             ("Mr. Robot", "Mr Robot", None),
             ("  Arrival  ", "Arrival", Some(2016)),
             ("Ёлки", "Елки", Some(2010)),
+            // A known, deliberate collision: the fold is by block, so `й`
+            // folds to `и` although Russian reads them as different letters
+            // (the accepted cost of `Amélie` = `Amelie`, D183-6 on PR #214).
+            ("Мой", "Мои", Some(2010)),
             // One kana, precomposed and decomposed: the same word.
             ("\u{304C}\u{304E}", "\u{304B}\u{3099}\u{304D}\u{3099}", None),
         ];
@@ -143,8 +159,8 @@ mod tests {
             (("The Thing", Some(1982)), ("Thing", Some(1982))),
             // Two punctuation-only titles do not both fold to nothing.
             (("!!!", None), ("???", None)),
-            // A mark that is part of a letter in its own script is not an
-            // accent: kana voicing, an Indic vowel sign.
+            // A combining mark outside the folded block is kept: kana
+            // voicing, an Indic vowel sign.
             (("かぎ", None), ("かき", None)),
             (("दिल", None), ("दल", None)),
             (("はは", None), ("ぱぱ", None)),

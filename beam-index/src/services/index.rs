@@ -1235,9 +1235,10 @@ impl LocalIndexService {
     /// the very thing the key exists to be independent of. Every file row
     /// counts, soft-deleted or not, so a title whose files are all missing at
     /// upgrade -- and may come back -- is keyed as its files say. A title
-    /// whose files all derive one key takes it; one with no file row at all
-    /// takes the key of its stored title and year (it is about to be deleted
-    /// as orphaned anyway). A title whose files disagree -- `Dune (1984)` and `Dune
+    /// whose files all derive one key takes it; one with no file row that
+    /// parses as its kind (a movie filename for a movie, an episode path for
+    /// a show) takes the key of its stored title and year (with no file row
+    /// at all, it is about to be deleted as orphaned anyway). A title whose files disagree -- `Dune (1984)` and `Dune
     /// (2021)` once merged under one title -- or whose key another title
     /// already holds -- the duplicate the old title lookup created -- is left
     /// keyless and named in an admin warning: it stays browsable, is never
@@ -1723,7 +1724,9 @@ impl IndexService for LocalIndexService {
         // read the whole tree gets here: one that failed anywhere has told us
         // nothing reliable about what is on disk. `start_time` protects a
         // title the watcher created while this scan ran, whose file row may
-        // not be written yet.
+        // not be written yet. It does not protect a title already orphaned
+        // before the scan began that the watcher is attaching a file to: that
+        // title can go under it, and the next scan re-indexes the file.
         let titles_removed = if failed_subtrees.is_empty() && !unscoped_failure {
             self.movie_repo.delete_orphaned(start_time).await?
                 + self.show_repo.delete_orphaned(start_time).await?
