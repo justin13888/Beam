@@ -77,8 +77,7 @@ strength. Each requirement is independently testable. See `product.md` for narra
     before it for the same season with rising episodes), by an air date (`2024-03-01`: season =
     year, episode = `MMDD`), or by an absolute number (`Show - 012`, `E12`) only where the layout
     is unambiguous (a season folder, or a folder naming the same title); the `<title> - <n>` form
-    also needs a season folder or a number of two or more digits, and never applies when the parent
-    folder carries the filename's own year; a year-shaped number (1900-2099) is an episode only in a
+    also needs a season folder or a number of two or more digits; a year-shaped number (1900-2099) is an episode only in a
     season folder of the show the title names; inside a season folder only, `Episode N` / `Ep N`
     and a three- or four-digit number whose leading digits are the folder's season (`501`) number
     it too; a marker contradicting its season folder wins;

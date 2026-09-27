@@ -299,12 +299,17 @@ const CORPUS: &[(&str, &str)] = &[
         "unclassifiable absolute 12",
     ),
     // The dash is a movie's when the number is one digit outside a season
-    // folder, or the parent folder carries the filename's own year (D8).
+    // folder (D8). A year the folder and filename share does not make a
+    // two-digit number a movie's part: a show's folder carries its year too.
     ("Movie (2019)/Movie (2019) - 1.mkv", "movie Movie - 1|2019"),
     ("Movie (2019)/Movie - 1.mkv", "movie Movie - 1|-"),
     (
-        "Movie (2019)/Movie (2019) - 12.mkv",
-        "movie Movie - 12|2019",
+        "Chernobyl (2019)/Chernobyl (2019) - 01.mkv",
+        "episode Chernobyl|2019 s1 e1 Absolute",
+    ),
+    (
+        "One Piece (1999)/One Piece (1999) - 1071.mkv",
+        "episode One Piece|1999 s1 e1071 Absolute",
     ),
     ("Show/Show - 5.mkv", "movie Show - 5|-"),
     (

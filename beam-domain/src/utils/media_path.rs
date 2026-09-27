@@ -292,14 +292,11 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         let year_is_episode = !absolute.year_shaped
             || (parent_season.is_some() && series_named && !absolute.title.is_empty());
         // The dash form is ambiguous with a movie's part number
-        // (`Movie (2019) - 1`): it needs a season folder or a number of at
-        // least two digits, and a parent folder carrying the filename's own
-        // year says the dash is the movie's.
-        let dash_plausible = !absolute.dash
-            || ((parent_season.is_some() || absolute.digits >= 2)
-                && !parent
-                    .and_then(title_of)
-                    .is_some_and(|folder| folder.year.is_some() && folder.year == parsed.year));
+        // (`Movie (2019) - 1`): outside a season folder it needs a number of
+        // at least two digits. A year the folder and filename share says
+        // nothing either way -- `Chernobyl (2019)/Chernobyl (2019) - 01` is
+        // an episode -- so it is not consulted.
+        let dash_plausible = !absolute.dash || parent_season.is_some() || absolute.digits >= 2;
         if year_is_episode && dash_plausible {
             if names_show {
                 // The folder was just checked against the title (or is a
