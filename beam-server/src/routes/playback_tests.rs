@@ -152,6 +152,7 @@ fn make_movie() -> Movie {
     Movie {
         id: uuid::Uuid::new_v4(),
         title: "Test Movie".to_owned(),
+        identity_key: None,
         title_localized: None,
         description: None,
         year: None,

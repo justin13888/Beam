@@ -40,6 +40,11 @@ In rough order of likelihood:
 4. **The match scored below the confidence threshold**, `BEAM_ENRICH_MIN_CONFIDENCE`. Beam prefers
    no metadata to wrong metadata.
 
+A match replaces the title's displayed name, year and artwork with the provider's. It does not
+change how Beam groups files: later files of the title still join it by the name their filename
+parses to, however the provider spells it. See
+[Managing libraries](/operate/libraries/#multiple-versions).
+
 The admin **Status** tab shows each title's enrichment state, so you can tell "not tried yet"
 apart from "tried and found nothing".
 

@@ -21,6 +21,7 @@ mod tests {
         Movie {
             id: Uuid::new_v4(),
             title: title.to_string(),
+            identity_key: None,
             title_localized: None,
             description: None,
             year: None,
@@ -198,6 +199,7 @@ mod tests {
         let show = Show {
             id: Uuid::new_v4(),
             title: "Test Show".to_string(),
+            identity_key: None,
             title_localized: None,
             description: None,
             year: None,

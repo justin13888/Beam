@@ -87,12 +87,17 @@ impl MetadataService for StubMetadataService {
 /// `test_support`'s state with the metadata service swapped for the one this
 /// test configured, so the stubs the media routes never touch stay shared.
 fn state_with(metadata: StubMetadataService) -> AppState {
+    state_with_service(Arc::new(metadata))
+}
+
+/// [`state_with`] for any metadata service, the real one included.
+fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
     let base = make_app_state();
 
     let services = AppServices {
         hash: base.services.hash.clone(),
         library: base.services.library.clone(),
-        metadata: Arc::new(metadata),
+        metadata,
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: base.services.user_repo.clone(),
@@ -293,6 +298,125 @@ async fn browsing_yields_a_connection_and_accepts_the_sort_parameters() {
     let body: MediaConnection = response.json();
     assert!(body.edges.is_empty());
     assert!(!body.page_info.has_next_page);
+}
+
+/// A movie titled `title` with one file behind it, through the same
+/// repository calls the indexer makes. Returns the movie's and the file's ids.
+async fn indexed_movie(
+    movies: &beam_domain::repositories::movie::in_memory::InMemoryMovieRepository,
+    files: &beam_domain::repositories::file::in_memory::InMemoryFileRepository,
+    title: &str,
+) -> (uuid::Uuid, uuid::Uuid) {
+    use beam_domain::models::{
+        CreateMediaFile, CreateMovie, CreateMovieEntry, FileStatus, MediaFileContent,
+    };
+    use beam_domain::repositories::{FileRepository, MovieRepository};
+
+    let library_id = uuid::Uuid::new_v4();
+    let movie = movies
+        .find_or_create_by_identity(CreateMovie::new(title, None, None))
+        .await
+        .unwrap();
+    let entry = movies
+        .create_entry(CreateMovieEntry {
+            library_id,
+            movie_id: movie.id,
+            edition: None,
+            is_primary: true,
+        })
+        .await
+        .unwrap();
+    let file = files
+        .create(CreateMediaFile {
+            library_id,
+            path: std::path::PathBuf::from(format!("/videos/{title}.mkv")),
+            hash: movie.id.as_u128() as u64,
+            size_bytes: 1024,
+            mtime: None,
+            mime_type: Some("video/x-matroska".to_string()),
+            duration: None,
+            container_format: None,
+            content: Some(MediaFileContent::Movie {
+                movie_entry_id: entry.id,
+            }),
+            status: FileStatus::Known,
+        })
+        .await
+        .unwrap();
+    (movie.id, file.id)
+}
+
+/// Browse lists a title only while one of its files is present (issue #183):
+/// the moment its only file goes missing it leaves the listing, without
+/// waiting for a purge -- yet its own detail route still answers, so a
+/// bookmark or a continue-watching tile does not dangle while the file is
+/// away. Real metadata service, real repository doubles linked to one file
+/// store.
+#[tokio::test]
+async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_resolves() {
+    use beam_domain::repositories::FileRepository;
+    use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+
+    use crate::services::metadata::DbMetadataService;
+
+    let files = Arc::new(InMemoryFileRepository::default());
+    let movies = Arc::new(InMemoryMovieRepository::with_files(files.clone()));
+    let (present, _) = indexed_movie(&movies, &files, "Arrival").await;
+    let (away, away_file) = indexed_movie(&movies, &files, "Contact").await;
+    files
+        .mark_missing(vec![away_file], chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let state = state_with_service(Arc::new(DbMetadataService::new(
+        movies.clone(),
+        Arc::new(InMemoryShowRepository::with_files(files.clone())),
+        files.clone(),
+        Arc::new(InMemoryMediaStreamRepository::default()),
+    )));
+    let token = seed_session(&state).await;
+    let client = client(state);
+
+    let response = client
+        .get("/v1/media")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: MediaConnection = response.json();
+    let listed: Vec<String> = body
+        .edges
+        .iter()
+        .map(|edge| match &edge.node {
+            MediaMetadata::Movie(movie) => movie.id.clone(),
+            MediaMetadata::Show(show) => show.id.clone(),
+        })
+        .collect();
+    assert_eq!(listed, vec![present.to_string()]);
+
+    let detail = client
+        .get(&format!("/v1/media/{away}"))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(
+        detail.status(),
+        StatusCode::OK,
+        "the hidden title still resolves"
+    );
+
+    // The file coming back puts the title back in the listing.
+    files.restore(away_file).await.unwrap();
+    let again: MediaConnection = client
+        .get("/v1/media")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json();
+    assert_eq!(again.edges.len(), 2);
 }
 
 // ── GET /v1/media/{id}/sources ───────────────────────────────────────────────

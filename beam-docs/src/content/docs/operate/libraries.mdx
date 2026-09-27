@@ -95,15 +95,18 @@ backstop for all of them.
 
 A file that is gone from disk is not removed at once. Beam marks it **missing**: it drops out of its
 title's sources, continue-watching and history, and cannot be streamed — but Beam keeps its record,
-and with it every viewer's resume point. The title itself stays in browsing and search; one whose
-only file is missing is still listed but has nothing to play (hiding such titles is tracked in
-[#183](https://github.com/justin13888/beam/issues/183)). If the file comes back at the same path, the
-next scan (or the filesystem watcher) restores it exactly as it was, progress included.
+and with it every viewer's resume point. A movie or show whose files are **all** missing drops out
+of browsing and search at once, since it has nothing to play; its own page still opens, so a
+bookmark does not break. If the file comes back at the same path, the next scan (or the filesystem
+watcher) restores it exactly as it was, progress included, and the title is listed again.
 
 A missing file is removed for good only when a scan still cannot find it after a grace period — 30
 days unless `BEAM_MISSING_FILE_GRACE_DAYS` says otherwise (see
 [Configuration](/reference/configuration/)). Removing it also removes everyone's progress for it.
-Set the grace to `0` to remove missing files at the next scan.
+Set the grace to `0` to remove missing files at the next scan. A title left with no files at all
+is removed by the same scan, together with its metadata; the scan's completion entry in the admin
+log counts it under `titles_removed`. A scan that could not read the whole library removes no
+titles.
 
 Two things never count as a file going missing:
 
@@ -208,9 +211,18 @@ An episode file with no parent directory becomes part of a show called *Unknown 
 
 ## Multiple versions
 
-Movies are grouped by their **cleaned title**. Index two files that clean to the same title and
-Beam treats them as two sources of one movie, and viewers get a picker labelled with each one's
-resolution and codec.
+Movies are grouped by their **cleaned title and year**. Index two files that clean to the same
+title and year and Beam treats them as two sources of one movie, and viewers get a picker labelled
+with each one's resolution and codec. The comparison ignores case, accents on Latin, Greek and
+Cyrillic letters, and punctuation, and reads `&` as `and`: `Amelie.2001.mkv` and
+`Amélie (2001).mkv` are one movie. That includes marks some languages count as separate letters:
+`ñ` matches `n`, `ä` matches `a` and `й` matches `и`, so `Мой (2010)` and `Мои (2010)` are one
+movie. Marks in other scripts, such as a Japanese voicing mark or a Devanagari vowel sign, still
+count: `かぎ` and `かき` are two titles. Shows are grouped
+the same way by their **folder name** (and a year in it, such as `Doctor Who (2005)`).
+
+The grouping comes from the filenames and never changes afterwards. When metadata enrichment gives
+a title the provider's name, later files still join it under the name their filename parses to.
 
 Episodes are grouped by **show, season and episode number**. Two files in the same show folder that
 both parse as, say, `S01E01` — `Show.S01E01.1080p.mkv` beside `Show.S01E01.720p.mkv` — are two
@@ -221,8 +233,9 @@ It is also the fix when a file will not play in a browser — add an H.264/AAC M
 
 Two limits to know:
 
-- **The year is not part of the grouping key.** Two different films that clean to the same title
-  will merge into one entry, whichever years they carry.
+- **The year is part of the grouping key.** `Dune.1984.mkv` and `Dune.2021.mkv` are two movies, as
+  they should be — but so are `Dune.2021.mkv` and a `Dune.mkv` with no year. Give every version of
+  a film the same year in its name.
 - **The first file names the episode.** An episode's title and runtime come from the first file
   indexed for it (or from metadata enrichment since). A later version's filename never renames it.
 

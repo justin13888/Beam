@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 # `RealClock::sleep` needs `tokio::time`; `TestClock`'s waiters need `tokio::sync`.
 tokio = { workspace = true }
 tracing = { workspace = true }
+unicode-normalization = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 

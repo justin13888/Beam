@@ -61,6 +61,7 @@ pub async fn movie_entry(db: &DatabaseConnection, library_id: Uuid) -> Result<Uu
     beam_entity::movie::ActiveModel {
         id: Set(movie_id),
         title: Set(format!("movie-{movie_id}")),
+        identity_key: Set(Some(format!("movie {movie_id}|"))),
         title_localized: Set(None),
         description: Set(None),
         year: Set(None),
@@ -137,6 +138,7 @@ pub async fn episode(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
     beam_entity::show::ActiveModel {
         id: Set(show_id),
         title: Set(format!("show-{show_id}")),
+        identity_key: Set(Some(format!("show {show_id}|"))),
         title_localized: Set(None),
         description: Set(None),
         year: Set(None),
