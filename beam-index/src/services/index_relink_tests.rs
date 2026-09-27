@@ -713,3 +713,33 @@ async fn a_directory_renamed_into_an_excluded_one_marks_its_files_missing() {
     assert!(h.row(&scene).await.unwrap().missing_since.is_some());
     h.present(&film).await;
 }
+
+/// A file whose size or modification time moved but whose content did not,
+/// and whose probe keeps failing, is hashed once: its new size and
+/// modification time are recorded, so the next visit does not hash it again
+/// to find the same content (PR #224 r2).
+#[tokio::test]
+async fn an_unprobed_file_touched_is_hashed_once_not_on_every_visit() {
+    let h = Harness::new().await;
+    h.prober.fails.store(true, Ordering::SeqCst);
+    let path = h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    assert_eq!(h.hashes(), 1);
+    assert_eq!(h.present(&path).await.duration, None, "the probe failed");
+
+    let touched = std::time::SystemTime::now() + Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(touched)
+        .unwrap();
+    h.scan().await;
+    assert_eq!(h.hashes(), 2, "a moved mtime is hashed once");
+    let (_, mtime) = read_fs_meta(&path).unwrap();
+    assert_eq!(h.present(&path).await.mtime, mtime, "and recorded");
+
+    h.scan().await;
+    assert_eq!(h.hashes(), 2, "and not again");
+    assert_eq!(h.probes(), 3, "while the probe is still retried");
+}

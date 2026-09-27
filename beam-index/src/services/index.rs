@@ -1477,8 +1477,9 @@ impl LocalIndexService {
     /// `files` CHECK allows it to be. Either way its streams and probe
     /// results are cleared ([`ProbeUpdate::Clear`]): they described the old
     /// content, and a row with no duration is probed again on every visit. A
-    /// failed probe of a file whose content did not change writes nothing:
-    /// the next visit tries again.
+    /// failed probe of a file whose content did not change writes only the
+    /// size and modification time it was found with, so the next visit --
+    /// which tries the probe again -- does not rehash it.
     async fn reprobe_file(
         &self,
         existing: &MediaFile,
@@ -1551,6 +1552,23 @@ impl LocalIndexService {
                     error = %e,
                     "a file whose probe failed before still does not probe"
                 );
+                // Its size or modification time moved but its content did
+                // not (a `touch`, a copy that kept the bytes): record them,
+                // so the next visit sees the file as it is and does not
+                // hash it again only to find the same content.
+                if size != existing.size_bytes || mtime != existing.mtime {
+                    self.file_repo
+                        .update(UpdateMediaFile {
+                            id: existing.id,
+                            hash: None,
+                            size_bytes: Some(size),
+                            mtime,
+                            probe: ProbeUpdate::Keep,
+                            content: None,
+                            status: None,
+                        })
+                        .await?;
+                }
                 Ok(false)
             }
             Err(e) => {
