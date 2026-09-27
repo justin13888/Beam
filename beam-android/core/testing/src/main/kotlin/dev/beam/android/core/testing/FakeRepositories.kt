@@ -303,8 +303,17 @@ public class FakeServerRepository(
      */
     public var deviceLogin: List<DeviceLoginStep>? = null
 
-    /** How many times a device login was polled. */
+    /** How many times a device login was polled, failed polls included. */
     public var devicePolls: Int = 0
+
+    /**
+     * Failures the next polls throw, front first, before the [deviceLogin]
+     * script resumes. Each one counts as a poll.
+     */
+    public val devicePollFailures: ArrayDeque<BeamException> = ArrayDeque()
+
+    /** How many polls the [deviceLogin] script has answered. */
+    private var scriptedPolls: Int = 0
 
     override suspend fun startDeviceLogin(serverId: String): DeviceLoginPrompt {
         failOnce?.let {
@@ -336,7 +345,12 @@ public class FakeServerRepository(
     ): DeviceLoginStep {
         failWith?.let { throw it }
         val script = checkNotNull(deviceLogin) { "no device login was started" }
-        val step = script[minOf(devicePolls, script.lastIndex)]
+        devicePollFailures.removeFirstOrNull()?.let {
+            devicePolls += 1
+            throw it
+        }
+        val step = script[minOf(scriptedPolls, script.lastIndex)]
+        scriptedPolls += 1
         devicePolls += 1
         if (step is DeviceLoginStep.SignedIn) {
             state.value =

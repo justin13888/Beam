@@ -13,24 +13,28 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.DeviceLoginPrompt
 import uniffi.beam_client_core.DeviceLoginStep
 import javax.inject.Inject
 
 /**
  * Adding a server, deciding whether to trust it, and signing in.
  *
- * Sign-in tries the device authorization grant first (ADR-0017): the screen
- * shows a code, the viewer approves it in any browser, and polling hands back
- * the session. When the server answers 501 -- its identity provider does not
- * offer the grant -- it falls back to the in-app browser, lifting the
- * `beam_session` cookie out of it, since the provider cannot redirect back to
- * a custom scheme.
+ * Where there is a usable browser -- a phone -- sign-in opens the in-app
+ * browser, lifting the `beam_session` cookie out of it since the provider
+ * cannot redirect back to a custom scheme, and [signInWithCode] offers the
+ * device authorization grant (ADR-0017) as a second choice. Where there is
+ * none -- a TV -- the device grant comes first: the screen shows a code, the
+ * viewer approves it in any browser, and polling hands back the session; the
+ * in-app browser is the fallback when the server answers 501 because its
+ * identity provider does not offer the grant.
  */
 @HiltViewModel
 public class AuthViewModel
     @Inject
     constructor(
         private val servers: ServerRepository,
+        private val browser: BrowserAvailability,
     ) : ViewModel() {
         private val mutableState = MutableStateFlow(AuthUiState())
 
@@ -90,11 +94,17 @@ public class AuthViewModel
         }
 
         /**
-         * Device login first; the in-app browser when the server says it has
-         * no device grant. Any other failure is the caller's to report.
+         * The in-app browser where there is one. Otherwise device login
+         * first, and the in-app browser when the server says it has no device
+         * grant. Any other failure is the caller's to report.
          */
         private suspend fun beginSignIn(serverId: String) {
             mutableState.update { it.copy(serverId = serverId) }
+            if (browser.hasUsableBrowser()) {
+                val url = servers.loginUrl(serverId)
+                mutableState.update { it.copy(isConnecting = false, loginUrl = url) }
+                return
+            }
             val prompt =
                 try {
                     servers.startDeviceLogin(serverId)
@@ -105,6 +115,34 @@ public class AuthViewModel
                     return
                 }
             mutableState.update { it.copy(isConnecting = false, devicePrompt = prompt) }
+            startPolling(serverId, prompt)
+        }
+
+        /**
+         * The viewer chose to sign in with a code rather than in the in-app
+         * browser. The browser stays open until the server has issued one, so
+         * a server without the device grant leaves the viewer where they were.
+         */
+        public fun signInWithCode() {
+            val serverId = mutableState.value.serverId ?: return
+            mutableState.update { it.copy(error = null) }
+            viewModelScope.launch {
+                val prompt =
+                    try {
+                        servers.startDeviceLogin(serverId)
+                    } catch (failure: BeamException) {
+                        mutableState.update { it.withFailure(failure) }
+                        return@launch
+                    }
+                mutableState.update { it.copy(loginUrl = null, devicePrompt = prompt) }
+                startPolling(serverId, prompt)
+            }
+        }
+
+        private fun startPolling(
+            serverId: String,
+            prompt: DeviceLoginPrompt,
+        ) {
             devicePolling?.cancel()
             devicePolling =
                 viewModelScope.launch {
@@ -112,25 +150,42 @@ public class AuthViewModel
                 }
         }
 
-        /** Poll until the viewer approves, refuses, or the code expires. */
+        /**
+         * Poll until the viewer approves, refuses, or the code expires.
+         *
+         * A failure that a later poll could get past -- a retryable server
+         * error, a rate limit, a lost connection -- does not end the login:
+         * the viewer may be halfway through approving it on their phone. The
+         * next poll waits the current interval, or as long as a rate limit
+         * asks if that is longer. Anything else (a refusal, an expiry, a flow
+         * the server no longer knows) ends it with the failure shown.
+         */
         private suspend fun pollDeviceLogin(
             serverId: String,
             deviceHandle: String,
             firstIntervalSecs: UInt,
         ) {
-            var intervalSecs = firstIntervalSecs
+            var intervalSecs = firstIntervalSecs.toLong()
+            var waitSecs = intervalSecs
             while (true) {
-                delay(intervalSecs.toLong() * MILLIS_PER_SECOND)
+                delay(waitSecs * MILLIS_PER_SECOND)
+                waitSecs = intervalSecs
                 val step =
                     try {
                         servers.pollDeviceLogin(serverId, deviceHandle)
                     } catch (failure: BeamException) {
+                        if (failure is BeamException.RateLimited) {
+                            waitSecs = maxOf(intervalSecs, failure.retryAfterSecs.toLong())
+                            continue
+                        }
+                        if (failure.keepsDeviceLoginAlive()) continue
                         mutableState.update { it.copy(devicePrompt = null).withFailure(failure) }
                         return
                     }
                 when (step) {
                     is DeviceLoginStep.Waiting -> {
-                        intervalSecs = step.intervalSecs
+                        intervalSecs = step.intervalSecs.toLong()
+                        waitSecs = intervalSecs
                     }
 
                     is DeviceLoginStep.SignedIn -> {
@@ -201,6 +256,14 @@ public class AuthViewModel
                 )
             } else {
                 copy(error = failure.toFailure().message)
+            }
+
+        /** Whether a poll that failed this way is worth repeating. */
+        private fun BeamException.keepsDeviceLoginAlive(): Boolean =
+            when (this) {
+                is BeamException.Server -> retryable
+                is BeamException.Network -> retryable
+                else -> false
             }
 
         private companion object {
