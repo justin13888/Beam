@@ -9,8 +9,9 @@ use crate::providers::enrichment::MovieEnrichment;
 /// Persistence for movies and their entries.
 ///
 /// A movie has two names (issue #183). Its **identity key** is what the
-/// indexer matches a file to it by: derived once from the filename parse and
-/// never rewritten. Its **display title** is what a user sees, and enrichment
+/// indexer matches a file to it by: derived from the filename parse, and
+/// rewritten only when the rules deriving it change ([`Self::rekey`]). Its
+/// **display title** is what a user sees, and enrichment
 /// replaces it with the provider's spelling. Looking a movie up by its display
 /// title is exactly how a renamed movie used to be missed and duplicated, so
 /// the trait offers no such lookup.
@@ -42,10 +43,35 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     /// indexer's backfill -- oldest first (`created_at`, then `id`), so of two
     /// legacy duplicates the backfill keys the original.
     async fn find_unkeyed(&self) -> Result<Vec<Movie>, DbErr>;
-    /// Give the keyless movie `movie_id` the key `identity_key`. Returns
-    /// `false`, changing nothing, when the movie does not exist, already has a
-    /// key, or another movie already holds `identity_key`.
-    async fn assign_identity_key(&self, movie_id: Uuid, identity_key: &str) -> Result<bool, DbErr>;
+    /// Give the keyless movie `movie_id` the key `identity_key`, derived by
+    /// version `version` of the rules. Returns `false`, changing nothing, when
+    /// the movie does not exist, already has a key, or another movie already
+    /// holds `identity_key`.
+    async fn assign_identity_key(
+        &self,
+        movie_id: Uuid,
+        identity_key: &str,
+        version: u16,
+    ) -> Result<bool, DbErr>;
+    /// The movie keyed `identity_key`, if any.
+    async fn find_by_identity_key(&self, identity_key: &str) -> Result<Option<Movie>, DbErr>;
+    /// Every keyed movie whose key an older version of the rules than
+    /// `version` derived, oldest first (`created_at`, then `id`). A change to
+    /// the rules or the title fold can change the key a movie's files derive;
+    /// these are the keys the indexer re-derives. A keyless movie is not
+    /// listed: [`Self::find_unkeyed`] lists those.
+    async fn find_keyed_before_version(&self, version: u16) -> Result<Vec<Movie>, DbErr>;
+    /// Replace the key of `movie_id` with `identity_key` -- `None` leaves it
+    /// keyless, never matched -- derived by version `version` of the rules.
+    /// The movie keeps its id and everything hanging off it. Returns `false`,
+    /// changing nothing, when the movie does not exist or another movie holds
+    /// `identity_key`.
+    async fn rekey(
+        &self,
+        movie_id: Uuid,
+        identity_key: Option<String>,
+        version: u16,
+    ) -> Result<bool, DbErr>;
     /// Delete every movie entry created before `created_before` that no file
     /// row references, then every movie created before `created_before` left
     /// with no entry, returning how many movies went. A file row that is only
@@ -56,7 +82,11 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     /// `created_before` protects a movie or entry the indexer created while
     /// the caller was running, whose file row may not be written yet.
     async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr>;
-    async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr>;
+    /// The entry for `(library_id, movie_id, edition)`, created if there is
+    /// none. Every copy of one edition of a film in a library is a file of one
+    /// entry; a second copy never creates a second entry. On a conflict the
+    /// stored entry is returned unchanged (`is_primary` included).
+    async fn find_or_create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr>;
     async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr>;
     /// Reverse lookup from a `MediaFileContent::Movie { movie_entry_id }` back
     /// to the entry (and, via `MovieEntry::movie_id`, the movie) -- used to
@@ -101,6 +131,10 @@ pub mod in_memory {
     pub struct InMemoryMovieRepository {
         pub movies: Mutex<HashMap<Uuid, Movie>>,
         pub entries: Mutex<HashMap<Uuid, MovieEntry>>,
+        /// The rules version behind each movie's key. A movie absent here --
+        /// one a test inserted into `movies` directly -- is version `0`, as a
+        /// row keyed before versions existed is.
+        pub key_versions: Mutex<HashMap<Uuid, u16>>,
         files: Option<Arc<InMemoryFileRepository>>,
     }
 
@@ -207,6 +241,7 @@ pub mod in_memory {
         async fn find_or_create_by_identity(&self, create: CreateMovie) -> Result<Movie, DbErr> {
             let CreateMovie {
                 identity_key,
+                identity_key_version,
                 title,
                 year,
                 runtime,
@@ -241,6 +276,10 @@ pub mod in_memory {
                 updated_at: chrono::Utc::now(),
             };
             movies.insert(movie.id, movie.clone());
+            self.key_versions
+                .lock()
+                .unwrap()
+                .insert(movie.id, identity_key_version);
             Ok(movie)
         }
 
@@ -261,6 +300,7 @@ pub mod in_memory {
             &self,
             movie_id: Uuid,
             identity_key: &str,
+            version: u16,
         ) -> Result<bool, DbErr> {
             let mut movies = self.movies.lock().unwrap();
             if movies
@@ -272,10 +312,58 @@ pub mod in_memory {
             match movies.get_mut(&movie_id) {
                 Some(movie) if movie.identity_key.is_none() => {
                     movie.identity_key = Some(identity_key.to_string());
+                    self.key_versions.lock().unwrap().insert(movie_id, version);
                     Ok(true)
                 }
                 _ => Ok(false),
             }
+        }
+
+        async fn find_by_identity_key(&self, identity_key: &str) -> Result<Option<Movie>, DbErr> {
+            Ok(self
+                .movies
+                .lock()
+                .unwrap()
+                .values()
+                .find(|m| m.identity_key.as_deref() == Some(identity_key))
+                .cloned())
+        }
+
+        async fn find_keyed_before_version(&self, version: u16) -> Result<Vec<Movie>, DbErr> {
+            // `movies` before `key_versions`, the order every method takes
+            // them in, so no two calls can deadlock.
+            let movies = self.movies.lock().unwrap();
+            let versions = self.key_versions.lock().unwrap();
+            let mut stale: Vec<_> = movies
+                .values()
+                .filter(|m| m.identity_key.is_some())
+                .filter(|m| versions.get(&m.id).copied().unwrap_or(0) < version)
+                .cloned()
+                .collect();
+            stale.sort_by_key(|m| (m.created_at, m.id));
+            Ok(stale)
+        }
+
+        async fn rekey(
+            &self,
+            movie_id: Uuid,
+            identity_key: Option<String>,
+            version: u16,
+        ) -> Result<bool, DbErr> {
+            let mut movies = self.movies.lock().unwrap();
+            if let Some(key) = identity_key.as_deref()
+                && movies
+                    .values()
+                    .any(|m| m.id != movie_id && m.identity_key.as_deref() == Some(key))
+            {
+                return Ok(false);
+            }
+            let Some(movie) = movies.get_mut(&movie_id) else {
+                return Ok(false);
+            };
+            movie.identity_key = identity_key;
+            self.key_versions.lock().unwrap().insert(movie_id, version);
+            Ok(true)
         }
 
         async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
@@ -292,16 +380,32 @@ pub mod in_memory {
             Ok((before - movies.len()) as u64)
         }
 
-        async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
+        async fn find_or_create_entry(
+            &self,
+            create: CreateMovieEntry,
+        ) -> Result<MovieEntry, DbErr> {
+            let CreateMovieEntry {
+                library_id,
+                movie_id,
+                edition,
+                is_primary,
+            } = create;
+            // Lookup and insert under one lock, as atomic as `ON CONFLICT`.
+            let mut entries = self.entries.lock().unwrap();
+            if let Some(existing) = entries.values().find(|e| {
+                e.library_id == library_id && e.movie_id == movie_id && e.edition == edition
+            }) {
+                return Ok(existing.clone());
+            }
             let entry = MovieEntry {
                 id: Uuid::new_v4(),
-                library_id: create.library_id,
-                movie_id: create.movie_id,
-                edition: create.edition,
-                is_primary: create.is_primary,
+                library_id,
+                movie_id,
+                edition,
+                is_primary,
                 created_at: chrono::Utc::now(),
             };
-            self.entries.lock().unwrap().insert(entry.id, entry.clone());
+            entries.insert(entry.id, entry.clone());
             Ok(entry)
         }
 

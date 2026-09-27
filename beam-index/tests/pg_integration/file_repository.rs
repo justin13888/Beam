@@ -31,6 +31,7 @@ async fn create_persists_a_file_and_reads_it_back_by_path() {
             duration: Some(std::time::Duration::from_secs(120)),
             container_format: Some("matroska".to_string()),
             status: FileStatus::Known,
+            classifier_version: 0,
             content: Some(MediaFileContent::Movie {
                 movie_entry_id: entry_id,
             }),
@@ -70,6 +71,7 @@ async fn find_by_hash_matches_the_full_unsigned_range() {
             duration: None,
             container_format: None,
             status: FileStatus::Unknown,
+            classifier_version: 0,
             content: Some(MediaFileContent::Movie {
                 movie_entry_id: entry_id,
             }),

@@ -105,6 +105,7 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `id` | UUID | no | PK |
 | `title` | TEXT | no | the **display** title: the filename parse until enrichment replaces it with the provider's. Never used to find the movie |
 | `identity_key` | TEXT | yes | unique — what the indexer matches a file to this movie by; see *Title identity* below. NULL only on a row that predates the column and could not be backfilled |
+| `identity_key_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that derived `identity_key`. A key an older version derived is re-derived from the title's files (*Rekey* below); `0` marks keys stored before versions existed |
 | `title_localized` | TEXT | yes | |
 | `description` | TEXT | yes | |
 | `year` | INTEGER | yes | |
@@ -126,7 +127,7 @@ has the same.
 
 ### `shows`
 Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `identity_key` (unique,
-nullable — as for movies), `title_localized`, `description`, `year`, `poster_url`,
+nullable — as for movies), `identity_key_version` (as for movies), `title_localized`, `description`, `year`, `poster_url`,
 `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id` (each unique, nullable),
 `created_at`, `updated_at`.
 
@@ -135,21 +136,32 @@ nullable — as for movies), `title_localized`, `description`, `year`, `poster_u
 A movie or show has two names (FR-214, FR-215;
 [#183](https://github.com/justin13888/beam/issues/183)). `title` is what users see, and enrichment
 overwrites it with the provider's spelling. `identity_key` is what the indexer finds the title by,
-and nothing but the indexer's own backfill ever writes it after insert: enrichment's `UPDATE` does
+and nothing but the indexer's own backfill and rekey (below) ever writes it after insert: enrichment's `UPDATE` does
 not name the column. It is `beam_domain::utils::identity::title_identity_key` of the filename
 parse — NFKD-decomposed, every combining mark in the Combining Diacritical Marks block
-(U+0300–U+036F: Latin, Greek and Cyrillic accents alike) dropped, punctuation dropped, lowercased,
+(U+0300–U+036F: Latin, Greek and Cyrillic accents alike) dropped, apostrophes (`'` and `’`) elided
+so a scene name's `Greys` is the folder's `Grey's`, other punctuation dropped, lowercased,
 `&` read as `and`, and recomposed (NFC) — followed by `|` and the parsed year (empty when there is
 none). Every combining mark outside that block is kept: a kana voicing mark or an Indic vowel sign
 is part of its letter, so `かぎ` and `かき`, or `दिल` and `दल`, stay two titles. The fold is by block,
 not by language, so it also merges letters some languages treat as distinct — Cyrillic `й`/`и`,
 `ї`/`і`, `ў`/`у`, Latin `ñ`/`n`, `ä`/`a` — and `Мой` and `Мои` of one year are one title. That is
 the accepted cost of `Amélie` and `Amelie` being one (decision D183-6 on
-[#214](https://github.com/justin13888/beam/pull/214)). A movie is keyed by its filename, a show by its series folder (the episode
-file's immediate parent directory, so a `Show/Season 01/` layout keys the show as `season 01|`
-until [#182](https://github.com/justin13888/beam/issues/182) improves the inference; files then
-re-classify to the correctly keyed show and the husk is retired below). The year is part of the
-key, so a remake is a separate title.
+[#214](https://github.com/justin13888/beam/pull/214)). A movie is keyed by its filename (with its folder's year, or its
+folder's title for a noise-only name), a show by its series folder: the parent of a season folder
+(or the season folder's own leading text, for a season pack; a multi-season pack's range of
+seasons ends the title it names, and a folder that is only a range is a pack inside the series
+folder above it), else the episode file's parent folder
+unless the filename names another show, else the filename
+(`beam_domain::utils::media_path::infer_media`, FR-204). Builds before
+[#182](https://github.com/justin13888/beam/issues/182) took the immediate parent, so a
+`Show/Season 01/` layout keyed a show as `season 01|`; the first scan under the current rules
+reclassifies those files onto the correctly keyed show (see `classifier_version` under `files`) and
+the emptied husk is retired below. The identity backfill never keys such a husk — a show every one
+of whose files the old parent-folder rule names after a season folder — since holding its files'
+key, the husk would capture the series' files instead. A show with no file row is keyed from its
+stored title like any fileless title, and retired as one. A husk is recognised by its files' paths
+or its stored key, never by the display title, which enrichment may have replaced. The year is part of the key, so a remake is a separate title.
 
 **Find-or-create** is one `INSERT ... ON CONFLICT (identity_key) DO NOTHING` followed by a read by
 key, against the unique index `idx_movies_identity_key` / `idx_shows_identity_key`. There is no
@@ -165,7 +177,36 @@ filename for a movie, an episode path for a show) takes the key of its stored ti
 display-title lookup created, the original takes the key. Files that disagree (two films once merged
 under one title) or a key another row already holds (the later duplicate) leave the key NULL and are
 named in an admin-log warning; such a row stays listed but is never matched again. A backfill that
-fails is logged and retried by the next `scan_all_libraries`; the scan itself goes ahead.
+fails is logged, reported in the admin log and retried, and holds reclassification (below); the
+scan itself goes ahead.
+
+**Rekey.** A change to the path inference or the title fold changes the key a title's files
+derive: #183 keyed `Grey's Anatomy` as `grey s anatomy|`, and the current fold keys its files
+`greys anatomy|`. Left alone, the next file would create a second title beside the enriched one.
+So each key carries `identity_key_version`, and right after the backfill the indexer re-derives
+every key older than `CLASSIFIER_VERSION` (`LocalIndexService::rekey_stale_titles`), before any
+file is reclassified. The two passes run once per process, under one lock
+(`LocalIndexService::identity_passes_done`), asked first by every path that reclassifies:
+`scan_all_libraries`, the administrator's `scan_library`, and a watcher event for a known file
+that awaits reclassification (probed, and classified by an older version); an event for any other
+file does not ask, so a failing pass is not retried on every event. A caller arriving while they
+run waits for them. Until both have succeeded, a file row an older
+version classified is not reclassified — it keeps its title and its version — while new and changed
+files are indexed as usual; a failed pass is logged, reported in an admin-log warning, and retried
+by the next caller. Reclassifying before the rekey would find no title by the file's new key,
+create one, and leave the enriched title with no file for orphan cleanup to retire. The new key is
+the one the title's present files derive, by the backfill's derivation; with no present file, the
+one all its file rows derive. A free key is written in place (`rekey`), so the title keeps its id,
+enrichment, genres, provider ids and manual match. A key another title holds means the current
+rules read the two as one title: the one with provider ids survives (else the older), takes the
+key, and receives the other's files — its entries found or created on the survivor per library and
+edition, its episodes per season and number, so both shows' files of one episode become sources
+of one episode — and the other, now keyless and fileless, is deleted by the scan's orphan cleanup.
+A show whose stored key's title part is a season-folder name (`season 05|`) is released (key set to
+NULL) instead, as the
+backfill leaves one keyless. A title whose files derive no key of its kind keeps its key and
+version and is looked at again on the next start; one whose files derive several keeps its key and
+is named in an admin-log warning. Rekeys and merges are listed in an admin-log entry.
 
 **Live titles.** A title is *live* while at least one file behind it is present
 (`missing_since IS NULL`): for a movie, through `movie_entries`; for a show, through `seasons` and
@@ -211,8 +252,15 @@ potentially backed by its own file(s).
 | `is_primary` | BOOLEAN | no | default `false` |
 | `created_at` | TIMESTAMPTZ | no | |
 
-Unique index on `(library_id, movie_id, edition)` — at most one entry per edition label per library,
-per movie. Indexes on `library_id` and `movie_id` individually.
+Unique index `idx_movie_entries_unique` on `(library_id, movie_id, edition)` `NULLS NOT DISTINCT` —
+at most one entry per edition per library, per movie, the default (NULL) edition included. Every
+copy of one edition is another `files` row of its one entry. The indexer finds or creates an entry
+with one `INSERT ... ON CONFLICT (library_id, movie_id, edition) DO NOTHING` and a read-back
+(`MovieRepository::find_or_create_entry`). Before
+[#182](https://github.com/justin13888/beam/issues/182) the index let any number of NULL-edition
+entries coexist and the indexer created one per file; migration `m20260929_000001_classifier_v2`
+merged those into the oldest of each group, repointing their files. Indexes on `library_id` and
+`movie_id` individually.
 
 ### `seasons` / `episodes`
 Standard show hierarchy.
@@ -222,8 +270,9 @@ Standard show hierarchy.
 index on `(show_id, season_number)`; index on `show_id`.
 
 `episodes`: `id` (PK), `season_id` (FK → `seasons.id`, cascade), `episode_number` (INTEGER, not
-null), `title` (TEXT, not null — filled from the scene-filename parser at index time, refined by
-enrichment), `description` (TEXT, nullable), `air_date` (DATE, nullable), `runtime_mins` (INTEGER,
+null), `title` (TEXT, not null — the text after the episode marker at index time, else
+`Episode N`; refined by enrichment), `description` (TEXT, nullable), `air_date` (DATE, nullable —
+set at index time for a date-based episode), `runtime_mins` (INTEGER,
 nullable), `thumbnail_url` (TEXT, nullable), `created_at` (TIMESTAMPTZ, not null). Unique index on
 `(season_id, episode_number)`; index on `season_id`.
 
@@ -255,6 +304,8 @@ quality/edition/language rip.
 | `file_status` | ENUM (`file_status`) | no | `known` \| `changed` \| `unknown`; default `known` |
 | `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash; NULL rows are treated as "suspected changed" |
 | `missing_since` | TIMESTAMPTZ | yes | soft-delete stamp: NULL while the file is on disk; the instant the indexer first found it gone otherwise (FR-211) |
+| `last_episode_number` | INTEGER | yes | the last episode of a multi-episode file (`S01E01E02`); the file's `episode_id` is its first. A `CHECK` (`files_last_episode_requires_episode`) allows it only alongside `episode_id` |
+| `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |
 
 **CHECK constraint** (table-level): exactly one of `movie_entry_id` / `episode_id` is set — *unless*
 `file_status = 'unknown'`, in which case both must be NULL (a file the indexer found but could not

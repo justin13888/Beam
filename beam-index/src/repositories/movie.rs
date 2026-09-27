@@ -111,6 +111,7 @@ impl MovieRepository for SqlMovieRepository {
 
         let CreateMovie {
             identity_key,
+            identity_key_version,
             title,
             year,
             runtime,
@@ -126,6 +127,7 @@ impl MovieRepository for SqlMovieRepository {
         let active = movie::ActiveModel {
             id: Set(Uuid::new_v4()),
             identity_key: Set(Some(identity_key.clone())),
+            identity_key_version: Set(identity_key_version as i16),
             title: Set(title),
             year: Set(year.map(|y| y as i32)),
             runtime_mins: Set(runtime.map(|d| (d.as_secs() / 60) as i32)),
@@ -164,7 +166,12 @@ impl MovieRepository for SqlMovieRepository {
         Ok(models.into_iter().map(Movie::from).collect())
     }
 
-    async fn assign_identity_key(&self, movie_id: Uuid, identity_key: &str) -> Result<bool, DbErr> {
+    async fn assign_identity_key(
+        &self,
+        movie_id: Uuid,
+        identity_key: &str,
+        version: u16,
+    ) -> Result<bool, DbErr> {
         use beam_entity::movie;
         use sea_orm::sea_query::{Expr, Query};
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -176,6 +183,10 @@ impl MovieRepository for SqlMovieRepository {
             .col_expr(
                 movie::Column::IdentityKey,
                 Expr::value(Some(identity_key.to_string())),
+            )
+            .col_expr(
+                movie::Column::IdentityKeyVersion,
+                Expr::value(version as i16),
             )
             .filter(movie::Column::Id.eq(movie_id))
             .filter(movie::Column::IdentityKey.is_null())
@@ -189,6 +200,72 @@ impl MovieRepository for SqlMovieRepository {
             .exec(self.db.as_ref())
             .await;
         match result {
+            Ok(result) => Ok(result.rows_affected == 1),
+            Err(err) if is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn find_by_identity_key(&self, identity_key: &str) -> Result<Option<Movie>, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let model = movie::Entity::find()
+            .filter(movie::Column::IdentityKey.eq(identity_key))
+            .one(self.db.as_ref())
+            .await?;
+        Ok(model.map(Movie::from))
+    }
+
+    async fn find_keyed_before_version(&self, version: u16) -> Result<Vec<Movie>, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+        let models = movie::Entity::find()
+            .filter(movie::Column::IdentityKey.is_not_null())
+            .filter(movie::Column::IdentityKeyVersion.lt(version as i16))
+            .order_by_asc(movie::Column::CreatedAt)
+            .order_by_asc(movie::Column::Id)
+            .all(self.db.as_ref())
+            .await?;
+        Ok(models.into_iter().map(Movie::from).collect())
+    }
+
+    async fn rekey(
+        &self,
+        movie_id: Uuid,
+        identity_key: Option<String>,
+        version: u16,
+    ) -> Result<bool, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::sea_query::{Alias, Expr, ExprTrait, Query};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let mut update = movie::Entity::update_many()
+            .col_expr(
+                movie::Column::IdentityKey,
+                Expr::value(identity_key.clone()),
+            )
+            .col_expr(
+                movie::Column::IdentityKeyVersion,
+                Expr::value(version as i16),
+            )
+            .filter(movie::Column::Id.eq(movie_id));
+        // As in `assign_identity_key`: `NOT EXISTS` answers the ordinary
+        // clash, the unique index a concurrent one. The movie itself may
+        // already hold the key.
+        if let Some(key) = identity_key.as_deref() {
+            let other = Alias::new("other");
+            update = update.filter(Expr::not_exists(
+                Query::select()
+                    .expr(Expr::val(1))
+                    .from_as(movie::Entity, other.clone())
+                    .and_where(Expr::col((other.clone(), movie::Column::IdentityKey)).eq(key))
+                    .and_where(Expr::col((other, movie::Column::Id)).ne(movie_id))
+                    .to_owned(),
+            ));
+        }
+        match update.exec(self.db.as_ref()).await {
             Ok(result) => Ok(result.rows_affected == 1),
             Err(err) if is_unique_violation(&err) => Ok(false),
             Err(err) => Err(err),
@@ -225,22 +302,55 @@ impl MovieRepository for SqlMovieRepository {
         Ok(movies.rows_affected())
     }
 
-    async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
+    async fn find_or_create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
         use beam_entity::movie_entry;
-        use sea_orm::{ActiveModelTrait, Set};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
-        let now = Utc::now();
-        let new_entry = movie_entry::ActiveModel {
+        let CreateMovieEntry {
+            library_id,
+            movie_id,
+            edition,
+            is_primary,
+        } = create;
+
+        // One `INSERT ... ON CONFLICT DO NOTHING` on `idx_movie_entries_unique`,
+        // which is `NULLS NOT DISTINCT`: a second copy of a film's default
+        // edition conflicts with the first instead of creating a second
+        // entry. Then a read by the triple, whichever call won.
+        let active = movie_entry::ActiveModel {
             id: Set(Uuid::new_v4()),
-            library_id: Set(create.library_id),
-            movie_id: Set(create.movie_id),
-            edition: Set(create.edition),
-            is_primary: Set(create.is_primary),
-            created_at: Set(now.into()),
+            library_id: Set(library_id),
+            movie_id: Set(movie_id),
+            edition: Set(edition.clone()),
+            is_primary: Set(is_primary),
+            created_at: Set(Utc::now().into()),
         };
+        movie_entry::Entity::insert(active)
+            .on_conflict_do_nothing_on([
+                movie_entry::Column::LibraryId,
+                movie_entry::Column::MovieId,
+                movie_entry::Column::Edition,
+            ])
+            .exec_without_returning(self.db.as_ref())
+            .await?;
 
-        let result = new_entry.insert(self.db.as_ref()).await?;
-        Ok(MovieEntry::from(result))
+        let edition_matches = match &edition {
+            Some(edition) => movie_entry::Column::Edition.eq(edition.as_str()),
+            None => movie_entry::Column::Edition.is_null(),
+        };
+        let stored = movie_entry::Entity::find()
+            .filter(movie_entry::Column::LibraryId.eq(library_id))
+            .filter(movie_entry::Column::MovieId.eq(movie_id))
+            .filter(edition_matches)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                DbErr::RecordNotFound(format!(
+                    "entry of movie {movie_id} in library {library_id} is not readable after \
+                     find-or-create"
+                ))
+            })?;
+        Ok(MovieEntry::from(stored))
     }
 
     async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr> {

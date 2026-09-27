@@ -61,6 +61,7 @@ mod tests {
             container_format: Some("mp4".to_string()),
             content: Some(content),
             status: beam_domain::models::FileStatus::Known,
+            classifier_version: 0,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -837,8 +838,8 @@ mod tests {
 
         // Two renditions for the same episode.
         let library_id = Uuid::new_v4();
-        let file_a = make_media_file(library_id, MediaFileContent::Episode { episode_id });
-        let file_b = make_media_file(library_id, MediaFileContent::Episode { episode_id });
+        let file_a = make_media_file(library_id, MediaFileContent::episode(episode_id));
+        let file_b = make_media_file(library_id, MediaFileContent::episode(episode_id));
         let file_a_id = file_a.id;
         let file_b_id = file_b.id;
         file_repo.files.lock().unwrap().insert(file_a.id, file_a);

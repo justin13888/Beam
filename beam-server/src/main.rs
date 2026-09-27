@@ -24,6 +24,11 @@ async fn main() -> Result<()> {
     let config = ServerConfig::load_and_validate().map_err(|e| eyre!(e))?;
 
     info!("Configuration loaded: {:?}", config);
+    for warning in
+        beam_server::bootstrap::retired_env_warnings(|name| std::env::var_os(name).is_some())
+    {
+        tracing::warn!("{warning}");
+    }
 
     match beam_server::bootstrap::check_cookie_security(&config) {
         Ok(beam_server::bootstrap::StartupGate::Proceed) => {}

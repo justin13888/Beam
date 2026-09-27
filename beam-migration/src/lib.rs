@@ -21,6 +21,7 @@ mod m20260711_000002_users_disabled;
 mod m20260927_000001_files_missing_since;
 mod m20260928_000001_title_identity_key;
 mod m20260928_000010_device_auths;
+mod m20260929_000001_classifier_v2;
 
 pub struct Migrator;
 
@@ -46,6 +47,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260927_000001_files_missing_since::Migration),
             Box::new(m20260928_000001_title_identity_key::Migration),
             Box::new(m20260928_000010_device_auths::Migration),
+            Box::new(m20260929_000001_classifier_v2::Migration),
         ]
     }
 }

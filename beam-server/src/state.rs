@@ -308,7 +308,7 @@ impl AppServices {
                 admin_log_service.clone(),
             )
             .with_clock(clock.clone())
-            .with_hash_unknown_files(config.hash_unknown_files)
+            .with_path_policy(config.scan_path_policy()?)
             .with_missing_file_grace(config.missing_file_grace())
             .with_enrichment_repo(enrichment_repo.clone()),
         );

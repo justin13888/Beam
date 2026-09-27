@@ -6,7 +6,27 @@ use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
-use beam_domain::models::{CreateMediaFile, MediaFile, MediaFileContent, UpdateMediaFile};
+use beam_domain::models::{
+    CreateMediaFile, FileClassification, MediaFile, MediaFileContent, UpdateMediaFile,
+};
+
+/// The `files` columns a file's content is stored in: `(movie_entry_id,
+/// episode_id, last_episode_number)`. Exactly one of the first two is set for
+/// classified content, neither for none.
+fn content_columns(content: Option<MediaFileContent>) -> (Option<Uuid>, Option<Uuid>, Option<i32>) {
+    match content {
+        Some(MediaFileContent::Movie { movie_entry_id }) => (Some(movie_entry_id), None, None),
+        Some(MediaFileContent::Episode {
+            episode_id,
+            last_episode_number,
+        }) => (
+            None,
+            Some(episode_id),
+            last_episode_number.map(|n| n as i32),
+        ),
+        None => (None, None, None),
+    }
+}
 use beam_domain::repositories::FileRepository;
 
 /// SQL-based implementation of the FileRepository trait.
@@ -122,11 +142,7 @@ impl FileRepository for SqlFileRepository {
         use sea_orm::{ActiveModelTrait, Set};
 
         let now = Utc::now();
-        let (movie_entry_id, episode_id) = match create.content {
-            Some(MediaFileContent::Movie { movie_entry_id }) => (Some(movie_entry_id), None),
-            Some(MediaFileContent::Episode { episode_id }) => (None, Some(episode_id)),
-            None => (None, None),
-        };
+        let (movie_entry_id, episode_id, last_episode_number) = content_columns(create.content);
 
         let new_file = files::ActiveModel {
             id: Set(uuid::Uuid::new_v4()),
@@ -148,6 +164,8 @@ impl FileRepository for SqlFileRepository {
             file_status: Set(create.status.into()),
             mtime: Set(create.mtime.map(|d| d.into())),
             missing_since: Set(None),
+            last_episode_number: Set(last_episode_number),
+            classifier_version: Set(create.classifier_version as i16),
         };
 
         let result = new_file.insert(self.db.as_ref()).await?;
@@ -186,21 +204,44 @@ impl FileRepository for SqlFileRepository {
         }
 
         if let Some(content) = update.content {
-            match content {
-                MediaFileContent::Movie { movie_entry_id } => {
-                    active_model.movie_entry_id = Set(Some(movie_entry_id));
-                    active_model.episode_id = Set(None);
-                }
-                MediaFileContent::Episode { episode_id } => {
-                    active_model.movie_entry_id = Set(None);
-                    active_model.episode_id = Set(Some(episode_id));
-                }
-            }
+            let (movie_entry_id, episode_id, last_episode_number) = content_columns(Some(content));
+            active_model.movie_entry_id = Set(movie_entry_id);
+            active_model.episode_id = Set(episode_id);
+            active_model.last_episode_number = Set(last_episode_number);
         }
 
         active_model.updated_at = Set(chrono::Utc::now().into());
 
         let result = active_model.update(self.db.as_ref()).await?;
+        Ok(MediaFile::from(result))
+    }
+
+    async fn set_classification(
+        &self,
+        id: Uuid,
+        classification: FileClassification,
+    ) -> Result<MediaFile, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let FileClassification {
+            content,
+            status,
+            classifier_version,
+        } = classification;
+        let (movie_entry_id, episode_id, last_episode_number) = content_columns(content);
+        let result = files::ActiveModel {
+            id: Set(id),
+            movie_entry_id: Set(movie_entry_id),
+            episode_id: Set(episode_id),
+            last_episode_number: Set(last_episode_number),
+            file_status: Set(status.into()),
+            classifier_version: Set(classifier_version as i16),
+            updated_at: Set(chrono::Utc::now().into()),
+            ..Default::default()
+        }
+        .update(self.db.as_ref())
+        .await?;
         Ok(MediaFile::from(result))
     }
 

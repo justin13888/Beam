@@ -79,7 +79,8 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
 - `services/` — `index.rs` (scan loop: WalkDir traversal, mtime/size/hash change detection,
   XXH3 content-hash dedup, movie-vs-episode classification, find-or-create by the title's identity
   key — never its enriched display title — with a once-per-process backfill of keys for titles
-  that predate them, and retirement of titles left with no file row at the end of a healthy scan
+  that predate them and re-derivation of keys older rules derived, which every reclassifying path
+  waits on, and retirement of titles left with no file row at the end of a healthy scan
   ([data model](data-model.md#title-identity-and-lifetime)); files the walk or the
   watcher no longer finds are soft-deleted with `missing_since`, restored under the same id when
   they reappear, and purged only after `BEAM_MISSING_FILE_GRACE_DAYS` by a scan whose walk hit no
@@ -160,8 +161,12 @@ This crate is what lets services be tested purely against in-memory fakes.
 - `providers/` — `EnrichmentProvider`: search/get movie and show metadata by external ID, resolve
   image URLs. Ships `InMemoryEnrichmentProvider` (test-utils) and `NoopEnrichmentProvider` (a
   production-safe "not found" default). Concrete provider SDKs live in `beam-index`, never here.
-- `utils/` — pure helpers: `hash.rs` (XXH3), `file.rs` (`FileType`), `filename.rs` (scene-filename
-  title/year/episode parsing used by the indexer's scan pipeline).
+- `utils/` — pure helpers: `hash.rs` (XXH3), `file.rs` (`FileType`), `identity.rs` (title identity
+  keys), `filename.rs` (scene-filename title/year/episode/edition parsing of one stem),
+  `media_path.rs` (`infer_media`: what a path relative to a library root is, folders included --
+  season folders, absolute numbering -- versioned by `CLASSIFIER_VERSION`), and `path_policy.rs`
+  (`PathPolicy`: which paths are media, sidecars, excluded or ignored, including the
+  `BEAM_SCAN_IGNORE` globs). The scan and the watcher both decide through these (FR-204, FR-216).
 
 **Testing:** every trait is usable without a database or network; all fakes are gated
 `#[cfg(any(test, feature = "test-utils"))]` so release builds never include test-only code.

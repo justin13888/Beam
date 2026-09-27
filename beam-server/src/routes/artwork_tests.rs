@@ -311,6 +311,7 @@ mod tests {
                 episode_number: 1,
                 title: "Good News About Hell".to_string(),
                 runtime: None,
+                air_date: None,
             })
             .await
             .expect("episode is created");

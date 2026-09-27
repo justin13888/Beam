@@ -122,9 +122,11 @@ are using. See [Account and sessions](/using/account-and-sessions/).
 
 ### What files does Beam index, and how should I name them?
 
-Common video containers — `mp4`, `mkv`, `avi`, `mov`, `webm` and others. Naming matters: a file is
-treated as a TV episode only if its name contains an `SxxEyy` marker, and a show takes its name
-from the folder directly containing the episode. See
+Common video containers — `mp4`, `mkv`, `avi`, `mov`, `webm` and others; hidden files, extras and
+samples are skipped. Naming matters: a file is a TV episode when its path gives it an episode
+number (`S01E02`, `1x02`, an air date), and a show takes its name from its series folder — the
+parent of a `Season 01` folder, or the folder the episode is in unless the filename names another
+show. See
 [Managing libraries](/operate/libraries/#how-beam-decides-what-a-file-is).
 
 ### Will Beam rename, move or delete my files?
