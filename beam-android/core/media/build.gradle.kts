@@ -34,11 +34,14 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     // A download's poster is kept in the app's own image loader, so the
     // downloads screen renders it offline from the entry it would read anyway.
+    // That loader is built here, beside the HTTP stack that authenticates it.
     implementation(libs.coil.singleton)
+    implementation(libs.coil.network.okhttp)
 
     testImplementation(projects.core.testing)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.kotlinx.coroutines.test)
-    testImplementation(libs.coil.network.okhttp)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.okhttp.tls)
 }

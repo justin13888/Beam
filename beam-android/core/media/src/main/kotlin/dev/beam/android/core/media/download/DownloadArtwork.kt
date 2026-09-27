@@ -6,7 +6,7 @@ import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 
 /**
- * Keeps a download's poster on disk for as long as the download exists.
+ * Keeps a download's poster on disk for roughly as long as the download exists.
  *
  * The downloads screen is the one screen guaranteed to be used offline, and a
  * poster URL written down at enqueue time is useless there unless its bytes
@@ -14,18 +14,22 @@ import coil3.request.ImageRequest
  * the image loader's disk cache, and removing the download evicts them.
  *
  * It goes through the app's own [ImageLoader] rather than a second fetcher for
- * two reasons. That loader already carries the session cookie and the trust
- * decision over the shared OkHttp client, so the poster is fetched under the
- * same credential as everything else. And an entry written to its disk cache
- * is exactly the entry `Artwork` reads on render: the disk cache key is the
- * URL, which is also what the screen passes as its model, so nothing has to
- * keep two copies or two key schemes in step.
+ * two reasons. That loader fetches through
+ * [dev.beam.android.core.media.http.ServerCallFactory], which attaches the
+ * active server's session cookie and trust decision, so the poster is fetched
+ * under the same credential as the API -- `/v1/artwork` answers 401 without
+ * it. And an entry written to its disk cache is exactly the entry `Artwork`
+ * reads on render: the disk cache key is the URL, which is also what the
+ * screen passes as its model, so nothing has to keep two copies or two key
+ * schemes in step.
  *
- * The cost of sharing that cache is that it is an LRU with a size cap: a
- * pinned poster can still be pushed out by enough browsing. Every render of
+ * The cost of sharing that cache is that the poster's lifetime approximates
+ * the download's rather than matching it: the cache is an LRU with a size
+ * cap, so enough browsing can still push a pinned poster out. Every render of
  * the downloads screen reads the entry and so refreshes it, and a poster that
  * is pushed out anyway falls back to the placeholder offline and is fetched
- * again on the next online render -- never a failed download.
+ * again on the next online render -- never a failed download. A poster that
+ * must survive regardless would need a store of its own outside the cache.
  *
  * @param loader resolved on first use rather than at construction, because the
  *   app's singleton loader is built from a client that is injected into the

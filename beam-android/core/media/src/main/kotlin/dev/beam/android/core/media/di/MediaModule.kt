@@ -28,12 +28,15 @@ import dev.beam.android.core.media.download.DownloadTitleStore
 import dev.beam.android.core.media.download.FileDownloadTitleStore
 import dev.beam.android.core.media.download.MediaDownloadRepository
 import dev.beam.android.core.media.http.BeamHttpClientFactory
+import dev.beam.android.core.media.http.ServerCallFactory
 import dev.beam.android.core.media.player.BeamPlayer
 import dev.beam.android.core.media.player.ExoBeamPlayer
 import dev.beam.android.core.media.session.PlayerProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.MainScope
 import okhttp3.OkHttpClient
+import uniffi.beam_client_core.BeamClient
+import uniffi.beam_client_core.BeamException
 import javax.inject.Singleton
 
 @Module
@@ -46,6 +49,28 @@ internal object MediaModule {
     @Provides
     @Singleton
     fun httpClientFactory(client: OkHttpClient): BeamHttpClientFactory = BeamHttpClientFactory(client)
+
+    /**
+     * The image loader's network path. Asks the core for the active server on
+     * every call, so signing out or switching servers takes effect on the
+     * next fetch rather than on the next launch.
+     */
+    @Provides
+    @Singleton
+    fun serverCallFactory(
+        clients: BeamHttpClientFactory,
+        client: BeamClient,
+    ): ServerCallFactory =
+        ServerCallFactory(clients) {
+            // No active server, or not signed in to it: artwork is fetched
+            // unauthenticated, and the server answers 401 exactly as it would
+            // for any other signed-out request.
+            try {
+                client.serverHttpConfig()
+            } catch (_: BeamException) {
+                null
+            }
+        }
 
     @Provides
     @Singleton

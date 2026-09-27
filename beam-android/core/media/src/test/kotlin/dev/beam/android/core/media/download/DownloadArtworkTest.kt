@@ -14,11 +14,12 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.test.core.app.ApplicationProvider
 import coil3.ImageLoader
 import coil3.decode.DataSource
-import coil3.disk.DiskCache
-import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
+import dev.beam.android.core.media.http.BeamHttpClientFactory
+import dev.beam.android.core.media.http.BeamImageLoader
+import dev.beam.android.core.media.http.ServerCallFactory
 import dev.beam.android.core.testing.FakePlaybackRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -31,7 +32,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
-import okio.Path.Companion.toOkioPath
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -50,9 +50,11 @@ import java.util.concurrent.Executors
  * A download's poster, from enqueue to removal.
  *
  * Everything below the network is real: Media3's download manager, the title
- * store, Coil's loader and its disk cache on a temporary directory. Only the
- * wire is faked, because "the device is offline" is the one condition the
- * feature exists for and the one a test cannot otherwise produce.
+ * store, the app's own image loader and its disk cache on a temporary
+ * directory. Only the wire is faked, because "the device is offline" is the
+ * one condition the feature exists for and the one a test cannot otherwise
+ * produce. (That the loader authenticates is `BeamImageLoaderTest`'s concern;
+ * here no server is signed in, so every fetch goes out on the plain client.)
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -98,15 +100,11 @@ class DownloadArtworkTest {
         // Robolectric that is the paused main looper this test runs on.
         Dispatchers.setMain(UnconfinedTestDispatcher())
         loader =
-            ImageLoader
-                .Builder(context)
-                .components { add(OkHttpNetworkFetcherFactory(callFactory = { http })) }
-                .diskCache {
-                    DiskCache
-                        .Builder()
-                        .directory(temp.newFolder("artwork").toOkioPath())
-                        .build()
-                }.build()
+            BeamImageLoader.build(
+                context = context,
+                calls = ServerCallFactory(BeamHttpClientFactory(http)) { null },
+                diskCacheDirectory = temp.newFolder("artwork"),
+            )
         database = StandaloneDatabaseProvider(context)
         cache = SimpleCache(temp.newFolder("downloads"), NoOpCacheEvictor(), database)
         media3 =

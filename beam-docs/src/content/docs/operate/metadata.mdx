@@ -80,11 +80,12 @@ Two things follow that are worth knowing:
 - **Artwork now uses your server's bandwidth.** If viewers watch from outside your network, the
   posters they see travel from your uplink rather than from a CDN. Posters are small and clients
   cache them hard, so this is usually unnoticeable — but it is not zero on a metered connection.
-- **Downloaded titles keep their poster offline on Android.** The app fetches a title's poster
-  when you download it and keeps it until you delete the download, so the downloads screen shows
-  it with no connection. It shares space with the app's image cache, so after a great deal of
-  browsing a poster can still be pushed out; it then shows a placeholder until the next time the
-  downloads screen is opened online.
+- **Downloaded titles usually keep their poster offline on Android.** The app fetches a title's
+  poster, over your signed-in session, when you download it, and releases it when you delete the
+  last download that uses it, so the downloads screen shows it with no connection. The poster
+  shares space with the app's image cache rather than living beside the download, so after a great
+  deal of browsing it can still be pushed out; it then shows a placeholder until the next time the
+  downloads screen is opened online. The download itself is never affected.
 
 <LinkCard
 	title="Why enrichment works this way"
