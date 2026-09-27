@@ -163,14 +163,15 @@ pub use in_memory::{FailingFilesystemProbe, FixedFilesystemProbe};
 mod tests {
     use super::*;
 
-    /// The hex literals above are checked against independent sources: the
-    /// constants `libc` publishes, and for the network filesystems `libc`
-    /// does not name, the kernel's own `linux/magic.h` as `linux-raw-sys`
-    /// generates it (cifs, smb2, 9p, ceph and kafs).
+    /// Twelve of the sixteen network literals above are checked against
+    /// independent sources: seven against the constants `libc` publishes, and
+    /// five that `libc` does not name (cifs, smb2, 9p, ceph and kafs) against
+    /// the kernel's own `linux/magic.h` as `linux-raw-sys` generates it.
     ///
-    /// Four have no constant in either -- Lustre, GFS2, GPFS and vboxsf keep
-    /// their magic in out-of-tree or filesystem-private headers -- and are
-    /// checked only by the named-case table below.
+    /// The other four -- Lustre, GFS2, GPFS and vboxsf -- are not checked by
+    /// any test. Neither crate has a constant for them (their magic lives in
+    /// out-of-tree or filesystem-private headers), and restating the literal
+    /// here would only mirror the list, which proves nothing.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_magics_agree_with_libc_and_the_kernel_headers() {
