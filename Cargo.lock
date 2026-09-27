@@ -637,6 +637,7 @@ dependencies = [
  "async-trait",
  "beam-entity",
  "chrono",
+ "glob",
  "mockall",
  "mutants",
  "num",

@@ -1,0 +1,411 @@
+//! Which files under a library root the indexer indexes.
+//!
+//! A library root holds more than media: hidden files, NAS housekeeping
+//! folders, subtitles and artwork beside the video, trailers and samples, and
+//! whatever else an administrator has told Beam to leave alone. The policy
+//! decides from a path relative to the root alone -- nothing is read from
+//! disk -- so the full scan and the watcher decide identically.
+
+use std::path::{Component, Path};
+
+use thiserror::Error;
+
+/// Extensions of the video files Beam indexes, lowercase.
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "m2ts", "mts", "flv", "wmv", "3gp", "ogv",
+    "mpg", "mpeg", "vob", "divx", "asf", "f4v",
+];
+
+/// Extensions of the files that travel beside a video -- subtitles, metadata
+/// and artwork -- lowercase. Not indexed as media; recognised so they can be
+/// told apart from files Beam has no use for at all.
+pub const SIDECAR_EXTENSIONS: &[&str] = &[
+    "srt", "ass", "ssa", "sub", "idx", "vtt", "sup", "smi", "nfo", "jpg", "jpeg", "png", "webp",
+    "tbn",
+];
+
+/// Folders NAS appliances and operating systems create for their own use.
+/// Matched case-insensitively at any depth.
+const SYSTEM_DIRECTORIES: &[&str] = &[
+    "@eadir",
+    "#recycle",
+    "$recycle.bin",
+    "system volume information",
+    "lost+found",
+];
+
+/// Folders that hold a title's extras rather than the title (the Plex and
+/// Jellyfin conventions). Matched case-insensitively, and only below the top
+/// level: `Movie/Trailers/` holds trailers, but a top-level `Shorts/` folder
+/// is a collection of short films.
+const EXTRAS_DIRECTORIES: &[&str] = &[
+    "extras",
+    "featurettes",
+    "behind the scenes",
+    "deleted scenes",
+    "interviews",
+    "scenes",
+    "shorts",
+    "trailers",
+    "other",
+    "sample",
+    "samples",
+    "bonus",
+];
+
+/// Filename-stem suffixes that mark an extra (`Movie-trailer.mkv`), matched
+/// case-insensitively.
+const EXTRA_FILE_SUFFIXES: &[&str] = &[
+    "-trailer",
+    "-sample",
+    ".sample",
+    "_sample",
+    "-featurette",
+    "-behindthescenes",
+    "-deleted",
+    "-interview",
+];
+
+/// Filename stems that are an extra on their own.
+const EXTRA_FILE_STEMS: &[&str] = &["sample", "trailer"];
+
+/// What the indexer does with a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathDisposition {
+    /// A video file: indexed.
+    Media,
+    /// A subtitle, metadata or artwork file: not indexed as media.
+    Sidecar,
+    /// Something the policy keeps out of the library, and why.
+    Excluded(ExclusionReason),
+    /// A file Beam has no use for.
+    Ignored,
+}
+
+/// Why a path is kept out of the library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusionReason {
+    /// A path component starts with `.`.
+    Hidden,
+    /// Under a NAS or operating-system housekeeping folder.
+    SystemDirectory,
+    /// Under an extras folder (`Trailers/`, `Featurettes/`, ...).
+    ExtrasDirectory,
+    /// Named as an extra (`Movie-trailer.mkv`, `sample.mkv`).
+    ExtraFile,
+    /// Matched by an administrator's ignore pattern.
+    IgnorePattern,
+}
+
+/// An administrator's ignore pattern that is not a valid glob.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid ignore pattern {pattern:?}: {reason}")]
+pub struct InvalidIgnorePattern {
+    pub pattern: String,
+    pub reason: String,
+}
+
+/// The rules deciding which paths under a library root are indexed.
+#[derive(Debug, Clone, Default)]
+pub struct PathPolicy {
+    ignore: Vec<glob::Pattern>,
+}
+
+/// Case-insensitive, and `*` never crosses a `/`: `Downloads/*` ignores the
+/// files in `Downloads`, `Downloads/**` everything beneath it.
+const GLOB_OPTIONS: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: false,
+    require_literal_separator: true,
+    require_literal_leading_dot: false,
+};
+
+impl PathPolicy {
+    /// A policy that also excludes every path matching one of `ignore_globs`,
+    /// each matched against the path relative to the library root. A pattern
+    /// that matches a directory excludes everything beneath it.
+    pub fn new<I, S>(ignore_globs: I) -> Result<Self, InvalidIgnorePattern>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let ignore = ignore_globs
+            .into_iter()
+            .map(|pattern| {
+                let pattern = pattern.as_ref();
+                glob::Pattern::new(pattern).map_err(|err| InvalidIgnorePattern {
+                    pattern: pattern.to_string(),
+                    reason: err.to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { ignore })
+    }
+
+    /// What the indexer does with the file at `rel_path`, relative to its
+    /// library root.
+    pub fn disposition(&self, rel_path: &Path) -> PathDisposition {
+        let components = normal_components(rel_path);
+        let Some((file_name, dirs)) = components.split_last() else {
+            return PathDisposition::Ignored;
+        };
+        if let Some(reason) = self.directory_exclusion(dirs) {
+            return PathDisposition::Excluded(reason);
+        }
+        if file_name.starts_with('.') {
+            return PathDisposition::Excluded(ExclusionReason::Hidden);
+        }
+        if is_extra_file(file_name) {
+            return PathDisposition::Excluded(ExclusionReason::ExtraFile);
+        }
+        if self.ignored(rel_path) {
+            return PathDisposition::Excluded(ExclusionReason::IgnorePattern);
+        }
+        match lowercase_extension(file_name).as_deref() {
+            Some(ext) if VIDEO_EXTENSIONS.contains(&ext) => PathDisposition::Media,
+            Some(ext) if SIDECAR_EXTENSIONS.contains(&ext) => PathDisposition::Sidecar,
+            _ => PathDisposition::Ignored,
+        }
+    }
+
+    /// Whether nothing beneath the directory at `rel_dir` can be indexed, so a
+    /// walk need not descend into it.
+    pub fn excludes_directory(&self, rel_dir: &Path) -> bool {
+        self.directory_exclusion(&normal_components(rel_dir))
+            .is_some()
+    }
+
+    /// Why the directories `dirs` (root first) exclude what is beneath them,
+    /// if they do.
+    fn directory_exclusion(&self, dirs: &[String]) -> Option<ExclusionReason> {
+        let mut prefix = std::path::PathBuf::new();
+        for (depth, dir) in dirs.iter().enumerate() {
+            let lower = dir.to_lowercase();
+            if dir.starts_with('.') {
+                return Some(ExclusionReason::Hidden);
+            }
+            if SYSTEM_DIRECTORIES.contains(&lower.as_str()) {
+                return Some(ExclusionReason::SystemDirectory);
+            }
+            if depth >= 1 && EXTRAS_DIRECTORIES.contains(&lower.as_str()) {
+                return Some(ExclusionReason::ExtrasDirectory);
+            }
+            prefix.push(dir);
+            if self.ignored(&prefix) {
+                return Some(ExclusionReason::IgnorePattern);
+            }
+        }
+        None
+    }
+
+    fn ignored(&self, rel_path: &Path) -> bool {
+        self.ignore
+            .iter()
+            .any(|pattern| pattern.matches_path_with(rel_path, GLOB_OPTIONS))
+    }
+}
+
+/// Whether `path` has a video extension. The extension alone: whether the
+/// file is excluded is [`PathPolicy::disposition`]'s question.
+pub fn is_video_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| lowercase_extension(&name.to_string_lossy()))
+        .is_some_and(|ext| VIDEO_EXTENSIONS.contains(&ext.as_str()))
+}
+
+fn normal_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn lowercase_extension(file_name: &str) -> Option<String> {
+    Path::new(file_name)
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+}
+
+fn is_extra_file(file_name: &str) -> bool {
+    let stem = Path::new(file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    EXTRA_FILE_STEMS.contains(&stem.as_str())
+        || EXTRA_FILE_SUFFIXES
+            .iter()
+            .any(|suffix| stem.ends_with(suffix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn disposition(policy: &PathPolicy, path: &str) -> PathDisposition {
+        policy.disposition(Path::new(path))
+    }
+
+    #[test]
+    fn what_the_default_policy_does_with_each_path() {
+        use ExclusionReason::*;
+        use PathDisposition::*;
+
+        let cases = [
+            ("Movie (2019)/Movie.2019.mkv", Media),
+            ("Show/Season 01/Show.S01E01.MKV", Media),
+            ("Movie.mts", Media),
+            ("Movie (2019)/Movie.2019.en.srt", Sidecar),
+            ("Movie (2019)/movie.nfo", Sidecar),
+            ("Movie (2019)/poster.jpg", Sidecar),
+            ("Movie (2019)/notes.txt", Ignored),
+            ("Movie (2019)/README", Ignored),
+            // Hidden, at any depth.
+            (".hidden.mkv", Excluded(Hidden)),
+            ("Movie/.Movie.mkv", Excluded(Hidden)),
+            (".trash/Movie.mkv", Excluded(Hidden)),
+            ("Show/.snapshots/Season 1/x.mkv", Excluded(Hidden)),
+            // NAS and OS housekeeping.
+            (
+                "@eaDir/Movie.mkv/SYNOVIDEO_VIDEO_SCREENSHOT.jpg",
+                Excluded(SystemDirectory),
+            ),
+            ("Movie/@eaDir/Movie.mkv", Excluded(SystemDirectory)),
+            ("#recycle/Movie.mkv", Excluded(SystemDirectory)),
+            ("$RECYCLE.BIN/Movie.mkv", Excluded(SystemDirectory)),
+            ("System Volume Information/x.mkv", Excluded(SystemDirectory)),
+            ("lost+found/x.mkv", Excluded(SystemDirectory)),
+            // Extras folders below the top level.
+            (
+                "Movie (2019)/Extras/Making Of.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            (
+                "Movie (2019)/Behind The Scenes/x.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            ("Movie (2019)/Featurettes/x.mkv", Excluded(ExtrasDirectory)),
+            (
+                "Show/Season 1/Deleted Scenes/x.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            ("Movie (2019)/Sample/movie.mkv", Excluded(ExtrasDirectory)),
+            ("Movie (2019)/Trailers/t.mkv", Excluded(ExtrasDirectory)),
+            // ... but a top-level folder of that name is a collection.
+            ("Shorts/Short Film (2019).mkv", Media),
+            ("Trailers/x.mkv", Media),
+            // Extras by name.
+            ("Movie (2019)/Movie-trailer.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/movie-sample.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/movie.sample.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/movie_SAMPLE.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/x-featurette.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/x-behindthescenes.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/x-deleted.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/x-interview.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/sample.mkv", Excluded(ExtraFile)),
+            ("Movie (2019)/Trailer.mkv", Excluded(ExtraFile)),
+            // Words that merely contain those names are not extras.
+            ("Samples of Life (2020).mkv", Media),
+            ("The Trailer Park (2010).mkv", Media),
+        ];
+        let policy = PathPolicy::default();
+        for (path, expected) in cases {
+            assert_eq!(disposition(&policy, path), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn ignore_patterns_exclude_matching_files_and_everything_under_matching_directories() {
+        let policy = PathPolicy::new(["Downloads", "**/*.partial.mkv", "kids/**"]).unwrap();
+        let excluded = PathDisposition::Excluded(ExclusionReason::IgnorePattern);
+
+        assert_eq!(disposition(&policy, "Downloads/x.mkv"), excluded);
+        assert_eq!(disposition(&policy, "downloads/deep/x.mkv"), excluded);
+        assert_eq!(disposition(&policy, "Movie/Movie.partial.mkv"), excluded);
+        assert_eq!(disposition(&policy, "Kids/Film.mkv"), excluded);
+        assert!(policy.excludes_directory(Path::new("Downloads")));
+        assert!(!policy.excludes_directory(Path::new("Movies")));
+
+        // `*` stops at a separator, and a pattern matches from the root.
+        assert_eq!(
+            disposition(&policy, "Movies/Downloads.mkv"),
+            PathDisposition::Media
+        );
+        assert_eq!(
+            disposition(&policy, "Movies/Downloads/x.mkv"),
+            PathDisposition::Media
+        );
+    }
+
+    #[test]
+    fn an_invalid_ignore_pattern_is_refused_and_named() {
+        let err = PathPolicy::new(["ok/*", "bad[pattern"]).unwrap_err();
+        assert_eq!(err.pattern, "bad[pattern");
+    }
+
+    #[test]
+    fn excluded_directories_are_pruned_and_ordinary_ones_are_not() {
+        let policy = PathPolicy::default();
+        for dir in [".git", "@eaDir", "Movie (2019)/Extras", "Show/.snapshots"] {
+            assert!(policy.excludes_directory(Path::new(dir)), "{dir}");
+        }
+        for dir in ["Movie (2019)", "Extras", "Show/Season 01", "Shorts"] {
+            assert!(!policy.excludes_directory(Path::new(dir)), "{dir}");
+        }
+    }
+
+    /// Every file the default policy calls media has a video extension, and
+    /// every file with one that it does not call media is excluded -- the
+    /// extension list and the disposition cannot disagree.
+    #[test]
+    fn media_is_exactly_the_video_extensions_that_are_not_excluded() {
+        let policy = PathPolicy::default();
+        for ext in VIDEO_EXTENSIONS {
+            let path = format!("Movie (2019)/Movie.{ext}");
+            assert!(is_video_path(Path::new(&path)), "{path}");
+            assert_eq!(
+                disposition(&policy, &path),
+                PathDisposition::Media,
+                "{path}"
+            );
+        }
+        for ext in SIDECAR_EXTENSIONS {
+            let path = format!("Movie (2019)/Movie.{ext}");
+            assert!(!is_video_path(Path::new(&path)), "{path}");
+        }
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// A path with any hidden component is never indexed.
+            #[test]
+            fn a_hidden_component_is_always_excluded(
+                before in proptest::collection::vec("[A-Za-z0-9 ]{1,8}", 0..3),
+                hidden in "\\.[A-Za-z0-9 ]{1,8}",
+                after in proptest::collection::vec("[A-Za-z0-9 ]{1,8}", 0..3),
+                ext in proptest::sample::select(VIDEO_EXTENSIONS),
+            ) {
+                let mut parts = before.clone();
+                parts.push(hidden.clone());
+                parts.extend(after.iter().cloned());
+                let path = format!("{}.{ext}", parts.join("/"));
+                prop_assert!(
+                    matches!(
+                        PathPolicy::default().disposition(Path::new(&path)),
+                        PathDisposition::Excluded(_)
+                    ),
+                    "{path}"
+                );
+            }
+
+            #[test]
+            fn disposition_never_panics(path in ".*") {
+                let _ = PathPolicy::default().disposition(Path::new(&path));
+            }
+        }
+    }
+}
