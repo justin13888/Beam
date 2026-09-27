@@ -3061,6 +3061,31 @@ mod tests {
         assert_eq!(client.pending_progress_count().await.expect("countable"), 0);
     }
 
+    /// A problem `type` the contract does not list for the status is lost,
+    /// status and all.
+    ///
+    /// This pins a gap, not a preference: the generated client decodes the
+    /// `type` as a closed set and reports anything else as a decode failure
+    /// that carries no status, so a code the server adds after a client ships
+    /// turns a documented 404 into a malformed response (getkono/spargen#268).
+    /// Expected to fail when that is fixed -- the failure is the reminder to
+    /// classify this as the 404 it is.
+    #[tokio::test]
+    async fn a_problem_type_the_contract_does_not_list_loses_its_status() {
+        let (client, _) = client_answering(
+            404,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404}"#,
+        )
+        .await;
+
+        let error = client
+            .media_sources("7".to_owned())
+            .await
+            .expect_err("the canned 404 fails the call");
+
+        assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
+    }
+
     /// The document the middleware captured is the one the error carries.
     ///
     /// Two 404s a viewer must be told about differently is what issue #123

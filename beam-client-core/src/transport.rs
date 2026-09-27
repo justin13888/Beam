@@ -205,13 +205,14 @@ impl ProblemDetail {
 /// caller may do about it, so choosing the variant from the status needs no
 /// table for anyone to maintain. The `type` is what beam-server adds on top --
 /// *which* 404 this is -- and it is carried through opaquely rather than
-/// matched on, so a code added on the server reaches a caller without a change
-/// here.
+/// matched on here. It does not follow that a code added on the server reaches
+/// a caller: the generated client decodes each status's `type` as the closed
+/// set the contract lists, and one outside it arrives as `Error::Decode`,
+/// which carries no status -- getkono/spargen#268.
 ///
 /// `code` is `about:blank` when the response carried no problem document, and
 /// when the framework answered rather than the application: the 401 from the
-/// session check, the 429 from the rate limiter, the 404 for a URL matching no
-/// route. RFC 9457 gives that exact reading -- the status code is the whole
+/// session check, the 404 for a URL matching no route. RFC 9457 gives that exact reading -- the status code is the whole
 /// story -- so it is an answer rather than a gap.
 #[must_use]
 pub fn classify(
@@ -342,7 +343,9 @@ impl TransportFailure {
 
             // A body that will not decode is permanent: the identical request
             // produces the identical failure, so offering a retry would be a
-            // dead end.
+            // dead end. That includes a documented error status whose problem
+            // `type` the contract did not list, which `Decode` reports without
+            // its status (getkono/spargen#268).
             Error::Protocol(_) | Error::Decode { .. } => (FailureKind::Malformed, None),
 
             // `RequestConstruction` covers two unrelated things, and which one
