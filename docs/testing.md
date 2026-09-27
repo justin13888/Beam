@@ -251,7 +251,8 @@ Two mechanisms close that:
 - **The `pg-integration` cargo feature** runs the shared behavioural contract against a real
   Postgres, and covers what only a real engine can answer: `ON CONFLICT` atomicity under
   concurrency, foreign keys and unique indexes, `DELETE ... RETURNING` single-use semantics,
-  `pg_trgm`, index usage, and migration up/down.
+  `pg_trgm`, index usage, migration up/down, and that a pending migration batch applies
+  all-or-nothing (`beam-migration/tests/pg_integration.rs`).
 
 `MockDatabase` required one structural change: enabling sea-orm's `mock` feature removes `Clone`
 from `DatabaseConnection` for the whole build graph, so every repository now holds an
@@ -269,8 +270,8 @@ BEAM_TEST_DATABASE_URL=postgres://beam:password@localhost:5432/beam mise run rus
 
 With the variable unset the tier fails loudly rather than skipping: a tier that silently passes
 when it did not run is worse than one that does not run. The harness lives in `beam-test-support`,
-a crate that is a dev-dependency of the crates owning repositories and is depended on by nothing in
-production; with the feature off it compiles to an empty library.
+a crate that is a dev-dependency of the crates owning repositories and of `beam-migration`, and is
+depended on by nothing in production; with the feature off it compiles to an empty library.
 
 **What the tier has already caught.** `files.file_status` is a Postgres `enum` type while
 `beam_entity::files::Model` declared the field as a bare `String`. sea-orm bound the parameter as
@@ -376,7 +377,7 @@ behaves the way our fakes assume."
 
 **Regions, not branches.** `cargo-llvm-cov`'s `--branch` requires
 `-Z coverage-options=branch` and therefore a nightly toolchain, and
-`rust-toolchain.toml` pins stable 1.91.0. LLVM *regions* are a superset of branches -- every match
+`rust-toolchain.toml` pins stable 1.94.0. LLVM *regions* are a superset of branches -- every match
 arm and every `&&` / `||` short-circuit carries its own counter -- so `--fail-under-regions` is the
 honest stable-toolchain branch gate, and it is the number that tracks mutation score. Measure with
 `mise run rust:coverage:report`, which prints the per-file Regions / Functions / Lines table without

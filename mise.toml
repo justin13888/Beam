@@ -46,7 +46,7 @@ hk = "1.57.0"
 # for linux-64, linux-aarch64, osx-64 and osx-arm64 alike; nasm.us ships Linux
 # builds only as RPMs. CI's system-FFmpeg jobs never call it, and it is ~1 MB.
 "conda:nasm" = "2.16.03"
-# Rust is deliberately absent: rust-toolchain.toml pins 1.91.0 and is honored by
+# Rust is deliberately absent: rust-toolchain.toml pins 1.94.0 and is honored by
 # rustup, rust-analyzer, and CI's setup-rust-toolchain action. Duplicating the
 # pin here would create a second source of truth for the same thing.
 #
@@ -212,7 +212,7 @@ run = 'cargo test --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEA
 description = "Run Rust tests with coverage and enforce the line/region/function thresholds"
 # --fail-under-regions is this project's branch-coverage gate. cargo-llvm-cov's
 # --branch is nightly-only (it needs -Z coverage-options=branch) and
-# rust-toolchain.toml pins stable 1.91.0, so it is simply unavailable. LLVM
+# rust-toolchain.toml pins stable 1.94.0, so it is simply unavailable. LLVM
 # regions are a superset of branches -- every match arm and every && / ||
 # short-circuit gets its own counter -- which makes region coverage the honest
 # stable-toolchain proxy, and the number that correlates with mutation score.
@@ -246,6 +246,7 @@ case "${BEAM_CARGO_FEATURES:-}" in
 esac
 cargo test --package beam-index --features "$features" --test pg_integration
 cargo test --package beam-auth --features "pg-integration,test-utils" --test pg_integration
+cargo test --package beam-migration --features pg-integration --test pg_integration
 '''
 
 [tasks."rust:coverage:report"]

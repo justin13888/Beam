@@ -187,8 +187,7 @@ pub fn parse_media_filename(stem: &str) -> ParsedFilename {
             .iter()
             .enumerate()
             .skip(1)
-            .filter(|(_, t)| YEAR_TOKEN_REGEX.is_match(t))
-            .next_back()
+            .rfind(|(_, t)| YEAR_TOKEN_REGEX.is_match(t))
         {
             Some((idx, t)) => (t.parse().ok(), &tokens[..idx]),
             None => (None, &tokens[..]),

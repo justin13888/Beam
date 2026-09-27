@@ -62,7 +62,9 @@ async fn main() -> Result<()> {
             .await
             .map_err(|e| eyre!("Failed to check pending migrations: {e}"))?
             .len();
-        beam_migration::Migrator::up(&db, None)
+        // All-or-nothing: a failure anywhere in the pending batch leaves the
+        // database at the version the previous image expects.
+        beam_migration::up_all_or_nothing::<beam_migration::Migrator, _>(&db, None)
             .await
             .map_err(|e| eyre!("Failed to apply database migrations: {e}"))?;
         info!("Database migrations up to date ({pending} applied at startup)");

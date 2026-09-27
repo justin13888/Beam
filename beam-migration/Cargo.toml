@@ -18,3 +18,11 @@ argon2 = "0.6.0"
 async-trait = { workspace = true }
 sea-orm-migration = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+beam-test-support = { path = "../beam-test-support" }
+
+[features]
+# Opt-in tier: runs the upgrade path against a real Postgres. Never enabled by
+# `rust:test`, `rust:coverage`, `mise run ci`, or the pre-push hook (NFR-201).
+pg-integration = ["beam-test-support/pg-integration"]

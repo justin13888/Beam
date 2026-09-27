@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 pub use sea_orm_migration::prelude::*;
 
 mod m20260209_000001_create_schema;
@@ -39,5 +41,84 @@ impl MigratorTrait for Migrator {
             Box::new(m20260711_000001_users_email_optional::Migration),
             Box::new(m20260711_000002_users_disabled::Migration),
         ]
+    }
+}
+
+/// Apply `M`'s pending migrations (at most `steps` of them) as one unit: either
+/// every one of them commits, or none does.
+///
+/// sea-orm-migration 2 wraps each migration in its own transaction on
+/// Postgres, so a batch A, B in which B fails leaves A committed. An image
+/// rolled back after that half-upgrade refuses to start, because its migrator
+/// has no file for the recorded version A. Running `up` inside a transaction
+/// Beam owns turns each of sea-orm's per-migration transactions into a
+/// savepoint (`begin` on a `DatabaseTransaction` issues `SAVEPOINT`), so a
+/// failure anywhere in the batch rolls the whole batch back and the database
+/// stays at the version the previous image expects. This is what
+/// sea-orm-migration 1.x did on Postgres by itself.
+///
+/// Every caller that applies migrations -- `beam-server` at startup, the
+/// `beam-migration up` CLI, the `pg-integration` tier -- goes through this, so
+/// there is one upgrade path.
+pub async fn up_all_or_nothing<'c, M, C>(db: C, steps: Option<u32>) -> Result<(), DbErr>
+where
+    M: MigratorTrait,
+    C: IntoSchemaManagerConnection<'c>,
+{
+    use sea_orm::TransactionTrait;
+
+    let executor = db.into_database_executor();
+    let batch = executor.begin().await?;
+    match M::up(&batch, steps).await {
+        Ok(()) => batch.commit().await,
+        Err(migration_error) => match batch.rollback().await {
+            Ok(()) => Err(migration_error),
+            Err(rollback_error) => Err(DbErr::Custom(format!(
+                "{migration_error}; rolling the migration batch back also failed: {rollback_error}"
+            ))),
+        },
+    }
+}
+
+/// `M` with `up` applied through [`up_all_or_nothing`]; every other command is
+/// `M`'s own.
+///
+/// The `beam-migration` CLI runs `AllOrNothing::<Migrator>`. The CLI dispatches
+/// on `MigratorTraitSelf`, whose blanket impl for every [`MigratorTrait`]
+/// forwards to the static `up`, so overriding `up` here is what routes
+/// `beam-migration up` through the shared path. `migrations` and
+/// `migration_table_name` delegate to `M`, so the ledger and the migration list
+/// are `M`'s. `down`, `fresh`, `refresh` and `reset` keep sea-orm's
+/// per-migration transactions: the trait defaults call its internal executor
+/// directly, not `up`.
+pub struct AllOrNothing<M>(PhantomData<fn() -> M>);
+
+impl<M> AllOrNothing<M> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M> Default for AllOrNothing<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl<M: MigratorTrait> MigratorTrait for AllOrNothing<M> {
+    fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+        M::migrations()
+    }
+
+    fn migration_table_name() -> sea_orm::DynIden {
+        M::migration_table_name()
+    }
+
+    async fn up<'c, C>(db: C, steps: Option<u32>) -> Result<(), DbErr>
+    where
+        C: IntoSchemaManagerConnection<'c>,
+    {
+        up_all_or_nothing::<M, C>(db, steps).await
     }
 }

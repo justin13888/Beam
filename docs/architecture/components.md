@@ -155,7 +155,9 @@ Conventions:
   `up()` has a reversing `down()`, including custom Postgres ENUM types. Identifiers are
   `#[derive(DeriveIden)]` enums local to each migration file. `main.rs` is the standard
   `sea-orm-migration` CLI (`migrate up`/`down`/`status`); in normal operation `beam-server`
-  auto-applies migrations at startup.
+  auto-applies migrations at startup. Both apply a pending batch through
+  `beam_migration::up_all_or_nothing`, which runs it in one transaction so a failing migration
+  commits none of the batch.
 - Entities: one file per table, a `Model` with `DeriveEntityModel`, a `Relation` enum, and an
   `ActiveModelBehavior` impl; `src/lib.rs` re-exports each `Entity` under a short name. UUID
   primary keys are application-generated (`Uuid::new_v4()` in repository `create()`), and Postgres

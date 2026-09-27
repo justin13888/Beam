@@ -1,5 +1,5 @@
 [toolchain]
-channel = "1.91.0"
+channel = "1.94.0"
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
 # beam-client-core cross-compiles to these for the Android client (#67).
 # Listing them here rather than in a build script means rustup, CI's

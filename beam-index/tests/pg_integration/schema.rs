@@ -59,10 +59,10 @@ async fn playback_progress_enforces_one_row_per_user_and_file() {
         )
     };
 
-    db.execute(insert(uuid::Uuid::new_v4()))
+    db.execute_raw(insert(uuid::Uuid::new_v4()))
         .await
         .expect("the first row for a (user, file) pair inserts");
-    let second = db.execute(insert(uuid::Uuid::new_v4())).await;
+    let second = db.execute_raw(insert(uuid::Uuid::new_v4())).await;
 
     assert!(
         second.is_err(),
@@ -78,7 +78,7 @@ async fn playback_progress_rows_are_removed_with_their_user() {
     let user = beam_test_support::seed::user(db).await.unwrap();
     let file = beam_test_support::seed::file(db).await.unwrap();
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         db.get_database_backend(),
         "INSERT INTO playback_progress \
          (id, user_id, file_id, position_secs, duration_secs, completed, updated_at) \
@@ -88,7 +88,7 @@ async fn playback_progress_rows_are_removed_with_their_user() {
     .await
     .expect("insert progress");
 
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         db.get_database_backend(),
         "DELETE FROM users WHERE id = $1",
         [user.into()],
@@ -97,7 +97,7 @@ async fn playback_progress_rows_are_removed_with_their_user() {
     .expect("deleting a user cascades rather than failing on the foreign key");
 
     let remaining = db
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             db.get_database_backend(),
             "SELECT id FROM playback_progress WHERE user_id = $1",
             [user.into()],

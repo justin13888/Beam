@@ -83,7 +83,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
               WHERE NOT EXISTS (SELECT 1 FROM metadata_enrichment e WHERE e.show_id = s.id)"
                 .to_string(),
         );
-        let result = self.db.execute(stmt).await?;
+        let result = self.db.execute_raw(stmt).await?;
         Ok(result.rows_affected())
     }
 
