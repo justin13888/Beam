@@ -44,21 +44,26 @@ fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
 /// A named result rather than a bare `Vec` so the walk can report more than
 /// the files it reached without changing its call site.
 struct WalkOutcome {
-    /// Every regular file under the root, in walk order.
+    /// Every regular file under the root, in walk order. Non-video files are
+    /// included: the scan indexes them as `Unknown`.
     files: Vec<PathBuf>,
+    /// How many of `files` have a known video extension -- the files Beam can
+    /// index as media, and so the ones the empty-root guard counts.
+    video_files: usize,
 }
 
 /// Walks a library root and collects every regular file beneath it.
 ///
 /// Entries the walk cannot read are skipped, as they always have been.
 fn walk_library_root(root: &Path) -> WalkOutcome {
-    let files = WalkDir::new(root)
+    let files: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())
         .map(walkdir::DirEntry::into_path)
         .filter(|path| path.is_file())
         .collect();
-    WalkOutcome { files }
+    let video_files = files.iter().filter(|path| is_known_video(path)).count();
+    WalkOutcome { files, video_files }
 }
 
 /// Whether a path has a recognised video file extension.
@@ -125,8 +130,9 @@ pub enum IndexError {
     /// variant must uphold it; `assert_names_no_path` pins all four.
     ///
     /// The four sites are the scan's two root guards (a root that is not a
-    /// directory, and a root that holds no files while the library has indexed
-    /// files) and the two `process_new_file` failures (metadata, hash).
+    /// directory, and a root that holds no video files while the library has
+    /// indexed video files) and the two `process_new_file` failures (metadata,
+    /// hash).
     ///
     /// The path itself goes to a structured `tracing` field at the failing
     /// site. Where it *also* reaches the admin log differs by site, and the
@@ -1057,25 +1063,33 @@ impl IndexService for LocalIndexService {
         let walk = walk_library_root(&library.root_path);
 
         // An unmounted volume usually leaves its mount point behind as an empty
-        // directory, which passes the guard above. Reconciling that walk would
-        // delete every indexed row, so a root with no files at all under a
-        // library that has indexed files is refused rather than believed.
-        // Emptying a library on purpose is deleting the library.
-        if walk.files.is_empty() && !existing_map.is_empty() {
-            let indexed_files = existing_map.len();
+        // directory, which passes the guard above -- or one holding only a
+        // sentinel or hidden file (`.not_mounted`, `.DS_Store`, `Thumbs.db`),
+        // which admins put on mount points on purpose. Reconciling that walk
+        // would delete every indexed video row, so a root with no video files
+        // under a library that has indexed video files is refused rather than
+        // believed. Only video rows are counted on either side: they are what
+        // is at stake, and a library that only ever held non-video files has
+        // nothing an unmounted volume could take from it. Emptying a library on
+        // purpose is deleting the library.
+        let indexed_video_files = existing_map
+            .keys()
+            .filter(|path| is_known_video(path))
+            .count();
+        if walk.video_files == 0 && indexed_video_files > 0 {
             warn!(
                 root = %library.root_path.display(),
                 library_id = %lib_uuid,
-                indexed_files,
-                "library root contains no files but files are indexed; refusing to reconcile"
+                indexed_video_files,
+                "library root contains no video files but video files are indexed; refusing to reconcile"
             );
             self.notification_service.publish(AdminEvent::error(
                 EventCategory::LibraryScan,
                 format!(
-                    "Library '{}' root contains no files but {} are indexed; refusing to \
+                    "Library '{}' root contains no video files but {} are indexed; refusing to \
                      reconcile — is the volume mounted? Root: {}",
                     library.name,
-                    indexed_files,
+                    indexed_video_files,
                     library.root_path.display()
                 ),
                 Some(lib_uuid.to_string()),
@@ -1087,18 +1101,19 @@ impl IndexService for LocalIndexService {
                     AdminLogLevel::Error,
                     AdminLogCategory::LibraryScan,
                     format!(
-                        "Library scan refused: root contains no files but {} are indexed for \"{}\"",
-                        indexed_files, library.name
+                        "Library scan refused: root contains no video files but {} are indexed for \"{}\"",
+                        indexed_video_files, library.name
                     ),
                     Some(serde_json::json!({
                         "library_id": library_id,
                         "path": library.root_path,
-                        "indexed_files": indexed_files,
+                        "indexed_video_files": indexed_video_files,
                     })),
                 )
                 .await;
             return Err(IndexError::PathNotFound(
-                "Library root contains no files but files are indexed; refusing to reconcile"
+                "Library root contains no video files but video files are indexed; refusing to \
+                 reconcile"
                     .to_string(),
             ));
         }
@@ -3029,7 +3044,7 @@ mod tests {
             Some(root_str.as_ref())
         );
         assert_eq!(
-            details.get("indexed_files").and_then(|n| n.as_u64()),
+            details.get("indexed_video_files").and_then(|n| n.as_u64()),
             Some(2)
         );
         assert_eq!(
@@ -3067,9 +3082,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scan_library_root_with_only_sentinel_files_is_refused() {
+        // An unmounted volume whose mount point carries the files admins and
+        // desktop OSes leave there on purpose: regular files, but not one
+        // that Beam can index as media.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".not_mounted"), b"").unwrap();
+        std::fs::write(root.join(".DS_Store"), b"\0").unwrap();
+        std::fs::create_dir_all(root.join("Movies")).unwrap();
+        std::fs::write(root.join("Movies").join("Thumbs.db"), b"\0").unwrap();
+        let IndexedLibraryHarness {
+            library,
+            lib_repo,
+            file_repo,
+            admin_log_repo,
+            service,
+            ..
+        } = indexed_library_harness(root, &["a.mp4", "Movies/b.mkv"]).await;
+        let before: Vec<Uuid> = {
+            let mut ids: Vec<Uuid> = file_repo
+                .find_all_by_library(library.id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|f| f.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        let err = service
+            .scan_library(library.id.to_string())
+            .await
+            .expect_err("a root holding only non-video files must refuse the scan");
+        assert!(matches!(err, IndexError::PathNotFound(_)));
+        assert_names_no_path(&err, &[root]);
+
+        // Every row survives, and the sentinels were not indexed either.
+        let mut after: Vec<Uuid> = file_repo
+            .find_all_by_library(library.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        after.sort();
+        assert_eq!(after, before, "a refused scan must not touch any row");
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert_eq!(stored.last_scan_started_at, None);
+
+        let logs = admin_log_repo.list(10, 0).await.unwrap();
+        let entry = logs
+            .iter()
+            .find(|l| {
+                l.level == AdminLogLevel::Error && l.category == AdminLogCategory::LibraryScan
+            })
+            .expect("a refused scan must write an error-level LibraryScan admin-log entry");
+        assert_eq!(
+            entry
+                .details
+                .as_ref()
+                .and_then(|d| d.get("indexed_video_files"))
+                .and_then(|n| n.as_u64()),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_library_without_indexed_video_files_is_not_refused() {
+        // The guard protects indexed video rows. A library that has only ever
+        // held non-video files has none, so a walk finding no video files is
+        // believed and a non-video file that went is removed as usual.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let kept_path = root.join("notes.nfo");
+        std::fs::write(&kept_path, b"still here").unwrap();
+        let IndexedLibraryHarness {
+            library,
+            lib_repo,
+            file_repo,
+            service,
+            ..
+        } = indexed_library_harness(root, &["gone.txt"]).await;
+        let kept = indexed_file_matching_disk(library.id, &kept_path);
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(kept.id, kept.clone());
+
+        assert_eq!(
+            service.scan_library(library.id.to_string()).await.unwrap(),
+            0
+        );
+
+        let files = file_repo.find_all_by_library(library.id).await.unwrap();
+        let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![kept.id]);
+        let stored = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
+        assert!(stored.last_scan_finished_at.is_some());
+    }
+
+    #[tokio::test]
     async fn test_scan_library_one_file_left_still_reconciles() {
-        // The guard is for a walk that found nothing. A root that still holds
-        // one file is believed: the rows for the files that went are deleted.
+        // The guard is for a walk that found no video files. A root that still
+        // holds one is believed: the rows for the files that went are deleted.
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let kept_path = root.join("kept.mp4");
