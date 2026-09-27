@@ -30,7 +30,7 @@ role.
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, with probed per-stream codecs |
 | `/v1/genres` | GET | Every genre in the catalog, for filter chips |
 | `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`; `variant` is `poster`/`backdrop`/`thumbnail` |
-| `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing and contents |
+| `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing and contents (file paths are relative to the library root, NFR-108) |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
 | `/v1/files/{fileId}/progress` | PUT | Report playback position |
