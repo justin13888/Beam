@@ -84,11 +84,65 @@ mod discovered {
     use super::{BeginAuth, OidcClient, OidcError, OidcIdentity};
     use async_trait::async_trait;
     use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
+    use openidconnect::{AsyncHttpClient, HttpClientError, HttpRequest, HttpResponse};
     use openidconnect::{
         AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet,
         EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
         TokenResponse,
     };
+    use std::future::Future;
+    use std::pin::Pin;
+
+    /// The HTTP client `openidconnect` makes discovery, JWKS, and token
+    /// requests through.
+    ///
+    /// oauth2 5.0.0 implements [`AsyncHttpClient`] only for reqwest 0.12; this
+    /// is the same adapter (ported from its `reqwest_client.rs`) over the
+    /// workspace's reqwest 0.13, so the server links one reqwest (issue #132).
+    #[derive(Debug, Clone)]
+    pub(crate) struct OidcHttpClient(reqwest::Client);
+
+    impl OidcHttpClient {
+        pub(crate) fn new() -> Result<Self, reqwest::Error> {
+            // Redirects are never followed: an IdP endpoint that answers with
+            // a redirect is surfaced as that response, not chased to wherever
+            // it points (the SSRF guidance of the OIDC/OAuth 2.0 specs).
+            let client = reqwest::ClientBuilder::new()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
+            Ok(Self(client))
+        }
+    }
+
+    impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
+        type Error = HttpClientError<reqwest::Error>;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<HttpResponse, Self::Error>> + Send + Sync + 'c>>;
+
+        fn call(&'c self, request: HttpRequest) -> Self::Future {
+            Box::pin(async move {
+                let request = reqwest::Request::try_from(request).map_err(Box::new)?;
+                let response = self.0.execute(request).await.map_err(Box::new)?;
+                into_http_response(response).await
+            })
+        }
+    }
+
+    /// Copies a reqwest response into the `http::Response` `openidconnect`
+    /// parses: status, version, every header (repeated ones included), and
+    /// the full body.
+    async fn into_http_response(
+        response: reqwest::Response,
+    ) -> Result<HttpResponse, HttpClientError<reqwest::Error>> {
+        let mut builder = openidconnect::http::Response::builder()
+            .status(response.status())
+            .version(response.version());
+        for (name, value) in response.headers() {
+            builder = builder.header(name, value);
+        }
+        let body = response.bytes().await.map_err(Box::new)?;
+        builder.body(body.to_vec()).map_err(HttpClientError::Http)
+    }
 
     /// The exact endpoint typestate `CoreClient::from_provider_metadata(...)`
     /// produces: the authorization endpoint is always present after
@@ -112,7 +166,7 @@ mod discovered {
     #[derive(Debug)]
     pub struct DiscoveredOidcClient {
         client: DiscoveredCoreClient,
-        http_client: reqwest::Client,
+        http_client: OidcHttpClient,
         scopes: Vec<String>,
     }
 
@@ -124,10 +178,8 @@ mod discovered {
             redirect_url: &str,
             scopes: Vec<String>,
         ) -> Result<Self, OidcError> {
-            let http_client = reqwest::ClientBuilder::new()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| OidcError::Discovery(e.to_string()))?;
+            let http_client =
+                OidcHttpClient::new().map_err(|e| OidcError::Discovery(e.to_string()))?;
 
             let issuer_url = IssuerUrl::new(issuer.to_string())
                 .map_err(|e| OidcError::Discovery(e.to_string()))?;
@@ -244,6 +296,39 @@ mod discovered {
             return serde_json::Value::Null;
         };
         serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[cfg(test)]
+    mod http_client_tests {
+        use super::into_http_response;
+        use openidconnect::http::{self, StatusCode, Version, header::LOCATION};
+
+        #[tokio::test]
+        async fn a_redirect_is_handed_back_intact_rather_than_followed_or_dropped() {
+            // The client never follows redirects, so a 3xx from an IdP reaches
+            // `openidconnect` as-is -- and must arrive with its status,
+            // version, every header, and body, or the crate misreports why
+            // discovery or the exchange failed.
+            let upstream = http::Response::builder()
+                .status(StatusCode::FOUND)
+                .version(Version::HTTP_2)
+                .header(LOCATION, "https://elsewhere.test/")
+                .header("x-repeated", "first")
+                .header("x-repeated", "second")
+                .body("redirect body")
+                .unwrap();
+
+            let converted = into_http_response(reqwest::Response::from(upstream))
+                .await
+                .unwrap();
+
+            assert_eq!(converted.status(), StatusCode::FOUND);
+            assert_eq!(converted.version(), Version::HTTP_2);
+            assert_eq!(converted.headers()[LOCATION], "https://elsewhere.test/");
+            let repeated: Vec<_> = converted.headers().get_all("x-repeated").iter().collect();
+            assert_eq!(repeated, ["first", "second"]);
+            assert_eq!(converted.body().as_slice(), b"redirect body");
+        }
     }
 
     #[cfg(test)]

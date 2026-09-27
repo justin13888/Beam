@@ -77,6 +77,13 @@ uuid = { workspace = true }
 # `rustls` (which forces aws-lc-rs) and `rustls-no-provider` (which pulls
 # `rustls-platform-verifier`, the thing `src/tls.rs` exists to replace with a
 # trust-on-first-use `ServerCertVerifier`). Neither is usable here.
+#
+# Decided in #132, which moved the rest of the workspace to 0.13: this crate
+# stays on 0.12, so the workspace carries two reqwest majors until the choice
+# changes. Rejected: `rustls-no-provider`, which would ship
+# `rustls-platform-verifier` in the Android `.so` as a dead dependency that
+# duplicates what `src/tls.rs` already does. Revisit when 0.13 offers a
+# no-provider rustls feature without the platform verifier.
 [dependencies.reqwest]
 version = "0.12.28"
 default-features = false
