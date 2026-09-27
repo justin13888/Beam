@@ -359,7 +359,7 @@ async fn a_cancelled_scan_stops_and_fails_as_cancelled() {
     let scan = tokio::spawn(async move { service.run_scan(ticket).await });
     h.wait_for(state_is(ScanState::Running)).await;
 
-    assert!(h.service.scans.cancel(h.library.id));
+    assert!(h.service.scans.cancel(h.library.id, h.clock.now()));
     h.open_gate();
 
     assert!(matches!(scan.await.unwrap(), Err(IndexError::Cancelled)));
@@ -475,6 +475,83 @@ async fn stopping_a_scan_gives_up_after_the_timeout() {
     );
     h.open_gate();
     assert!(matches!(scan.await.unwrap(), Err(IndexError::Cancelled)));
+}
+
+/// A scan still queued -- here behind a watcher reconcile holding the
+/// library -- has nothing to finish, so stopping it returns at once rather
+/// than after [`SCAN_STOP_TIMEOUT`], and its task, once it gets the library,
+/// does nothing (PR #224 r2).
+#[tokio::test]
+async fn stopping_a_queued_scan_fails_it_at_once_and_it_never_runs() {
+    let h = Harness::settled().await;
+    h.write("Heat (1995).mkv");
+    let reconcile = h
+        .service
+        .scans
+        .try_acquire_for_reconcile(h.library.id)
+        .expect("the library is free");
+    let ticket = h
+        .service
+        .begin_scan(h.library.id, ScanTrigger::Manual)
+        .await
+        .unwrap();
+    let service = h.service.clone();
+    let scan = tokio::spawn(async move { service.run_scan(ticket).await });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        h.service.scan_job(h.library.id).unwrap().state,
+        ScanState::Queued
+    );
+
+    // Returns with the clock never moved -- the `TestClock` does not move on
+    // its own -- so it was not held until the timeout.
+    assert!(h.service.stop_scan(h.library.id).await);
+
+    let job = h.service.scan_job(h.library.id).unwrap();
+    assert_eq!(job.state, ScanState::Failed);
+    assert_eq!(job.failure.as_deref(), Some(CANCELLED));
+    drop(reconcile);
+    assert!(matches!(scan.await.unwrap(), Err(IndexError::Cancelled)));
+    assert_eq!(h.hashes(), 0, "the cancelled scan read no file");
+    assert_eq!(
+        h.service.scan_job(h.library.id).unwrap(),
+        job,
+        "and left its job as the stop ended it"
+    );
+}
+
+/// Once a library's scan is stopped for its delete, nothing starts on it
+/// before the delete lands (PR #224 r2): a new scan -- periodic,
+/// administrator's or newly polled -- is refused as for a library that is
+/// gone, and a watcher event is handed back.
+#[tokio::test]
+async fn a_library_whose_scan_was_stopped_is_not_scanned_or_reconciled_again() {
+    let h = Harness::settled().await;
+    let path = h.write("Heat (1995).mkv");
+
+    assert!(h.service.stop_scan(h.library.id).await);
+
+    assert!(matches!(
+        h.service
+            .begin_scan(h.library.id, ScanTrigger::Periodic)
+            .await,
+        Err(IndexError::LibraryNotFound)
+    ));
+    assert_eq!(
+        h.service
+            .scan_all_libraries(ScanTrigger::Periodic)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(matches!(
+        h.service
+            .reconcile_path(h.library.id, path.clone(), FsEventKind::Created)
+            .await,
+        Ok(ReconcileOutcome::Deferred { .. })
+    ));
+    assert_eq!(h.hashes(), 0);
+    assert!(h.row(&path).await.is_none(), "nothing was indexed");
 }
 
 /// With no scan queued or running there is nothing to wait for.

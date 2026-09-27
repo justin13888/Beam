@@ -21,7 +21,7 @@
 //!   follow it. The latest job of each library is kept in memory only: it is
 //!   what an administrator watches, not a history, and a restart forgets it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -129,9 +129,14 @@ pub struct ScanEvent {
     pub progress: ScanProgress,
 }
 
-/// A scan is already queued or running for the library.
+/// Why a scan could not be registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScanInProgress;
+pub enum ScanRefused {
+    /// A scan is already queued or running for the library.
+    InProgress,
+    /// The library is being deleted (see [`ScanCoordinator::retire`]).
+    Retired,
+}
 
 /// The failure text of a job whose task went away without finishing it --
 /// a panic, or a runtime shutting down.
@@ -172,6 +177,11 @@ impl LibrarySlot {
 pub struct ScanCoordinator {
     libraries: parking_lot::Mutex<HashMap<Uuid, Arc<LibrarySlot>>>,
     catalog: Arc<RwLock<()>>,
+    /// Libraries being deleted, or deleted: nothing scans or reconciles them
+    /// again. Kept for the life of the process -- a library id is a v4 UUID,
+    /// never reused -- so a slot forgotten after the delete cannot be
+    /// re-created by a late caller and scan a library that is gone.
+    retired: parking_lot::Mutex<HashSet<Uuid>>,
 }
 
 /// What a scan holds while it runs: its library's lock, and the catalog gate
@@ -206,14 +216,14 @@ impl ScanCoordinator {
     }
 
     /// Register `job` as its library's current job, unless one is already
-    /// queued or running. The check and the registration are one step: two
-    /// callers racing for one library cannot both succeed.
-    pub fn register(
-        &self,
-        job: ScanJob,
-        clock: Arc<dyn Clock>,
-    ) -> Result<ScanTicket, ScanInProgress> {
+    /// queued or running, or the library is [retired](Self::retire). The
+    /// check and the registration are one step: two callers racing for one
+    /// library cannot both succeed.
+    pub fn register(&self, job: ScanJob, clock: Arc<dyn Clock>) -> Result<ScanTicket, ScanRefused> {
         let library_id = job.library_id;
+        if self.is_retired(library_id) {
+            return Err(ScanRefused::Retired);
+        }
         let slot = self.slot(library_id);
         let job_id = job.id;
         let mut incoming = Some(job);
@@ -225,7 +235,7 @@ impl ScanCoordinator {
             true
         });
         if !registered {
-            return Err(ScanInProgress);
+            return Err(ScanRefused::InProgress);
         }
         let cancel = Arc::new(AtomicBool::new(false));
         *slot.cancel.lock() = cancel.clone();
@@ -250,10 +260,29 @@ impl ScanCoordinator {
         self.slot(library_id).job.subscribe()
     }
 
-    /// Ask `library_id`'s active job to stop. The scan checks between files,
-    /// so it stops after the file it is on; it then fails as
-    /// [`CANCELLED`]. Returns whether there was an active job to ask.
-    pub fn cancel(&self, library_id: Uuid) -> bool {
+    /// Stop `library_id` from ever being scanned or reconciled again: it is
+    /// being deleted. From now on [`Self::register`] refuses it and
+    /// [`Self::try_acquire_for_reconcile`] never gets it, so no scan -- a
+    /// periodic one, an administrator's, a newly polled library's -- and no
+    /// watcher event can start on it between the caller stopping its scan
+    /// and deleting its rows. A job registered before is not affected;
+    /// [`Self::cancel`] it.
+    pub fn retire(&self, library_id: Uuid) {
+        self.retired.lock().insert(library_id);
+    }
+
+    fn is_retired(&self, library_id: Uuid) -> bool {
+        self.retired.lock().contains(&library_id)
+    }
+
+    /// Ask `library_id`'s active job to stop. A running scan checks between
+    /// files, so it stops after the file it is on; it then fails as
+    /// [`CANCELLED`]. A job still queued has nothing to finish, so it fails
+    /// as [`CANCELLED`] at once, stamped `now`: a caller waiting for it to
+    /// stop is not held behind whatever it was queued behind. Its task, when
+    /// it gets the library, finds it cancelled and does nothing. Returns
+    /// whether there was an active job to ask.
+    pub fn cancel(&self, library_id: Uuid, now: DateTime<Utc>) -> bool {
         let Some(slot) = self.existing_slot(library_id) else {
             return false;
         };
@@ -264,6 +293,15 @@ impl ScanCoordinator {
             .is_some_and(|job| job.state.is_active());
         if active {
             slot.cancel.lock().store(true, Ordering::SeqCst);
+            slot.job.send_if_modified(|current| match current {
+                Some(job) if job.state == ScanState::Queued => {
+                    job.state = ScanState::Failed;
+                    job.finished_at = Some(now);
+                    job.failure = Some(CANCELLED.to_string());
+                    true
+                }
+                _ => false,
+            });
         }
         active
     }
@@ -289,9 +327,12 @@ impl ScanCoordinator {
 
     /// Take `library_id`'s lock and the catalog gate for a watcher reconcile
     /// without waiting: `None` when a scan job is registered for the library,
-    /// or either is held. A watcher that waited would stall every other
-    /// library's events behind one scan.
+    /// either is held, or the library is [retired](Self::retire). A watcher
+    /// that waited would stall every other library's events behind one scan.
     pub fn try_acquire_for_reconcile(&self, library_id: Uuid) -> Option<ScanGuard> {
+        if self.is_retired(library_id) {
+            return None;
+        }
         let slot = self.slot(library_id);
         if slot
             .job
@@ -373,9 +414,12 @@ impl ScanTicket {
         self.cancel.load(Ordering::SeqCst)
     }
 
+    /// Apply `change` to the job while it is still active. A finished job
+    /// -- one cancelled while it was queued, above all -- keeps the ending
+    /// it was given: its task, still running, cannot revive it.
     fn update(&self, change: impl FnOnce(&mut ScanJob)) {
         self.slot.job.send_if_modified(|current| match current {
-            Some(job) if job.id == self.job_id => {
+            Some(job) if job.id == self.job_id && job.state.is_active() => {
                 change(job);
                 true
             }
@@ -423,11 +467,9 @@ impl Drop for ScanTicket {
     fn drop(&mut self) {
         let now = self.clock.now();
         self.update(|job| {
-            if job.state.is_active() {
-                job.state = ScanState::Failed;
-                job.finished_at = Some(now);
-                job.failure = Some(INTERRUPTED.to_string());
-            }
+            job.state = ScanState::Failed;
+            job.finished_at = Some(now);
+            job.failure = Some(INTERRUPTED.to_string());
         });
     }
 }

@@ -114,7 +114,7 @@ fn a_second_job_is_refused_while_one_is_queued_or_running() {
         coordinator
             .register(queued(library, &clock), clock.clone())
             .err(),
-        Some(ScanInProgress),
+        Some(ScanRefused::InProgress),
         "a queued job holds the library"
     );
     ticket.start();
@@ -122,7 +122,7 @@ fn a_second_job_is_refused_while_one_is_queued_or_running() {
         coordinator
             .register(queued(library, &clock), clock.clone())
             .err(),
-        Some(ScanInProgress),
+        Some(ScanRefused::InProgress),
         "so does a running one"
     );
     assert!(
@@ -215,18 +215,18 @@ fn cancelling_reaches_only_the_active_job() {
     let library = Uuid::new_v4();
 
     assert!(
-        !coordinator.cancel(library),
+        !coordinator.cancel(library, clock.now()),
         "nothing to cancel before a job"
     );
     let first = coordinator
         .register(queued(library, &clock), clock.clone())
         .unwrap();
-    assert!(coordinator.cancel(library));
+    assert!(coordinator.cancel(library, clock.now()));
     assert!(first.is_cancelled());
 
     first.fail(CANCELLED);
     assert!(
-        !coordinator.cancel(library),
+        !coordinator.cancel(library, clock.now()),
         "a finished job is not cancelled"
     );
     let second = coordinator
@@ -345,4 +345,96 @@ async fn a_subscriber_sees_the_job_finish() {
     .expect("a job");
     assert_eq!(finished.id, job_id);
     assert_eq!(finished.state, ScanState::Succeeded);
+}
+
+/// A job still queued when its library is deleted fails as cancelled at
+/// once, rather than when its task finally gets the library -- which may be
+/// behind another library's scan and the identity passes (PR #224 r2). Its
+/// task cannot then revive it.
+#[test]
+fn cancelling_a_queued_job_fails_it_at_once_and_for_good() {
+    let clock = Arc::new(TestClock::starting_at(instant(0)));
+    let coordinator = ScanCoordinator::new();
+    let library = Uuid::new_v4();
+    let ticket = coordinator
+        .register(queued(library, &clock), clock.clone())
+        .unwrap();
+
+    clock.advance(Duration::from_secs(3));
+    assert!(coordinator.cancel(library, clock.now()));
+
+    let job = coordinator.job(library).unwrap();
+    assert_eq!(job.state, ScanState::Failed);
+    assert_eq!(job.failure.as_deref(), Some(CANCELLED));
+    assert_eq!(job.finished_at, Some(instant(3)));
+    assert!(ticket.is_cancelled());
+
+    clock.advance(Duration::from_secs(4));
+    ticket.start();
+    ticket.succeed(ScanProgress {
+        added: 9,
+        ..ScanProgress::default()
+    });
+    drop(ticket);
+    assert_eq!(
+        coordinator.job(library),
+        Some(job),
+        "the task that gets the library later changes nothing"
+    );
+}
+
+/// A running job is only asked to stop: it finishes the file it is on and
+/// fails as cancelled itself.
+#[test]
+fn cancelling_a_running_job_leaves_it_running_until_it_stops() {
+    let clock = Arc::new(TestClock::new());
+    let coordinator = ScanCoordinator::new();
+    let library = Uuid::new_v4();
+    let ticket = coordinator
+        .register(queued(library, &clock), clock.clone())
+        .unwrap();
+    ticket.start();
+
+    assert!(coordinator.cancel(library, clock.now()));
+
+    assert_eq!(coordinator.job(library).unwrap().state, ScanState::Running);
+    ticket.fail(CANCELLED);
+    assert_eq!(coordinator.job(library).unwrap().state, ScanState::Failed);
+}
+
+/// Between stopping a library's scan and deleting its rows, nothing may
+/// start on it (PR #224 r2): a retired library is refused a scan job and a
+/// reconcile, even once its slot has been forgotten.
+#[tokio::test]
+async fn a_retired_library_is_never_scanned_or_reconciled_again() {
+    let clock = Arc::new(TestClock::new());
+    let coordinator = ScanCoordinator::new();
+    let library = Uuid::new_v4();
+    let other = Uuid::new_v4();
+
+    coordinator.retire(library);
+
+    assert_eq!(
+        coordinator
+            .register(queued(library, &clock), clock.clone())
+            .err(),
+        Some(ScanRefused::Retired)
+    );
+    assert!(coordinator.try_acquire_for_reconcile(library).is_none());
+    coordinator.forget(library);
+    assert_eq!(
+        coordinator
+            .register(queued(library, &clock), clock.clone())
+            .err(),
+        Some(ScanRefused::Retired),
+        "forgetting the slot does not bring the library back"
+    );
+    assert!(coordinator.try_acquire_for_reconcile(library).is_none());
+
+    assert!(
+        coordinator
+            .register(queued(other, &clock), clock.clone())
+            .is_ok(),
+        "only the retired library is refused"
+    );
 }

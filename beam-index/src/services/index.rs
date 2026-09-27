@@ -19,7 +19,7 @@ use crate::services::media_info::MediaInfoService;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use crate::services::scan::{
     CANCELLED, CatalogExclusive, ProgressThrottle, SCAN_STOP_TIMEOUT, ScanCoordinator, ScanEvent,
-    ScanInProgress, ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, Settle,
+    ScanJob, ScanPhase, ScanProgress, ScanRefused, ScanState, ScanTicket, ScanTrigger, Settle,
     settle_state,
 };
 use crate::services::watcher::FsEventKind;
@@ -463,9 +463,13 @@ impl IndexError {
     }
 }
 
-impl From<ScanInProgress> for IndexError {
-    fn from(_: ScanInProgress) -> Self {
-        IndexError::ScanInProgress
+impl From<ScanRefused> for IndexError {
+    fn from(refused: ScanRefused) -> Self {
+        match refused {
+            ScanRefused::InProgress => IndexError::ScanInProgress,
+            // Being deleted: as good as gone to anyone asking to scan it.
+            ScanRefused::Retired => IndexError::LibraryNotFound,
+        }
     }
 }
 
@@ -528,11 +532,15 @@ pub trait IndexService: Send + Sync + std::fmt::Debug {
     /// Follow `library_id`'s scan jobs.
     fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>>;
 
-    /// Stop `library_id`'s scan before the library is deleted: ask an active
-    /// one to stop after the file it is on, then wait for it to finish -- as
-    /// [`CANCELLED`], unless it finished first -- for at most
-    /// [`SCAN_STOP_TIMEOUT`] on the injected clock. Returns whether no scan
-    /// of the library is still queued or running.
+    /// Stop `library_id`'s scan before the library is deleted.
+    ///
+    /// The library is retired first: from then on no scan registers for it
+    /// and no watcher event reconciles it, so nothing starts between this
+    /// call and the caller's delete. A queued scan fails as [`CANCELLED`] at
+    /// once; a running one is asked to stop after the file it is on and
+    /// waited for -- as [`CANCELLED`], unless it finished first -- for at
+    /// most [`SCAN_STOP_TIMEOUT`] on the injected clock. Returns whether no
+    /// scan of the library is still queued or running.
     async fn stop_scan(&self, library_id: Uuid) -> bool;
 
     /// Drop `library_id`'s lock and latest job once the library is deleted.
@@ -2359,6 +2367,11 @@ impl LocalIndexService {
                     );
                     continue;
                 }
+                // Deleted since it was listed, or being deleted.
+                Err(IndexError::LibraryNotFound) => {
+                    info!(library_id = %library.id, "the library is being deleted; skipping it");
+                    continue;
+                }
                 Err(e) => {
                     error!("Scan failed for library {}: {}", library.id, e);
                     continue;
@@ -2602,6 +2615,11 @@ impl LocalIndexService {
     ) -> Result<ScanProgress, IndexError> {
         let library_id = ticket.library_id();
         let _guard = self.scans.acquire_for_scan(library_id).await;
+        // Cancelled while it was queued: the job has already failed as
+        // cancelled, and its library is being deleted.
+        if ticket.is_cancelled() {
+            return Err(IndexError::Cancelled);
+        }
         ticket.start();
 
         let (library, result) = match self.library_repo.find_by_id(library_id).await {
@@ -2699,7 +2717,10 @@ impl IndexService for LocalIndexService {
     }
 
     async fn stop_scan(&self, library_id: Uuid) -> bool {
-        if !self.scans.cancel(library_id) {
+        // Retired first, so nothing registers between the cancel and the
+        // caller's delete of the library.
+        self.scans.retire(library_id);
+        if !self.scans.cancel(library_id, self.clock.now()) {
             return true;
         }
         // Subscribed after the cancel: `wait_for` reads the current job
