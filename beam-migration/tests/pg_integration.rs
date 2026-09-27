@@ -1037,9 +1037,20 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
               2, 'c0ffee', now(), now())",
             "an NFO record belongs to a library",
         ),
+        (
+            "UPDATE files SET container_tags = '[\"show\"]'::jsonb \
+              WHERE id = '00000000-0000-0000-0000-0000000000f1'",
+            "a file's container tags are a JSON object",
+        ),
     ] {
         assert!(db.execute_unprepared(refused).await.is_err(), "{why}");
     }
+    db.execute_unprepared(
+        "UPDATE files SET container_tags = '{\"show\": \"The Office\", \"season\": 2}'::jsonb \
+          WHERE id = '00000000-0000-0000-0000-0000000000f1'",
+    )
+    .await
+    .expect("a file stores the tags its probe read");
     db.execute_unprepared(
         "UPDATE movies SET pinned_ref = NULL, pin_source = NULL \
           WHERE id = '00000000-0000-0000-0000-00000000000b'",
@@ -1064,7 +1075,7 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
             "SELECT (table_name || '.' || column_name)::text AS v \
                FROM information_schema.columns \
               WHERE table_schema = current_schema() \
-                AND (column_name IN ('pinned_ref', 'pin_source') \
+                AND (column_name IN ('pinned_ref', 'pin_source', 'container_tags') \
                      OR table_name IN ('sidecar_subtitles', 'applied_nfos'))"
         )
         .await

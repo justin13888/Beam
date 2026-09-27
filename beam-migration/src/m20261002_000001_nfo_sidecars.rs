@@ -23,6 +23,12 @@ use sea_orm_migration::prelude::*;
 ///   skip re-reading an NFO that was not written since. An NFO is re-applied
 ///   exactly when its content differs from its record, whatever its
 ///   modification time says. `path` is unique; a row goes with its library.
+/// - `files.container_tags`: the file-level container tags classification
+///   reads, as the last successful probe read them -- a JSON object, `NULL`
+///   while the file has no successful probe (or had it before this column
+///   existed). A reclassification at a classifier-version bump reads them
+///   instead of probing every file again, so a file placed by its tags keeps
+///   its place.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -99,12 +105,21 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
+        db.execute_unprepared(
+            "ALTER TABLE files ADD COLUMN container_tags JSONB \
+                 CONSTRAINT files_container_tags_object \
+                 CHECK (jsonb_typeof(container_tags) = 'object')",
+        )
+        .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
+        db.execute_unprepared("ALTER TABLE files DROP COLUMN container_tags")
+            .await?;
         db.execute_unprepared("DROP TABLE applied_nfos").await?;
         db.execute_unprepared("DROP TABLE sidecar_subtitles")
             .await?;

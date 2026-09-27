@@ -29,7 +29,12 @@ use crate::utils::nfo::{Nfo, NfoKind};
 /// The file-level container tags classification reads, as FFmpeg reports
 /// them (`title`; an MP4's `show`, `season_number`, `episode_sort`; a `date`
 /// or `year`), keys compared case-insensitively.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Stored on the file as its probe read them (`files.container_tags`), so a
+/// reclassification at a [`crate::utils::media_path::CLASSIFIER_VERSION`]
+/// bump reads the same tags without probing the file again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ContainerTags {
     pub title: Option<String>,
     pub show: Option<String>,

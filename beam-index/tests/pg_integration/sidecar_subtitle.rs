@@ -36,6 +36,7 @@ async fn video_file(db: &Arc<DatabaseConnection>, library_id: Uuid) -> Uuid {
             content: Some(MediaFileContent::Movie { movie_entry_id }),
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
         })
         .await
         .expect("create a video file")

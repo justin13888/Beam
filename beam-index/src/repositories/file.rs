@@ -7,6 +7,7 @@ use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
+use beam_domain::models::file::container_tags_json;
 use beam_domain::models::{
     CreateMediaFile, FileClassification, MediaFile, MediaFileContent, ProbeUpdate, UpdateMediaFile,
 };
@@ -192,6 +193,7 @@ impl FileRepository for SqlFileRepository {
             missing_since: Set(None),
             last_episode_number: Set(last_episode_number),
             classifier_version: Set(create.classifier_version as i16),
+            container_tags: Set(create.container_tags.as_ref().map(container_tags_json)),
         };
 
         let result = new_file.insert(self.db.as_ref()).await?;
@@ -222,15 +224,18 @@ impl FileRepository for SqlFileRepository {
                 mime_type,
                 duration,
                 container_format,
+                container_tags,
             } => {
                 active_model.mime_type = Set(Some(mime_type));
                 active_model.duration_secs = Set(Some(duration.as_secs_f64()));
                 active_model.container_format = Set(Some(container_format));
+                active_model.container_tags = Set(Some(container_tags_json(&container_tags)));
             }
             ProbeUpdate::Clear => {
                 active_model.mime_type = Set(None);
                 active_model.duration_secs = Set(None);
                 active_model.container_format = Set(None);
+                active_model.container_tags = Set(None);
             }
         }
         if let Some(status) = update.status {

@@ -173,6 +173,7 @@ fn media_file(container: Option<&str>, size_bytes: u64, duration: Option<Duratio
         content: None,
         status: FileStatus::Known,
         classifier_version: 0,
+        container_tags: None,
         scanned_at: Utc::now(),
         updated_at: Utc::now(),
         missing_since: None,

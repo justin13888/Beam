@@ -589,6 +589,7 @@ macro_rules! file_repository_contract {
             ProbeUpdate, UpdateMediaFile,
         };
         use $crate::repositories::contract::fixture::FileRepositoryFixture;
+        use $crate::utils::classification::ContainerTags;
 
         /// A fixed, non-epoch instant: `missing_since` is `timestamptz`, and a
         /// whole second survives Postgres's microsecond precision unchanged.
@@ -619,9 +620,19 @@ macro_rules! file_repository_contract {
                     content: Some(content),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: Some(some_tags()),
                 })
                 .await
                 .expect("create a file")
+        }
+
+        /// Tags a probe could have read; some left out, as most files do.
+        fn some_tags() -> ContainerTags {
+            ContainerTags {
+                show: Some("The Office".to_string()),
+                season: Some(2),
+                ..ContainerTags::default()
+            }
         }
 
         async fn movie_file(fixture: &impl FileRepositoryFixture, library_id: Uuid) -> MediaFile {
@@ -682,6 +693,7 @@ macro_rules! file_repository_contract {
                         content: Some(MediaFileContent::Movie { movie_entry_id }),
                         status: FileStatus::Known,
                         classifier_version: 0,
+                        container_tags: None,
                     })
                     .await
                     .expect("create a file");
@@ -744,6 +756,7 @@ macro_rules! file_repository_contract {
                     content: Some(MediaFileContent::Movie { movie_entry_id }),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await;
 
@@ -842,6 +855,11 @@ macro_rules! file_repository_contract {
             let stored = repo.find_by_id(file.id).await.unwrap().expect("still present");
             assert!(stored.content.is_none());
             assert_eq!(stored.classifier_version, 8);
+            assert_eq!(
+                stored.container_tags,
+                Some(some_tags()),
+                "reclassifying reads the tags; it never replaces them"
+            );
         }
 
         /// A file with no content is `Unknown`: `Known` and `Changed` name a
@@ -866,6 +884,7 @@ macro_rules! file_repository_contract {
                     content: None,
                     status,
                     classifier_version: 0,
+                    container_tags: None,
                 }
             };
             for status in [FileStatus::Known, FileStatus::Changed] {
@@ -941,39 +960,49 @@ macro_rules! file_repository_contract {
                     file.mime_type.clone(),
                     file.duration,
                     file.container_format.clone(),
+                    file.container_tags.clone(),
                 )
             };
+            let tags = ContainerTags {
+                title: Some("The Dundies".to_string()),
+                show: Some("The Office".to_string()),
+                season: Some(2),
+                episode: Some(1),
+                year: Some(2005),
+            };
 
-            let set = repo
-                .update(update(ProbeUpdate::Set {
-                    mime_type: "video/mp4".to_string(),
-                    duration: ::std::time::Duration::from_secs(90),
-                    container_format: "mp4".to_string(),
-                }))
-                .await
-                .expect("set the probe results");
+            repo.update(update(ProbeUpdate::Set {
+                mime_type: "video/mp4".to_string(),
+                duration: ::std::time::Duration::from_secs(90),
+                container_format: "mp4".to_string(),
+                container_tags: tags.clone(),
+            }))
+            .await
+            .expect("set the probe results");
             let expected = (
                 Some("video/mp4".to_string()),
                 Some(::std::time::Duration::from_secs(90)),
                 Some("mp4".to_string()),
+                Some(tags),
             );
-            assert_eq!(probe_of(&set), expected);
+            let stored = || async {
+                repo.find_by_id(file.id)
+                    .await
+                    .unwrap()
+                    .expect("still present")
+            };
+            assert_eq!(probe_of(&stored().await), expected);
 
-            let kept = repo
-                .update(update(ProbeUpdate::Keep))
+            repo.update(update(ProbeUpdate::Keep))
                 .await
                 .expect("keep the probe results");
-            assert_eq!(probe_of(&kept), expected);
+            assert_eq!(probe_of(&stored().await), expected);
 
             repo.update(update(ProbeUpdate::Clear))
                 .await
                 .expect("clear the probe results");
-            let cleared = repo
-                .find_by_id(file.id)
-                .await
-                .unwrap()
-                .expect("still present");
-            assert_eq!(probe_of(&cleared), (None, None, None));
+            let cleared = stored().await;
+            assert_eq!(probe_of(&cleared), (None, None, None, None));
             assert_eq!(
                 (
                     cleared.hash,
@@ -1000,6 +1029,11 @@ macro_rules! file_repository_contract {
                 .unwrap()
                 .expect("a new file is visible");
             assert_eq!(found.missing_since, None);
+            assert_eq!(
+                found.container_tags,
+                Some(some_tags()),
+                "the tags it was created with are stored"
+            );
         }
 
         #[tokio::test]
@@ -1288,6 +1322,7 @@ macro_rules! show_repository_contract {
                     content: Some(MediaFileContent::episode(episode_id)),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .expect("create an episode file")
@@ -2293,6 +2328,7 @@ macro_rules! movie_repository_contract {
                         }),
                         status: FileStatus::Known,
                         classifier_version: 0,
+                        container_tags: None,
                     })
                     .await
                     .expect("create a movie file"),
@@ -3226,6 +3262,7 @@ macro_rules! library_shape_repository_contract {
                     content,
                     status,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .expect("create a file")

@@ -275,6 +275,7 @@ pub mod in_memory_fixture {
                     content: None,
                     status: FileStatus::Unknown,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .expect("create a file row")

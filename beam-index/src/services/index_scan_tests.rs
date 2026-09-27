@@ -837,6 +837,7 @@ async fn an_unhashed_row_is_hashed_when_it_is_probed_again() {
             content: None,
             status: FileStatus::Unknown,
             classifier_version: 0,
+            container_tags: None,
         })
         .await
         .unwrap();

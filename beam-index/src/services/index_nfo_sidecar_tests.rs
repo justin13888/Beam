@@ -529,6 +529,44 @@ async fn container_tags_place_an_episode_the_path_could_not() {
     assert_eq!(show.identity_key.as_deref(), Some("the office|"));
 }
 
+/// A file placed only by its container tags keeps its place when a
+/// classifier-version bump reclassifies it: its probe stored the tags with
+/// it, and the reclassification reads them rather than probing again.
+#[tokio::test]
+async fn a_file_placed_by_its_tags_keeps_its_place_when_it_is_reclassified() {
+    let h = Harness::new().await;
+    h.video("The Office/The Dundies.m4v");
+    h.tag(
+        "The Office/The Dundies.m4v",
+        &[
+            ("show", "The Office"),
+            ("season_number", "2"),
+            ("episode_sort", "1"),
+        ],
+    );
+    h.scan().await;
+    let (placed, _, _) = h.show_of("The Office/The Dundies.m4v");
+
+    // As the next classifier version would find the row; and a re-probe
+    // would no longer see the tags, so only the stored ones can place it.
+    h.tags.lock().unwrap().clear();
+    let id = h.file("The Office/The Dundies.m4v").id;
+    h.file_repo
+        .files
+        .lock()
+        .unwrap()
+        .get_mut(&id)
+        .unwrap()
+        .classifier_version = CLASSIFIER_VERSION - 1;
+    h.scan().await;
+
+    let file = h.file("The Office/The Dundies.m4v");
+    assert_eq!(file.classifier_version, CLASSIFIER_VERSION, "reclassified");
+    let (show, season, episode) = h.show_of("The Office/The Dundies.m4v");
+    assert_eq!((season, episode), (2, 1));
+    assert_eq!(show.id, placed.id, "the same show as before");
+}
+
 /// A file whose first probe failed is classified when a later probe succeeds
 /// (issue #181) -- and by the tags that probe read, exactly as a new file
 /// would be, not by its path alone.

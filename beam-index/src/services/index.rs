@@ -802,19 +802,6 @@ impl LocalIndexService {
         Ok(count)
     }
 
-    /// Classify a file from its path relative to `library.root_path` and the
-    /// NFOs beside it, with no container tags; see
-    /// [`Self::classify_media_content_with`].
-    async fn classify_media_content(
-        &self,
-        path: &Path,
-        library: &Library,
-        runtime: Option<Duration>,
-    ) -> Result<Option<MediaFileContent>, IndexError> {
-        self.classify_media_content_with(path, library, runtime, &ContainerTags::default())
-            .await
-    }
-
     /// Classify a file from its path relative to `library.root_path`, the
     /// NFOs beside it and its container `tags` (issue #184), finding or
     /// creating its movie or show: by the provider id an NFO pins it to, else
@@ -824,7 +811,7 @@ impl LocalIndexService {
     /// `None` when the path says the file is media but not which: an episode
     /// file with no episode number in a season folder. Such a file is kept as
     /// an `Unknown` row with no content, and the administrator is told.
-    async fn classify_media_content_with(
+    async fn classify_media_content(
         &self,
         path: &Path,
         library: &Library,
@@ -1056,8 +1043,9 @@ impl LocalIndexService {
     }
 
     /// Bring a row classified by older rules up to [`CLASSIFIER_VERSION`]:
-    /// reclassify it from its path, attaching it to the title the current
-    /// rules name, and stamp the version. The row keeps its id -- and so its
+    /// reclassify it from its path, the NFOs beside it and the container tags
+    /// its last probe stored, attaching it to the title the current rules
+    /// name, and stamp the version. The row keeps its id -- and so its
     /// playback progress -- its hash and its probe results; nothing is
     /// re-probed. A title the move leaves with no file (a show a legacy
     /// build named after a `Season 01` folder) is retired by the scan's
@@ -1071,8 +1059,11 @@ impl LocalIndexService {
         path: &Path,
         library: &Library,
     ) -> Result<(), IndexError> {
+        // The tags the file's last probe read, as stored: a file placed by
+        // its tags keeps its place without being probed again.
+        let tags = existing.container_tags.clone().unwrap_or_default();
         let content = self
-            .classify_media_content(path, library, existing.duration)
+            .classify_media_content(path, library, existing.duration, &tags)
             .await?;
         let status = match (&content, existing.status) {
             (None, _) => FileStatus::Unknown,
@@ -1148,6 +1139,7 @@ impl LocalIndexService {
                         content: None,
                         status: FileStatus::Unknown,
                         classifier_version: 0,
+                        container_tags: None,
                     })
                     .await?;
                 self.check_and_report_duplicate(&file).await;
@@ -1156,8 +1148,9 @@ impl LocalIndexService {
         };
 
         let duration = Duration::from_secs_f64(metadata.duration_seconds());
+        let tags = container_tags(&metadata);
         let content = self
-            .classify_media_content_with(path, library, Some(duration), &container_tags(&metadata))
+            .classify_media_content(path, library, Some(duration), &tags)
             .await?;
         let status = if content.is_some() {
             FileStatus::Known
@@ -1179,6 +1172,7 @@ impl LocalIndexService {
                 content,
                 status,
                 classifier_version: CLASSIFIER_VERSION,
+                container_tags: Some(tags),
             })
             .await?;
 
@@ -1368,6 +1362,7 @@ impl LocalIndexService {
                 self.insert_media_streams(existing.id, &metadata).await?;
 
                 let duration = Duration::from_secs_f64(metadata.duration_seconds());
+                let tags = container_tags(&metadata);
                 let mut updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -1379,6 +1374,7 @@ impl LocalIndexService {
                             mime_type: format!("video/{}", metadata.format_name),
                             duration,
                             container_format: metadata.format_name.clone(),
+                            container_tags: tags.clone(),
                         },
                         content: None,
                         status: Some(if existing.content.is_some() {
@@ -1392,12 +1388,7 @@ impl LocalIndexService {
                     // Classified as a new file is: the path, the NFOs beside
                     // it, and the tags this probe just read (issue #184).
                     let content = self
-                        .classify_media_content_with(
-                            path,
-                            library,
-                            Some(duration),
-                            &container_tags(&metadata),
-                        )
+                        .classify_media_content(path, library, Some(duration), &tags)
                         .await?;
                     let status = if content.is_some() {
                         FileStatus::Known
@@ -3335,7 +3326,12 @@ mod tests {
                 PathBuf::new()
             };
             let content = self
-                .classify_media_content(path, &test_library(lib_id, &root), Some(runtime))
+                .classify_media_content(
+                    path,
+                    &test_library(lib_id, &root),
+                    Some(runtime),
+                    &ContainerTags::default(),
+                )
                 .await?;
             Ok(content.expect("the path classifies"))
         }
@@ -4535,6 +4531,7 @@ mod tests {
                 }),
                 status: FileStatus::Known,
                 classifier_version: 0,
+                container_tags: None,
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
@@ -4690,6 +4687,7 @@ mod tests {
                 content: Some(beam_domain::models::MediaFileContent::episode(episode_id)),
                 status: FileStatus::Known,
                 classifier_version: 0,
+                container_tags: None,
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
@@ -5014,6 +5012,7 @@ mod tests {
             }),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5090,6 +5089,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5147,6 +5147,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5169,6 +5170,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5872,6 +5874,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5893,6 +5896,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5974,6 +5978,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -6033,6 +6038,7 @@ mod tests {
             }),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -6096,6 +6102,7 @@ mod tests {
             }),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -6165,6 +6172,7 @@ mod tests {
             content: None,
             status: FileStatus::Unknown,
             classifier_version: CLASSIFIER_VERSION,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -6234,6 +6242,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -6476,6 +6485,7 @@ mod tests {
             content,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,

@@ -102,7 +102,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
 
   An NFO beside the file and the file's container tags refine this (FR-219). Every row MUST record
   the version of these rules that classified it, and a scan MUST reclassify a row classified by an
-  older version from its path and the NFOs beside it -- keeping its id, hash and probe results -- so
+  older version from its path, the NFOs beside it and the container tags its probe stored --
+  keeping its id, hash and probe results -- so
   a change to the rules reaches files indexed before it.
 - **FR-205**: The server MUST support multiple indexed file versions (distinct `files` rows) under a
   single logical movie or episode entry, to support the source-selection delivery scenario.
@@ -202,7 +203,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   `<stem>.nfo` beside it, else `movie.nfo` in its folder, and for an episode `tvshow.nfo` in its
   folder or, when that is a season folder, the series folder above; never one at the library root
   or in a category folder above a show's own folder -- and the file's container tags, in the
-  priority NFO, then path, then tags. An NFO's root (`<movie>`, or `<episodedetails>` with a
+  priority NFO, then path, then tags. The container tags a probe read MUST be stored with the
+  file, replaced by each successful probe and cleared when changed content fails its probe, so a
+  reclassification reads them without probing the file again. An NFO's root (`<movie>`, or `<episodedetails>` with a
   season and episode) decides whether the file is a movie or an episode; container tags (`show`,
   `season_number`, `episode_sort`, `title`, `date`/`year`) only fill what the path leaves open. An
   NFO or a tag MUST NOT change the identity key a title is matched by (FR-214), which stays the

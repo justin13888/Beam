@@ -209,6 +209,7 @@ impl Harness {
                     FileStatus::Unknown
                 },
                 classifier_version: 0,
+                container_tags: None,
             })
             .await
             .unwrap();
@@ -510,6 +511,7 @@ async fn a_legacy_sidecar_row_is_marked_missing() {
             content: None,
             status: FileStatus::Unknown,
             classifier_version: 0,
+            container_tags: None,
         })
         .await
         .unwrap();

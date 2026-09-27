@@ -128,6 +128,7 @@ pub async fn file(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         missing_since: Set(None),
         last_episode_number: Set(None),
         classifier_version: Set(0),
+        container_tags: Set(None),
     }
     .insert(db)
     .await?;

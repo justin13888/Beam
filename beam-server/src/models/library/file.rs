@@ -131,6 +131,7 @@ impl LibraryFile {
             missing_since: _,
             // Indexer bookkeeping: which rules classified the row.
             classifier_version: _,
+            container_tags: _,
         } = file;
         let content_type = match &content {
             Some(beam_domain::models::MediaFileContent::Movie { .. }) => FileContentType::Movie,

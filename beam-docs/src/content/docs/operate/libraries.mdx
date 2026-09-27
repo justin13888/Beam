@@ -405,7 +405,9 @@ progress; nothing is re-probed. A show a Beam version before these rules named a
 *Season 01* show is removed by the same scan. The first scan after upgrading to a Beam that reads
 [NFO files](#nfo-files-container-tags-and-subtitles) reclassifies every file this way, so the NFOs
 already in your library take effect — and pin their titles — without a manual rescan. Container
-tags are read when a file is probed, so they apply to files indexed or changed from then on.
+tags are read when a file is probed and kept with it, so a later reclassification places the file
+by them too. A file last probed by a Beam version before that is reclassified without its tags
+until its content changes and it is probed again.
 
 The name each movie and show is [grouped by](#multiple-versions) is versioned with the rules too.
 Before the scan reclassifies anything, Beam works out each title's grouping name again from its

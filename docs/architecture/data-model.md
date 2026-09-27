@@ -296,7 +296,7 @@ quality/edition/language rip.
 | `file_size` | BIGINT | no | |
 | `mime_type` | TEXT | yes | |
 | `hash_xxh3` | BIGINT | no | content hash used for change detection and dedup |
-| `duration_secs` | DOUBLE PRECISION | yes | NULL until a probe succeeds, and cleared (with `mime_type`, `container_format` and the file's `media_streams`) when changed content fails its probe; the indexer probes a NULL row again on every visit |
+| `duration_secs` | DOUBLE PRECISION | yes | NULL until a probe succeeds, and cleared (with `mime_type`, `container_format`, `container_tags` and the file's `media_streams`) when changed content fails its probe; the indexer probes a NULL row again on every visit |
 | `container_format` | TEXT | yes | |
 | `language` | TEXT | yes | primary audio/release language tag |
 | `quality` | TEXT | yes | e.g. `"1080p"` — the human label the client's source picker displays |
@@ -308,7 +308,8 @@ quality/edition/language rip.
 | `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash; NULL rows are treated as "suspected changed" |
 | `missing_since` | TIMESTAMPTZ | yes | soft-delete stamp: NULL while the file is on disk; the instant the indexer first found it gone otherwise (FR-211) |
 | `last_episode_number` | INTEGER | yes | the last episode of a multi-episode file (`S01E01E02`); the file's `episode_id` is its first. A `CHECK` (`files_last_episode_requires_episode`) allows it only alongside `episode_id` |
-| `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |
+| `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, the NFOs beside it and its `container_tags`, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |
+| `container_tags` | JSONB | yes | the file-level container tags classification reads (`title`, `show`, `season`, `episode`, `year`; `beam_domain::utils::classification::ContainerTags`) as the last successful probe read them. Set with the other probe results, cleared with them when changed content fails its probe; NULL while the file has no successful probe, or had it before this column existed. A `CHECK` (`files_container_tags_object`) holds it to a JSON object. A reclassification reads it instead of probing again, so a file placed by its tags keeps its place (FR-219) |
 
 **CHECK constraint** (table-level): exactly one of `movie_entry_id` / `episode_id` is set — *unless*
 `file_status = 'unknown'`, in which case both must be NULL (a file the indexer found but could not

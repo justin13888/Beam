@@ -349,6 +349,7 @@ impl Harness {
                 content: Some(content),
                 status: FileStatus::Known,
                 classifier_version: 0,
+                container_tags: None,
             })
             .await
             .unwrap();
@@ -1655,6 +1656,7 @@ async fn a_watcher_event_with_nothing_to_reclassify_does_not_retry_the_passes() 
             content: None,
             status: FileStatus::Unknown,
             classifier_version: 0,
+            container_tags: None,
         })
         .await
         .unwrap();

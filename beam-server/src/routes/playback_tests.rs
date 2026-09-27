@@ -146,6 +146,7 @@ fn make_media_file(content: MediaFileContent) -> MediaFile {
         content: Some(content),
         status: beam_domain::models::FileStatus::Known,
         classifier_version: 0,
+        container_tags: None,
         scanned_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         missing_since: None,

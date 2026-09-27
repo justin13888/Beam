@@ -63,6 +63,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,

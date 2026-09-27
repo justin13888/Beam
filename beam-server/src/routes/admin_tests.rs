@@ -596,6 +596,7 @@ async fn a_regular_user_listing_library_files_never_sees_a_filesystem_path() {
                 content: None,
                 status: FileStatus::Unknown,
                 classifier_version: 0,
+                container_tags: None,
             })
             .await
             .unwrap();
@@ -1657,6 +1658,7 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
             content: None,
             status: FileStatus::Unknown,
             classifier_version: 0,
+            container_tags: None,
         })
         .await
         .unwrap();

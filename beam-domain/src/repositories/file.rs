@@ -238,6 +238,7 @@ pub mod in_memory {
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
                 classifier_version: create.classifier_version,
+                container_tags: create.container_tags,
             };
             check_status(&file)?;
             let mut files = self.files.lock().unwrap();
@@ -277,15 +278,18 @@ pub mod in_memory {
                     mime_type,
                     duration,
                     container_format,
+                    container_tags,
                 } => {
                     file.mime_type = Some(mime_type);
                     file.duration = Some(duration);
                     file.container_format = Some(container_format);
+                    file.container_tags = Some(container_tags);
                 }
                 ProbeUpdate::Clear => {
                     file.mime_type = None;
                     file.duration = None;
                     file.container_format = None;
+                    file.container_tags = None;
                 }
             }
             if let Some(status) = update.status {
