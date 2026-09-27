@@ -11015,7 +11015,7 @@
                 "type": "null"
               }
             ],
-            "description": "The scan job a `scan_progress` event reports on; absent on every\nother category."
+            "description": "The scan job a `scan_progress` event reports on; `null` on every\nother category."
           }
         },
         "type": "object",

@@ -1266,9 +1266,11 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
     assert_eq!(second["message"], "disk nearly full");
     assert_eq!(second["level"], "warning");
     assert_eq!(second["category"], "system");
-    assert!(
-        second["scan"].is_null(),
-        "only a scan-progress event carries a scan"
+    assert_eq!(
+        second.get("scan"),
+        Some(&Value::Null),
+        "only a scan-progress event carries a scan; the others send null, like every absent \
+         optional field"
     );
 
     // A scan's progress arrives as structured data a client can render

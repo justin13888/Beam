@@ -60,7 +60,7 @@ pub struct AdminEventDto {
     pub message: String,
     pub library_id: Option<String>,
     pub library_name: Option<String>,
-    /// The scan job a `scan_progress` event reports on; absent on every
+    /// The scan job a `scan_progress` event reports on; `null` on every
     /// other category.
     pub scan: Option<ScanEvent>,
 }
