@@ -38,6 +38,11 @@ pub struct Model {
     /// Filesystem modification time, used with `file_size` as the cheap
     /// change-detection gate before an XXH3 rehash.
     pub mtime: Option<DateTimeWithTimeZone>,
+
+    /// When the indexer first found this file gone from disk, or `None` while
+    /// it is present. A missing row is hidden from every visible read and
+    /// purged once it has been missing for the grace period (issue #179).
+    pub missing_since: Option<DateTimeWithTimeZone>,
 }
 
 /// The `file_status` column is a Postgres enum type, not text (see

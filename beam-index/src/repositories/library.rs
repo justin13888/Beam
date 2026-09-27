@@ -65,8 +65,11 @@ impl LibraryRepository for SqlLibraryRepository {
         use beam_entity::files;
         use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
+        // Present files only: a missing file (issue #179) is not part of the
+        // library a user can see, so it is not in the count a scan records.
         files::Entity::find()
             .filter(files::Column::LibraryId.eq(library_id))
+            .filter(files::Column::MissingSince.is_null())
             .count(self.db.as_ref())
             .await
     }

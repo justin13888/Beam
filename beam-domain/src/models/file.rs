@@ -20,6 +20,12 @@ pub struct MediaFile {
     pub status: FileStatus,
     pub scanned_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When the indexer first found this file gone from disk; `None` while it
+    /// is present. A missing file is soft-deleted: every visible read of
+    /// [`crate::repositories::FileRepository`] skips it, and it keeps its id
+    /// -- and so its playback progress -- until the path reappears or the
+    /// grace period runs out (issue #179).
+    pub missing_since: Option<DateTime<Utc>>,
 }
 
 /// Status of the file in the library
@@ -127,6 +133,7 @@ impl From<beam_entity::files::Model> for MediaFile {
             status: FileStatus::from(model.file_status),
             scanned_at: model.scanned_at.with_timezone(&Utc),
             updated_at: model.updated_at.with_timezone(&Utc),
+            missing_since: model.missing_since.map(|d| d.with_timezone(&Utc)),
         }
     }
 }

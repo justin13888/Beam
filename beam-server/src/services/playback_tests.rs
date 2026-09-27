@@ -54,6 +54,7 @@ mod tests {
             status: beam_domain::models::FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         }
     }
 

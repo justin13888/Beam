@@ -121,9 +121,63 @@ pub async fn file(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         updated_at: Set(now()),
         file_status: Set(beam_entity::files::FileStatus::Known),
         mtime: Set(None),
+        missing_since: Set(None),
     }
     .insert(db)
     .await?;
 
     Ok(file_id)
+}
+
+/// Insert a show, a season and an episode, returning the episode's id -- the
+/// polymorphic parent an episode file hangs off. Shows are not owned by a
+/// library, so unlike [`movie_entry`] this takes none.
+pub async fn episode(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
+    let show_id = Uuid::new_v4();
+    beam_entity::show::ActiveModel {
+        id: Set(show_id),
+        title: Set(format!("show-{show_id}")),
+        title_localized: Set(None),
+        description: Set(None),
+        year: Set(None),
+        poster_url: Set(None),
+        backdrop_url: Set(None),
+        tmdb_id: Set(None),
+        imdb_id: Set(None),
+        tvdb_id: Set(None),
+        anilist_id: Set(None),
+        created_at: Set(now()),
+        updated_at: Set(now()),
+    }
+    .insert(db)
+    .await?;
+
+    let season_id = Uuid::new_v4();
+    beam_entity::season::ActiveModel {
+        id: Set(season_id),
+        show_id: Set(show_id),
+        season_number: Set(1),
+        poster_url: Set(None),
+        first_aired: Set(None),
+        last_aired: Set(None),
+    }
+    .insert(db)
+    .await?;
+
+    let episode_id = Uuid::new_v4();
+    beam_entity::episode::ActiveModel {
+        id: Set(episode_id),
+        season_id: Set(season_id),
+        episode_number: Set(1),
+        title: Set(format!("episode-{episode_id}")),
+        description: Set(None),
+        air_date: Set(None),
+        runtime_mins: Set(None),
+        thumbnail_url: Set(None),
+        created_at: Set(now()),
+    }
+    .insert(db)
+    .await?;
+
+    Ok(episode_id)
 }

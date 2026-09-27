@@ -62,6 +62,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         }
     }
 
@@ -601,6 +602,43 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_file_by_id_for_a_file_gone_missing_returns_none() {
+        // The stream and download routes resolve a file through this lookup,
+        // so a missing file (issue #179) answers 404 rather than an open on a
+        // path that is not there.
+        use beam_domain::repositories::FileRepository;
+
+        let video_dir = PathBuf::from("/media/videos");
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let file_id = Uuid::new_v4();
+        file_repo
+            .files
+            .lock()
+            .unwrap()
+            .insert(file_id, make_media_file(file_id, Uuid::new_v4()));
+        file_repo
+            .mark_missing(vec![file_id], chrono::Utc::now())
+            .await
+            .unwrap();
+        let service = LocalLibraryService::new(
+            Arc::new(InMemoryLibraryRepository::default()),
+            file_repo,
+            video_dir.clone(),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(MockIndexService::new()),
+            Arc::new(InMemoryPathValidator::success(video_dir)),
+        );
+
+        assert!(
+            service
+                .get_file_by_id(file_id.to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

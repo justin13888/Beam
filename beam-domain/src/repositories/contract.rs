@@ -49,6 +49,28 @@ pub mod fixture {
         /// A media file that exists as far as the backing store is concerned.
         async fn new_file(&self) -> Uuid;
     }
+
+    /// Everything the [`crate::file_repository_contract`] suite needs from a
+    /// backing store.
+    ///
+    /// The parents a file row hangs off are allocated by the fixture for the
+    /// same reason as in [`PlaybackProgressFixture`]: Postgres enforces the
+    /// `library_id`, `movie_entry_id` and `episode_id` foreign keys, the
+    /// in-memory store does not.
+    #[async_trait::async_trait]
+    pub trait FileRepositoryFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::FileRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
+
+        /// A movie entry inside `library_id`.
+        async fn new_movie_entry(&self, library_id: Uuid) -> Uuid;
+
+        /// An episode (with the show and season it needs) for `library_id`.
+        async fn new_episode(&self, library_id: Uuid) -> Uuid;
+    }
 }
 
 /// Behavioural contract for [`crate::repositories::PlaybackProgressRepository`].
@@ -368,6 +390,321 @@ macro_rules! playback_progress_repository_contract {
 
             assert_eq!(repo.count_by_user(user).await.unwrap(), 2);
             assert_eq!(repo.count_by_user(other).await.unwrap(), 1);
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::FileRepository`]: the
+/// soft-delete lifecycle of issue #179 -- which reads hide a missing file,
+/// which see it, and that marking, restoring and purging keep the id and the
+/// first stamp.
+///
+/// `$setup` names an `async fn() -> impl FileRepositoryFixture`.
+#[macro_export]
+macro_rules! file_repository_contract {
+    ($setup:path) => {
+        use ::chrono::{DateTime, Utc};
+        use ::std::path::PathBuf;
+        use ::uuid::Uuid;
+        use $crate::models::file::{CreateMediaFile, FileStatus, MediaFile, MediaFileContent};
+        use $crate::repositories::contract::fixture::FileRepositoryFixture;
+
+        /// A fixed, non-epoch instant: `missing_since` is `timestamptz`, and a
+        /// whole second survives Postgres's microsecond precision unchanged.
+        fn at(offset_secs: i64) -> DateTime<Utc> {
+            DateTime::from_timestamp(1_700_000_000 + offset_secs, 0).expect("valid instant")
+        }
+
+        /// Insert a present file under `library_id`. The path and hash are
+        /// fresh per call so concurrently running Postgres tests never meet.
+        async fn file_in(
+            fixture: &impl FileRepositoryFixture,
+            library_id: Uuid,
+            content: MediaFileContent,
+        ) -> MediaFile {
+            let unique = Uuid::new_v4();
+            fixture
+                .repo()
+                .create(CreateMediaFile {
+                    library_id,
+                    path: PathBuf::from(format!("/videos/{library_id}/{unique}.mkv")),
+                    // Positive and unique: the hash is a signed BIGINT column.
+                    hash: (unique.as_u128() as u64) >> 1,
+                    size_bytes: 1024,
+                    mtime: None,
+                    mime_type: Some("video/x-matroska".to_string()),
+                    duration: None,
+                    container_format: Some("matroska".to_string()),
+                    content: Some(content),
+                    status: FileStatus::Known,
+                })
+                .await
+                .expect("create a file")
+        }
+
+        async fn movie_file(fixture: &impl FileRepositoryFixture, library_id: Uuid) -> MediaFile {
+            let movie_entry_id = fixture.new_movie_entry(library_id).await;
+            file_in(
+                fixture,
+                library_id,
+                MediaFileContent::Movie { movie_entry_id },
+            )
+            .await
+        }
+
+        fn ids(files: &[MediaFile]) -> Vec<Uuid> {
+            let mut ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
+            ids.sort();
+            ids
+        }
+
+        fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+            ids.sort();
+            ids
+        }
+
+        #[tokio::test]
+        async fn a_created_file_is_present() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+
+            assert_eq!(file.missing_since, None);
+            let found = fixture
+                .repo()
+                .find_by_id(file.id)
+                .await
+                .unwrap()
+                .expect("a new file is visible");
+            assert_eq!(found.missing_since, None);
+        }
+
+        #[tokio::test]
+        async fn a_missing_file_is_hidden_from_every_visible_read() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let movie_entry_id = fixture.new_movie_entry(library).await;
+            let episode_id = fixture.new_episode(library).await;
+            let movie = file_in(
+                &fixture,
+                library,
+                MediaFileContent::Movie { movie_entry_id },
+            )
+            .await;
+            let episode =
+                file_in(&fixture, library, MediaFileContent::Episode { episode_id }).await;
+            let kept = movie_file(&fixture, library).await;
+
+            assert_eq!(
+                repo.mark_missing(vec![movie.id, episode.id], at(0))
+                    .await
+                    .unwrap(),
+                2
+            );
+
+            assert!(repo.find_by_id(movie.id).await.unwrap().is_none());
+            assert!(repo.find_by_id(episode.id).await.unwrap().is_none());
+            assert!(repo.find_by_hash(movie.hash).await.unwrap().is_empty());
+            assert!(
+                repo.find_by_movie_entry_id(movie_entry_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                repo.find_by_episode_id(episode_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                ids(&repo.find_all_by_library(library).await.unwrap()),
+                vec![kept.id],
+                "only the present file is listed"
+            );
+            // The present file is untouched by its neighbours going missing.
+            assert!(repo.find_by_id(kept.id).await.unwrap().is_some());
+            assert_eq!(repo.find_by_hash(kept.hash).await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_missing_file_is_still_seen_by_the_reconcile_reads() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let missing = movie_file(&fixture, library).await;
+            let present = movie_file(&fixture, library).await;
+            repo.mark_missing(vec![missing.id], at(0)).await.unwrap();
+
+            let by_path = repo
+                .find_by_path(&missing.path.to_string_lossy())
+                .await
+                .unwrap()
+                .expect("a missing file is still found by its path");
+            assert_eq!(by_path.id, missing.id);
+            assert_eq!(by_path.missing_since, Some(at(0)));
+
+            let all = repo
+                .find_all_by_library_including_missing(library)
+                .await
+                .unwrap();
+            assert_eq!(ids(&all), sorted(vec![missing.id, present.id]));
+            let stamped: Vec<Option<DateTime<Utc>>> = all
+                .iter()
+                .filter(|f| f.id == missing.id)
+                .map(|f| f.missing_since)
+                .collect();
+            assert_eq!(stamped, vec![Some(at(0))]);
+        }
+
+        #[tokio::test]
+        async fn the_reconcile_listing_is_scoped_to_one_library() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let other = fixture.new_library().await;
+            let mine = movie_file(&fixture, library).await;
+            let theirs = movie_file(&fixture, other).await;
+            repo.mark_missing(vec![mine.id, theirs.id], at(0))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                ids(&repo
+                    .find_all_by_library_including_missing(library)
+                    .await
+                    .unwrap()),
+                vec![mine.id]
+            );
+        }
+
+        #[tokio::test]
+        async fn marking_a_missing_file_again_keeps_the_first_stamp() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+
+            assert_eq!(repo.mark_missing(vec![file.id], at(0)).await.unwrap(), 1);
+            assert_eq!(
+                repo.mark_missing(vec![file.id], at(3600)).await.unwrap(),
+                0,
+                "a row already missing is not newly marked"
+            );
+
+            let stored = repo
+                .find_by_path(&file.path.to_string_lossy())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.missing_since,
+                Some(at(0)),
+                "the grace period runs from when the file was first found gone"
+            );
+        }
+
+        #[tokio::test]
+        async fn restoring_a_missing_file_keeps_its_id_and_makes_it_visible() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+            repo.mark_missing(vec![file.id], at(0)).await.unwrap();
+
+            repo.restore(file.id).await.unwrap();
+
+            let found = repo
+                .find_by_id(file.id)
+                .await
+                .unwrap()
+                .expect("a restored file is visible again under its old id");
+            assert_eq!(found.missing_since, None);
+            assert_eq!(found.path, file.path);
+            assert_eq!(
+                ids(&repo.find_all_by_library(library).await.unwrap()),
+                vec![file.id]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_restored_file_that_goes_missing_again_takes_a_fresh_stamp() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+            repo.mark_missing(vec![file.id], at(0)).await.unwrap();
+            repo.restore(file.id).await.unwrap();
+
+            assert_eq!(repo.mark_missing(vec![file.id], at(60)).await.unwrap(), 1);
+
+            let stored = repo
+                .find_by_path(&file.path.to_string_lossy())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.missing_since, Some(at(60)));
+        }
+
+        #[tokio::test]
+        async fn purge_removes_only_the_listed_rows_that_are_missing() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let missing = movie_file(&fixture, library).await;
+            let present = movie_file(&fixture, library).await;
+            let unlisted = movie_file(&fixture, library).await;
+            repo.mark_missing(vec![missing.id, unlisted.id], at(0))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                repo.purge_missing(vec![missing.id, present.id])
+                    .await
+                    .unwrap(),
+                1,
+                "a present file is never purged, even when listed"
+            );
+
+            assert!(
+                repo.find_by_path(&missing.path.to_string_lossy())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the purged row is gone from the reconcile reads too"
+            );
+            assert!(repo.find_by_id(present.id).await.unwrap().is_some());
+            assert_eq!(
+                ids(&repo
+                    .find_all_by_library_including_missing(library)
+                    .await
+                    .unwrap()),
+                sorted(vec![present.id, unlisted.id]),
+                "an unlisted missing row is left for its own grace period"
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_id_lists_change_nothing() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+            let gone = movie_file(&fixture, library).await;
+            repo.mark_missing(vec![gone.id], at(0)).await.unwrap();
+
+            assert_eq!(repo.mark_missing(Vec::new(), at(60)).await.unwrap(), 0);
+            assert_eq!(repo.purge_missing(Vec::new()).await.unwrap(), 0);
+
+            assert!(repo.find_by_id(file.id).await.unwrap().is_some());
+            assert_eq!(
+                ids(&repo
+                    .find_all_by_library_including_missing(library)
+                    .await
+                    .unwrap()),
+                sorted(vec![file.id, gone.id])
+            );
         }
     };
 }

@@ -25,6 +25,7 @@ use beam_domain::repositories::{
     EnrichmentStateRepository, FileRepository, LibraryRepository, MediaStreamRepository,
     MovieRepository, ShowRepository,
 };
+use beam_domain::services::{Clock, RealClock};
 
 // TODO: See if these can be improved. Ensure logic can detect all of them properly
 const KNOWN_VIDEO_EXTENSIONS: &[&str] = &[
@@ -50,21 +51,120 @@ struct WalkOutcome {
     /// How many of `files` have a known video extension -- the files Beam can
     /// index as media, and so the ones the empty-root guard counts.
     video_files: usize,
+    /// Every path the walk failed to read, usually a directory it could not
+    /// list. The walk says nothing about what is beneath one of these, so an
+    /// indexed row under it is left exactly as it is rather than marked
+    /// missing (issue #179).
+    failed_subtrees: Vec<PathBuf>,
+    /// Whether the walk hit an error it could not attribute to a path. Nothing
+    /// then scopes what the walk failed to see, so no row is marked missing.
+    unscoped_failure: bool,
 }
 
 /// Walks a library root and collects every regular file beneath it.
 ///
-/// Entries the walk cannot read are skipped, as they always have been.
+/// An entry the walk cannot read is collected as a failure rather than
+/// dropped: a subdirectory that fails to list contributes no files, and
+/// reading that silence as "every file under it is gone" is how a transient
+/// permission or I/O error used to delete rows.
 fn walk_library_root(root: &Path) -> WalkOutcome {
-    let files: Vec<PathBuf> = WalkDir::new(root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .map(walkdir::DirEntry::into_path)
-        .filter(|path| path.is_file())
-        .collect();
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut failed_subtrees: Vec<PathBuf> = Vec::new();
+    let mut unscoped_failure = false;
+    for entry in WalkDir::new(root) {
+        match entry {
+            Ok(entry) => {
+                let path = entry.into_path();
+                if path.is_file() {
+                    files.push(path);
+                }
+            }
+            Err(err) => match err.path() {
+                Some(path) => {
+                    warn!(path = %path.display(), error = %err, "library walk could not read a path");
+                    failed_subtrees.push(path.to_path_buf());
+                }
+                None => {
+                    warn!(error = %err, "library walk failed without a path");
+                    unscoped_failure = true;
+                }
+            },
+        }
+    }
     let video_files = files.iter().filter(|path| is_known_video(path)).count();
-    WalkOutcome { files, video_files }
+    WalkOutcome {
+        files,
+        video_files,
+        failed_subtrees,
+        unscoped_failure,
+    }
 }
+
+/// What to do with the indexed rows a scan's walk did not see.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MissingPlan {
+    /// Rows to stamp `missing_since = now`: not yet marked, and not under a
+    /// path the walk failed to read.
+    ///
+    /// With a zero grace period a row can be in both `mark` and `purge`.
+    /// [`FileRepository::purge_missing`] only removes rows that are already
+    /// stamped, so the scan marks before it purges.
+    mark: Vec<Uuid>,
+    /// Rows missing for at least the grace period, to purge.
+    purge: Vec<Uuid>,
+    /// How many unseen rows were left untouched because the walk could not
+    /// vouch for their absence.
+    shielded: usize,
+}
+
+/// Decide the fate of every row a walk did not see.
+///
+/// Pure so the grace arithmetic and the walk-error shielding are tested as a
+/// table rather than through a filesystem that has to be made to fail: a walk
+/// error is the one input a `TempDir` cannot reliably produce (CLAUDE.md,
+/// "no `FileSystem` trait").
+///
+/// A row is *shielded* -- left exactly as it is -- when the walk hit an error
+/// it could not scope, or when the row's path lies under a path the walk
+/// failed to read. `Path::starts_with` compares whole components, so a
+/// failure at `/a/b` shields `/a/b/c.mkv` but not `/a/bc.mkv`. Every other
+/// row is missing as of its first stamp (or `now`, if this scan is the first
+/// to notice) and is purged once `now - missing_since` reaches `grace`.
+fn plan_missing<'a>(
+    unseen: impl IntoIterator<Item = &'a MediaFile>,
+    failed_subtrees: &[PathBuf],
+    unscoped_failure: bool,
+    now: DateTime<Utc>,
+    grace: Duration,
+) -> MissingPlan {
+    let grace = chrono::TimeDelta::from_std(grace).unwrap_or(chrono::TimeDelta::MAX);
+    let mut plan = MissingPlan::default();
+    for file in unseen {
+        let shielded = unscoped_failure
+            || failed_subtrees
+                .iter()
+                .any(|failed| file.path.starts_with(failed));
+        if shielded {
+            plan.shielded += 1;
+            continue;
+        }
+        if file.missing_since.is_none() {
+            plan.mark.push(file.id);
+        }
+        let since = file.missing_since.unwrap_or(now);
+        if now - since >= grace {
+            plan.purge.push(file.id);
+        }
+    }
+    plan
+}
+
+/// The most failed paths an admin-log entry lists; the count is always exact.
+const MAX_REPORTED_FAILED_PATHS: usize = 50;
+
+/// How long a file may stay missing before a scan purges its row, unless the
+/// caller sets it with [`LocalIndexService::with_missing_file_grace`].
+pub const DEFAULT_MISSING_FILE_GRACE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Whether a path has a recognised video file extension.
 fn is_known_video(path: &Path) -> bool {
@@ -167,6 +267,8 @@ pub struct LocalIndexService {
     hash_unknown_files: bool,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
     divergence_policy: DivergencePolicy,
+    clock: Arc<dyn Clock>,
+    missing_file_grace: Duration,
 }
 
 impl LocalIndexService {
@@ -195,7 +297,25 @@ impl LocalIndexService {
             hash_unknown_files: true,
             enrichment_repo: None,
             divergence_policy: DivergencePolicy::default(),
+            clock: Arc::new(RealClock),
+            missing_file_grace: DEFAULT_MISSING_FILE_GRACE,
         }
+    }
+
+    /// Override the clock that stamps scan times and `missing_since`, and that
+    /// the grace period is measured against. Defaults to [`RealClock`].
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Override how long a file may stay missing from disk before a scan
+    /// purges its row -- and, through `ON DELETE CASCADE`, its playback
+    /// progress (issue #179). Zero purges at the first healthy scan that does
+    /// not find the file. Defaults to [`DEFAULT_MISSING_FILE_GRACE`].
+    pub fn with_missing_file_grace(mut self, grace: Duration) -> Self {
+        self.missing_file_grace = grace;
+        self
     }
 
     /// Override the runtime-divergence thresholds used when warning that two
@@ -531,6 +651,22 @@ impl LocalIndexService {
         self.insert_media_streams(file.id, &metadata).await?;
         self.check_and_report_duplicate(&file).await;
         self.check_and_report_runtime_divergence(&file).await;
+        Ok(true)
+    }
+
+    /// Clear `missing_since` on a row whose path is back on disk, returning
+    /// whether it had been missing. The row keeps its id, so its playback
+    /// progress is still attached (issue #179). Shared by the full scan and
+    /// single-path watcher events.
+    async fn restore_if_missing(&self, existing: &MediaFile) -> Result<bool, IndexError> {
+        if existing.missing_since.is_none() {
+            return Ok(false);
+        }
+        info!(
+            "Missing file is back, restoring: {}",
+            existing.path.display()
+        );
+        self.file_repo.restore(existing.id).await?;
         Ok(true)
     }
 
@@ -929,6 +1065,62 @@ impl LocalIndexService {
             .await;
     }
 
+    /// Tell the operator that part of a library could not be read, and that
+    /// the rows beneath it were left as they were rather than marked missing.
+    async fn report_walk_failures(
+        &self,
+        lib_uuid: Uuid,
+        library_name: &str,
+        failed_subtrees: &[PathBuf],
+        unscoped_failure: bool,
+        shielded: usize,
+    ) {
+        warn!(
+            library_id = %lib_uuid,
+            failed_paths = failed_subtrees.len(),
+            unscoped_failure,
+            shielded,
+            "library walk could not read part of the root; rows beneath were left untouched"
+        );
+        self.notification_service.publish(AdminEvent::warning(
+            EventCategory::LibraryScan,
+            format!(
+                "Library '{}': {} path(s) could not be read during the scan; {} indexed file(s) \
+                 beneath them were left as they were",
+                library_name,
+                failed_subtrees.len(),
+                shielded
+            ),
+            Some(lib_uuid.to_string()),
+            Some(library_name.to_string()),
+        ));
+        let reported: Vec<String> = failed_subtrees
+            .iter()
+            .take(MAX_REPORTED_FAILED_PATHS)
+            .map(|path| path.display().to_string())
+            .collect();
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Warning,
+                AdminLogCategory::LibraryScan,
+                format!(
+                    "Library scan could not read {} path(s) in \"{}\"; {} indexed file(s) left untouched",
+                    failed_subtrees.len(),
+                    library_name,
+                    shielded
+                ),
+                Some(serde_json::json!({
+                    "library_id": lib_uuid.to_string(),
+                    "failed_path_count": failed_subtrees.len(),
+                    "failed_paths": reported,
+                    "unscoped_failure": unscoped_failure,
+                    "shielded": shielded,
+                })),
+            )
+            .await;
+    }
+
     /// Scan every library. Used for the startup scan and the periodic backstop.
     /// A failure in one library is logged and does not abort the others.
     pub async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
@@ -951,22 +1143,40 @@ impl LocalIndexService {
         kind: FsEventKind,
     ) -> Result<(), IndexError> {
         // Ignore events for libraries that no longer exist.
-        if self.library_repo.find_by_id(library_id).await?.is_none() {
+        let Some(library) = self.library_repo.find_by_id(library_id).await? else {
             return Ok(());
-        }
+        };
 
         let path_str = path.to_string_lossy().to_string();
 
         if kind == FsEventKind::Removed || !path.is_file() {
-            if let Some(file) = self.file_repo.find_by_path(&path_str).await? {
-                info!("Removing deleted file from index: {}", path.display());
-                self.file_repo.delete(file.id).await?;
+            // A root that is not there is a volume that went away, not a file
+            // that was deleted: say nothing about the file until the next scan
+            // can see the root again (issue #179).
+            if !library.root_path.is_dir() {
+                warn!(
+                    path = %path.display(),
+                    root = %library.root_path.display(),
+                    "library root is unavailable; ignoring the removal"
+                );
+                return Ok(());
+            }
+            if let Some(file) = self.file_repo.find_by_path(&path_str).await?
+                && file.missing_since.is_none()
+            {
+                info!("Marking deleted file missing: {}", path.display());
+                self.file_repo
+                    .mark_missing(vec![file.id], self.clock.now())
+                    .await?;
             }
             return Ok(());
         }
 
         match self.file_repo.find_by_path(&path_str).await? {
-            Some(existing) => self.reconcile_existing_file(&existing, &path).await,
+            Some(existing) => {
+                self.restore_if_missing(&existing).await?;
+                self.reconcile_existing_file(&existing, &path).await
+            }
             None => {
                 if self.process_new_file(&path, library_id).await? {
                     record_file_outcome("new");
@@ -981,7 +1191,7 @@ impl LocalIndexService {
 impl IndexService for LocalIndexService {
     async fn scan_library(&self, library_id: String) -> Result<u32, IndexError> {
         let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| IndexError::InvalidId)?;
-        let start_time = chrono::Utc::now();
+        let start_time = self.clock.now();
 
         // Fetch Library
         let library = self
@@ -1050,8 +1260,13 @@ impl IndexService for LocalIndexService {
             ));
         }
 
-        // Phase 1: Fetch existing files from DB
-        let existing_files = self.file_repo.find_all_by_library(lib_uuid).await?;
+        // Phase 1: Fetch existing files from DB -- missing ones included, so a
+        // path that comes back is matched to its old row (and id), and so the
+        // empty-root guard below still counts a row that is already missing.
+        let existing_files = self
+            .file_repo
+            .find_all_by_library_including_missing(lib_uuid)
+            .await?;
         let mut existing_map: HashMap<PathBuf, beam_domain::models::MediaFile> = existing_files
             .into_iter()
             .map(|f| (f.path.clone(), f))
@@ -1060,13 +1275,18 @@ impl IndexService for LocalIndexService {
         info!("Found {} existing files in DB", existing_map.len());
 
         // Phase 2: Walk FS
-        let walk = walk_library_root(&library.root_path);
+        let WalkOutcome {
+            files: walked_files,
+            video_files: walked_video_files,
+            failed_subtrees,
+            unscoped_failure,
+        } = walk_library_root(&library.root_path);
 
         // An unmounted volume usually leaves its mount point behind as an empty
         // directory, which passes the guard above -- or one holding only a
         // sentinel or hidden file (`.not_mounted`, `.DS_Store`, `Thumbs.db`),
         // which admins put on mount points on purpose. Reconciling that walk
-        // would delete every indexed video row, so a root with no video files
+        // would mark every indexed video row missing, so a root with no video files
         // under a library that has indexed video files is refused rather than
         // believed. Only video rows are counted on either side: they are what
         // is at stake, and a library that only ever held non-video files has
@@ -1076,7 +1296,7 @@ impl IndexService for LocalIndexService {
             .keys()
             .filter(|path| is_known_video(path))
             .count();
-        if walk.video_files == 0 && indexed_video_files > 0 {
+        if walked_video_files == 0 && indexed_video_files > 0 {
             warn!(
                 root = %library.root_path.display(),
                 library_id = %lib_uuid,
@@ -1124,12 +1344,23 @@ impl IndexService for LocalIndexService {
             .await?;
 
         let mut added_count = 0;
+        let mut restored_count = 0u64;
 
         // Phase 3: Compare with DB, add new files
-        for path in walk.files {
+        for path in walked_files {
             if let Some(existing_file) = existing_map.remove(&path) {
-                // Known file: reconcile against its current on-disk state.
-                if let Err(e) = self.reconcile_existing_file(&existing_file, &path).await {
+                // Known file: bring it back if it was missing, then reconcile
+                // it against its current on-disk state.
+                let reconciled = match self.restore_if_missing(&existing_file).await {
+                    Ok(restored) => {
+                        if restored {
+                            restored_count += 1;
+                        }
+                        self.reconcile_existing_file(&existing_file, &path).await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = reconciled {
                     self.report_file_failure(lib_uuid, &library.name, &path, &e)
                         .await;
                 }
@@ -1149,16 +1380,63 @@ impl IndexService for LocalIndexService {
             }
         }
 
-        // Phase 4: Remove files that are in DB but not on FS
-        let removed_count = existing_map.len();
-        let to_remove: Vec<Uuid> = existing_map.values().map(|f| f.id).collect();
-        if !to_remove.is_empty() {
-            info!("Removing {} missing files from library", to_remove.len());
-            self.file_repo.delete_by_ids(to_remove).await?;
+        // Phase 4: Soft-delete the rows the walk did not see, and purge the
+        // ones that have been missing for the whole grace period. Nothing is
+        // deleted on first sight: a file that is gone now may only be on a
+        // volume that is away for a moment (issue #179).
+        let now = self.clock.now();
+        let plan = plan_missing(
+            existing_map.values(),
+            &failed_subtrees,
+            unscoped_failure,
+            now,
+            self.missing_file_grace,
+        );
+        let MissingPlan {
+            mark,
+            purge,
+            shielded,
+        } = plan;
+        let marked_count = self.file_repo.mark_missing(mark, now).await?;
+        let purged_count = self.file_repo.purge_missing(purge).await?;
+        if marked_count > 0 {
+            info!("Marked {} files missing from library", marked_count);
+        }
+        if !failed_subtrees.is_empty() || unscoped_failure {
+            self.report_walk_failures(
+                lib_uuid,
+                &library.name,
+                &failed_subtrees,
+                unscoped_failure,
+                shielded,
+            )
+            .await;
+        }
+        if purged_count > 0 {
+            info!(
+                "Purged {} files missing for longer than the grace period",
+                purged_count
+            );
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Info,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "Purged {} files from \"{}\" that were missing for longer than the grace period",
+                        purged_count, library.name
+                    ),
+                    Some(serde_json::json!({
+                        "library_id": library_id,
+                        "purged": purged_count,
+                        "grace_secs": self.missing_file_grace.as_secs(),
+                    })),
+                )
+                .await;
         }
 
         // Update scan finish time
-        let end_time = chrono::Utc::now();
+        let end_time = self.clock.now();
         let total_files = self.library_repo.count_files(lib_uuid).await?;
 
         self.library_repo
@@ -1166,15 +1444,15 @@ impl IndexService for LocalIndexService {
             .await?;
 
         info!(
-            "Scan complete. Added: {}, Removed: {}, Total: {}",
-            added_count, removed_count, total_files
+            "Scan complete. Added: {}, Marked missing: {}, Restored: {}, Purged: {}, Total: {}",
+            added_count, marked_count, restored_count, purged_count, total_files
         );
 
         self.notification_service.publish(AdminEvent::info(
             EventCategory::LibraryScan,
             format!(
-                "Library scan complete for '{}': added {}, removed {}, total {}",
-                library.name, added_count, removed_count, total_files
+                "Library scan complete for '{}': added {}, missing {}, restored {}, purged {}, total {}",
+                library.name, added_count, marked_count, restored_count, purged_count, total_files
             ),
             Some(lib_uuid.to_string()),
             Some(library.name.clone()),
@@ -1185,13 +1463,15 @@ impl IndexService for LocalIndexService {
                 AdminLogLevel::Info,
                 AdminLogCategory::LibraryScan,
                 format!(
-                    "Library scan completed: \"{}\" — {} added, {} removed, {} total",
-                    library.name, added_count, removed_count, total_files
+                    "Library scan completed: \"{}\" — {} added, {} marked missing, {} restored, {} purged, {} total",
+                    library.name, added_count, marked_count, restored_count, purged_count, total_files
                 ),
                 Some(serde_json::json!({
                     "library_id": library_id,
                     "added": added_count,
-                    "removed": removed_count,
+                    "marked_missing": marked_count,
+                    "restored": restored_count,
+                    "purged": purged_count,
                     "total": total_files,
                 })),
             )
@@ -1200,6 +1480,10 @@ impl IndexService for LocalIndexService {
         Ok(added_count)
     }
 }
+
+#[cfg(test)]
+#[path = "index_missing_tests.rs"]
+mod missing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2323,6 +2607,7 @@ mod tests {
                 status: FileStatus::Known,
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
+                missing_since: None,
             })
         });
 
@@ -2472,6 +2757,7 @@ mod tests {
                 status: FileStatus::Known,
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
+                missing_since: None,
             })
         });
 
@@ -2778,6 +3064,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         };
         file_repo
             .files
@@ -2820,7 +3107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scan_library_removed_file() {
+    async fn test_scan_library_removed_file_is_marked_missing_not_deleted() {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let dir = TempDir::new().unwrap();
@@ -2852,6 +3139,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         };
         file_repo
             .files
@@ -2874,10 +3162,17 @@ mod tests {
         let result = service.scan_library(library.id.to_string()).await;
         assert_eq!(result.unwrap(), 0); // no new files
 
-        // Phantom record must have been deleted; the file on disk survives.
+        // The phantom is hidden from the visible reads but kept, stamped
+        // missing, so its id -- and anything keyed on it -- survives (#179).
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
         assert_eq!(ids, vec![kept.id]);
+        let stored = file_repo
+            .find_by_path(&phantom.path.to_string_lossy())
+            .await
+            .unwrap()
+            .expect("a missing file is soft-deleted, not deleted");
+        assert!(stored.missing_since.is_some());
     }
 
     /// The row a previous scan would have written for a file that is on disk
@@ -2899,6 +3194,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         }
     }
 
@@ -2919,6 +3215,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         }
     }
 
@@ -3153,7 +3450,7 @@ mod tests {
     async fn test_scan_library_without_indexed_video_files_is_not_refused() {
         // The guard protects indexed video rows. A library that has only ever
         // held non-video files has none, so a walk finding no video files is
-        // believed and a non-video file that went is removed as usual.
+        // believed and a non-video file that went is marked missing as usual.
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let kept_path = root.join("notes.nfo");
@@ -3187,7 +3484,8 @@ mod tests {
     #[tokio::test]
     async fn test_scan_library_one_file_left_still_reconciles() {
         // The guard is for a walk that found no video files. A root that still
-        // holds one is believed: the rows for the files that went are deleted.
+        // holds one is believed: the rows for the files that went are marked
+        // missing.
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let kept_path = root.join("kept.mp4");
@@ -3580,8 +3878,8 @@ mod tests {
     #[tokio::test]
     async fn test_scan_publishes_correct_event_counts() {
         // Seed: 2 pre-existing DB records, 1 matching file on disk and 1 phantom.
-        // Disk: 1 matching file (stays) + 1 phantom (removed) + 1 brand-new file (added).
-        // Expected: added=1, removed=1 in the admin-log completion entry.
+        // Disk: 1 matching file (stays) + 1 phantom (marked missing) + 1 brand-new file (added).
+        // Expected: added=1, marked_missing=1 in the admin-log completion entry.
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
@@ -3608,10 +3906,11 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         };
         file_repo.files.lock().unwrap().insert(file_a.id, file_a);
 
-        // File B: exists in DB only (phantom, no matching disk file) → will be removed
+        // File B: exists in DB only (phantom, no matching disk file) → will be marked missing
         let phantom_path = dir.path().join("phantom.txt");
         let file_b = beam_domain::models::MediaFile {
             id: Uuid::new_v4(),
@@ -3627,6 +3926,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         };
         file_repo.files.lock().unwrap().insert(file_b.id, file_b);
 
@@ -3650,7 +3950,7 @@ mod tests {
         let added = service.scan_library(library.id.to_string()).await.unwrap();
         assert_eq!(added, 1);
 
-        // Admin log completion entry must record added=1, removed=1 in its JSON details
+        // Admin log completion entry must record the counts in its JSON details
         let logs = admin_log_repo.list(100, 0).await.unwrap();
         let completion = logs
             .iter()
@@ -3661,7 +3961,9 @@ mod tests {
             .as_ref()
             .expect("completion log has JSON details");
         assert_eq!(details["added"], serde_json::json!(1));
-        assert_eq!(details["removed"], serde_json::json!(1));
+        assert_eq!(details["marked_missing"], serde_json::json!(1));
+        assert_eq!(details["restored"], serde_json::json!(0));
+        assert_eq!(details["purged"], serde_json::json!(0));
     }
 
     // ─── reconcile, dedup, reconcile_path, scan_all_libraries ───────────────
@@ -3694,6 +3996,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
+            missing_since: None,
         };
         file_repo
             .files
@@ -3748,6 +4051,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
+            missing_since: None,
         };
         file_repo
             .files
@@ -3806,6 +4110,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
+            missing_since: None,
         };
         file_repo
             .files
@@ -3845,7 +4150,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reconcile_path_removed_deletes_file() {
+    async fn test_reconcile_path_removed_marks_file_missing() {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let dir = TempDir::new().unwrap();
@@ -3868,7 +4173,9 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
+            missing_since: None,
         };
+        let phantom_id = phantom.id;
         file_repo.files.lock().unwrap().insert(phantom.id, phantom);
 
         let service = LocalIndexService::new(
@@ -3889,7 +4196,14 @@ mod tests {
             .unwrap();
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
-        assert!(files.is_empty(), "removed file must be deleted from index");
+        assert!(files.is_empty(), "a removed file is hidden from the index");
+        let stored = file_repo
+            .find_all_by_library_including_missing(library.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1, "a removal never hard-deletes");
+        assert_eq!(stored[0].id, phantom_id);
+        assert!(stored[0].missing_since.is_some());
     }
 
     #[tokio::test]
@@ -4135,6 +4449,7 @@ mod tests {
             status: FileStatus::Known,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
+            missing_since: None,
         }
     }
 

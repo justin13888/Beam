@@ -62,6 +62,7 @@ mod tests {
             status: beam_domain::models::FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            missing_since: None,
         }
     }
 
@@ -719,6 +720,58 @@ mod tests {
             format!("/v1/files/{file_id}/download")
         );
         assert_eq!(sources[0].size_bytes, 1024);
+    }
+
+    #[tokio::test]
+    async fn test_get_media_sources_omits_a_file_that_went_missing() {
+        // A source that is not on disk cannot be streamed, so it is not offered
+        // (issue #179); the rendition still on disk is.
+        use beam_domain::repositories::FileRepository;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+
+        let movie = make_movie("Two Cuts", Some(2020));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let library_id = Uuid::new_v4();
+        let entry = MovieEntry {
+            id: Uuid::new_v4(),
+            library_id,
+            movie_id,
+            edition: None,
+            is_primary: true,
+            created_at: chrono::Utc::now(),
+        };
+        let content = MediaFileContent::Movie {
+            movie_entry_id: entry.id,
+        };
+        movie_repo.entries.lock().unwrap().insert(entry.id, entry);
+        let present = make_media_file(library_id, content.clone());
+        let missing = make_media_file(library_id, content);
+        let present_id = present.id;
+        let missing_id = missing.id;
+        for file in [present, missing] {
+            file_repo.files.lock().unwrap().insert(file.id, file);
+        }
+        file_repo
+            .mark_missing(vec![missing_id], chrono::Utc::now())
+            .await
+            .unwrap();
+
+        let service = DbMetadataService::new(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        let ids: Vec<String> = sources.iter().map(|s| s.file_id.clone()).collect();
+        assert_eq!(ids, vec![present_id.to_string()]);
     }
 
     /// Seeds a show/season/episode and returns the episode id, so the sources

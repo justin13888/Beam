@@ -134,6 +134,7 @@ fn make_media_file(content: MediaFileContent) -> MediaFile {
         status: beam_domain::models::FileStatus::Known,
         scanned_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        missing_since: None,
     }
 }
 
@@ -320,6 +321,56 @@ async fn a_partially_watched_file_resolves_back_to_its_movie() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].media_id, movie_id.to_string());
     assert_eq!(items[0].media_type, "movie");
+}
+
+/// A file that goes missing (issue #179) drops out of continue-watching and
+/// refuses new reports, but its position is kept: when the file is restored
+/// under the same id, the row comes back where the user left it.
+#[tokio::test]
+async fn a_missing_file_leaves_continue_watching_and_returns_with_its_position_on_restore() {
+    use beam_domain::repositories::FileRepository;
+
+    let fixture = fixture();
+    let (_, file_id) = seed_movie_file(&fixture);
+    let client = client(&fixture);
+    let token = seed_session(&fixture).await;
+    assert_eq!(report(&client, &token, file_id, 37.0).await, StatusCode::OK);
+
+    let continue_watching = || async {
+        let response = client
+            .get("/v1/continue-watching")
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.json::<Vec<ContinueWatchingItem>>()
+    };
+
+    fixture
+        .file_repo
+        .mark_missing(vec![file_id], chrono::Utc::now())
+        .await
+        .unwrap();
+
+    assert!(
+        continue_watching().await.is_empty(),
+        "a missing file cannot be resumed"
+    );
+    assert_eq!(
+        report(&client, &token, file_id, 50.0).await,
+        StatusCode::NOT_FOUND,
+        "a missing file cannot be played, so it takes no reports"
+    );
+
+    fixture.file_repo.restore(file_id).await.unwrap();
+
+    let items = continue_watching().await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].file_id, file_id.to_string());
+    assert_eq!(
+        items[0].position_secs, 37.0,
+        "the position survived the absence"
+    );
 }
 
 // ── GET /v1/history ──────────────────────────────────────────────────────────
