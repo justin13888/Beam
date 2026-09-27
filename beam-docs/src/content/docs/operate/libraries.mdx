@@ -12,9 +12,9 @@ A library is a directory Beam indexes. You can have several.
 The indexer only ever reads. It does not rename, move, delete, or write sidecar files, and it
 never creates artwork next to your videos — enrichment data lives in Beam's database.
 
-The Compose file does not mount your media read-only by default. If you want that guarantee
-enforced by the container runtime rather than by Beam's behaviour, add `:ro` to the media volume
-in `compose.beam.yaml`.
+The Compose file mounts your media read-only (`:ro`), so the guarantee is enforced by the container
+runtime rather than resting on Beam's behaviour alone. Keep it that way if you write your own
+Compose file or run the container another way: Beam needs no write access to a library root.
 
 ## Adding and scanning
 

@@ -87,8 +87,11 @@ services:
     ports:
       - "${BEAM_SERVER_HOST_PORT:-8000}:8000"
     volumes:
-      # Use named volumes by default, or custom host paths if specified
-      - ${HOST_VIDEO_DIR:-server_videos}:${BEAM_VIDEO_DIR:-/videos}
+      # Use named volumes by default, or custom host paths if specified.
+      # The library is mounted read-only (FR-202): Beam never writes under a
+      # library root, and `:ro` makes that a property of the container rather
+      # than of the code. `check:compose-invariants` fails if it is dropped.
+      - ${HOST_VIDEO_DIR:-server_videos}:${BEAM_VIDEO_DIR:-/videos}:ro
       - ${HOST_DATA_DIR:-server_data}:${BEAM_DATA_DIR:-/data}
     depends_on:
       postgres:

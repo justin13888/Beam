@@ -126,9 +126,9 @@ the usual causes.
 
 ## Your media directory
 
-`HOST_VIDEO_DIR` is mounted into the container at `BEAM_VIDEO_DIR`. Beam's indexer never writes
-to it — it only reads. For defence in depth you can append `:ro` to that volume in
-`compose.beam.yaml` so the container cannot write there even if something tried.
+`HOST_VIDEO_DIR` is mounted into the container at `BEAM_VIDEO_DIR`, read-only. Beam's indexer never
+writes to it — it only reads — and the `:ro` in `compose.beam.yaml` means the container could not
+write there even if something tried.
 
 <LinkCard
 	title="Full configuration reference"
