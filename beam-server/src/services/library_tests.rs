@@ -61,6 +61,7 @@ mod tests {
             container_format: Some("mp4".to_string()),
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,

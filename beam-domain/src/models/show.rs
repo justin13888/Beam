@@ -91,6 +91,8 @@ pub struct CreateEpisode {
     pub episode_number: u32,
     pub title: String,
     pub runtime: Option<Duration>,
+    /// When a date-based episode aired, read from its filename.
+    pub air_date: Option<NaiveDate>,
 }
 
 #[cfg(feature = "entity")]

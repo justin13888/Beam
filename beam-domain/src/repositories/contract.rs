@@ -531,7 +531,9 @@ macro_rules! file_repository_contract {
         use ::chrono::{DateTime, Utc};
         use ::std::path::PathBuf;
         use ::uuid::Uuid;
-        use $crate::models::file::{CreateMediaFile, FileStatus, MediaFile, MediaFileContent};
+        use $crate::models::file::{
+            CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent,
+        };
         use $crate::repositories::contract::fixture::FileRepositoryFixture;
 
         /// A fixed, non-epoch instant: `missing_since` is `timestamptz`, and a
@@ -562,6 +564,7 @@ macro_rules! file_repository_contract {
                     container_format: Some("matroska".to_string()),
                     content: Some(content),
                     status: FileStatus::Known,
+                    classifier_version: 0,
                 })
                 .await
                 .expect("create a file")
@@ -586,6 +589,92 @@ macro_rules! file_repository_contract {
         fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
             ids.sort();
             ids
+        }
+
+        #[tokio::test]
+        async fn a_multi_episode_range_is_stored_with_its_first_episode() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let episode_id = fixture.new_episode(library).await;
+            let file = file_in(
+                &fixture,
+                library,
+                MediaFileContent::Episode {
+                    episode_id,
+                    last_episode_number: Some(3),
+                },
+            )
+            .await;
+
+            let stored = fixture
+                .repo()
+                .find_by_id(file.id)
+                .await
+                .unwrap()
+                .expect("the file is present");
+            assert!(
+                matches!(
+                    stored.content,
+                    Some(MediaFileContent::Episode {
+                        episode_id: id,
+                        last_episode_number: Some(3),
+                    }) if id == episode_id
+                ),
+                "{:?}",
+                stored.content
+            );
+        }
+
+        #[tokio::test]
+        async fn set_classification_replaces_the_classification_and_nothing_else() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+            let episode_id = fixture.new_episode(library).await;
+
+            let moved = repo
+                .set_classification(
+                    file.id,
+                    FileClassification {
+                        content: Some(MediaFileContent::Episode {
+                            episode_id,
+                            last_episode_number: Some(2),
+                        }),
+                        status: FileStatus::Known,
+                        classifier_version: 7,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(moved.id, file.id);
+            assert_eq!(moved.classifier_version, 7);
+            assert_eq!((moved.hash, moved.size_bytes), (file.hash, file.size_bytes));
+            assert_eq!(moved.path, file.path);
+            assert_eq!(
+                ids(&repo.find_by_episode_id(episode_id).await.unwrap()),
+                vec![file.id],
+                "the file now belongs to the episode"
+            );
+
+            let cleared = repo
+                .set_classification(
+                    file.id,
+                    FileClassification {
+                        content: None,
+                        status: FileStatus::Unknown,
+                        classifier_version: 8,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(cleared.content.is_none(), "{:?}", cleared.content);
+            assert_eq!(cleared.status, FileStatus::Unknown);
+            assert_eq!(cleared.classifier_version, 8);
+            assert!(repo.find_by_episode_id(episode_id).await.unwrap().is_empty());
+            let stored = repo.find_by_id(file.id).await.unwrap().expect("still present");
+            assert!(stored.content.is_none());
+            assert_eq!(stored.classifier_version, 8);
         }
 
         #[tokio::test]
@@ -618,7 +707,7 @@ macro_rules! file_repository_contract {
             )
             .await;
             let episode =
-                file_in(&fixture, library, MediaFileContent::Episode { episode_id }).await;
+                file_in(&fixture, library, MediaFileContent::episode(episode_id)).await;
             let kept = movie_file(&fixture, library).await;
 
             assert_eq!(
@@ -880,8 +969,9 @@ macro_rules! show_repository_contract {
                     mime_type: Some("video/x-matroska".to_string()),
                     duration: None,
                     container_format: Some("matroska".to_string()),
-                    content: Some(MediaFileContent::Episode { episode_id }),
+                    content: Some(MediaFileContent::episode(episode_id)),
                     status: FileStatus::Known,
+                    classifier_version: 0,
                 })
                 .await
                 .expect("create an episode file")
@@ -908,7 +998,31 @@ macro_rules! show_repository_contract {
                 episode_number,
                 title: title.to_string(),
                 runtime: Some(Duration::from_secs(mins * 60)),
+                air_date: None,
             }
+        }
+
+        #[tokio::test]
+        async fn a_new_episode_keeps_its_air_date() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (season, _) = new_seasons(repo).await;
+            let aired = ::chrono::NaiveDate::from_ymd_opt(2024, 3, 1).expect("a valid date");
+
+            let created = repo
+                .find_or_create_episode(CreateEpisode {
+                    air_date: Some(aired),
+                    ..episode(season, 301, "Guest", 30)
+                })
+                .await
+                .unwrap();
+
+            let stored = repo
+                .find_episode_by_id(created.id)
+                .await
+                .unwrap()
+                .expect("the episode is readable by id");
+            assert_eq!(stored.air_date, Some(aired.to_string()));
         }
 
         #[tokio::test]
@@ -1355,7 +1469,7 @@ macro_rules! movie_repository_contract {
             let library_id = fixture.new_library().await;
             let entry = fixture
                 .repo()
-                .create_entry(CreateMovieEntry {
+                .find_or_create_entry(CreateMovieEntry {
                     library_id,
                     movie_id: movie.id,
                     edition: None,
@@ -1385,6 +1499,7 @@ macro_rules! movie_repository_contract {
                             movie_entry_id: entry.id,
                         }),
                         status: FileStatus::Known,
+                        classifier_version: 0,
                     })
                     .await
                     .expect("create a movie file"),
@@ -1401,6 +1516,60 @@ macro_rules! movie_repository_contract {
 
         fn after_everything() -> ::chrono::DateTime<::chrono::Utc> {
             ::chrono::Utc::now() + ::chrono::Duration::minutes(1)
+        }
+
+        #[tokio::test]
+        async fn find_or_create_entry_returns_one_entry_per_library_movie_and_edition() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = repo
+                .find_or_create_by_identity(parsed("Editions", Some(2019)))
+                .await
+                .unwrap();
+            let library = fixture.new_library().await;
+            let other_library = fixture.new_library().await;
+            let entry = |library_id: Uuid, edition: Option<&str>| CreateMovieEntry {
+                library_id,
+                movie_id: movie.id,
+                edition: edition.map(str::to_string),
+                is_primary: true,
+            };
+
+            let default = repo
+                .find_or_create_entry(entry(library, None))
+                .await
+                .unwrap();
+            let again = repo
+                .find_or_create_entry(entry(library, None))
+                .await
+                .unwrap();
+            assert_eq!(
+                again.id, default.id,
+                "a second copy of the default edition shares its entry"
+            );
+
+            let cut = repo
+                .find_or_create_entry(entry(library, Some("Director's Cut")))
+                .await
+                .unwrap();
+            let cut_again = repo
+                .find_or_create_entry(entry(library, Some("Director's Cut")))
+                .await
+                .unwrap();
+            assert_eq!(cut_again.id, cut.id);
+            assert_ne!(cut.id, default.id, "an edition is its own entry");
+            assert_eq!(cut.edition.as_deref(), Some("Director's Cut"));
+
+            let elsewhere = repo
+                .find_or_create_entry(entry(other_library, None))
+                .await
+                .unwrap();
+            assert_ne!(elsewhere.id, default.id, "another library is another entry");
+
+            assert_eq!(
+                repo.find_entries_by_movie_id(movie.id).await.unwrap().len(),
+                3
+            );
         }
 
         #[tokio::test]

@@ -225,22 +225,55 @@ impl MovieRepository for SqlMovieRepository {
         Ok(movies.rows_affected())
     }
 
-    async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
+    async fn find_or_create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
         use beam_entity::movie_entry;
-        use sea_orm::{ActiveModelTrait, Set};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
-        let now = Utc::now();
-        let new_entry = movie_entry::ActiveModel {
+        let CreateMovieEntry {
+            library_id,
+            movie_id,
+            edition,
+            is_primary,
+        } = create;
+
+        // One `INSERT ... ON CONFLICT DO NOTHING` on `idx_movie_entries_unique`,
+        // which is `NULLS NOT DISTINCT`: a second copy of a film's default
+        // edition conflicts with the first instead of creating a second
+        // entry. Then a read by the triple, whichever call won.
+        let active = movie_entry::ActiveModel {
             id: Set(Uuid::new_v4()),
-            library_id: Set(create.library_id),
-            movie_id: Set(create.movie_id),
-            edition: Set(create.edition),
-            is_primary: Set(create.is_primary),
-            created_at: Set(now.into()),
+            library_id: Set(library_id),
+            movie_id: Set(movie_id),
+            edition: Set(edition.clone()),
+            is_primary: Set(is_primary),
+            created_at: Set(Utc::now().into()),
         };
+        movie_entry::Entity::insert(active)
+            .on_conflict_do_nothing_on([
+                movie_entry::Column::LibraryId,
+                movie_entry::Column::MovieId,
+                movie_entry::Column::Edition,
+            ])
+            .exec_without_returning(self.db.as_ref())
+            .await?;
 
-        let result = new_entry.insert(self.db.as_ref()).await?;
-        Ok(MovieEntry::from(result))
+        let edition_matches = match &edition {
+            Some(edition) => movie_entry::Column::Edition.eq(edition.as_str()),
+            None => movie_entry::Column::Edition.is_null(),
+        };
+        let stored = movie_entry::Entity::find()
+            .filter(movie_entry::Column::LibraryId.eq(library_id))
+            .filter(movie_entry::Column::MovieId.eq(movie_id))
+            .filter(edition_matches)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                DbErr::RecordNotFound(format!(
+                    "entry of movie {movie_id} in library {library_id} is not readable after \
+                     find-or-create"
+                ))
+            })?;
+        Ok(MovieEntry::from(stored))
     }
 
     async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr> {

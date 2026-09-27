@@ -56,7 +56,11 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     /// `created_before` protects a movie or entry the indexer created while
     /// the caller was running, whose file row may not be written yet.
     async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr>;
-    async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr>;
+    /// The entry for `(library_id, movie_id, edition)`, created if there is
+    /// none. Every copy of one edition of a film in a library is a file of one
+    /// entry; a second copy never creates a second entry. On a conflict the
+    /// stored entry is returned unchanged (`is_primary` included).
+    async fn find_or_create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr>;
     async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr>;
     /// Reverse lookup from a `MediaFileContent::Movie { movie_entry_id }` back
     /// to the entry (and, via `MovieEntry::movie_id`, the movie) -- used to
@@ -292,16 +296,32 @@ pub mod in_memory {
             Ok((before - movies.len()) as u64)
         }
 
-        async fn create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr> {
+        async fn find_or_create_entry(
+            &self,
+            create: CreateMovieEntry,
+        ) -> Result<MovieEntry, DbErr> {
+            let CreateMovieEntry {
+                library_id,
+                movie_id,
+                edition,
+                is_primary,
+            } = create;
+            // Lookup and insert under one lock, as atomic as `ON CONFLICT`.
+            let mut entries = self.entries.lock().unwrap();
+            if let Some(existing) = entries.values().find(|e| {
+                e.library_id == library_id && e.movie_id == movie_id && e.edition == edition
+            }) {
+                return Ok(existing.clone());
+            }
             let entry = MovieEntry {
                 id: Uuid::new_v4(),
-                library_id: create.library_id,
-                movie_id: create.movie_id,
-                edition: create.edition,
-                is_primary: create.is_primary,
+                library_id,
+                movie_id,
+                edition,
+                is_primary,
                 created_at: chrono::Utc::now(),
             };
-            self.entries.lock().unwrap().insert(entry.id, entry.clone());
+            entries.insert(entry.id, entry.clone());
             Ok(entry)
         }
 

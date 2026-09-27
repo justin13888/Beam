@@ -309,6 +309,7 @@ impl ShowRepository for SqlShowRepository {
             episode_number,
             title,
             runtime,
+            air_date,
         } = create;
 
         // One `INSERT ... ON CONFLICT DO NOTHING`, not SELECT-then-INSERT:
@@ -323,6 +324,7 @@ impl ShowRepository for SqlShowRepository {
             episode_number: Set(episode_number as i32),
             title: Set(title),
             runtime_mins: Set(runtime.map(|d| (d.as_secs() / 60) as i32)),
+            air_date: Set(air_date),
             created_at: Set(Utc::now().into()),
             ..Default::default()
         };

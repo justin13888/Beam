@@ -82,6 +82,22 @@ mod cookie_security_gate {
     }
 }
 
+mod retired_env_vars {
+    use super::*;
+
+    #[test]
+    fn a_retired_variable_that_is_still_set_is_named_in_a_warning() {
+        let warnings = retired_env_warnings(|name| name == "BEAM_HASH_UNKNOWN_FILES");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("BEAM_HASH_UNKNOWN_FILES "));
+    }
+
+    #[test]
+    fn nothing_is_said_when_no_retired_variable_is_set() {
+        assert!(retired_env_warnings(|_| false).is_empty());
+    }
+}
+
 mod cors {
     use std::collections::BTreeSet;
 

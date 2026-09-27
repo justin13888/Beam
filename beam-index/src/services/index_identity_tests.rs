@@ -228,7 +228,7 @@ impl Harness {
         for rel in rels {
             let entry = self
                 .movie_repo
-                .create_entry(CreateMovieEntry {
+                .find_or_create_entry(CreateMovieEntry {
                     library_id: self.library.id,
                     movie_id: id,
                     edition: None,
@@ -277,16 +277,12 @@ impl Harness {
                     episode_number: n as u32 + 1,
                     title: format!("Episode {}", n + 1),
                     runtime: None,
+                    air_date: None,
                 })
                 .await
                 .unwrap();
-            self.index_file(
-                rel,
-                MediaFileContent::Episode {
-                    episode_id: episode.id,
-                },
-            )
-            .await;
+            self.index_file(rel, MediaFileContent::episode(episode.id))
+                .await;
         }
         id
     }
@@ -310,6 +306,7 @@ impl Harness {
                 container_format: None,
                 content: Some(content),
                 status: FileStatus::Known,
+                classifier_version: 0,
             })
             .await
             .unwrap();
@@ -380,8 +377,8 @@ async fn a_renamed_movie_takes_its_next_file_instead_of_duplicating() {
             .await
             .unwrap()
             .len(),
-        2,
-        "one entry per file"
+        1,
+        "both copies are files of the one default-edition entry"
     );
 }
 
@@ -820,7 +817,8 @@ async fn scanning_every_library_backfills_first_so_a_legacy_title_takes_its_next
             .await
             .unwrap()
             .len(),
-        2
+        1,
+        "the new copy joins the legacy entry"
     );
     // The library list the scan walked is the harness's one library.
     assert_eq!(h.library_repo.find_all().await.unwrap().len(), 1);

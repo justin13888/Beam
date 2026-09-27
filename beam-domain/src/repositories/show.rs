@@ -71,7 +71,7 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     ///
     /// Atomic: concurrent calls for one pair all return the same row.
     async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
-    /// Reverse lookup from a `MediaFileContent::Episode { episode_id }` back
+    /// Reverse lookup from a `MediaFileContent::Episode { episode_id, .. }` back
     /// to the episode -- used together with `find_season_by_id` to resolve a
     /// file id to its show for continue-watching.
     async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr>;
@@ -139,7 +139,7 @@ pub mod in_memory {
                     .values()
                     .filter(|f| !present_only || f.missing_since.is_none())
                     .filter_map(|f| match &f.content {
-                        Some(MediaFileContent::Episode { episode_id }) => Some(*episode_id),
+                        Some(MediaFileContent::Episode { episode_id, .. }) => Some(*episode_id),
                         _ => None,
                     })
                     .collect(),
@@ -368,6 +368,7 @@ pub mod in_memory {
                 episode_number,
                 title,
                 runtime,
+                air_date,
             } = create;
             // Lookup and insert under one lock, so the double is as atomic as
             // the `ON CONFLICT` statement it stands in for.
@@ -384,7 +385,7 @@ pub mod in_memory {
                 episode_number,
                 title,
                 description: None,
-                air_date: None,
+                air_date: air_date.map(|d| d.to_string()),
                 runtime,
                 thumbnail_url: None,
                 created_at: chrono::Utc::now(),

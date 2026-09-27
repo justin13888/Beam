@@ -54,6 +54,7 @@ mod tests {
             container_format: Some("mp4".to_string()),
             content: Some(content),
             status: beam_domain::models::FileStatus::Known,
+            classifier_version: 0,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -255,7 +256,7 @@ mod tests {
             .unwrap()
             .insert(episode.id, episode);
 
-        let file = make_media_file(MediaFileContent::Episode { episode_id });
+        let file = make_media_file(MediaFileContent::episode(episode_id));
         let file_id = file.id;
         harness
             .file_repo

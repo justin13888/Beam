@@ -37,7 +37,8 @@ services:
       - BEAM_AUTO_MIGRATE=${BEAM_AUTO_MIGRATE:-true}
 
       # Indexing / filesystem watcher (defaults match config.rs)
-      - BEAM_HASH_UNKNOWN_FILES=${BEAM_HASH_UNKNOWN_FILES:-true}
+      # Comma-separated glob patterns (relative to a library root) to skip.
+      - BEAM_SCAN_IGNORE=${BEAM_SCAN_IGNORE:-}
       - BEAM_SCAN_INTERVAL_SECS=${BEAM_SCAN_INTERVAL_SECS:-3600}
       - BEAM_MISSING_FILE_GRACE_DAYS=${BEAM_MISSING_FILE_GRACE_DAYS:-30}
       - BEAM_WATCH_ENABLED=${BEAM_WATCH_ENABLED:-true}

@@ -80,11 +80,19 @@ pub struct ServerConfig {
     #[config(env = "BEAM_DB_MIN_CONNECTIONS", default = 5)]
     pub db_min_connections: u32,
 
-    /// Whether to hash files with unknown/unsupported extensions during
-    /// indexing. Hashing them lets duplicate detection cover every file;
-    /// disable to save scan IO.
-    #[config(env = "BEAM_HASH_UNKNOWN_FILES", default = true)]
-    pub hash_unknown_files: bool,
+    /// Glob patterns, comma-separated, for paths under a library root the
+    /// indexer must leave alone (issue #182) -- in addition to the hidden
+    /// files, NAS housekeeping folders, extras and samples it always skips.
+    /// Each is matched case-insensitively against the path relative to the
+    /// library root; `*` stops at a `/`, `**` crosses it, and a pattern that
+    /// matches a directory skips everything beneath it: `Downloads`,
+    /// `**/*.partial.mkv`, `Kids/**`. An invalid pattern is a startup error.
+    #[config(
+        env = "BEAM_SCAN_IGNORE",
+        parse_env = confique::env::parse::list_by_comma,
+        default = []
+    )]
+    pub scan_ignore: Vec<String>,
 
     /// Interval between periodic full rescans of every library, in seconds.
     /// Acts as the backstop that catches changes the filesystem watcher missed.
@@ -282,7 +290,7 @@ impl fmt::Debug for ServerConfig {
             auto_migrate,
             db_max_connections,
             db_min_connections,
-            hash_unknown_files,
+            scan_ignore,
             scan_interval_secs,
             missing_file_grace_days,
             watch_enabled,
@@ -325,7 +333,7 @@ impl fmt::Debug for ServerConfig {
             .field("auto_migrate", auto_migrate)
             .field("db_max_connections", db_max_connections)
             .field("db_min_connections", db_min_connections)
-            .field("hash_unknown_files", hash_unknown_files)
+            .field("scan_ignore", scan_ignore)
             .field("scan_interval_secs", scan_interval_secs)
             .field("missing_file_grace_days", missing_file_grace_days)
             .field("watch_enabled", watch_enabled)
@@ -475,6 +483,16 @@ impl ServerConfig {
         std::time::Duration::from_secs(u64::from(self.missing_file_grace_days) * SECONDS_PER_DAY)
     }
 
+    /// Which paths under a library root the indexer indexes: the built-in
+    /// rules plus [`Self::scan_ignore`].
+    pub fn scan_path_policy(
+        &self,
+    ) -> Result<beam_domain::utils::path_policy::PathPolicy, ConfigError> {
+        beam_domain::utils::path_policy::PathPolicy::new(&self.scan_ignore).map_err(|err| {
+            ConfigError::InvalidValue("BEAM_SCAN_IGNORE".to_string(), err.to_string())
+        })
+    }
+
     /// Whether enough OIDC configuration is present to attempt discovery.
     /// All three of issuer/client_id/client_secret are required together.
     pub fn oidc_configured(&self) -> bool {
@@ -525,6 +543,13 @@ impl ServerConfig {
         }
 
         self.metadata_language = empty_to_none(self.metadata_language.take());
+        // `list_by_comma` splits without trimming: `a, b` is `["a", " b"]`,
+        // and a trailing comma leaves an empty pattern.
+        self.scan_ignore = std::mem::take(&mut self.scan_ignore)
+            .into_iter()
+            .map(|pattern| pattern.trim().to_string())
+            .filter(|pattern| !pattern.is_empty())
+            .collect();
         self.oidc_admin_claim = empty_to_none(self.oidc_admin_claim.take());
         self.oidc_admin_value = empty_to_none(self.oidc_admin_value.take());
     }
@@ -572,6 +597,8 @@ impl ServerConfig {
                 "must be at least 1".to_string(),
             ));
         }
+
+        self.scan_path_policy()?;
 
         // An expected admin-claim value is meaningless without the claim to
         // read it from -- reject the half-configured combination up front
@@ -926,6 +953,43 @@ mod tests {
         ServerConfig::default()
             .validate_values()
             .expect("a defaults-only configuration must pass its own validation");
+    }
+
+    #[test]
+    fn an_invalid_scan_ignore_pattern_fails_startup_and_names_the_pattern() {
+        let config = ServerConfig {
+            scan_ignore: vec!["Downloads".to_string(), "bad[glob".to_string()],
+            ..Default::default()
+        };
+        let err = config.validate_values().unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidValue(field, reason)
+                if field == "BEAM_SCAN_IGNORE" && reason.contains("bad[glob")),
+            "{err:?}"
+        );
+    }
+
+    /// `list_by_comma` splits without trimming, so `a, b,` arrives as
+    /// `["a", " b", ""]`; normalising makes it the two patterns it means.
+    #[test]
+    fn scan_ignore_patterns_are_trimmed_and_empty_ones_dropped() {
+        let mut config = ServerConfig {
+            scan_ignore: vec![
+                "Downloads".to_string(),
+                " **/*.partial.mkv".to_string(),
+                String::new(),
+            ],
+            ..Default::default()
+        };
+        config.normalize_values();
+        assert_eq!(config.scan_ignore, vec!["Downloads", "**/*.partial.mkv"]);
+        assert!(
+            config
+                .scan_path_policy()
+                .unwrap()
+                .excludes_directory(std::path::Path::new("downloads")),
+            "the configured pattern reaches the policy"
+        );
     }
 
     #[test]

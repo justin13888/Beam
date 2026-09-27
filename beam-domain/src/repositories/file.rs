@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::file::{CreateMediaFile, MediaFile, UpdateMediaFile};
+use crate::models::file::{CreateMediaFile, FileClassification, MediaFile, UpdateMediaFile};
 
 /// Persistence for indexed media files.
 ///
@@ -44,6 +44,16 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr>;
     async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr>;
+    /// Replace `id`'s classification -- content, status and classifier
+    /// version -- as a whole, clearing the content when `classification`
+    /// carries none. Everything else about the row (its id, hash, probe
+    /// results, missing stamp) is left as it is. Used when a scan reclassifies
+    /// a file under newer rules (issue #182).
+    async fn set_classification(
+        &self,
+        id: Uuid,
+        classification: FileClassification,
+    ) -> Result<MediaFile, DbErr>;
     /// Stamp `missing_since = at` on every listed row that is not already
     /// missing, returning how many were newly stamped. A row already missing
     /// keeps its first stamp: the grace period runs from when the file was
@@ -161,7 +171,7 @@ pub mod in_memory {
                 .values()
                 .filter(|f| {
                     f.missing_since.is_none()
-                        && matches!(&f.content, Some(MediaFileContent::Episode { episode_id: id }) if *id == episode_id)
+                        && matches!(&f.content, Some(MediaFileContent::Episode { episode_id: id, .. }) if *id == episode_id)
                 })
                 .cloned()
                 .collect())
@@ -183,6 +193,7 @@ pub mod in_memory {
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
+                classifier_version: create.classifier_version,
             };
             self.files.lock().unwrap().insert(file.id, file.clone());
             Ok(file)
@@ -220,6 +231,27 @@ pub mod in_memory {
             if let Some(content) = update.content {
                 file.content = Some(content);
             }
+            file.updated_at = chrono::Utc::now();
+            Ok(file.clone())
+        }
+
+        async fn set_classification(
+            &self,
+            id: Uuid,
+            classification: FileClassification,
+        ) -> Result<MediaFile, DbErr> {
+            let FileClassification {
+                content,
+                status,
+                classifier_version,
+            } = classification;
+            let mut files = self.files.lock().unwrap();
+            let file = files
+                .get_mut(&id)
+                .ok_or(DbErr::RecordNotFound(format!("File {id} not found")))?;
+            file.content = content;
+            file.status = status;
+            file.classifier_version = classifier_version;
             file.updated_at = chrono::Utc::now();
             Ok(file.clone())
         }

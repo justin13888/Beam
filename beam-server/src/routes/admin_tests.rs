@@ -478,6 +478,7 @@ async fn a_regular_user_listing_library_files_never_sees_a_filesystem_path() {
                 container_format: None,
                 content: None,
                 status: FileStatus::Known,
+                classifier_version: 0,
             })
             .await
             .unwrap();
@@ -1224,6 +1225,7 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
             container_format: None,
             content: None,
             status: FileStatus::Known,
+            classifier_version: 0,
         })
         .await
         .unwrap();
