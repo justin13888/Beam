@@ -172,7 +172,7 @@ quality/edition/language rip.
 | `language` | TEXT | yes | primary audio/release language tag |
 | `quality` | TEXT | yes | e.g. `"1080p"` — the human label the client's source picker displays |
 | `release_group` | TEXT | yes | |
-| `is_primary` | BOOLEAN | no | default `false` — which file plays by default for the parent entry/episode |
+| `is_primary` | BOOLEAN | no | default `false`, but the indexer writes `true` for every file it creates (`SqlFileRepository::create`), and nothing reads it. It does **not** select which of a movie's or episode's files plays by default: `/v1/media/{id}/sources` returns them in no particular order ([#142](https://github.com/justin13888/beam/issues/142)) |
 | `scanned_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 | `file_status` | ENUM (`file_status`) | no | `known` \| `changed` \| `unknown`; default `known` |

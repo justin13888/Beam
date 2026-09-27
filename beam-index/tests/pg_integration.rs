@@ -21,3 +21,5 @@ mod file_repository;
 mod playback_progress;
 #[path = "pg_integration/schema.rs"]
 mod schema;
+#[path = "pg_integration/show_repository.rs"]
+mod show_repository;
