@@ -53,8 +53,21 @@ is used exactly as given.
 - A failed delivery is retried after an hour, then two, four, and so on up to a day.
 - The time of the last successful delivery is kept in `BEAM_DATA_DIR/telemetry/`, so restarting the
   server does not send an extra report.
-- Only the collector's `scheme://host` appears in logs and in the preview; anything in the URL's
-  path or query, such as an ingest token, is not shown.
+- Only the collector's `scheme://host` appears in logs and in the preview — including when a
+  delivery fails; anything in the URL's path, query or user info, such as an ingest token, is not
+  shown.
+
+### Authenticating to the collector
+
+If your collector wants credentials, put them in the URL. Two forms are supported:
+
+- **A token in the query**, e.g. `https://collector.example/v1/metrics?token=…`, for a collector
+  that reads one there.
+- **A user name and password**, e.g. `https://user:secret@collector.example/v1/metrics`. They are
+  taken out of the URL and sent as an HTTP Basic `Authorization` header.
+
+Either way the credential is yours, sent only to the URL you named; no Beam session or credential is
+ever attached to the report.
 
 To turn it off, unset the variable and restart. See the
 [configuration reference](/reference/configuration/) for the exact semantics.

@@ -294,6 +294,9 @@ pub struct ServerConfig {
     /// version) and never a title, path, name or identifier. An admin can see
     /// the exact bytes at `GET /v1/admin/telemetry/library` before opting in.
     /// Must be an `http` or `https` URL with a host; an empty value is unset.
+    /// Credentials for the collector go in the URL: a query token, or
+    /// userinfo, sent as a Basic `Authorization` header. Only the origin is
+    /// ever logged.
     #[config(env = "BEAM_TELEMETRY_URL")]
     pub telemetry_url: Option<String>,
 }

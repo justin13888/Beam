@@ -64,6 +64,11 @@ never part of any report. The report reads the library's shape, not its use.
 - Beam gains one more outbound HTTP client (`ReqwestTelemetrySink` in `beam-index`, beside the
   artwork fetcher), built with no cookie store and no redirects, so the report reaches the URL the
   operator named or nowhere.
+- The collector URL is a secret in all but its origin: a query token or userinfo (which reqwest
+  sends as a Basic `Authorization` header -- the supported way, with a query token, to authenticate
+  to a collector) may sit in it. Only `scheme://host[:port]` is ever shown: the config's `Debug`
+  output, the admin preview, and every delivery error -- the adapter strips the URL from each
+  `reqwest::Error` before it is kept or logged.
 - Everything above the network is hermetic: the shape is a repository trait with a shared contract
   (bound to the in-memory double and, under `pg-integration`, to the SQL), and delivery is a
   `TelemetrySink` trait with a recording double.
