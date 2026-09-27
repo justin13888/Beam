@@ -112,17 +112,29 @@ for the full reference).
 
 ## Development
 
-0. Install [`rustup`](https://rustup.rs/) and [`mise`](https://mise.jdx.dev/) (mise supplies Bun and
-   the rest of the tooling; rustup reads the pin in `rust-toolchain.toml`)
+macOS and Linux are the supported development platforms, and both follow the same steps:
+
+0. Install [`rustup`](https://rustup.rs/) and [`mise`](https://mise.jdx.dev/) 2026.5.0 or later
+   (mise supplies Bun, the JDK, `nasm` and the rest of the tooling; rustup reads the pin in
+   `rust-toolchain.toml`). On macOS, the Apple client also needs Xcode, which nothing can install
+   for you.
 1. Clone repository
 2. `mise install && mise run setup` -- installs tools, JS dependencies, and the git hooks
+
+That is all the `pre-push` hook needs. Anything heavier is provisioned by the task that uses it, the
+first time it runs: the JS tasks install `node_modules`, and every `android:*` task runs
+`android:sdk`, which installs the pinned Android SDK packages and NDK into
+`$XDG_DATA_HOME/beam/android-sdk` (`~/.local/share/beam/android-sdk` by default). That location is
+set by `mise.toml` rather than read from `ANDROID_HOME`, so no `beam-android/local.properties` is
+needed; to share the SDK with Android Studio, point Studio at the same directory. The first
+Android run downloads about 2 GB; `mise run android:avd` adds the emulator on top, about 10 GB more.
 
 `mise.toml` is the single source of truth for every command CI and the git hooks run. `mise tasks`
 lists them; `mise run ci` runs everything CI does except coverage and image builds. See
 [ADR-0009](docs/architecture/decisions/ADR-0009-release-engineering.md).
 
 On hosts without system FFmpeg development libraries, the Rust tasks statically vendor an LGPL-only
-FFmpeg (requires a `nasm` assembler on `PATH`) -- see
+FFmpeg, assembled with the `nasm` mise installs -- see
 [ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md). If you do have the
 system libraries, set `BEAM_CARGO_FEATURES = ""` in a `mise.local.toml` to link against them
 instead.

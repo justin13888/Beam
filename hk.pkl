@@ -128,8 +128,22 @@ hooks {
                 glob = List("*.rs")
                 check = "mise run check:mutants-skip-fakes"
             }
+            // Every JS task depends on `deps:js`, so a fresh worktree -- which has
+            // no node_modules -- provisions itself. But the three JS steps below
+            // run in parallel, and overlapping `bun install`s fail (ENOTEMPTY over
+            // an empty node_modules, EEXIST re-linking bins over a full one). This
+            // step installs once, and they wait on it. Their own `deps:js` is then
+            // skipped by mise without starting bun, because the install left a
+            // stamp newer than bun.lock and every package.json (see the task in
+            // mise.toml). The glob is the union of theirs, so it fires exactly
+            // when one of them will.
+            ["js-deps"] {
+                glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json", "beam-docs/**")
+                check = "mise run deps:js"
+            }
             ["ts-check"] {
                 glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json")
+                depends = List("js-deps")
                 check = "mise run ts:check"
             }
             // TODO(#146): restore `ts-typecheck`.
@@ -149,6 +163,7 @@ hooks {
             // generated types to exist, so the suite runs on a fresh checkout.
             ["ts-test"] {
                 glob = List("*.ts", "*.tsx")
+                depends = List("js-deps")
                 check = "mise run ts:test"
             }
             // Without this a docs-only change is pushed unverified, because none of the ts-*
@@ -157,11 +172,18 @@ hooks {
             // build on every mise.toml edit is not worth the wait. CI still covers that.
             ["docs-build"] {
                 glob = List("beam-docs/**")
+                depends = List("js-deps")
                 check = "mise run docs:build"
             }
             // The Android steps also watch beam-client-core: the Kotlin
             // bindings and the .so are generated from it, so a change there can
             // break the Android build without touching a Kotlin file.
+            //
+            // Nothing needs installing by hand first: every `android:*` task
+            // depends on `android:sdk`, which installs the pinned SDK and NDK
+            // into the mise-owned ANDROID_SDK_ROOT on the first run and is a
+            // no-op after that. It is not a race across these three: they are
+            // chained, so `android-lint` provisions before the others start.
             ["android-lint"] {
                 glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
                 check = "mise run android:lint"

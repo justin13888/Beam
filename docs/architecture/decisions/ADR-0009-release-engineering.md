@@ -91,6 +91,11 @@ hardcoded a third copy of the vendored-FFmpeg feature list. `BEAM_CARGO_FEATURES
 now the only place it appears.
 
 Contributors now need `mise` (and, for the vendored-FFmpeg build, `nasm`). `mise install && mise run
-setup` replaces the previous rustup/bun/`lefthook install` sequence. Existing clones must delete the
+setup` replaces the previous rustup/bun/`lefthook install` sequence. (Amended 2026-09-27 — see issue
+#178 — mise now provides `nasm` too, and every task provisions what it needs on first use: the JS
+tasks install `node_modules` through `deps:js`, and the Android tasks install the pinned SDK and NDK
+through `android:sdk` into a mise-owned `ANDROID_SDK_ROOT`. Beyond `mise`, a contributor needs only
+rustup, plus Xcode on macOS for the Apple client, so a fresh macOS or Linux checkout passes the
+`pre-push` hook with no other setup.) Existing clones must delete the
 stale lefthook shims in `.git/hooks/`: `hk` installs via git's `hook.*` config on git 2.54+ rather
 than by writing hook files, so the old shims would otherwise keep running alongside it.
