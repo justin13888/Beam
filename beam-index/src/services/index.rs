@@ -98,12 +98,21 @@ struct WalkOutcome {
 /// A directory `policy` excludes wholesale is not descended into (issue
 /// #182); a file it does not call media is not collected.
 fn walk_library_root(root: &Path, policy: &PathPolicy) -> WalkOutcome {
+    walk_under(root, root, policy)
+}
+
+/// [`walk_library_root`] from `start`, a directory at or beneath `root`: the
+/// walk a watcher event for a directory makes (issue #180). What is beneath
+/// `start` is judged by the policy as a full scan would judge it, relative to
+/// the library `root`; whether the policy excludes `start` itself is the
+/// caller's to ask.
+fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut video_files_seen = 0usize;
     let mut excluded = 0usize;
     let mut failed_subtrees: Vec<PathBuf> = Vec::new();
     let mut unscoped_failure = false;
-    let walk = WalkDir::new(root)
+    let walk = WalkDir::new(start)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
@@ -228,6 +237,111 @@ fn plan_missing<'a>(
         }
     }
     plan
+}
+
+/// Whether nothing is at `path` any more: a stat that does not follow a
+/// link says "no such file". Any other failure -- a permission error, a
+/// transient I/O error on a network mount -- says nothing about the file, so
+/// it is not absent.
+fn path_is_absent(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// Which of `candidates` a new file at `path`, of `size` bytes and content
+/// hash `hash`, is the same file as -- moved or renamed -- if any (issue
+/// #180). The candidates are rows of the file's own library.
+///
+/// A candidate is one with the same content (hash and size) whose own file
+/// is gone: marked missing, or no longer at its path per `is_absent`. A row
+/// whose file is still there is a copy, not a move, and a new row is right
+/// for the new file. A hash of zero is the unhashed sentinel and matches
+/// nothing.
+///
+/// Absent-but-unmarked counts because the watcher delivers the two halves of
+/// a move in no particular order: the new path's event can be reconciled
+/// before the old path's, while the old row is not yet marked missing.
+///
+/// Two copies of one file moved together both match either new path, so
+/// the tie is broken toward the candidate that looks most like the same file:
+/// the same file name, then the same directory, then the one gone most
+/// recently -- an unmarked row, then the latest stamp -- and, last, the
+/// lowest id, so the choice never depends on the order the rows came in.
+fn choose_relink_candidate<'a>(
+    path: &Path,
+    size: u64,
+    hash: u64,
+    candidates: &'a [MediaFile],
+    is_absent: impl Fn(&Path) -> bool,
+) -> Option<&'a MediaFile> {
+    if hash == 0 {
+        return None;
+    }
+    candidates
+        .iter()
+        .filter(|row| row.hash == hash && row.size_bytes == size && row.path != path)
+        .filter(|row| row.missing_since.is_some() || is_absent(&row.path))
+        .min_by_key(|row| {
+            let same_name = row.path.file_name() == path.file_name();
+            let same_directory = row.path.parent() == path.parent();
+            let gone_most_recently = (row.missing_since.is_none(), row.missing_since);
+            (
+                std::cmp::Reverse(same_name),
+                std::cmp::Reverse(same_directory),
+                std::cmp::Reverse(gone_most_recently),
+                row.id,
+            )
+        })
+}
+
+/// The rows a scan may relink a new file to: every row of the library its
+/// walk did not see -- missing, or gone since the last visit -- keyed by
+/// content hash. A row under a path the walk could not read is left out: the
+/// walk cannot say its file is gone.
+#[derive(Debug, Default)]
+struct RelinkPool {
+    by_hash: HashMap<u64, Vec<MediaFile>>,
+    /// The paths the rows relinked so far were at: the scan no longer holds
+    /// a row for them, so none is marked missing.
+    vacated: Vec<PathBuf>,
+}
+
+impl RelinkPool {
+    fn new<'a>(unseen: impl IntoIterator<Item = &'a MediaFile>) -> Self {
+        let mut pool = Self::default();
+        for row in unseen {
+            if row.hash != 0 {
+                pool.by_hash.entry(row.hash).or_default().push(row.clone());
+            }
+        }
+        pool
+    }
+
+    fn candidates(&self, hash: u64) -> &[MediaFile] {
+        self.by_hash.get(&hash).map_or(&[], Vec::as_slice)
+    }
+
+    /// `row` was relinked: it is no longer a candidate, and its old path is
+    /// vacated.
+    fn take(&mut self, row: &MediaFile) {
+        if let Some(rows) = self.by_hash.get_mut(&row.hash) {
+            rows.retain(|candidate| candidate.id != row.id);
+        }
+        self.vacated.push(row.path.clone());
+    }
+}
+
+/// Where [`LocalIndexService::process_new_file`] looks for the row a new
+/// file may be a moved one of.
+enum RelinkSource<'a> {
+    /// A full scan: the rows its walk did not see.
+    Pool(&'a mut RelinkPool),
+    /// A watcher event: the library's rows with the file's hash, read from
+    /// the repository. Order-independent across debounce windows: the row is
+    /// found whether the old path's event was reconciled first or not yet.
+    Repository,
 }
 
 /// The most failed paths an admin-log entry lists; the count is always exact.
@@ -373,8 +487,8 @@ fn legacy_show_key(path: &Path) -> String {
 
 /// Records one processed-file outcome on the
 /// `beam_index_files_processed_total{result}` counter, covering both full
-/// scans and watcher-driven reconciles. `result` is one of `new`, `changed`,
-/// `unchanged`, or `failed`. A no-op unless beam-server installed a metrics
+/// scans and watcher-driven reconciles. `result` is one of `new`, `relinked`,
+/// `changed`, `unchanged`, or `failed`. A no-op unless beam-server installed a metrics
 /// recorder (`BEAM_ENABLE_METRICS=true`).
 fn record_file_outcome(result: &'static str) {
     metrics::counter!("beam_index_files_processed_total", "result" => result).increment(1);
@@ -495,6 +609,9 @@ pub const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileOutcome {
     Added,
+    /// A moved or renamed file, found at its new path and pointed to by its
+    /// old row (issue #180).
+    Relinked,
     Changed,
     Unchanged,
     /// Still being written: left alone, to be visited again after the
@@ -1017,15 +1134,22 @@ impl LocalIndexService {
     /// Process a NEW media file to add it to the library. The caller has
     /// already established that the [`PathPolicy`] calls `path` media.
     ///
-    /// Stat, settle, hash, probe, classify, write -- in that order. A file
-    /// still being written is left alone and nothing is written for it
+    /// Stat, settle, hash, relink, probe, classify, write -- in that order. A
+    /// file still being written is left alone and nothing is written for it
     /// ([`FileOutcome::Deferred`]). Every file is hashed before it is probed,
     /// so a row whose probe fails still carries its real hash and takes part
     /// in duplicate detection like any other.
+    ///
+    /// A file that is a moved or renamed one -- see
+    /// [`choose_relink_candidate`], over the rows `relink` offers -- is
+    /// [relinked](Self::relink_file) instead: its old row, with its id and
+    /// everything keyed on it, points at the new path, and the file is
+    /// neither probed nor classified (issue #180).
     async fn process_new_file(
         &self,
         path: &Path,
         library: &Library,
+        relink: RelinkSource<'_>,
     ) -> Result<FileOutcome, IndexError> {
         info!("Processing new file: {}", path.display());
 
@@ -1049,6 +1173,39 @@ impl LocalIndexService {
             debug!(path = %path.display(), "a new file changed while it was hashed; deferring it");
             return Ok(FileOutcome::Deferred(self.settle_window));
         };
+
+        let moved_from = match relink {
+            RelinkSource::Pool(pool) => {
+                let chosen = choose_relink_candidate(
+                    path,
+                    size,
+                    hash,
+                    pool.candidates(hash),
+                    path_is_absent,
+                )
+                .cloned();
+                if let Some(row) = &chosen {
+                    self.relink_file(row, path, size, mtime, library).await?;
+                    pool.take(row);
+                }
+                chosen
+            }
+            RelinkSource::Repository => {
+                let candidates = self
+                    .file_repo
+                    .find_by_library_and_hash_including_missing(library.id, hash)
+                    .await?;
+                let chosen =
+                    choose_relink_candidate(path, size, hash, &candidates, path_is_absent).cloned();
+                if let Some(row) = &chosen {
+                    self.relink_file(row, path, size, mtime, library).await?;
+                }
+                chosen
+            }
+        };
+        if moved_from.is_some() {
+            return Ok(FileOutcome::Relinked);
+        }
 
         let metadata = match self.media_info_service.get_video_metadata(path).await {
             Ok(m) => m,
@@ -1146,6 +1303,59 @@ impl LocalIndexService {
         );
         self.file_repo.restore(existing.id).await?;
         Ok(true)
+    }
+
+    /// Point `row` at `path`, where its file was moved or renamed to, found
+    /// there at `size` bytes and `mtime` (issue #180).
+    ///
+    /// The row keeps its id, and so its playback progress, its movie or
+    /// episode, and its streams; a missing row is visible again. Nothing is
+    /// probed or classified: the content is the content the row already
+    /// describes. The move is told to the administrator, naming both paths.
+    async fn relink_file(
+        &self,
+        row: &MediaFile,
+        path: &Path,
+        size: u64,
+        mtime: Option<DateTime<Utc>>,
+        library: &Library,
+    ) -> Result<(), IndexError> {
+        self.file_repo
+            .relink(row.id, path.to_path_buf(), size, mtime)
+            .await?;
+        info!(
+            file_id = %row.id,
+            from = %row.path.display(),
+            to = %path.display(),
+            "a moved file keeps its row"
+        );
+        record_file_outcome("relinked");
+        let message = format!(
+            "File moved: '{}' is now '{}'",
+            row.path.display(),
+            path.display()
+        );
+        self.notification_service.publish(AdminEvent::info(
+            EventCategory::LibraryScan,
+            message.clone(),
+            Some(library.id.to_string()),
+            Some(library.name.clone()),
+        ));
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Info,
+                AdminLogCategory::LibraryScan,
+                message,
+                Some(serde_json::json!({
+                    "library_id": library.id.to_string(),
+                    "file_id": row.id.to_string(),
+                    "from": row.path.display().to_string(),
+                    "to": path.display().to_string(),
+                })),
+            )
+            .await;
+        Ok(())
     }
 
     /// Reconcile a file already present in the index against its current state
@@ -2404,6 +2614,20 @@ impl LocalIndexService {
     /// [`ReconcileOutcome::Deferred`] untouched -- as is an event for a file
     /// still being written (see [`Self::with_settle_window`]). The caller
     /// retries it after the delay the outcome names.
+    ///
+    /// `kind` is a hint only: what is at the path now decides.
+    ///
+    /// * **A file** is reconciled as a scan would: an indexed one against
+    ///   its row, a new one indexed -- or, when it is a moved or renamed
+    ///   file, relinked to its row (issue #180).
+    /// * **A directory** -- one renamed, or moved into the library -- is
+    ///   walked, and every file beneath it reconciled the same way. A row
+    ///   beneath it the walk did not see is marked missing, as a scan would
+    ///   mark it (see [`Self::reconcile_directory`]).
+    /// * **Nothing** -- or a symlink, which is not part of the library
+    ///   (issue #186) -- marks the row at the path missing. With no row
+    ///   there the path was a directory: every row beneath it whose file is
+    ///   gone is marked missing. The watcher never purges.
     pub async fn reconcile_path(
         &self,
         library_id: Uuid,
@@ -2438,6 +2662,7 @@ impl LocalIndexService {
                 retry_after: LIBRARY_BUSY_RETRY,
             });
         };
+        debug!(path = %path.display(), ?kind, "reconciling a watcher event");
 
         // Only a stat that says "no such file" means the path is gone. Any
         // other failure (EACCES from an unsearchable parent, a transient EIO
@@ -2446,52 +2671,56 @@ impl LocalIndexService {
         // shields the same path (issue #179). The stat does not follow a
         // symlink: a link is not a library file (issue #186), so a path that
         // is now one reconciles exactly like a path that is gone.
-        let is_file = if kind == FsEventKind::Removed {
-            false
-        } else {
-            match std::fs::symlink_metadata(&path) {
-                Ok(meta) => meta.is_file(),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-                Err(err) => {
-                    warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "could not stat a changed path; leaving its row as it is"
-                    );
-                    return Ok(ReconcileOutcome::Done);
-                }
-            }
-        };
-
-        if !is_file {
-            // A root that is not there is a volume that went away, not a file
-            // that was deleted: say nothing about the file until the next scan
-            // can see the root again (issue #179).
-            if !library.root_path.is_dir() {
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => Some(meta),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
                 warn!(
                     path = %path.display(),
-                    root = %library.root_path.display(),
-                    "library root is unavailable; ignoring the removal"
+                    error = %err,
+                    "could not stat a changed path; leaving its row as it is"
                 );
                 return Ok(ReconcileOutcome::Done);
             }
-            if let Some(file) = self.file_repo.find_by_path(&path_str).await?
-                && file.missing_since.is_none()
-            {
-                info!("Marking deleted file missing: {}", path.display());
-                self.file_repo
-                    .mark_missing(vec![file.id], self.clock.now())
-                    .await?;
-            }
-            return Ok(ReconcileOutcome::Done);
-        }
+        };
 
+        let outcome = match meta {
+            Some(meta) if meta.is_file() => {
+                self.reconcile_file(&path, &library, reclassify).await?
+            }
+            Some(meta) if meta.is_dir() => {
+                return self.reconcile_directory(&path, &library).await;
+            }
+            _ => {
+                self.reconcile_gone(&path, &library).await?;
+                return Ok(ReconcileOutcome::Done);
+            }
+        };
+        Ok(match outcome {
+            FileOutcome::Deferred(retry_after) => ReconcileOutcome::Deferred { retry_after },
+            FileOutcome::Added
+            | FileOutcome::Relinked
+            | FileOutcome::Changed
+            | FileOutcome::Unchanged
+            | FileOutcome::Failed => ReconcileOutcome::Done,
+        })
+    }
+
+    /// Reconcile the file at `path` for a watcher event: restore and
+    /// reconcile its row, or index it -- relinking a moved file to its row.
+    async fn reconcile_file(
+        &self,
+        path: &Path,
+        library: &Library,
+        reclassify: bool,
+    ) -> Result<FileOutcome, IndexError> {
+        let path_str = path.to_string_lossy().to_string();
         // A file the policy keeps out of the library is not indexed. One that
         // was -- a `.nfo` from before issue #182, a sample renamed into place
         // -- is marked missing, exactly as a full scan would leave it.
         if self
             .path_policy
-            .disposition(relative_to(&library.root_path, &path))
+            .disposition(relative_to(&library.root_path, path))
             != PathDisposition::Media
         {
             if let Some(file) = self.file_repo.find_by_path(&path_str).await?
@@ -2502,29 +2731,176 @@ impl LocalIndexService {
                     .mark_missing(vec![file.id], self.clock.now())
                     .await?;
             }
-            return Ok(ReconcileOutcome::Done);
+            return Ok(FileOutcome::Unchanged);
         }
 
-        let outcome = match self.file_repo.find_by_path(&path_str).await? {
+        match self.file_repo.find_by_path(&path_str).await? {
             Some(existing) => {
                 self.restore_if_missing(&existing).await?;
-                self.reconcile_existing_file(&existing, &path, &library, reclassify)
-                    .await?
+                self.reconcile_existing_file(&existing, path, library, reclassify)
+                    .await
             }
             None => {
-                let outcome = self.process_new_file(&path, &library).await?;
+                let outcome = self
+                    .process_new_file(path, library, RelinkSource::Repository)
+                    .await?;
                 if outcome == FileOutcome::Added {
                     record_file_outcome("new");
                 }
-                outcome
+                Ok(outcome)
             }
+        }
+    }
+
+    /// Nothing is at `path` any more -- or only a symlink, which is not part
+    /// of the library. Its row, if it has one, is marked missing; with none,
+    /// `path` was a directory, and every row beneath it whose file is gone is
+    /// marked missing (issue #180). The watcher never purges: that waits for
+    /// a scan and the grace period.
+    async fn reconcile_gone(&self, path: &Path, library: &Library) -> Result<(), IndexError> {
+        // A root that is not there is a volume that went away, not a file
+        // that was deleted: say nothing about the file until the next scan
+        // can see the root again (issue #179).
+        if !library.root_path.is_dir() {
+            warn!(
+                path = %path.display(),
+                root = %library.root_path.display(),
+                "library root is unavailable; ignoring the removal"
+            );
+            return Ok(());
+        }
+        let now = self.clock.now();
+        if let Some(file) = self.file_repo.find_by_path(&path.to_string_lossy()).await? {
+            if file.missing_since.is_none() {
+                info!("Marking deleted file missing: {}", path.display());
+                self.file_repo.mark_missing(vec![file.id], now).await?;
+            }
+            return Ok(());
+        }
+        // Each file is asked after rather than assumed gone with its
+        // directory: the directory may be gone while a file of it is not --
+        // a rename the watcher reports as two events, the new name
+        // reconciled first, has already moved the rows along.
+        let gone: Vec<Uuid> = self
+            .file_repo
+            .find_all_by_library_including_missing(library.id)
+            .await?
+            .into_iter()
+            .filter(|row| {
+                row.missing_since.is_none()
+                    && row.path != path
+                    && row.path.starts_with(path)
+                    && path_is_absent(&row.path)
+            })
+            .map(|row| row.id)
+            .collect();
+        if !gone.is_empty() {
+            info!(
+                path = %path.display(),
+                files = gone.len(),
+                "Marking the files of a removed directory missing"
+            );
+            self.file_repo.mark_missing(gone, now).await?;
+        }
+        Ok(())
+    }
+
+    /// Reconcile the directory at `dir` for a watcher event -- a directory
+    /// renamed, or moved into the library (issue #180).
+    ///
+    /// Every media file beneath it is reconciled as a single file is: a file
+    /// of a renamed directory is new at its path, and is relinked to its row
+    /// by content. A row beneath `dir` the walk did not see is then marked
+    /// missing, as a scan would mark it, unless the walk failed on a path
+    /// above it; the watcher never purges. A directory the path policy
+    /// excludes indexes nothing, so every row beneath it is marked missing.
+    ///
+    /// The library root itself is left to the scan: a root that reads as
+    /// empty may be an unmounted volume, which only the scan's empty-root
+    /// guard can tell. Deferred as a whole when any file beneath it is still
+    /// being written; walking it again later is idempotent.
+    async fn reconcile_directory(
+        &self,
+        dir: &Path,
+        library: &Library,
+    ) -> Result<ReconcileOutcome, IndexError> {
+        if dir == library.root_path {
+            debug!(root = %dir.display(), "an event for the library root is left to the scan");
+            return Ok(ReconcileOutcome::Done);
+        }
+        let WalkOutcome {
+            files,
+            video_files_seen: _,
+            excluded: _,
+            failed_subtrees,
+            unscoped_failure,
+        } = if self
+            .path_policy
+            .excludes_directory(relative_to(&library.root_path, dir))
+        {
+            WalkOutcome {
+                files: Vec::new(),
+                video_files_seen: 0,
+                excluded: 0,
+                failed_subtrees: Vec::new(),
+                unscoped_failure: false,
+            }
+        } else {
+            walk_under(&library.root_path, dir, &self.path_policy)
         };
-        Ok(match outcome {
-            FileOutcome::Deferred(retry_after) => ReconcileOutcome::Deferred { retry_after },
-            FileOutcome::Added
-            | FileOutcome::Changed
-            | FileOutcome::Unchanged
-            | FileOutcome::Failed => ReconcileOutcome::Done,
+
+        let mut retry_after: Option<Duration> = None;
+        for path in &files {
+            let outcome = match self.reconcile_file(path, library, false).await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    // One file that cannot be indexed does not stop the rest.
+                    warn!(path = %path.display(), error = %e, "failed to reconcile a file of a changed directory");
+                    record_file_outcome("failed");
+                    FileOutcome::Failed
+                }
+            };
+            if let FileOutcome::Deferred(after) = outcome {
+                retry_after = Some(retry_after.map_or(after, |before| before.min(after)));
+            }
+        }
+
+        // Read after the files are reconciled, so a row relinked to a path
+        // beneath `dir` is seen at its new path.
+        let seen: std::collections::HashSet<&Path> = files.iter().map(PathBuf::as_path).collect();
+        let rows = self
+            .file_repo
+            .find_all_by_library_including_missing(library.id)
+            .await?;
+        let now = self.clock.now();
+        let MissingPlan {
+            mark,
+            purge: _,
+            shielded,
+        } = plan_missing(
+            rows.iter()
+                .filter(|row| row.path.starts_with(dir) && !seen.contains(row.path.as_path())),
+            &failed_subtrees,
+            unscoped_failure,
+            now,
+            // Never purged here: that is the scan's, after the grace period.
+            Duration::MAX,
+        );
+        if shielded > 0 {
+            warn!(
+                dir = %dir.display(),
+                shielded,
+                "could not read part of a changed directory; rows beneath were left as they were"
+            );
+        }
+        let marked = self.file_repo.mark_missing(mark, now).await?;
+        if marked > 0 {
+            info!(dir = %dir.display(), marked, "Marked files of a changed directory missing");
+        }
+
+        Ok(match retry_after {
+            Some(retry_after) => ReconcileOutcome::Deferred { retry_after },
+            None => ReconcileOutcome::Done,
         })
     }
 
@@ -2898,6 +3274,23 @@ impl LocalIndexService {
         progress.total = Some(walked_files.len() as u64);
         ticket.record(progress);
 
+        // The rows a new file may be a moved one of: every row the walk did
+        // not see, but for those under a path it could not read (issue
+        // #180). A file moved since the last scan is found at its new path
+        // and relinked to its row, not indexed anew beside a row marked
+        // missing.
+        let mut relink_pool = {
+            let walked: std::collections::HashSet<&Path> =
+                walked_files.iter().map(PathBuf::as_path).collect();
+            RelinkPool::new(existing_map.values().filter(|row| {
+                !walked.contains(row.path.as_path())
+                    && !unscoped_failure
+                    && !failed_subtrees
+                        .iter()
+                        .any(|failed| row.path.starts_with(failed))
+            }))
+        };
+
         // Phase 3: Compare with DB, add new files
         for path in walked_files {
             if ticket.is_cancelled() {
@@ -2926,8 +3319,11 @@ impl LocalIndexService {
                     }
                 }
             } else {
-                // New file.
-                match self.process_new_file(&path, library).await {
+                // New file, or a moved one.
+                match self
+                    .process_new_file(&path, library, RelinkSource::Pool(&mut relink_pool))
+                    .await
+                {
                     Ok(outcome) => {
                         if outcome == FileOutcome::Added {
                             record_file_outcome("new");
@@ -2943,6 +3339,7 @@ impl LocalIndexService {
             };
             match outcome {
                 FileOutcome::Added => progress.added += 1,
+                FileOutcome::Relinked => progress.relinked += 1,
                 FileOutcome::Changed => progress.changed += 1,
                 FileOutcome::Unchanged => progress.unchanged += 1,
                 // Seen, so never marked missing: a file still being copied in
@@ -2962,6 +3359,12 @@ impl LocalIndexService {
         if ticket.is_cancelled() {
             info!(library_id = %lib_uuid, "Scan cancelled");
             return Err(IndexError::Cancelled);
+        }
+
+        // A relinked row is at its new path now, and its old one holds
+        // nothing to mark missing.
+        for vacated in &relink_pool.vacated {
+            existing_map.remove(vacated);
         }
 
         // Phase 4: Soft-delete the rows the walk did not see, and purge the
@@ -3061,18 +3464,31 @@ impl LocalIndexService {
             failed: _,
             marked_missing: _,
             restored: restored_count,
+            relinked: relinked_count,
             purged: _,
         } = progress;
         info!(
-            "Scan complete. Added: {}, Deferred: {}, Marked missing: {}, Restored: {}, Purged: {}, Total: {}",
-            added_count, deferred_count, marked_count, restored_count, purged_count, total_files
+            "Scan complete. Added: {}, Relinked: {}, Deferred: {}, Marked missing: {}, Restored: {}, Purged: {}, Total: {}",
+            added_count,
+            relinked_count,
+            deferred_count,
+            marked_count,
+            restored_count,
+            purged_count,
+            total_files
         );
 
         self.notification_service.publish(AdminEvent::info(
             EventCategory::LibraryScan,
             format!(
-                "Library scan complete for '{}': added {}, missing {}, restored {}, purged {}, total {}",
-                library.name, added_count, marked_count, restored_count, purged_count, total_files
+                "Library scan complete for '{}': added {}, moved {}, missing {}, restored {}, purged {}, total {}",
+                library.name,
+                added_count,
+                relinked_count,
+                marked_count,
+                restored_count,
+                purged_count,
+                total_files
             ),
             Some(lib_uuid.to_string()),
             Some(library.name.clone()),
@@ -3083,12 +3499,19 @@ impl LocalIndexService {
                 AdminLogLevel::Info,
                 AdminLogCategory::LibraryScan,
                 format!(
-                    "Library scan completed: \"{}\" — {} added, {} marked missing, {} restored, {} purged, {} total",
-                    library.name, added_count, marked_count, restored_count, purged_count, total_files
+                    "Library scan completed: \"{}\" — {} added, {} moved, {} marked missing, {} restored, {} purged, {} total",
+                    library.name,
+                    added_count,
+                    relinked_count,
+                    marked_count,
+                    restored_count,
+                    purged_count,
+                    total_files
                 ),
                 Some(serde_json::json!({
                     "library_id": library_id,
                     "added": added_count,
+                    "relinked": relinked_count,
                     "deferred": deferred_count,
                     "marked_missing": marked_count,
                     "restored": restored_count,
@@ -3115,6 +3538,10 @@ mod identity_tests;
 #[cfg(test)]
 #[path = "index_inference_tests.rs"]
 mod inference_tests;
+
+#[cfg(test)]
+#[path = "index_relink_tests.rs"]
+mod relink_tests;
 
 #[cfg(test)]
 #[path = "index_scan_tests.rs"]
@@ -4394,6 +4821,11 @@ mod tests {
             .expect_find_by_hash()
             .times(1)
             .returning(|_| Ok(vec![]));
+        // No row of the library has the file's content: not a moved file.
+        mock_file_repo
+            .expect_find_by_library_and_hash_including_missing()
+            .times(1)
+            .returning(|_, _| Ok(vec![]));
 
         let file_id = Uuid::new_v4();
         mock_file_repo.expect_create().times(1).returning(move |_| {
@@ -4436,7 +4868,11 @@ mod tests {
         );
 
         let result = service
-            .process_new_file(&path, &test_library(lib_id, temp_dir.path()))
+            .process_new_file(
+                &path,
+                &test_library(lib_id, temp_dir.path()),
+                RelinkSource::Repository,
+            )
             .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), FileOutcome::Added);
@@ -4549,6 +4985,11 @@ mod tests {
             .expect_find_by_hash()
             .times(1)
             .returning(|_| Ok(vec![]));
+        // No row of the library has the file's content: not a moved file.
+        mock_file_repo
+            .expect_find_by_library_and_hash_including_missing()
+            .times(1)
+            .returning(|_, _| Ok(vec![]));
 
         let file_id = Uuid::new_v4();
         mock_file_repo.expect_create().times(1).returning(move |_| {
@@ -4589,7 +5030,11 @@ mod tests {
         );
 
         let result = service
-            .process_new_file(&path, &test_library(lib_id, temp_dir.path()))
+            .process_new_file(
+                &path,
+                &test_library(lib_id, temp_dir.path()),
+                RelinkSource::Repository,
+            )
             .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), FileOutcome::Added);
@@ -4614,7 +5059,11 @@ mod tests {
         );
 
         let err = service
-            .process_new_file(&path, &test_library(Uuid::new_v4(), temp_dir.path()))
+            .process_new_file(
+                &path,
+                &test_library(Uuid::new_v4(), temp_dir.path()),
+                RelinkSource::Repository,
+            )
             .await
             .expect_err("a file that cannot be stat'ed must be refused");
         assert!(matches!(err, IndexError::PathNotFound(_)));
@@ -4658,7 +5107,11 @@ mod tests {
         );
 
         let err = service
-            .process_new_file(&path, &test_library(Uuid::new_v4(), temp_dir.path()))
+            .process_new_file(
+                &path,
+                &test_library(Uuid::new_v4(), temp_dir.path()),
+                RelinkSource::Repository,
+            )
             .await
             .expect_err("a file that cannot be hashed must be refused");
         assert!(matches!(err, IndexError::PathNotFound(_)));

@@ -163,6 +163,9 @@ pub struct ScanProgress {
     pub marked_missing_count: u64,
     /// Missing files that came back.
     pub restored_count: u64,
+    /// Files found at a new path -- moved or renamed -- that kept their
+    /// row, and with it their id, progress and title.
+    pub relinked_count: u64,
     /// Files missing for the whole grace period, removed.
     pub purged_count: u64,
 }
@@ -179,6 +182,7 @@ impl From<index_scan::ScanProgress> for ScanProgress {
             failed,
             marked_missing,
             restored,
+            relinked,
             purged,
         } = progress;
         Self {
@@ -191,6 +195,7 @@ impl From<index_scan::ScanProgress> for ScanProgress {
             failed_count: failed,
             marked_missing_count: marked_missing,
             restored_count: restored,
+            relinked_count: relinked,
             purged_count: purged,
         }
     }

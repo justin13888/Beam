@@ -92,6 +92,9 @@ pub struct ScanProgress {
     pub marked_missing: u64,
     /// Missing rows whose path came back.
     pub restored: u64,
+    /// Files found at a new path -- moved or renamed -- whose row was
+    /// pointed there rather than a new one indexed (issue #180).
+    pub relinked: u64,
     /// Rows missing for the whole grace period, removed.
     pub purged: u64,
 }

@@ -20,7 +20,9 @@ use crate::services::watch_status::{PollReason, WatchMode, WatchStatus};
 /// correctly. A rename, for one, arrives from inotify as a `Modify(Name(..))`
 /// event on each side, which [`translate_event_kind`] reads as `Modified`:
 /// the reconcile stats the path and finds the old name gone and the new one
-/// present.
+/// present, and relinks the file's row to the new name by content (issue
+/// #180). An event may name a directory -- one renamed, removed or moved in
+/// -- and the reconcile then covers everything beneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsEventKind {
     Created,
@@ -810,7 +812,7 @@ mod tests {
     #[test]
     fn test_translate_event_kind() {
         use notify::EventKind;
-        use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
+        use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind, RenameMode};
 
         assert_eq!(
             translate_event_kind(&EventKind::Create(CreateKind::File)),
@@ -828,6 +830,15 @@ mod tests {
             translate_event_kind(&EventKind::Access(AccessKind::Any)),
             None
         );
+        // Either half of a rename, or both at once, is a change at the path:
+        // the reconcile finds out which half it is on disk (issue #180).
+        for mode in [RenameMode::From, RenameMode::To, RenameMode::Both] {
+            assert_eq!(
+                translate_event_kind(&EventKind::Modify(ModifyKind::Name(mode))),
+                Some(FsEventKind::Modified),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]
