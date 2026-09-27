@@ -184,7 +184,16 @@ impl LibraryService for StubLibraryService {
     ) -> Result<crate::models::Library, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
-    async fn scan_library(&self, _library_id: String) -> Result<u32, LibraryError> {
+    async fn start_scan(
+        &self,
+        _library_id: String,
+    ) -> Result<crate::models::ScanJob, LibraryError> {
+        unimplemented!("not called in stream route tests")
+    }
+    async fn get_scan(
+        &self,
+        _library_id: String,
+    ) -> Result<Option<crate::models::ScanJob>, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
     async fn delete_library(&self, _library_id: String) -> Result<bool, LibraryError> {

@@ -26,21 +26,25 @@ use beam_domain::models::file::{CreateMediaFile, FileStatus};
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::{EnrichmentStateRepository, FileRepository};
-use beam_index::services::index::{IndexError, MockIndexService};
+use beam_index::probe::metadata::MetadataError as ProbeError;
+use beam_index::services::IndexService;
+use beam_index::services::LocalIndexService;
+use beam_index::services::media_info::MockMediaInfoService;
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
 use serde_json::Value;
+use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 use crate::models::{
     AdminLogEntryDto, AdminStatusResponse, AdminUserListResponse, CreateLibraryRequest, Library,
-    ScanLibraryResponse, UpdateAdminUserRequest,
+    ScanJob, ScanState, ScanTrigger, UpdateAdminUserRequest,
 };
 use crate::routes::admin::{
     create_library, delete_library, get_admin_events, get_admin_log_count, get_admin_logs,
-    get_admin_status, get_library, get_library_files, list_admin_users, list_libraries,
-    refresh_media_metadata, scan_library, stream_admin_events, update_admin_user,
+    get_admin_status, get_library, get_library_files, get_library_scan, list_admin_users,
+    list_libraries, refresh_media_metadata, scan_library, stream_admin_events, update_admin_user,
 };
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::hash::HashService;
@@ -196,6 +200,60 @@ struct TestFixture {
     file_repo: Arc<InMemoryFileRepo>,
     enrichment_repo: Arc<InMemoryEnrichmentRepo>,
     notification: Arc<dyn NotificationService>,
+    /// The real indexer the library service starts its scans on.
+    index: Arc<LocalIndexService>,
+    /// Every file the indexer hashes takes one permit (see
+    /// [`GatedHashService`]).
+    hash_gate: Arc<tokio::sync::Semaphore>,
+    /// Where the validator resolves every library root: a real, empty
+    /// directory for a fixture from [`make_scan_test_state`], and a path
+    /// that does not exist otherwise.
+    library_root: PathBuf,
+    _scratch: Option<TempDir>,
+}
+
+impl TestFixture {
+    fn library_root(&self) -> &std::path::Path {
+        &self.library_root
+    }
+
+    /// Let every hash through from now on.
+    fn open_gate(&self) {
+        self.hash_gate
+            .add_permits(tokio::sync::Semaphore::MAX_PERMITS - self.hash_gate.available_permits());
+    }
+}
+
+/// Whether a scan's hashes wait for the test.
+#[derive(Clone, Copy)]
+enum Gate {
+    Open,
+    /// Every hash waits until [`TestFixture::open_gate`], so a test can act
+    /// while a scan is running.
+    Closed,
+}
+
+/// The indexer's hasher, held at a gate the test controls. The hash itself
+/// is a stand-in: nothing here compares file contents.
+#[derive(Debug)]
+struct GatedHashService {
+    gate: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl HashService for GatedHashService {
+    fn hash_sync(&self, path: &std::path::Path) -> std::io::Result<u64> {
+        Ok(path.as_os_str().len() as u64)
+    }
+
+    async fn hash_async(&self, path: PathBuf) -> std::io::Result<u64> {
+        self.gate
+            .acquire()
+            .await
+            .expect("the gate is never closed")
+            .forget();
+        Ok(path.as_os_str().len() as u64)
+    }
 }
 
 fn make_test_state() -> TestFixture {
@@ -203,29 +261,45 @@ fn make_test_state() -> TestFixture {
 }
 
 fn make_test_state_with_notification(notification: Arc<dyn NotificationService>) -> TestFixture {
-    let mut mock_index = MockIndexService::new();
-    mock_index.expect_scan_library().returning(|_| Ok(0));
-    make_test_state_with(notification, mock_index)
+    make_test_state_with_data_dir(notification, PathBuf::from("/beam-data"))
 }
 
-/// Like [`make_test_state`], with an indexer the test scripts itself.
-fn make_test_state_with_index(mock_index: MockIndexService) -> TestFixture {
-    make_test_state_with(Arc::new(InMemoryNotificationService::new()), mock_index)
-}
-
-fn make_test_state_with(
-    notification: Arc<dyn NotificationService>,
-    mock_index: MockIndexService,
-) -> TestFixture {
-    make_test_state_with_data_dir(notification, mock_index, PathBuf::from("/beam-data"))
-}
-
-/// Like [`make_test_state_with`], with the library service's data directory
+/// Like [`make_test_state`], with the library service's data directory
 /// chosen by the test.
 fn make_test_state_with_data_dir(
     notification: Arc<dyn NotificationService>,
-    mock_index: MockIndexService,
     data_dir: PathBuf,
+) -> TestFixture {
+    build_fixture(
+        notification,
+        PathBuf::from("/videos/movies"),
+        None,
+        data_dir,
+        Gate::Open,
+    )
+}
+
+/// A fixture whose libraries resolve to a real, empty directory, so a scan
+/// of one runs for real.
+fn make_scan_test_state(gate: Gate) -> TestFixture {
+    let scratch = TempDir::new().unwrap();
+    let root = scratch.path().join("movies");
+    std::fs::create_dir(&root).unwrap();
+    build_fixture(
+        Arc::new(InMemoryNotificationService::new()),
+        root,
+        Some(scratch),
+        PathBuf::from("/beam-data"),
+        gate,
+    )
+}
+
+fn build_fixture(
+    notification: Arc<dyn NotificationService>,
+    library_root: PathBuf,
+    scratch: Option<TempDir>,
+    data_dir: PathBuf,
+    gate: Gate,
 ) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
@@ -241,16 +315,40 @@ fn make_test_state_with_data_dir(
     let file_repo = Arc::new(InMemoryFileRepo::default());
     let enrichment_repo = Arc::new(InMemoryEnrichmentRepo::default());
 
+    let hash_gate = Arc::new(tokio::sync::Semaphore::new(match gate {
+        Gate::Open => tokio::sync::Semaphore::MAX_PERMITS,
+        Gate::Closed => 0,
+    }));
+    // No file here is a real film: every probe fails, and the file is
+    // indexed without a title, which is all these tests need of it.
+    let mut prober = MockMediaInfoService::new();
+    prober
+        .expect_get_video_metadata()
+        .returning(|_| Err(ProbeError::UnknownError("not a film".to_string())));
+    let index = Arc::new(LocalIndexService::new(
+        library_repo.clone(),
+        file_repo.clone(),
+        Arc::new(beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default()),
+        Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default()),
+        Arc::new(
+            beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository::default(),
+        ),
+        Arc::new(GatedHashService {
+            gate: hash_gate.clone(),
+        }),
+        Arc::new(prober),
+        notification.clone(),
+        admin_log.clone(),
+    ));
+
     let library: Arc<dyn LibraryService> = Arc::new(LocalLibraryService::new(
         library_repo.clone(),
         file_repo.clone(),
         PathBuf::from("/videos"),
         data_dir,
         notification.clone(),
-        Arc::new(mock_index),
-        Arc::new(InMemoryPathValidator::success(PathBuf::from(
-            "/videos/movies",
-        ))),
+        index.clone() as Arc<dyn IndexService>,
+        Arc::new(InMemoryPathValidator::success(library_root.clone())),
     ));
 
     let services = AppServices {
@@ -317,6 +415,10 @@ fn make_test_state_with_data_dir(
         file_repo,
         enrichment_repo,
         notification,
+        index,
+        hash_gate,
+        library_root,
+        _scratch: scratch,
     }
 }
 
@@ -373,6 +475,7 @@ fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
                     get_library_files,
                     create_library,
                     scan_library,
+                    get_library_scan,
                     refresh_media_metadata,
                     delete_library,
                 ])
@@ -567,15 +670,17 @@ async fn an_admin_creates_a_library_and_it_is_then_listed() {
     assert_eq!(listed[0].id, created.id);
 }
 
-#[tokio::test]
-async fn scanning_a_library_as_an_admin_returns_the_added_count() {
-    let fixture = make_test_state();
-    let client = build_client(&fixture);
-    let token = seed_user_session(&fixture, true).await;
+// ─── Library scans (issue #181) ──────────────────────────────────────────────
 
+/// Create a library through the API -- the fixture's validator resolves it to
+/// the fixture's library root -- and return it with its id parsed.
+async fn create_movies_library(
+    client: &TestClient<AppState>,
+    token: &str,
+) -> (Library, uuid::Uuid) {
     let created: Library = client
         .post("/v1/admin/libraries")
-        .cookie("beam_session", &token)
+        .cookie("beam_session", token)
         .json(&CreateLibraryRequest {
             name: "Movies".to_string(),
             root_path: "movies".to_string(),
@@ -583,6 +688,46 @@ async fn scanning_a_library_as_an_admin_returns_the_added_count() {
         .send()
         .await
         .json();
+    let id = uuid::Uuid::parse_str(&created.id).expect("a library id is a UUID");
+    (created, id)
+}
+
+/// Wait -- on the job itself, never on a clock -- until `library_id`'s latest
+/// scan satisfies `done`, bounded so a hang fails rather than stalls.
+async fn wait_for_scan(
+    fixture: &TestFixture,
+    library_id: uuid::Uuid,
+    done: impl FnMut(&Option<beam_index::services::ScanJob>) -> bool,
+) -> beam_index::services::ScanJob {
+    let mut jobs = fixture.index.subscribe_scan(library_id);
+    tokio::time::timeout(std::time::Duration::from_secs(10), jobs.wait_for(done))
+        .await
+        .expect("the scan reaches the awaited state")
+        .expect("the indexer is alive")
+        .clone()
+        .expect("a scan job")
+}
+
+fn finished(job: &Option<beam_index::services::ScanJob>) -> bool {
+    job.as_ref().is_some_and(|job| !job.state.is_active())
+}
+
+fn running(job: &Option<beam_index::services::ScanJob>) -> bool {
+    job.as_ref()
+        .is_some_and(|job| job.state == beam_index::services::ScanState::Running)
+}
+
+/// The request answers before the scan runs: 202 with the job, queued. The
+/// scan then runs to the end in the background, indexing the library, and
+/// the job reads as succeeded.
+#[tokio::test]
+async fn scanning_a_library_answers_202_with_a_queued_job_that_then_succeeds() {
+    let fixture = make_scan_test_state(Gate::Open);
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let (created, library_id) = create_movies_library(&client, &token).await;
+    let video = fixture.library_root().join("Heat (1995).mkv");
+    std::fs::write(&video, b"not really a film").unwrap();
 
     let response = client
         .post(&format!("/v1/admin/libraries/{}/scan", created.id))
@@ -590,37 +735,145 @@ async fn scanning_a_library_as_an_admin_returns_the_added_count() {
         .send()
         .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
-    // The mocked indexer scans trivially, so this verifies wiring/auth/response
-    // shape rather than scan semantics (covered where the indexer is).
-    assert_eq!(response.json::<ScanLibraryResponse>().added, 0);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job: ScanJob = response.json();
+    assert_eq!(job.library_id, library_id);
+    assert_eq!(job.trigger, ScanTrigger::Manual);
+    assert_eq!(job.state, ScanState::Queued);
+    assert_eq!(job.started_at, None);
+
+    let done = wait_for_scan(&fixture, library_id, finished).await;
+    assert_eq!(done.id, job.id, "the job the request answered with ran");
+    assert_eq!(done.state, beam_index::services::ScanState::Succeeded);
+    assert_eq!(done.progress.added, 1);
+    assert!(
+        fixture
+            .file_repo
+            .find_by_path(&video.to_string_lossy())
+            .await
+            .unwrap()
+            .is_some(),
+        "the scan indexed the file"
+    );
+
+    let read = client
+        .get(&format!("/v1/admin/libraries/{}/scan", created.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(read.status(), StatusCode::OK);
+    let read: ScanJob = read.json();
+    assert_eq!(read.id, job.id);
+    assert_eq!(read.state, ScanState::Succeeded);
+    assert_eq!(read.progress.added_count, 1);
+    assert_eq!(read.progress.total_count, Some(1));
+    assert!(read.finished_at.is_some());
+}
+
+/// One scan per library at a time: asking again while one runs is a 409 with
+/// its own problem type, and starts nothing. Once it has finished, a new scan
+/// is accepted.
+#[tokio::test]
+async fn a_second_scan_while_one_runs_is_409_and_starts_nothing() {
+    let fixture = make_scan_test_state(Gate::Closed);
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let (created, library_id) = create_movies_library(&client, &token).await;
+    std::fs::write(fixture.library_root().join("Heat (1995).mkv"), b"film").unwrap();
+    let scan = format!("/v1/admin/libraries/{}/scan", created.id);
+
+    let first: ScanJob = client
+        .post(&scan)
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json();
+    // Held on the file's hash.
+    wait_for_scan(&fixture, library_id, running).await;
+
+    let second = client
+        .post(&scan)
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    second.assert_problem_type(
+        "https://beam.justinchung.net/reference/errors/#library-scan-in-progress",
+    );
+    assert_eq!(
+        fixture.index.scan_job(library_id).map(|job| job.id),
+        Some(first.id),
+        "the refused request registered no job"
+    );
+
+    fixture.open_gate();
+    let done = wait_for_scan(&fixture, library_id, finished).await;
+    assert_eq!(done.id, first.id);
+
+    let third = client
+        .post(&scan)
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(
+        third.status(),
+        StatusCode::ACCEPTED,
+        "a finished scan no longer holds the library"
+    );
+    wait_for_scan(&fixture, library_id, finished).await;
+}
+
+/// A library deleted while it is being scanned: 204, and the scan stops after
+/// the file it was on and fails as cancelled rather than reconciling a
+/// library that is gone.
+#[tokio::test]
+async fn deleting_a_library_mid_scan_cancels_the_scan() {
+    let fixture = make_scan_test_state(Gate::Closed);
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let (created, library_id) = create_movies_library(&client, &token).await;
+    for name in ["Heat (1995).mkv", "Ronin (1998).mkv"] {
+        std::fs::write(fixture.library_root().join(name), b"film").unwrap();
+    }
+
+    let accepted = client
+        .post(&format!("/v1/admin/libraries/{}/scan", created.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    wait_for_scan(&fixture, library_id, running).await;
+
+    let deleted = client
+        .delete(&format!("/v1/admin/libraries/{}", created.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+    fixture.open_gate();
+    let done = wait_for_scan(&fixture, library_id, finished).await;
+    assert_eq!(done.state, beam_index::services::ScanState::Failed);
+    assert_eq!(done.failure.as_deref(), Some("cancelled"));
+    assert!(
+        done.progress.processed < 2,
+        "the scan stopped before the second file"
+    );
 }
 
 /// A rescan of a library whose root has gone since registration is a 400 whose
 /// `detail` is the indexer's own message, passed through unchanged. That
 /// message is path-free by construction in `beam-index` (asserted there), so
-/// the route has no reason to replace it -- and must not (NFR-108).
+/// the route has no reason to replace it -- and must not (NFR-108). No job is
+/// registered for it.
 #[tokio::test]
 async fn scanning_a_library_whose_root_has_gone_is_400_without_a_path() {
     const REASON: &str = "Library root path does not exist or is not a directory";
-    let mut mock_index = MockIndexService::new();
-    mock_index
-        .expect_scan_library()
-        .returning(|_| Err(IndexError::PathNotFound(REASON.into())));
-    let fixture = make_test_state_with_index(mock_index);
+    let fixture = make_scan_test_state(Gate::Open);
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
-
-    let created: Library = client
-        .post("/v1/admin/libraries")
-        .cookie("beam_session", &token)
-        .json(&CreateLibraryRequest {
-            name: "Movies".to_string(),
-            root_path: "movies".to_string(),
-        })
-        .send()
-        .await
-        .json();
+    let (created, library_id) = create_movies_library(&client, &token).await;
+    std::fs::remove_dir(fixture.library_root()).unwrap();
 
     let response = client
         .post(&format!("/v1/admin/libraries/{}/scan", created.id))
@@ -637,11 +890,7 @@ async fn scanning_a_library_whose_root_has_gone_is_400_without_a_path() {
         .expect("problem detail is a string")
         .to_string();
     // The subject is the pass-through, so assert the indexer's reason survives
-    // rather than comparing against `IndexError`'s `Display`. The value the
-    // route produces comes from `LibraryError`'s, and the two agree only
-    // because both carry the same format string today -- pinning that
-    // coincidence would fail this test for a change it does not test, and pass
-    // it for one it does.
+    // rather than comparing against `IndexError`'s `Display`.
     assert!(
         detail.ends_with(REASON),
         "the route must pass the indexer's reason through unchanged: {detail:?}"
@@ -649,6 +898,111 @@ async fn scanning_a_library_whose_root_has_gone_is_400_without_a_path() {
     assert!(
         !detail.contains('/'),
         "no filesystem path may reach the client: {detail}"
+    );
+    assert_eq!(
+        fixture.index.scan_job(library_id),
+        None,
+        "no job was registered"
+    );
+}
+
+/// Scan jobs live in memory: a library not scanned since the server started
+/// has none, which is its own 404 -- distinct from a library that does not
+/// exist.
+#[tokio::test]
+async fn reading_the_scan_of_a_library_never_scanned_is_404_scan_not_found() {
+    let fixture = make_scan_test_state(Gate::Open);
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let (created, _) = create_movies_library(&client, &token).await;
+
+    let response = client
+        .get(&format!("/v1/admin/libraries/{}/scan", created.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    response.assert_problem_type("https://beam.justinchung.net/reference/errors/#scan-not-found");
+}
+
+#[tokio::test]
+async fn a_scan_of_a_malformed_or_unknown_library_is_400_or_404() {
+    let fixture = make_scan_test_state(Gate::Open);
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let unknown = uuid::Uuid::new_v4();
+
+    for (method, path, status, problem) in [
+        (
+            "POST",
+            "/v1/admin/libraries/not-a-uuid/scan".to_string(),
+            StatusCode::BAD_REQUEST,
+            "invalid-library-id",
+        ),
+        (
+            "GET",
+            "/v1/admin/libraries/not-a-uuid/scan".to_string(),
+            StatusCode::BAD_REQUEST,
+            "invalid-library-id",
+        ),
+        (
+            "POST",
+            format!("/v1/admin/libraries/{unknown}/scan"),
+            StatusCode::NOT_FOUND,
+            "library-not-found",
+        ),
+        (
+            "GET",
+            format!("/v1/admin/libraries/{unknown}/scan"),
+            StatusCode::NOT_FOUND,
+            "library-not-found",
+        ),
+    ] {
+        let request = match method {
+            "POST" => client.post(&path),
+            _ => client.get(&path),
+        };
+        let response = request.cookie("beam_session", &token).send().await;
+        assert_eq!(response.status(), status, "{method} {path}");
+        response.assert_problem_type(&format!(
+            "https://beam.justinchung.net/reference/errors/#{problem}"
+        ));
+    }
+    assert_eq!(fixture.index.scan_job(unknown), None);
+}
+
+#[tokio::test]
+async fn scans_are_closed_to_a_regular_user() {
+    let fixture = make_scan_test_state(Gate::Open);
+    let client = build_client(&fixture);
+    let admin = seed_user_session(&fixture, true).await;
+    let (created, library_id) = create_movies_library(&client, &admin).await;
+    let token = seed_user_session(&fixture, false).await;
+    let scan = format!("/v1/admin/libraries/{}/scan", created.id);
+
+    assert_eq!(
+        client
+            .post(&scan)
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        client
+            .get(&scan)
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fixture.index.scan_job(library_id),
+        None,
+        "a refused request starts no scan"
     );
 }
 
@@ -821,6 +1175,22 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
                 Some("Movies".to_string()),
             ),
             AdminEvent::warning(EventCategory::System, "disk nearly full", None, None),
+            AdminEvent::info(
+                EventCategory::ScanProgress,
+                "Scanning 'Movies': 3 of 8 files",
+                Some("lib-1".to_string()),
+                Some("Movies".to_string()),
+            )
+            .with_scan(beam_index::services::scan::ScanEvent {
+                job_id: uuid::Uuid::nil(),
+                phase: beam_index::services::ScanPhase::Progress,
+                progress: beam_index::services::ScanProgress {
+                    total: Some(8),
+                    processed: 3,
+                    added: 3,
+                    ..Default::default()
+                },
+            }),
         ],
     }));
     let client = build_client(&fixture);
@@ -844,7 +1214,7 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
     assert_eq!(response.header("x-accel-buffering"), Some("no"));
 
     let events = response.events();
-    assert_eq!(events.len(), 2, "one record per broadcast event");
+    assert_eq!(events.len(), 3, "one record per broadcast event");
 
     let first: Value = events[0].json();
     assert_eq!(first["message"], "scan started");
@@ -856,6 +1226,20 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
     assert_eq!(second["message"], "disk nearly full");
     assert_eq!(second["level"], "warning");
     assert_eq!(second["category"], "system");
+    assert!(
+        second["scan"].is_null(),
+        "only a scan-progress event carries a scan"
+    );
+
+    // A scan's progress arrives as structured data a client can render
+    // without parsing the message (FR-208).
+    let third: Value = events[2].json();
+    assert_eq!(third["category"], "scan_progress");
+    assert_eq!(third["scan"]["job_id"], uuid::Uuid::nil().to_string());
+    assert_eq!(third["scan"]["phase"], "progress");
+    assert_eq!(third["scan"]["progress"]["total_count"], 8);
+    assert_eq!(third["scan"]["progress"]["processed_count"], 3);
+    assert_eq!(third["scan"]["progress"]["added_count"], 3);
 }
 
 // ─── Refresh metadata ────────────────────────────────────────────────────────
@@ -1363,12 +1747,9 @@ async fn registering_a_root_that_overlaps_an_existing_library_is_409_and_changes
 
 #[tokio::test]
 async fn registering_a_root_that_holds_the_data_directory_is_400_and_changes_nothing() {
-    let mut mock_index = MockIndexService::new();
-    mock_index.expect_scan_library().never();
     // The fixture's validator resolves every request to /videos/movies.
     let fixture = make_test_state_with_data_dir(
         Arc::new(InMemoryNotificationService::new()),
-        mock_index,
         PathBuf::from("/videos/movies/.beam"),
     );
     let client = build_client(&fixture);

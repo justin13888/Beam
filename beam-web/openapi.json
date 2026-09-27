@@ -4378,11 +4378,271 @@
       }
     },
     "/v1/admin/libraries/{id}/scan": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "The latest scan of a library since the server started, running or finished.",
+        "operationId": "getLibraryScan",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Library id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Invalid library id",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-library-id"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanJob"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Library not found; No scan of this library since the server started",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#library-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Library not found"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#scan-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "No scan of this library since the server started"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": [
+              "admin"
+            ]
+          }
+        ]
+      },
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Rescan a library root, indexing anything new.",
+        "summary": "Start a rescan of a library root. Answers at once with the scan job, queued; the scan runs in the background, one per library at a time. Follow it at `GET /v1/admin/libraries/{id}/scan`, or on the admin event stream's `scan_progress` events.",
         "operationId": "scanLibrary",
         "parameters": [
           {
@@ -4571,12 +4831,34 @@
               }
             }
           },
-          "200": {
-            "description": "OK",
+          "202": {
+            "description": "the request was accepted, and the processing it asked for has not completed",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ScanLibraryResponse"
+                  "$ref": "#/components/schemas/ScanJob"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A scan of this library is already queued or running",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#library-scan-in-progress"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -10466,19 +10748,161 @@
           "root_path"
         ]
       },
-      "ScanLibraryResponse": {
+      "ScanTrigger": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "startup",
+          "periodic",
+          "newly_polled"
+        ],
+        "description": "What started a scan."
+      },
+      "ScanState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed"
+        ],
+        "description": "Where a scan job is."
+      },
+      "ScanProgress": {
         "properties": {
-          "added": {
-            "type": "integer",
-            "maximum": 4294967295.0,
+          "total_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0.0,
-            "format": "uint32"
+            "format": "uint64",
+            "description": "Files the walk found to index; absent until the walk has finished."
+          },
+          "processed_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Files handled so far, whatever became of them."
+          },
+          "added_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Files indexed for the first time."
+          },
+          "changed_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Indexed files whose content changed, or which probed at last."
+          },
+          "unchanged_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Indexed files found as they were."
+          },
+          "deferred_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Files still being written, left for a later visit."
+          },
+          "failed_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Files that could not be processed."
+          },
+          "marked_missing_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Files no longer on disk, newly marked missing."
+          },
+          "restored_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Missing files that came back."
+          },
+          "purged_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Files missing for the whole grace period, removed."
           }
         },
         "type": "object",
         "required": [
-          "added"
-        ]
+          "processed_count",
+          "added_count",
+          "changed_count",
+          "unchanged_count",
+          "deferred_count",
+          "failed_count",
+          "marked_missing_count",
+          "restored_count",
+          "purged_count"
+        ],
+        "description": "A scan's per-file counts so far."
+      },
+      "ScanJob": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "library_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/ScanTrigger"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ScanState"
+          },
+          "queued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ScanProgress"
+          },
+          "failure": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a failed scan failed. Names no filesystem path."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "library_id",
+          "trigger",
+          "state",
+          "queued_at",
+          "progress"
+        ],
+        "description": "One scan of one library. A library has at most one queued or running\nscan; the latest is kept until the server restarts."
       },
       "AdminLogLevelDto": {
         "type": "string",
@@ -10551,8 +10975,40 @@
         "type": "string",
         "enum": [
           "library_scan",
+          "scan_progress",
           "system"
         ]
+      },
+      "ScanPhase": {
+        "type": "string",
+        "enum": [
+          "started",
+          "progress",
+          "completed",
+          "failed"
+        ],
+        "description": "Which moment of a scan an event reports."
+      },
+      "ScanEvent": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/ScanPhase"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ScanProgress"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "phase",
+          "progress"
+        ],
+        "description": "The scan job a `scan_progress` event reports on (FR-208)."
       },
       "AdminEventDto": {
         "properties": {
@@ -10583,6 +11039,17 @@
               "string",
               "null"
             ]
+          },
+          "scan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScanEvent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The scan job a `scan_progress` event reports on; absent on every\nother category."
           }
         },
         "type": "object",

@@ -319,6 +319,7 @@ impl AppServices {
             .with_clock(clock.clone())
             .with_path_policy(config.scan_path_policy()?)
             .with_missing_file_grace(config.missing_file_grace())
+            .with_settle_window(Duration::from_secs(config.scan_settle_secs))
             .with_enrichment_repo(enrichment_repo.clone()),
         );
 

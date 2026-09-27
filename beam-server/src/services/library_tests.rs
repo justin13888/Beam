@@ -10,6 +10,7 @@ mod tests {
     use beam_domain::repositories::library::MockLibraryRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
     use beam_index::services::index::{IndexError, MockIndexService};
+    use beam_index::services::scan::ScanTrigger;
     use sea_orm::DbErr;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -68,56 +69,58 @@ mod tests {
         }
     }
 
-    // ── scan_library ──────────────────────────────────────────────────────────────
+    // ── start_scan ────────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_scan_library_delegates_to_index_service() {
-        let mock_library_repo = MockLibraryRepository::new();
-        let mock_file_repo = MockFileRepository::new();
-        let video_dir = PathBuf::from("/media/videos");
-
-        let lib_id = Uuid::new_v4().to_string();
-        let lib_id_clone = lib_id.clone();
+    async fn start_scan_refuses_a_malformed_id_without_asking_the_indexer() {
         let mut mock_index = MockIndexService::new();
-        mock_index
-            .expect_scan_library()
-            .times(1)
-            .withf(move |id| id == &lib_id_clone)
-            .returning(|_| Ok(42));
+        mock_index.expect_begin_scan().never();
+        let service = make_service(
+            MockLibraryRepository::new(),
+            MockFileRepository::new(),
+            PathBuf::from("/media/videos"),
+            mock_index,
+        );
 
-        let service = make_service(mock_library_repo, mock_file_repo, video_dir, mock_index);
-
-        let result = service.scan_library(lib_id).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
+        let result = service.start_scan("not-a-uuid".to_string()).await;
+        assert!(matches!(result, Err(LibraryError::InvalidId)));
     }
 
     #[tokio::test]
-    async fn test_scan_library_propagates_index_error() {
-        let mock_library_repo = MockLibraryRepository::new();
-        let mock_file_repo = MockFileRepository::new();
-        let video_dir = PathBuf::from("/media/videos");
-
+    async fn start_scan_reports_a_running_scan_as_scan_in_progress() {
+        let lib_id = Uuid::new_v4();
         let mut mock_index = MockIndexService::new();
         mock_index
-            .expect_scan_library()
+            .expect_begin_scan()
             .times(1)
-            .returning(|_| Err(IndexError::LibraryNotFound));
+            .withf(move |id, trigger| *id == lib_id && *trigger == ScanTrigger::Manual)
+            .returning(|_, _| Err(IndexError::ScanInProgress));
+        mock_index.expect_run_scan().never();
+        let service = make_service(
+            MockLibraryRepository::new(),
+            MockFileRepository::new(),
+            PathBuf::from("/media/videos"),
+            mock_index,
+        );
 
-        let service = make_service(mock_library_repo, mock_file_repo, video_dir, mock_index);
-
-        let result = service.scan_library(Uuid::new_v4().to_string()).await;
-        assert!(matches!(result, Err(LibraryError::LibraryNotFound)));
+        let result = service.start_scan(lib_id.to_string()).await;
+        assert!(matches!(result, Err(LibraryError::ScanInProgress)));
     }
 
+    /// Deleting a library cancels its scan first, so the scan never
+    /// reconciles a library that is gone.
     #[tokio::test]
     async fn test_delete_library_returns_true() {
         let mut mock_library_repo = MockLibraryRepository::new();
         let mock_file_repo = MockFileRepository::new();
         let video_dir = PathBuf::from("/media/videos");
-        let mock_index = MockIndexService::new();
-
         let lib_id = Uuid::new_v4();
+        let mut mock_index = MockIndexService::new();
+        mock_index
+            .expect_cancel_scan()
+            .times(1)
+            .withf(move |id| *id == lib_id)
+            .returning(|_| true);
 
         mock_library_repo
             .expect_find_by_id()
@@ -736,6 +739,9 @@ mod tests {
 
         let notif = Arc::new(InMemoryNotificationService::new());
         let notif_ref = Arc::clone(&notif);
+        // No scan to cancel.
+        let mut idle_index = MockIndexService::new();
+        idle_index.expect_cancel_scan().returning(|_| false);
 
         let service = LocalLibraryService::new(
             lib_repo,
@@ -743,7 +749,7 @@ mod tests {
             video_dir.clone(),
             PathBuf::from("/beam-data"),
             notif as Arc<dyn NotificationService>,
-            Arc::new(MockIndexService::new()),
+            Arc::new(idle_index),
             Arc::new(InMemoryPathValidator::success(video_dir)),
         );
 

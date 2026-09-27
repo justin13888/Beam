@@ -6,10 +6,11 @@ use thiserror::Error;
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use crate::models::{Library, LibraryFile};
+use crate::models::{Library, LibraryFile, ScanJob};
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_domain::models::Library as DomainLibrary;
 use beam_index::services::index::{IndexError, IndexService};
+use beam_index::services::scan::ScanTrigger;
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
     /// Validates a *library root* at registration, returning the canonical
@@ -345,10 +346,19 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
         root_path: String,
     ) -> Result<Library, LibraryError>;
 
-    /// Scan a library for new content
-    async fn scan_library(&self, library_id: String) -> Result<u32, LibraryError>;
+    /// Start a scan of a library, returning its job as registered: queued.
+    /// The scan runs on a task of its own; follow it with
+    /// [`Self::get_scan`]. Fails with [`LibraryError::ScanInProgress`] while
+    /// a scan of the library is queued or running, and with
+    /// [`LibraryError::PathNotFound`] when its root is not a directory.
+    async fn start_scan(&self, library_id: String) -> Result<ScanJob, LibraryError>;
 
-    /// Delete a library by ID
+    /// The latest scan of a library in this process: `None` when there has
+    /// been none since the server started.
+    async fn get_scan(&self, library_id: String) -> Result<Option<ScanJob>, LibraryError>;
+
+    /// Delete a library by ID. A scan of it that is queued or running is
+    /// cancelled first.
     async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError>;
 }
 
@@ -548,11 +558,31 @@ impl LibraryService for LocalLibraryService {
         })
     }
 
-    async fn scan_library(&self, library_id: String) -> Result<u32, LibraryError> {
-        self.index_service
-            .scan_library(library_id)
-            .await
-            .map_err(LibraryError::from)
+    async fn start_scan(&self, library_id: String) -> Result<ScanJob, LibraryError> {
+        let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
+        let ticket = self
+            .index_service
+            .begin_scan(lib_uuid, ScanTrigger::Manual)
+            .await?;
+        let job = ticket.job();
+        // The request answers now; the scan runs as long as it runs. A task
+        // that dies unfinished fails the job as interrupted.
+        let index_service = self.index_service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = index_service.run_scan(ticket).await {
+                warn!(library_id = %lib_uuid, error = %e, "library scan failed");
+            }
+        });
+        Ok(ScanJob::from(job))
+    }
+
+    async fn get_scan(&self, library_id: String) -> Result<Option<ScanJob>, LibraryError> {
+        let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
+        self.library_repo
+            .find_by_id(lib_uuid)
+            .await?
+            .ok_or(LibraryError::LibraryNotFound)?;
+        Ok(self.index_service.scan_job(lib_uuid).map(ScanJob::from))
     }
 
     async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError> {
@@ -564,6 +594,9 @@ impl LibraryService for LocalLibraryService {
             .await?
             .ok_or(LibraryError::LibraryNotFound)?;
 
+        // Stops after the file it is on, before it reconciles a library that
+        // is no longer there; its job fails as cancelled.
+        self.index_service.cancel_scan(lib_uuid);
         self.library_repo.delete(lib_uuid).await?;
 
         self.notification_service.publish(AdminEvent::info(
@@ -595,6 +628,8 @@ pub enum LibraryError {
     PathOverlapsLibrary,
     #[error("Library path overlaps the server's data directory")]
     PathOverlapsDataDir,
+    #[error("A scan of this library is already queued or running")]
+    ScanInProgress,
 }
 
 impl From<IndexError> for LibraryError {
@@ -604,6 +639,11 @@ impl From<IndexError> for LibraryError {
             IndexError::LibraryNotFound => LibraryError::LibraryNotFound,
             IndexError::InvalidId => LibraryError::InvalidId,
             IndexError::PathNotFound(s) => LibraryError::PathNotFound(s),
+            IndexError::ScanInProgress => LibraryError::ScanInProgress,
+            // Unreachable: a cancelled scan is reported through its job,
+            // never by the call that starts it. An internal error rather
+            // than a plausible 4xx if that ever changes.
+            IndexError::Cancelled => LibraryError::Db(DbErr::Custom(e.to_string())),
         }
     }
 }
