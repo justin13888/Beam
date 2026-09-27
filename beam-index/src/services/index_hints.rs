@@ -136,14 +136,19 @@ pub(super) struct NfoRead {
 
 /// Open `path` for reading, never through a symbolic link: on Unix with
 /// `O_NOFOLLOW`, so a link swapped in after the caller's `lstat` fails to open
-/// rather than being followed out of the library (issue #186).
+/// rather than being followed out of the library (issue #186). The open is
+/// also non-blocking, so a FIFO swapped in after that `lstat` opens at once --
+/// and is then refused as not a regular file -- rather than waiting forever
+/// for a writer; on a regular file `O_NONBLOCK` changes nothing.
 pub(super) fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
     }
     options.open(path)
 }

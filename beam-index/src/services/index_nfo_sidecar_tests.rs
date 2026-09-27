@@ -643,6 +643,32 @@ fn an_nfo_is_opened_without_following_a_link() {
     assert!(hints::open_no_follow(&link).is_err());
 }
 
+/// A FIFO swapped in for an NFO opens at once rather than blocking the scan
+/// until something writes to it -- and is then no regular file, so it is not
+/// read.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_nfo_that_is_a_fifo_opens_without_blocking() {
+    let dir = TempDir::new().unwrap();
+    let fifo = dir.path().join("movie.nfo");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .unwrap();
+
+    let (sent, opened) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let is_file = hints::open_no_follow(&fifo).map(|file| file.metadata().unwrap().is_file());
+        let _ = sent.send(is_file.ok());
+    });
+    let is_file = opened
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the open returned instead of waiting for a writer");
+    assert_eq!(is_file, Some(false), "opened, and seen not to be a file");
+}
+
 #[tokio::test]
 async fn an_nfo_added_after_indexing_pins_the_movie_on_the_next_scan() {
     let h = Harness::new().await;

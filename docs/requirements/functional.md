@@ -224,7 +224,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   change is never applied again. An NFO whose pin is refused because another title already holds
   that id MUST NOT be recorded as applied, so a later scan tries it again. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a
-  symbolic link, FR-212 -- on Unix with `O_NOFOLLOW`) and at most 1 MiB of it; an NFO larger than that, not
+  symbolic link, FR-212 -- on Unix with `O_NOFOLLOW`, and `O_NONBLOCK` so a FIFO cannot stall
+  the read) and at most 1 MiB of it; an NFO larger than that, not
   UTF-8, declaring a document type, or over 10 000 XML nodes MUST be ignored and the file
   classified by its path. Reading these MUST NOT write anything under a library root (FR-202).
 - **FR-220**: A text subtitle file (`.srt`, `.vtt`, `.ass`, `.ssa`) beside an indexed video, named

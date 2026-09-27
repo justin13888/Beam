@@ -144,7 +144,8 @@ The indexer also *parses* files it did not write: the Kodi `.nfo` files beside t
 Anyone who can drop a file into a library can hand Beam one, so an NFO is treated as hostile
 input. It is opened read-only, only when it is a regular file (a symbolic link is never followed:
 it is refused at the `lstat`, and on Unix the open itself carries `O_NOFOLLOW`, so a link swapped
-in between the two fails to open),
+in between the two fails to open; it also carries `O_NONBLOCK`, so a FIFO swapped in opens at once
+and is refused as not a regular file instead of blocking the scan),
 and at most 1 MiB of it is read; bytes that are not UTF-8 are refused rather than guessed at; a
 document type declaration is refused before parsing, so no entity is ever expanded (the billion
 laughs); and the XML parser (`roxmltree`, which resolves no external resources) is capped at
