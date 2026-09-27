@@ -31,6 +31,7 @@ use kynos::test::{TestClient, TestResponse};
 use serde_json::{Value, json};
 
 use crate::routes::api_error::SESSION_COOKIE;
+use crate::routes::auth::DEVICE_LOGIN_MAX_SECS;
 use crate::routes::create_router;
 use crate::routes::test_support::make_app_state_full;
 use crate::services::health::InMemoryDependencyProbe;
@@ -546,4 +547,91 @@ async fn polls_spend_their_own_budget_and_are_refused_past_it() {
         .await
         .assert_status(StatusCode::TOO_MANY_REQUESTS)
         .assert_problem_type(&problem("rate-limited"));
+}
+
+// ─── What the IdP grants, bounded ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_lifetime_past_the_cap_is_cut_to_it_in_the_answer_and_the_stored_flow() {
+    let harness = harness(
+        FakeOidcClient::default()
+            .with_device_grant(2 * DEVICE_LOGIN_MAX_SECS, FAKE_DEVICE_INTERVAL_SECS),
+    );
+
+    let response = start(&harness).await;
+    response.assert_status(StatusCode::OK);
+    let body: Value = response.json();
+    assert_eq!(body["expires_in_secs"], DEVICE_LOGIN_MAX_SECS);
+    let handle = body["device_handle"].as_str().unwrap().to_owned();
+
+    // The stored flow ends at the cap too, not at the IdP's lifetime.
+    harness
+        .clock
+        .advance(Duration::from_secs(DEVICE_LOGIN_MAX_SECS - 1));
+    poll(&harness, &handle)
+        .await
+        .assert_status(StatusCode::ACCEPTED);
+    harness.clock.advance(Duration::from_secs(1));
+    poll(&harness, &handle)
+        .await
+        .assert_status(StatusCode::GONE)
+        .assert_problem_type(&problem("device-login-expired"));
+}
+
+#[tokio::test]
+async fn an_idp_asking_for_no_interval_is_paced_at_one_second() {
+    let harness =
+        harness(FakeOidcClient::default().with_device_grant(FAKE_DEVICE_EXPIRES_IN_SECS, 0));
+
+    let response = start(&harness).await;
+    response.assert_status(StatusCode::OK);
+    let body: Value = response.json();
+    assert_eq!(body["interval_secs"], 1);
+    let handle = body["device_handle"].as_str().unwrap().to_owned();
+
+    poll(&harness, &handle)
+        .await
+        .assert_status(StatusCode::ACCEPTED);
+    // With no floor an immediate second poll would reach the IdP.
+    let again = poll(&harness, &handle).await;
+    again.assert_status(StatusCode::ACCEPTED);
+    assert_eq!(again.json::<Value>()["status"], "slow_down");
+    assert_eq!(harness.oidc.device_poll_count(), 1);
+}
+
+// ─── An approval that does not verify ─────────────────────────────────────────
+
+#[tokio::test]
+async fn an_id_token_that_does_not_verify_is_400_and_ends_the_flow() {
+    for failure in [
+        OidcError::MissingIdToken,
+        OidcError::ClaimsVerification("audience does not match".to_owned()),
+    ] {
+        let label = failure.to_string();
+        let harness = harness(FakeOidcClient::default().with_device_script(vec![Err(failure)]));
+        let handle = started(&harness).await;
+
+        poll(&harness, &handle)
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(&problem("login-failed"));
+
+        // A retry would verify no better, so the flow is gone and nobody was
+        // provisioned.
+        assert!(harness.flows.handle_hashes().is_empty(), "{label}");
+        assert!(
+            harness
+                .users
+                .find_by_oidc_identity("https://dex.test", "tv-user")
+                .await
+                .unwrap()
+                .is_none(),
+            "{label}"
+        );
+        poll(&harness, &handle)
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(&problem("device-login-invalid"));
+        assert_eq!(harness.oidc.device_poll_count(), 1, "{label}");
+    }
 }

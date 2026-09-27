@@ -57,7 +57,7 @@ const STATE_TTL_SECS: u64 = 600; // 10 minutes to complete the round trip
 /// room and find a phone, and short enough that an abandoned flow -- whose
 /// user code is the one thing a phisher needs (RFC 8628 section 5.4) -- does
 /// not stay redeemable all day.
-const DEVICE_LOGIN_MAX_SECS: u64 = 1800;
+pub(crate) const DEVICE_LOGIN_MAX_SECS: u64 = 1800;
 
 // ── Wire types ───────────────────────────────────────────────────────────────
 
