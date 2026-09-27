@@ -710,6 +710,7 @@ dependencies = [
  "beam-test-support",
  "sea-orm-migration",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

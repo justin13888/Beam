@@ -125,6 +125,7 @@ export default defineConfig({
 						{ slug: "operate/telemetry", label: "Anonymous library report" },
 						{ slug: "operate/backup-and-upgrade" },
 						{ slug: "operate/production" },
+						{ slug: "operate/kubernetes" },
 					],
 				},
 				{

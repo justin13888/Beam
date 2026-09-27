@@ -1,0 +1,46 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "beam.fullname" . }}
+  labels:
+    {{- include "beam.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls.secretName }}
+  tls:
+    - hosts:
+        - {{ $.Values.ingress.host | quote }}
+      secretName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # The API only. `/metrics` and the `/openapi` docs sit at the server's
+          # root and are deliberately not routed: metrics are for an in-cluster
+          # scraper, not the internet. `check:chart-invariants` fails if the
+          # server is routed at `/` or `/metrics`.
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "beam.fullname" . }}
+                port:
+                  name: http
+          {{- if .Values.web.enabled }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "beam.webFullname" . }}
+                port:
+                  name: http
+          {{- end }}
+{{- end }}

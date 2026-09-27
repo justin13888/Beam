@@ -1,0 +1,213 @@
+# Beam Helm chart values. values.schema.json validates every key here and
+# rejects unknown ones, so a misspelt key fails `helm install` instead of being
+# silently ignored.
+#
+# Deliberately absent: a replica count. Beam runs exactly one server pod --
+# the background indexer and enrichment worker run in-process with no leader
+# election, and sessions' rate limits and admin event streams are in memory --
+# so the Deployment is pinned to one replica with the Recreate strategy. See
+# docs/architecture/decisions (the Kubernetes ADR) and
+# docs/operations/deployment.md.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/justin13888/beam-server
+  # Empty means `v<appVersion>`, the tag release.yml publishes for this chart's
+  # release.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+server:
+  # Required. The externally reachable origin of the API (BEAM_SERVER_URL):
+  # the OIDC redirect URI is derived from it, it is an allowed CSRF origin, and
+  # its scheme decides whether auth cookies are Secure.
+  publicUrl: ""
+  # BEAM_WEB_URL: the browser client's origin -- where the OIDC callback sends
+  # the browser on success, and an allowed CSRF origin. Empty means publicUrl
+  # when web.enabled (the web client is then served from the same origin).
+  # With web.enabled false and this empty, BEAM_WEB_URL is left unset and the
+  # server falls back to its development default (http://localhost:5173):
+  # fine for native-only (device-grant) clients, but set it if a browser
+  # client is served from anywhere else.
+  webUrl: ""
+  # BEAM_EXTRA_ALLOWED_ORIGINS, joined with commas.
+  extraAllowedOrigins: []
+  # BEAM_COOKIE_SECURE. null leaves it to publicUrl's scheme.
+  cookieSecure: null
+  # BEAM_AUTO_MIGRATE. Migrations run at startup under a Postgres advisory
+  # lock, so an overlapping old and new pod cannot race them.
+  autoMigrate: true
+  # BEAM_SHUTDOWN_TIMEOUT_SECS: how long a stopping server waits for in-flight
+  # requests (streams included) to drain. The pod's
+  # terminationGracePeriodSeconds is this plus 15, so the server always
+  # finishes draining before the kubelet's SIGKILL.
+  shutdownTimeoutSeconds: 30
+  logLevel: "beam_server=info,tower_http=info"
+  # The server pod runs as the image's user: uid 1000, gid 1000 (with fsGroup
+  # 1000 for /data). That is fixed, not a value -- the image owns /data as
+  # 1000. Library media must therefore be readable by uid 1000, by gid 1000,
+  # by one of these supplemental groups, or by everyone. A NAS export that
+  # grants read to a group, say `media` with gid 1500, needs that gid here:
+  #   supplementalGroups: [1500]
+  # Libraries are mounted read-only and the kubelet never changes their
+  # ownership, so the media's own permissions are what decide.
+  podSecurityContext:
+    supplementalGroups: []
+  # Any other beam-server setting (docs/operations/configuration.md), as
+  # NAME: "value". Names the chart manages itself are rejected by the schema.
+  env: {}
+
+# Exactly one of `url` or `existingSecret` is required. The chart never runs a
+# database itself: point it at PostgreSQL 18 (what compose and CI run) whose
+# user may CREATE in the database -- a migration creates the trusted
+# `pg_trgm` extension.
+database:
+  # A postgres:// URL, stored in a Secret the chart creates.
+  url: ""
+  # Or the name of an existing Secret holding the URL...
+  existingSecret: ""
+  # ...under this key.
+  existingSecretKey: url
+
+# OIDC login (bring your own IdP, FR-101). Login is disabled with a clear
+# error until issuer, clientId and a client secret are all set.
+oidc:
+  issuer: ""
+  clientId: ""
+  # Stored in a Secret the chart creates. Prefer existingSecret.
+  clientSecret: ""
+  existingSecret: ""
+  existingSecretKey: client-secret
+  # BEAM_OIDC_CLIENT_AUTH_METHOD: how the client is registered to authenticate
+  # at the IdP, client_secret_basic or client_secret_post. Empty leaves it
+  # unset, which means client_secret_basic.
+  clientAuthMethod: ""
+  scopes: "openid profile email"
+  # BEAM_OIDC_ADMIN_CLAIM / BEAM_OIDC_ADMIN_VALUE: admin is granted by an
+  # IdP-asserted ID-token claim, e.g. claim `groups`, value `beam-admin`.
+  adminClaim: ""
+  adminValue: ""
+
+# TMDB enrichment. Without a token, TMDB-eligible titles are left
+# un-enriched; AniList-sourced titles still enrich.
+tmdb:
+  apiToken: ""
+  existingSecret: ""
+  existingSecretKey: api-token
+
+# Media libraries. Each is mounted read-only at /videos/<name> (Beam never
+# writes under a library root, FR-202); create the library in Beam's admin UI
+# with that path. `volume` is one Kubernetes volume source. Every source kind
+# with a readOnly field (persistentVolumeClaim, nfs, csi, iscsi, rbd, cephfs,
+# ...) is forced to readOnly: true, which also keeps the kubelet from
+# applying the pod's fsGroup to your media. hostPath and image volumes are
+# accepted too; a hostPath is always `type: Directory` (the chart sets it, and
+# refuses any other type), so a mistyped path fails the pod instead of the
+# kubelet creating an empty directory for Beam to index. An `image` volume
+# needs a cluster with the ImageVolume feature (see the Kubernetes guide).
+# Kinds that cannot be read-only media (emptyDir, ephemeral, gitRepo,
+# configMap, ...) are refused by the schema. The pod reads media as uid 1000,
+# gid 1000 and server.podSecurityContext.supplementalGroups.
+#
+# libraries:
+#   - name: movies
+#     volume:
+#       persistentVolumeClaim:
+#         claimName: media-movies
+#   - name: anime
+#     volume:
+#       nfs:
+#         server: nas.lan
+#         path: /export/anime
+libraries: []
+
+persistence:
+  # Server-writable state at /data (artwork cache and the like). Disabled
+  # means an emptyDir: the state is lost whenever the pod is replaced.
+  data:
+    enabled: true
+    # Use an existing PersistentVolumeClaim instead of creating one.
+    existingClaim: ""
+    # Empty uses the cluster's default StorageClass.
+    storageClass: ""
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+
+service:
+  # ClusterIP keeps the server reachable only through the ingress. NodePort or
+  # LoadBalancer expose the whole API port directly -- /metrics (when
+  # metrics.enabled) and the /openapi docs included, which the ingress never
+  # routes -- and let clients bypass the ingress, so rateLimit.trustForwardedFor
+  # then defaults to false.
+  type: ClusterIP
+  port: 8000
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # The single host Beam is served on. `/v1` goes to beam-server, and `/` to
+  # the web client when web.enabled. `/metrics` is never routed.
+  host: ""
+  tls:
+    # Name of the TLS Secret for `host`. Empty serves plain HTTP.
+    secretName: ""
+
+rateLimit:
+  # BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR: key the rate limiter on
+  # X-Forwarded-For rather than the peer address. null means true only when
+  # ingress.enabled and service.type is ClusterIP -- every peer is then the
+  # ingress controller. A NodePort or LoadBalancer Service lets clients reach
+  # the server directly and forge the header, so null means false there. Only
+  # set it true when clients cannot reach the Service directly.
+  trustForwardedFor: null
+
+metrics:
+  # BEAM_ENABLE_METRICS, plus prometheus.io/* scrape annotations on the pod.
+  # /metrics is served on the API port and is never routed by the ingress.
+  enabled: false
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# The optional web client. The published beam-web image bakes its API origin
+# in at build time as http://localhost:8000, so it cannot serve a cluster:
+# enabling this requires an image built for your origin (see
+# docs/operations/deployment.md), hence no default repository or tag.
+web:
+  enabled: false
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi

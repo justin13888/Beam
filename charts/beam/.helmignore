@@ -1,0 +1,9 @@
+# Scenario values for `mise run helm:lint` / `helm:template` /
+# `check:chart-invariants`; not part of the packaged chart.
+ci/
+.DS_Store
+*.swp
+*.bak
+*.tmp
+*.orig
+*~

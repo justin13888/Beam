@@ -1,0 +1,5 @@
+# The smallest install the schema accepts: a public URL and a database.
+server:
+  publicUrl: http://beam.example.test
+database:
+  url: postgres://beam:password@postgres.example.test:5432/beam

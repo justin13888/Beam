@@ -1,0 +1,25 @@
+# The web client served from the same origin as the API, inline secrets, and
+# no persistence.
+server:
+  publicUrl: https://beam.example.test
+database:
+  url: postgres://beam:password@postgres.example.test:5432/beam
+oidc:
+  issuer: https://idp.example.test
+  clientId: beam
+  clientSecret: not-a-real-secret
+tmdb:
+  apiToken: not-a-real-token
+persistence:
+  data:
+    enabled: false
+ingress:
+  enabled: true
+  host: beam.example.test
+rateLimit:
+  trustForwardedFor: false
+web:
+  enabled: true
+  image:
+    repository: registry.example.test/beam-web
+    tag: beam.example.test-v0.1.0
