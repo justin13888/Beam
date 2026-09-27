@@ -446,6 +446,17 @@ struct ContentMoves {
 /// so the result depends on neither the order of the walk nor the order of
 /// the rows. A row whose path a relink takes, and that is not relinked
 /// itself, is displaced.
+///
+/// Except for a replace-by-rename: a file renamed onto a path whose row
+/// someone has played, when nobody has played the renamed file's row. The
+/// path keeps its own row, its new content a change to it, and the renamed
+/// file's row is left to be marked missing -- so replacing a film with
+/// another copy of it keeps everyone's place. Declining such a pairing can
+/// free a row or a path for another, so the pairing is planned again
+/// without it, until none is left.
+///
+/// `last_played` holds the rows that are paired and the rows at the paths
+/// they are paired with.
 fn plan_content_moves(
     rows: &HashMap<PathBuf, MediaFile>,
     matches: Vec<ContentMatch<'_>>,
@@ -457,10 +468,41 @@ fn plan_content_moves(
             .cmp(&relink_preference(b.path, b.row, last_played))
             .then_with(|| a.path.cmp(b.path))
     });
+    loop {
+        let plan = pair_best_first(rows, &matches);
+        let displaced: std::collections::HashSet<Uuid> =
+            plan.displaced.iter().map(|row| row.id).collect();
+        let replaced_by_rename: std::collections::HashSet<(Uuid, PathBuf)> = plan
+            .relinks
+            .iter()
+            .filter(|(row, path, _)| {
+                rows.get(path).is_some_and(|holder| {
+                    displaced.contains(&holder.id)
+                        && last_played.contains_key(&holder.id)
+                        && !last_played.contains_key(&row.id)
+                })
+            })
+            .map(|(row, path, _)| (row.id, path.clone()))
+            .collect();
+        if replaced_by_rename.is_empty() {
+            return plan;
+        }
+        matches.retain(|candidate| {
+            !replaced_by_rename.contains(&(candidate.row.id, candidate.path.to_path_buf()))
+        });
+    }
+}
+
+/// [`plan_content_moves`]'s pairing of `matches`, already sorted best first:
+/// each is taken unless its row or its path already has been.
+fn pair_best_first(
+    rows: &HashMap<PathBuf, MediaFile>,
+    matches: &[ContentMatch<'_>],
+) -> ContentMoves {
     let mut moved: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     let mut taken: std::collections::HashSet<&Path> = std::collections::HashSet::new();
     let mut plan = ContentMoves::default();
-    for ContentMatch { row, path, found } in matches {
+    for &ContentMatch { row, path, found } in matches {
         if moved.contains(&row.id) || taken.contains(path) {
             continue;
         }
@@ -1467,8 +1509,9 @@ impl LocalIndexService {
         Ok(true)
     }
 
-    /// When each of `rows` was last played; asked only when there is a tie
-    /// to break.
+    /// When each of `rows` was last played; asked only when there are two
+    /// rows to weigh against each other -- a tie to break, or a path's row
+    /// against the row a relink would give the path.
     async fn last_played(
         &self,
         rows: &[MediaFile],
@@ -3661,7 +3704,14 @@ impl LocalIndexService {
             .fingerprint_walk(&walked_files, &existing_map, &walked, &is_shielded, ticket)
             .await?;
         let matches = content_matches(&existing_map, &walked, &fingerprints, is_shielded);
-        let tied: Vec<MediaFile> = matches.iter().map(|m| m.row.clone()).collect();
+        // The rows that may be paired, and the rows at the paths they may
+        // be paired with: whether a pairing is a replace-by-rename turns on
+        // whether each was played.
+        let tied: Vec<MediaFile> = matches
+            .iter()
+            .flat_map(|m| std::iter::once(m.row).chain(existing_map.get(m.path)))
+            .cloned()
+            .collect();
         let last_played = self.last_played(&tied).await?;
         let ContentMoves { relinks, displaced } =
             plan_content_moves(&existing_map, matches, &last_played);

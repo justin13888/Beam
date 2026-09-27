@@ -470,6 +470,91 @@ fn of_identical_copies_the_row_played_most_recently_follows_the_file() {
 
 // ─── the scan and the watcher ────────────────────────────────────────────────
 
+/// A file renamed onto a played row's path, when its own row was never
+/// played, replaces that row's content rather than taking its path; any
+/// other pairing is planned as before -- including a swap with a played
+/// row, which displaces nobody.
+#[test]
+fn a_played_rows_path_is_replaced_not_taken_by_an_unplayed_row() {
+    let played = |ids: &[u128]| -> HashMap<Uuid, DateTime<Utc>> {
+        ids.iter()
+            .map(|id| (Uuid::from_u128(*id), instant(5)))
+            .collect()
+    };
+    let replaced = [row(1, "/lib/M.mkv", 10), row(2, "/lib/T.mkv", 20)];
+    // T renamed onto M: M's path holds T's content, T's path is gone.
+    let rename_onto_m = [("/lib/M.mkv", 20)];
+    let cases: [(
+        &str,
+        &[MediaFile],
+        &[(&str, u64)],
+        &[u128],
+        Vec<(u128, PathBuf)>,
+        Vec<u128>,
+    ); 6] = [
+        (
+            "the played row keeps its path",
+            &replaced,
+            &rename_onto_m,
+            &[1],
+            vec![],
+            vec![],
+        ),
+        (
+            "a played renamed row takes the path",
+            &replaced,
+            &rename_onto_m,
+            &[1, 2],
+            vec![to(2, "/lib/M.mkv")],
+            vec![1],
+        ),
+        (
+            "an unplayed path's row is displaced",
+            &replaced,
+            &rename_onto_m,
+            &[2],
+            vec![to(2, "/lib/M.mkv")],
+            vec![1],
+        ),
+        (
+            "nobody played either",
+            &replaced,
+            &rename_onto_m,
+            &[],
+            vec![to(2, "/lib/M.mkv")],
+            vec![1],
+        ),
+        (
+            "a swap with a played row still swaps",
+            &replaced,
+            &[("/lib/M.mkv", 20), ("/lib/T.mkv", 10)],
+            &[1],
+            vec![to(1, "/lib/T.mkv"), to(2, "/lib/M.mkv")],
+            vec![],
+        ),
+        (
+            "the declined row goes on to a path of its own",
+            &[
+                row(1, "/lib/M.mkv", 10),
+                row(2, "/lib/T.mkv", 20),
+                row(3, "/lib/x/Copy.mkv", 30),
+            ],
+            // T's content at M, and at the path of a row whose own content is gone.
+            &[("/lib/M.mkv", 20), ("/lib/x/Copy.mkv", 20)],
+            &[1],
+            vec![to(2, "/lib/x/Copy.mkv")],
+            vec![3],
+        ),
+    ];
+    for (name, rows, fingerprints, watched, relinks, displaced) in cases {
+        assert_eq!(
+            moves(rows, &[], fingerprints, &[], &played(watched)),
+            (relinks, displaced),
+            "{name}"
+        );
+    }
+}
+
 /// A prober that reports an hour-long matroska file, or fails, counting its
 /// calls: a relinked file is never probed.
 #[derive(Debug, Default)]
@@ -1357,6 +1442,46 @@ async fn a_displaced_row_found_again_is_reported_from_its_own_path() {
     for text in told {
         assert!(!text.contains(".beam-displaced-"), "{text}");
     }
+}
+
+/// Replacing a watched film by renaming another file onto its name -- a
+/// better copy, say -- keeps the watched row and everyone's place in it:
+/// its content changed. The renamed file's row, never played, is marked
+/// missing rather than taking the path.
+#[tokio::test]
+async fn a_file_renamed_onto_a_watched_files_path_replaces_its_content() {
+    let h = Harness::new().await;
+    let m = h.write("Heat (1995).mkv", "heat");
+    let t = h.write("Heat (1995) 1080p.mkv", "heat, a better copy");
+    h.scan().await;
+    h.watch(&m).await;
+    let m_id = h.present(&m).await.id;
+    let t_id = h.present(&t).await.id;
+
+    h.mv(&t, "Heat (1995).mkv");
+    let progress = h.scan().await;
+
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.marked_missing),
+        (0, 1, 1)
+    );
+    let kept = h.present(&m).await;
+    assert_eq!(kept.id, m_id, "the path keeps its own row");
+    assert_eq!(
+        kept.hash,
+        h.row(&t).await.unwrap().hash,
+        "with the new content"
+    );
+    assert!(
+        h.row(&t).await.unwrap().missing_since.is_some(),
+        "the renamed file's row is released as gone"
+    );
+    assert_eq!(h.row(&t).await.unwrap().id, t_id);
+    assert_eq!(
+        h.progress.last_played_at(vec![m_id]).await.unwrap().len(),
+        1,
+        "the progress stays on the path's row"
+    );
 }
 
 /// One of two identical copies moved, the other deleted: the row someone
