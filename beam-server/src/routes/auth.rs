@@ -783,16 +783,17 @@ pub async fn start_device_login(
 /// grows the interval, as RFC 8628 section 3.5 has the IdP do. On approval
 /// the session is minted exactly as the browser callback mints it (same
 /// admin claim, JIT provisioning, disabled gate, and expiry) and its opaque
-/// value returned in the body.
-///
-/// The credential is presented afterwards as the `beam_session` cookie, not
-/// as `Authorization: Bearer`. Kynos 0.3's `Auth<S>` binds one scheme per
-/// operation and has no way to declare "cookie or bearer" (an OpenAPI
-/// security requirement list of alternatives), so accepting a bearer token
-/// would mean either a second, undescribed authenticator or re-declaring
-/// every secured operation. That is an upstream gap in kynos, recorded in
-/// ADR-0017 to be filed on getkono/kynos; until a release closes it, the one
-/// described scheme is the one every client uses.
+/// value returned in the body, to be presented as the `beam_session` cookie
+/// on every later request.
+//
+// Cookie, not `Authorization: Bearer`: Kynos 0.3's `Auth<S>` binds one scheme
+// per operation and has no way to declare "cookie or bearer" (an OpenAPI
+// security requirement list of alternatives), so accepting a bearer token
+// would mean either a second, undescribed authenticator or re-declaring every
+// secured operation. That is an upstream gap in kynos -- not yet filed on
+// getkono/kynos; recorded in ADR-0017 (D151-3) for the maintainer to file.
+// Until a release closes it, the one described scheme is the one every client
+// uses.
 #[kynos::post("/auth/device/token", tag = Auth, operation_id = "pollDeviceLogin")]
 pub async fn poll_device_login(
     Headers(headers): Headers<ClientHeaders>,

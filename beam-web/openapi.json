@@ -7774,7 +7774,7 @@
           "auth"
         ],
         "summary": "Polls a device login once.",
-        "description": "Each call reaches the IdP at most once, and not at all when it comes\nsooner than the flow's interval allows -- that answers `slow_down` and\ngrows the interval, as RFC 8628 section 3.5 has the IdP do. On approval\nthe session is minted exactly as the browser callback mints it (same\nadmin claim, JIT provisioning, disabled gate, and expiry) and its opaque\nvalue returned in the body.\n\nThe credential is presented afterwards as the `beam_session` cookie, not\nas `Authorization: Bearer`. Kynos 0.3's `Auth<S>` binds one scheme per\noperation and has no way to declare \"cookie or bearer\" (an OpenAPI\nsecurity requirement list of alternatives), so accepting a bearer token\nwould mean either a second, undescribed authenticator or re-declaring\nevery secured operation. That is an upstream gap in kynos, recorded in\nADR-0017 to be filed on getkono/kynos; until a release closes it, the one\ndescribed scheme is the one every client uses.",
+        "description": "Each call reaches the IdP at most once, and not at all when it comes\nsooner than the flow's interval allows -- that answers `slow_down` and\ngrows the interval, as RFC 8628 section 3.5 has the IdP do. On approval\nthe session is minted exactly as the browser callback mints it (same\nadmin claim, JIT provisioning, disabled gate, and expiry) and its opaque\nvalue returned in the body, to be presented as the `beam_session` cookie\non every later request.",
         "operationId": "pollDeviceLogin",
         "parameters": [
           {
