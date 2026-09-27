@@ -13,8 +13,9 @@
 //!
 //! The report has no exact number to give, so no point carries one: every
 //! point's value is `1`, and its range is an attribute -- `count_bucket` for a
-//! count, `size_bucket` for the total size. A collector counts servers per
-//! range by summing the `1`s.
+//! count, `size_bucket` for the total size. A collector that keeps each
+//! request as it arrives counts servers per range by summing the `1`s; an OTLP
+//! backend may instead merge identical series (ADR-0019, Consequences).
 
 use std::borrow::Cow;
 

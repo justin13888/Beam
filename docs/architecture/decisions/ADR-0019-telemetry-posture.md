@@ -51,8 +51,9 @@ request. An admin can read it before deciding to opt in, and audit it after.
 **OTLP/HTTP JSON, hand-written.** The body is an OTLP `ExportMetricsServiceRequest` of gauges in the
 protobuf-JSON mapping, so any OpenTelemetry collector ingests it with no Beam-specific receiver.
 Having no exact number to give, every point's value is `1` and its range is an attribute
-(`count_bucket`, or `size_bucket` for the total size): a collector counts servers per range by
-summing.
+(`count_bucket`, or `size_bucket` for the total size). A collector that keeps each request as it
+arrives counts servers per range by summing; an OTLP backend may instead merge identical series (see
+Consequences).
 It is encoded by a hundred lines in `beam-server/src/services/telemetry/otlp.rs` rather than by the
 OpenTelemetry SDK: one request a week of a dozen gauges does not need a periodic reader, exporter and
 runtime, and a batching SDK cannot promise that what the preview shows is what goes on the wire.
