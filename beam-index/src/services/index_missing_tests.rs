@@ -267,7 +267,7 @@ impl Harness {
             size_bytes,
             mtime,
             mime_type: Some("video/mp4".to_string()),
-            duration: None,
+            duration: Some(Duration::from_secs(60)),
             container_format: None,
             content: None,
             status: FileStatus::Known,

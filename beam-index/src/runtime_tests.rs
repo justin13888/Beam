@@ -40,6 +40,10 @@ struct RecordingIndexer {
     /// when the scan started.
     watcher: Option<Arc<InMemoryFsWatcher>>,
     watched_at_scan_start: std::sync::Mutex<Vec<Vec<Uuid>>>,
+    /// What started each full scan, in order.
+    triggers: std::sync::Mutex<Vec<ScanTrigger>>,
+    /// Paths whose next reconcile is deferred by the given delay -- once.
+    defer_once: std::sync::Mutex<HashMap<PathBuf, Duration>>,
 }
 
 impl RecordingIndexer {
@@ -63,6 +67,18 @@ impl RecordingIndexer {
         self.watched_at_scan_start.lock().unwrap().clone()
     }
 
+    fn triggers(&self) -> Vec<ScanTrigger> {
+        self.triggers.lock().unwrap().clone()
+    }
+
+    /// Defer the next reconcile of `path` by `delay`.
+    fn defer_next(&self, path: &str, delay: Duration) {
+        self.defer_once
+            .lock()
+            .unwrap()
+            .insert(PathBuf::from(path), delay);
+    }
+
     fn store(&self, library: &Library) {
         self.library_repo
             .libraries
@@ -82,7 +98,8 @@ impl RecordingIndexer {
 
 #[async_trait::async_trait]
 impl BackgroundIndexer for RecordingIndexer {
-    async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
+    async fn scan_all_libraries(&self, trigger: ScanTrigger) -> Result<u32, IndexError> {
+        self.triggers.lock().unwrap().push(trigger);
         if let Some(watcher) = &self.watcher {
             self.watched_at_scan_start
                 .lock()
@@ -118,12 +135,16 @@ impl BackgroundIndexer for RecordingIndexer {
         library_id: Uuid,
         path: PathBuf,
         kind: FsEventKind,
-    ) -> Result<(), IndexError> {
+    ) -> Result<ReconcileOutcome, IndexError> {
+        let deferred = self.defer_once.lock().unwrap().remove(&path);
         self.reconciled
             .lock()
             .unwrap()
             .push((library_id, path, kind));
-        Ok(())
+        Ok(match deferred {
+            Some(retry_after) => ReconcileOutcome::Deferred { retry_after },
+            None => ReconcileOutcome::Done,
+        })
     }
 
     fn library_repo(&self) -> Arc<dyn LibraryRepository> {
@@ -208,6 +229,29 @@ async fn the_periodic_rescan_fires_once_per_interval_and_not_before() {
 
     clock.advance(Duration::from_secs(3600));
     until("the second rescan", || indexer.scan_count() == 3).await;
+
+    tasks.periodic_maintenance.abort();
+}
+
+#[tokio::test]
+async fn the_startup_scan_and_the_rescans_say_what_started_them() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+
+    let tasks =
+        spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(60, 2000));
+    until("the startup scan", || indexer.scan_count() == 1).await;
+    until("the maintenance loop to sleep", || {
+        clock.waiter_count() == 1
+    })
+    .await;
+    clock.advance(Duration::from_secs(60));
+    until("the first rescan", || indexer.scan_count() == 2).await;
+
+    assert_eq!(
+        indexer.triggers(),
+        vec![ScanTrigger::Startup, ScanTrigger::Periodic]
+    );
 
     tasks.periodic_maintenance.abort();
 }
@@ -334,6 +378,120 @@ async fn a_burst_of_events_for_one_path_reconciles_once_after_the_debounce() {
         reconciled[0].2,
         FsEventKind::Modified,
         "the last kind in the burst wins"
+    );
+
+    tasks.abort();
+}
+
+/// An event the indexer defers -- a scan holds its library, or its file is
+/// still being written -- is handed back once the delay has passed on the
+/// injected clock, and not before.
+#[tokio::test]
+async fn a_deferred_event_is_retried_once_its_delay_has_passed() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+    indexer.defer_next("/videos/a.mkv", Duration::from_secs(30));
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    watcher.emit(FsEvent {
+        library_id,
+        path: PathBuf::from("/videos/a.mkv"),
+        kind: FsEventKind::Created,
+    });
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+    clock.advance(Duration::from_millis(2000));
+    until("the first, deferred reconcile", || {
+        indexer.reconciled().len() == 1
+    })
+    .await;
+    // The maintenance interval, the poll interval and the retry.
+    until("the consumer to wait for the retry", || {
+        clock.waiter_count() >= 3
+    })
+    .await;
+
+    clock.advance(Duration::from_secs(29));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        indexer.reconciled().len(),
+        1,
+        "a second short of the delay, the event is still held"
+    );
+
+    clock.advance(Duration::from_secs(1));
+    until("the retry", || indexer.reconciled().len() == 2).await;
+    assert_eq!(
+        indexer.reconciled()[1],
+        (
+            library_id,
+            PathBuf::from("/videos/a.mkv"),
+            FsEventKind::Created
+        ),
+        "the retry is the event that was deferred"
+    );
+
+    tasks.abort();
+}
+
+/// A fresh event for a path whose last event was deferred replaces it: the
+/// path is reconciled as the fresh event says, and the old one is dropped.
+#[tokio::test]
+async fn a_fresh_event_replaces_a_deferred_one_for_the_same_path() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+    indexer.defer_next("/videos/a.mkv", Duration::from_secs(30));
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    watcher.emit(FsEvent {
+        library_id,
+        path: PathBuf::from("/videos/a.mkv"),
+        kind: FsEventKind::Created,
+    });
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+    clock.advance(Duration::from_millis(2000));
+    until("the deferred reconcile", || indexer.reconciled().len() == 1).await;
+    until("the consumer to wait for the retry", || {
+        clock.waiter_count() >= 3
+    })
+    .await;
+
+    watcher.emit(FsEvent {
+        library_id,
+        path: PathBuf::from("/videos/a.mkv"),
+        kind: FsEventKind::Removed,
+    });
+    until("the fresh event's debounce window", || {
+        clock.waiter_count() >= 4
+    })
+    .await;
+    clock.advance(Duration::from_millis(2000));
+    until("the fresh reconcile", || indexer.reconciled().len() == 2).await;
+    assert_eq!(indexer.reconciled()[1].2, FsEventKind::Removed);
+
+    clock.advance(Duration::from_secs(60));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        indexer.reconciled().len(),
+        2,
+        "the replaced event is never retried"
     );
 
     tasks.abort();
@@ -763,13 +921,19 @@ mod local_index_service_adapter {
         // wired in, not a fresh empty one.
         assert_eq!(indexer.library_repo().find_all().await.unwrap().len(), 1);
 
-        let added = indexer.scan_all_libraries().await.unwrap();
+        let added = indexer
+            .scan_all_libraries(ScanTrigger::Periodic)
+            .await
+            .unwrap();
         assert_eq!(added, 0, "an empty directory adds no files");
 
         // A file appears, and the same call now finds it -- which a stubbed
         // adapter could not do.
         std::fs::write(temp.path().join("Movie.2019.mkv"), b"not really a movie").unwrap();
-        let added = indexer.scan_all_libraries().await.unwrap();
+        let added = indexer
+            .scan_all_libraries(ScanTrigger::Periodic)
+            .await
+            .unwrap();
         assert_eq!(added, 1, "the scan really walked the library root");
     }
 
