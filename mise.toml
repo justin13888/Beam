@@ -1128,11 +1128,11 @@ exit "$status"
 '''
 
 [tasks."check:compose-invariants"]
-description = "Assert the compose topology keeps the dev IdP opt-in and declares its networks"
-# Three properties the dev stack depends on, none of which any other gate sees.
+description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, and lets dev admin work"
+# Four properties the dev stack depends on, none of which any other gate sees.
 # `dev:verify-oidc` asserts the first two, but it needs a container runtime and
 # so sits outside `ci` (NFR-201) -- which means nothing runs them automatically.
-# These three are pure YAML, hermetic, and belong here:
+# These four are pure configuration, hermetic, and belong here:
 #
 #   1. `dex` stays behind the `dev-idp` profile, so a bare `compose up` is the
 #      production shape and starts no IdP (FR-110, NFR-406).
@@ -1146,16 +1146,22 @@ description = "Assert the compose topology keeps the dev IdP opt-in and declares
 #      file on its own, so a declaration in a sibling include does not rescue
 #      the standalone `compose -f compose.beam.yaml` path the install guide
 #      documents, even while the root project passes.
+#   4. When `dev:up` points BEAM_OIDC_ADMIN_CLAIM at `groups`, its
+#      BEAM_OIDC_SCOPES requests `groups` and a compose service forwards that
+#      variable. Dex puts `groups` in the ID token only when the scope is asked
+#      for, so dropping it leaves every dev user a silent non-admin (#195) --
+#      and `dev:up` runs nowhere automatically, so only this gate would notice.
 #
 # The files are the ones compose.yaml `include`s, read from there rather than
 # restated, so a compose file is under these checks from the moment it is
-# included. The directory argument points the gate at a copy of the files; that
-# is how its negative cases are exercised without editing the tracked ones.
+# included; property 4 reads `mise.toml` from the same directory. The directory
+# argument points the gate at a copy of the files; that is how its negative
+# cases are exercised without editing the tracked ones.
 #
 # Parsed with Bun's YAML rather than grepped: mise pins bun, so CI runs the
 # exact same parser, and a textual assertion about YAML drifts the moment
 # someone reflows a block.
-usage = 'arg "[dir]" help="Directory holding compose.yaml and the files it includes" default="."'
+usage = 'arg "[dir]" help="Directory holding compose.yaml, the files it includes, and mise.toml" default="."'
 run = '''
 set -eu
 cd "$usage_dir"
@@ -1203,6 +1209,27 @@ for (const [f, doc] of docs) {
     for (const n of nets)
       check(declared.has(n), `${f}: service ${name} attaches to network ${n}, declared in ${f}`);
   }
+}
+
+// Property 4. A service `environment` is a list of NAME[=value] or a map.
+const devUp = Bun.TOML.parse(await Bun.file("mise.toml").text()).tasks?.["dev:up"]?.env ?? {};
+check(devUp.BEAM_OIDC_ADMIN_CLAIM !== undefined, "mise.toml: dev:up sets BEAM_OIDC_ADMIN_CLAIM");
+if (devUp.BEAM_OIDC_ADMIN_CLAIM === "groups") {
+  const scopes = String(devUp.BEAM_OIDC_SCOPES ?? "").split(/\s+/);
+  check(
+    scopes.includes("groups"),
+    `mise.toml: dev:up requests the groups scope for its groups admin claim (BEAM_OIDC_SCOPES=${JSON.stringify(devUp.BEAM_OIDC_SCOPES ?? null)})`,
+  );
+  const forwards = [...docs].some(([, doc]) =>
+    Object.values(doc.services ?? {}).some((svc) => {
+      const env = svc?.environment;
+      const names = Array.isArray(env)
+        ? env.map((e) => String(e).split("=")[0])
+        : Object.keys(env ?? {});
+      return names.includes("BEAM_OIDC_SCOPES");
+    }),
+  );
+  check(forwards, "a compose service forwards BEAM_OIDC_SCOPES");
 }
 
 process.exit(status);
@@ -1547,6 +1574,7 @@ description = "Bring up the dev stack, including the bundled Dex IdP"
 # so user@beam.localhost is a genuine non-admin for exercising the admin guards
 # by hand. BEAM_OIDC_SCOPES must request `groups`: Dex puts the claim in the ID
 # token only when that scope is asked for, and without it nobody would be admin.
+# `check:compose-invariants` fails if the scope and the claim fall out of step.
 #
 # All three are pinned here rather than left to a root `.env`, because shell
 # env outranks `.env` for compose interpolation: a stray `.env` admin claim or
