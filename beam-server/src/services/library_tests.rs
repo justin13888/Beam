@@ -10,7 +10,7 @@ mod tests {
     use beam_domain::repositories::library::MockLibraryRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
     use beam_index::services::index::{IndexError, MockIndexService};
-    use beam_index::services::scan::ScanTrigger;
+    use beam_index::services::scan::{ScanCoordinator, ScanTrigger, StoppedScan};
     use sea_orm::DbErr;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -34,6 +34,15 @@ mod tests {
             Arc::new(InMemoryPathValidator::success(video_dir)),
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         )
+    }
+
+    /// What a double's `stop_scan` answers: a real retirement, of a
+    /// coordinator no one else reads.
+    fn stopped_scan(library_id: Uuid, in_time: bool) -> StoppedScan {
+        StoppedScan {
+            in_time,
+            retirement: ScanCoordinator::new().retire(library_id),
+        }
     }
 
     fn make_domain_library(id: Uuid, name: &str) -> DomainLibrary {
@@ -116,7 +125,7 @@ mod tests {
             .times(1)
             .in_sequence(&mut sequence)
             .withf(move |id| *id == lib_id)
-            .returning(|_| true);
+            .returning(|id| stopped_scan(id, true));
         mock_library_repo
             .expect_delete()
             .times(1)
@@ -144,7 +153,9 @@ mod tests {
         mock_library_repo
             .expect_find_by_id()
             .returning(move |_| Ok(Some(make_domain_library(lib_id, "Movies"))));
-        mock_index.expect_stop_scan().returning(|_| false);
+        mock_index
+            .expect_stop_scan()
+            .returning(|id| stopped_scan(id, false));
         mock_library_repo
             .expect_delete()
             .times(1)
@@ -159,6 +170,99 @@ mod tests {
         );
         let result = service.delete_library(lib_id.to_string()).await;
         assert!(matches!(result, Ok(true)), "{result:?}");
+    }
+
+    /// A delete that fails leaves the library stored and listed, so it must
+    /// not stay retired: afterwards a watcher event for it is reconciled and
+    /// a scan of it registers, as before the delete was asked for (NFR-205).
+    #[tokio::test]
+    async fn a_library_whose_delete_fails_is_reconciled_and_scanned_again() {
+        use beam_domain::repositories::FileRepository;
+        use beam_index::services::media_info::MockMediaInfoService;
+        use beam_index::services::watcher::FsEventKind;
+        use beam_index::services::{
+            IndexService, LocalHashService, LocalIndexService, NoOpAdminLogService,
+            ReconcileOutcome,
+        };
+
+        let root = tempfile::TempDir::new().unwrap();
+        let film = root.path().join("Heat (1995).mkv");
+        std::fs::write(&film, b"heat").unwrap();
+        let lib_id = Uuid::new_v4();
+        let library = DomainLibrary {
+            root_path: root.path().to_path_buf(),
+            ..make_domain_library(lib_id, "Movies")
+        };
+
+        let index_libraries = Arc::new(InMemoryLibraryRepository::default());
+        index_libraries
+            .libraries
+            .lock()
+            .unwrap()
+            .insert(lib_id, library.clone());
+        let files = Arc::new(InMemoryFileRepository::default());
+        let mut prober = MockMediaInfoService::new();
+        prober.expect_get_video_metadata().returning(|_| {
+            Err(beam_index::probe::metadata::MetadataError::UnknownError(
+                "not a film".to_string(),
+            ))
+        });
+        let index = Arc::new(LocalIndexService::new(
+            index_libraries,
+            files.clone(),
+            Arc::new(beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default()),
+            Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default()),
+            Arc::new(
+                beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository::default(),
+            ),
+            Arc::new(LocalHashService::default()),
+            Arc::new(prober),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(NoOpAdminLogService),
+        ));
+
+        let mut libraries = MockLibraryRepository::new();
+        libraries
+            .expect_find_by_id()
+            .returning(move |_| Ok(Some(library.clone())));
+        libraries
+            .expect_delete()
+            .times(1)
+            .returning(|_| Err(DbErr::Custom("statement timeout".to_string())));
+        let service = LocalLibraryService::new(
+            Arc::new(libraries),
+            Arc::new(MockFileRepository::new()),
+            root.path().to_path_buf(),
+            PathBuf::from("/beam-data"),
+            Arc::new(InMemoryNotificationService::new()),
+            index.clone() as Arc<dyn IndexService>,
+            Arc::new(InMemoryPathValidator::success(root.path().to_path_buf())),
+            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        );
+
+        let result = service.delete_library(lib_id.to_string()).await;
+        assert!(matches!(result, Err(LibraryError::Db(_))), "{result:?}");
+
+        assert_eq!(
+            index
+                .reconcile_path(lib_id, film.clone(), FsEventKind::Created)
+                .await
+                .unwrap(),
+            ReconcileOutcome::Done
+        );
+        assert!(
+            files
+                .find_by_path(&film.to_string_lossy())
+                .await
+                .unwrap()
+                .is_some(),
+            "the watcher event indexed the file"
+        );
+        let ticket = index
+            .begin_scan(lib_id, ScanTrigger::Manual)
+            .await
+            .expect("a scan of the library registers");
+        index.run_scan(ticket).await.unwrap();
     }
 
     // ── create_library ────────────────────────────────────────────────────────────
@@ -773,7 +877,9 @@ mod tests {
         let notif_ref = Arc::clone(&notif);
         // No scan to cancel.
         let mut idle_index = MockIndexService::new();
-        idle_index.expect_stop_scan().returning(|_| true);
+        idle_index
+            .expect_stop_scan()
+            .returning(|id| stopped_scan(id, true));
         idle_index.expect_forget_library().return_const(());
 
         let service = LocalLibraryService::new(

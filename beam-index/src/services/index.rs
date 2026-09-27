@@ -20,7 +20,7 @@ use crate::services::notification::{AdminEvent, EventCategory, NotificationServi
 use crate::services::scan::{
     CANCELLED, CatalogExclusive, ProgressThrottle, SCAN_STOP_TIMEOUT, ScanCoordinator, ScanEvent,
     ScanJob, ScanPhase, ScanProgress, ScanRefused, ScanState, ScanTicket, ScanTrigger, Settle,
-    settle_state,
+    StoppedScan, settle_state,
 };
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
@@ -651,14 +651,17 @@ pub trait IndexService: Send + Sync + std::fmt::Debug {
 
     /// Stop `library_id`'s scan before the library is deleted.
     ///
-    /// The library is retired first: from then on no scan registers for it
-    /// and no watcher event reconciles it, so nothing starts between this
-    /// call and the caller's delete. A queued scan fails as [`CANCELLED`] at
-    /// once; a running one is asked to stop after the file it is on and
-    /// waited for -- as [`CANCELLED`], unless it finished first -- for at
-    /// most [`SCAN_STOP_TIMEOUT`] on the injected clock. Returns whether no
-    /// scan of the library is still queued or running.
-    async fn stop_scan(&self, library_id: Uuid) -> bool;
+    /// The library is retired first: while the returned
+    /// [`StoppedScan::retirement`] is held no scan registers for it and no
+    /// watcher event reconciles it, so nothing starts between this call and
+    /// the caller's delete. The caller commits the retirement once the delete
+    /// succeeds; dropping it -- the delete failed -- gives the library back.
+    /// A queued scan fails as [`CANCELLED`] at once; a running one is asked
+    /// to stop after the file it is on and waited for -- as [`CANCELLED`],
+    /// unless it finished first -- for at most [`SCAN_STOP_TIMEOUT`] on the
+    /// injected clock. [`StoppedScan::in_time`] says whether no scan of the
+    /// library is still queued or running.
+    async fn stop_scan(&self, library_id: Uuid) -> StoppedScan;
 
     /// Drop `library_id`'s lock and latest job once the library is deleted.
     fn forget_library(&self, library_id: Uuid);
@@ -3110,12 +3113,15 @@ impl IndexService for LocalIndexService {
         self.scans.subscribe(library_id)
     }
 
-    async fn stop_scan(&self, library_id: Uuid) -> bool {
+    async fn stop_scan(&self, library_id: Uuid) -> StoppedScan {
         // Retired first, so nothing registers between the cancel and the
         // caller's delete of the library.
-        self.scans.retire(library_id);
+        let retirement = self.scans.retire(library_id);
         if !self.scans.cancel(library_id, self.clock.now()) {
-            return true;
+            return StoppedScan {
+                in_time: true,
+                retirement,
+            };
         }
         // Subscribed after the cancel: `wait_for` reads the current job
         // first, so a scan that finished in between is seen as finished.
@@ -3127,9 +3133,13 @@ impl IndexService for LocalIndexService {
                 .wait_for(|job| !job.as_ref().is_some_and(|job| job.state.is_active()))
                 .await;
         };
-        tokio::select! {
+        let in_time = tokio::select! {
             () = finished => true,
             () = self.clock.sleep(SCAN_STOP_TIMEOUT) => false,
+        };
+        StoppedScan {
+            in_time,
+            retirement,
         }
     }
 

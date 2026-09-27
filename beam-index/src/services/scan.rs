@@ -181,10 +181,87 @@ pub struct ScanCoordinator {
     libraries: parking_lot::Mutex<HashMap<Uuid, Arc<LibrarySlot>>>,
     catalog: Arc<RwLock<()>>,
     /// Libraries being deleted, or deleted: nothing scans or reconciles them
-    /// again. Kept for the life of the process -- a library id is a v4 UUID,
-    /// never reused -- so a slot forgotten after the delete cannot be
-    /// re-created by a late caller and scan a library that is gone.
-    retired: parking_lot::Mutex<HashSet<Uuid>>,
+    /// while they are here. See [`Retirements`].
+    retired: Arc<parking_lot::Mutex<Retirements>>,
+}
+
+/// Which libraries are retired, and how. A deleted library stays retired for
+/// the life of the process -- a library id is a v4 UUID, never reused -- so a
+/// slot forgotten after the delete cannot be re-created by a late caller and
+/// scan a library that is gone. A library being deleted is retired only for
+/// as long as some delete of it is in flight: one whose delete fails comes
+/// back.
+#[derive(Debug, Default)]
+struct Retirements {
+    /// Deletes in flight per library, each holding a [`Retirement`].
+    deleting: HashMap<Uuid, usize>,
+    /// Libraries whose delete succeeded.
+    deleted: HashSet<Uuid>,
+}
+
+impl Retirements {
+    fn contains(&self, library_id: Uuid) -> bool {
+        self.deleted.contains(&library_id) || self.deleting.contains_key(&library_id)
+    }
+}
+
+/// A library [retired](ScanCoordinator::retire) while it is deleted.
+///
+/// [Commit](Self::commit) it once the library's delete has succeeded, and the
+/// library stays retired for good. Dropped uncommitted -- the delete failed,
+/// and the library is still stored and listed -- it gives the library back:
+/// it is scanned and its watcher events reconciled again, as though the
+/// delete had never been asked for.
+#[derive(Debug)]
+#[must_use = "dropping a retirement un-retires the library; commit it once the delete succeeds"]
+pub struct Retirement {
+    retired: Arc<parking_lot::Mutex<Retirements>>,
+    library_id: Uuid,
+    committed: bool,
+}
+
+impl Retirement {
+    /// The library is deleted: it stays retired for the life of the process.
+    pub fn commit(mut self) {
+        let mut retired = self.retired.lock();
+        release(&mut retired, self.library_id);
+        retired.deleted.insert(self.library_id);
+        drop(retired);
+        self.committed = true;
+    }
+
+    pub fn library_id(&self) -> Uuid {
+        self.library_id
+    }
+}
+
+impl Drop for Retirement {
+    fn drop(&mut self) {
+        if !self.committed {
+            release(&mut self.retired.lock(), self.library_id);
+        }
+    }
+}
+
+/// What stopping a library's scan before its delete leaves the caller with
+/// (see [`crate::services::index::IndexService::stop_scan`]).
+#[derive(Debug)]
+pub struct StoppedScan {
+    /// Whether no scan of the library is still queued or running.
+    pub in_time: bool,
+    /// The library's retirement: commit it once the delete succeeds, drop it
+    /// if the delete fails.
+    pub retirement: Retirement,
+}
+
+/// One delete of `library_id` is no longer in flight.
+fn release(retired: &mut Retirements, library_id: Uuid) {
+    if let Some(count) = retired.deleting.get_mut(&library_id) {
+        *count -= 1;
+        if *count == 0 {
+            retired.deleting.remove(&library_id);
+        }
+    }
 }
 
 /// What a scan holds while it runs: its library's lock, and the catalog gate
@@ -263,19 +340,25 @@ impl ScanCoordinator {
         self.slot(library_id).job.subscribe()
     }
 
-    /// Stop `library_id` from ever being scanned or reconciled again: it is
-    /// being deleted. From now on [`Self::register`] refuses it and
-    /// [`Self::try_acquire_for_reconcile`] never gets it, so no scan -- a
-    /// periodic one, an administrator's, a newly polled library's -- and no
-    /// watcher event can start on it between the caller stopping its scan
-    /// and deleting its rows. A job registered before is not affected;
-    /// [`Self::cancel`] it.
-    pub fn retire(&self, library_id: Uuid) {
-        self.retired.lock().insert(library_id);
+    /// Stop `library_id` from being scanned or reconciled: it is being
+    /// deleted. While the returned [`Retirement`] is held, and for good once
+    /// it is [committed](Retirement::commit), [`Self::register`] refuses the
+    /// library and [`Self::try_acquire_for_reconcile`] never gets it, so no
+    /// scan -- a periodic one, an administrator's, a newly polled library's
+    /// -- and no watcher event can start on it between the caller stopping
+    /// its scan and deleting its rows. A job registered before is not
+    /// affected; [`Self::cancel`] it.
+    pub fn retire(&self, library_id: Uuid) -> Retirement {
+        *self.retired.lock().deleting.entry(library_id).or_insert(0) += 1;
+        Retirement {
+            retired: self.retired.clone(),
+            library_id,
+            committed: false,
+        }
     }
 
     fn is_retired(&self, library_id: Uuid) -> bool {
-        self.retired.lock().contains(&library_id)
+        self.retired.lock().contains(library_id)
     }
 
     /// Ask `library_id`'s active job to stop. A running scan checks between

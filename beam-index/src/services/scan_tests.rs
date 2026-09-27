@@ -403,8 +403,9 @@ fn cancelling_a_running_job_leaves_it_running_until_it_stops() {
 }
 
 /// Between stopping a library's scan and deleting its rows, nothing may
-/// start on it (PR #224 r2): a retired library is refused a scan job and a
-/// reconcile, even once its slot has been forgotten.
+/// start on it (PR #224 r2): a retired library whose delete succeeded is
+/// refused a scan job and a reconcile, even once its slot has been
+/// forgotten.
 #[tokio::test]
 async fn a_retired_library_is_never_scanned_or_reconciled_again() {
     let clock = Arc::new(TestClock::new());
@@ -412,7 +413,7 @@ async fn a_retired_library_is_never_scanned_or_reconciled_again() {
     let library = Uuid::new_v4();
     let other = Uuid::new_v4();
 
-    coordinator.retire(library);
+    coordinator.retire(library).commit();
 
     assert_eq!(
         coordinator
@@ -436,5 +437,58 @@ async fn a_retired_library_is_never_scanned_or_reconciled_again() {
             .register(queued(other, &clock), clock.clone())
             .is_ok(),
         "only the retired library is refused"
+    );
+}
+
+/// A library whose delete fails is still stored and listed, so its
+/// retirement, dropped uncommitted, gives it back: it registers scans and
+/// reconciles again. While it is held, it is refused like a deleted one.
+#[test]
+fn a_retirement_dropped_uncommitted_gives_the_library_back() {
+    let clock = Arc::new(TestClock::new());
+    let coordinator = ScanCoordinator::new();
+    let library = Uuid::new_v4();
+
+    let retirement = coordinator.retire(library);
+    assert_eq!(
+        coordinator
+            .register(queued(library, &clock), clock.clone())
+            .err(),
+        Some(ScanRefused::Retired)
+    );
+    assert!(coordinator.try_acquire_for_reconcile(library).is_none());
+
+    drop(retirement);
+
+    assert!(coordinator.try_acquire_for_reconcile(library).is_some());
+    assert!(
+        coordinator
+            .register(queued(library, &clock), clock.clone())
+            .is_ok()
+    );
+}
+
+/// Two deletes of one library in flight at once: the first to fail does not
+/// give the library back while the second may still succeed, and once that
+/// one does, the library stays retired.
+#[test]
+fn a_library_stays_retired_while_any_delete_of_it_is_in_flight() {
+    let clock = Arc::new(TestClock::new());
+    let coordinator = ScanCoordinator::new();
+    let library = Uuid::new_v4();
+
+    let first = coordinator.retire(library);
+    let second = coordinator.retire(library);
+    drop(first);
+    assert!(
+        coordinator.try_acquire_for_reconcile(library).is_none(),
+        "the second delete still holds it"
+    );
+    second.commit();
+    assert_eq!(
+        coordinator
+            .register(queued(library, &clock), clock.clone())
+            .err(),
+        Some(ScanRefused::Retired)
     );
 }

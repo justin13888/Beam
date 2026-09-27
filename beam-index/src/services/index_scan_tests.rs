@@ -437,7 +437,7 @@ async fn stopping_a_scan_waits_until_it_has_failed_as_cancelled() {
 
     h.open_gate();
 
-    assert!(stop.await.unwrap(), "the scan stopped in time");
+    assert!(stop.await.unwrap().in_time, "the scan stopped in time");
     let job = h.service.scan_job(h.library.id).unwrap();
     assert_eq!(
         job.state,
@@ -468,7 +468,7 @@ async fn stopping_a_scan_gives_up_after_the_timeout() {
     assert!(!stop.is_finished(), "not yet timed out");
     h.clock.advance(Duration::from_secs(1));
 
-    assert!(!stop.await.unwrap(), "the scan was still running");
+    assert!(!stop.await.unwrap().in_time, "the scan was still running");
     assert_eq!(
         h.service.scan_job(h.library.id).unwrap().state,
         ScanState::Running
@@ -505,7 +505,7 @@ async fn stopping_a_queued_scan_fails_it_at_once_and_it_never_runs() {
 
     // Returns with the clock never moved -- the `TestClock` does not move on
     // its own -- so it was not held until the timeout.
-    assert!(h.service.stop_scan(h.library.id).await);
+    assert!(h.service.stop_scan(h.library.id).await.in_time);
 
     let job = h.service.scan_job(h.library.id).unwrap();
     assert_eq!(job.state, ScanState::Failed);
@@ -523,13 +523,16 @@ async fn stopping_a_queued_scan_fails_it_at_once_and_it_never_runs() {
 /// Once a library's scan is stopped for its delete, nothing starts on it
 /// before the delete lands (PR #224 r2): a new scan -- periodic,
 /// administrator's or newly polled -- is refused as for a library that is
-/// gone, and a watcher event is handed back.
+/// gone, and a watcher event is handed back. A delete that then fails drops
+/// the retirement, and the library -- still stored -- is scanned and
+/// reconciled again.
 #[tokio::test]
 async fn a_library_whose_scan_was_stopped_is_not_scanned_or_reconciled_again() {
     let h = Harness::settled().await;
     let path = h.write("Heat (1995).mkv");
 
-    assert!(h.service.stop_scan(h.library.id).await);
+    let stopped = h.service.stop_scan(h.library.id).await;
+    assert!(stopped.in_time);
 
     assert!(matches!(
         h.service
@@ -552,6 +555,25 @@ async fn a_library_whose_scan_was_stopped_is_not_scanned_or_reconciled_again() {
     ));
     assert_eq!(h.hashes(), 0);
     assert!(h.row(&path).await.is_none(), "nothing was indexed");
+
+    // The delete failed.
+    drop(stopped);
+
+    assert_eq!(
+        h.service
+            .reconcile_path(h.library.id, path.clone(), FsEventKind::Created)
+            .await
+            .unwrap(),
+        ReconcileOutcome::Done
+    );
+    assert!(h.row(&path).await.is_some(), "the event was reconciled");
+    assert!(
+        h.service
+            .begin_scan(h.library.id, ScanTrigger::Periodic)
+            .await
+            .is_ok(),
+        "and a scan registers"
+    );
 }
 
 /// With no scan queued or running there is nothing to wait for.
@@ -561,7 +583,7 @@ async fn stopping_an_idle_library_returns_at_once() {
     h.write("Heat (1995).mkv");
     h.scan().await;
 
-    assert!(h.service.stop_scan(h.library.id).await);
+    assert!(h.service.stop_scan(h.library.id).await.in_time);
     assert_eq!(h.clock.waiter_count(), 0, "it never waited");
     assert_eq!(
         h.service.scan_job(h.library.id).unwrap().state,

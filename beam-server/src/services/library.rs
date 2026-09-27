@@ -11,7 +11,7 @@ use crate::services::notification::{AdminEvent, EventCategory, NotificationServi
 use beam_domain::models::Library as DomainLibrary;
 use beam_index::runtime::LibraryWatchHook;
 use beam_index::services::index::{IndexError, IndexService};
-use beam_index::services::scan::ScanTrigger;
+use beam_index::services::scan::{ScanTrigger, StoppedScan};
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
     /// Validates a *library root* at registration, returning the canonical
@@ -612,13 +612,23 @@ impl LibraryService for LocalLibraryService {
         // job as an internal error. A scan held on one file past the timeout
         // does not hold the delete: whatever it then writes is refused with
         // the library, or left for the orphan sweep.
-        if !self.index_service.stop_scan(lib_uuid).await {
+        //
+        // The library stays retired -- nothing scans or reconciles it -- only
+        // once the delete has succeeded. A delete that fails returns early
+        // and drops the retirement, so the library, still stored and listed,
+        // is scanned and watched again.
+        let StoppedScan {
+            in_time,
+            retirement,
+        } = self.index_service.stop_scan(lib_uuid).await;
+        if !in_time {
             warn!(
                 library_id = %lib_uuid,
                 "a scan of the library did not stop in time; deleting the library anyway"
             );
         }
         self.library_repo.delete(lib_uuid).await?;
+        retirement.commit();
         self.index_service.forget_library(lib_uuid);
         self.watch_hook.library_deleted(lib_uuid).await;
 
