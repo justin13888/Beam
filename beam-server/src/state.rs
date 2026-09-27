@@ -266,6 +266,7 @@ impl AppServices {
                 admin_log_service.clone(),
             )
             .with_hash_unknown_files(config.hash_unknown_files)
+            .with_missing_file_grace(config.missing_file_grace())
             .with_enrichment_repo(enrichment_repo.clone()),
         );
 

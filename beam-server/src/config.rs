@@ -91,6 +91,14 @@ pub struct ServerConfig {
     #[config(env = "BEAM_SCAN_INTERVAL_SECS", default = 3600)]
     pub scan_interval_secs: u64,
 
+    /// How many days a file may stay missing from disk before a scan purges
+    /// its row -- and, with it, every user's playback progress for it. Until
+    /// then the file is only hidden, and comes back under the same id if its
+    /// path reappears (an unmounted NAS or USB disk remounted). `0` purges at
+    /// the first healthy scan that does not find the file.
+    #[config(env = "BEAM_MISSING_FILE_GRACE_DAYS", default = 30)]
+    pub missing_file_grace_days: u32,
+
     /// Whether to run the inotify-based filesystem watcher for near-real-time
     /// index updates. When false, only the startup scan and periodic rescans run.
     #[config(env = "BEAM_WATCH_ENABLED", default = true)]
@@ -269,6 +277,7 @@ impl fmt::Debug for ServerConfig {
             db_min_connections,
             hash_unknown_files,
             scan_interval_secs,
+            missing_file_grace_days,
             watch_enabled,
             watch_debounce_ms,
             enrich_interval_secs,
@@ -310,6 +319,7 @@ impl fmt::Debug for ServerConfig {
             .field("db_min_connections", db_min_connections)
             .field("hash_unknown_files", hash_unknown_files)
             .field("scan_interval_secs", scan_interval_secs)
+            .field("missing_file_grace_days", missing_file_grace_days)
             .field("watch_enabled", watch_enabled)
             .field("watch_debounce_ms", watch_debounce_ms)
             .field("enrich_interval_secs", enrich_interval_secs)
@@ -449,6 +459,11 @@ impl ServerConfig {
     /// Hard ceiling on session lifetime from creation, in seconds.
     pub fn session_absolute_ttl_secs(&self) -> u64 {
         self.session_max_days * SECONDS_PER_DAY
+    }
+
+    /// How long a file may stay missing before a scan purges it (issue #179).
+    pub fn missing_file_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.missing_file_grace_days) * SECONDS_PER_DAY)
     }
 
     /// Whether enough OIDC configuration is present to attempt discovery.
@@ -815,6 +830,22 @@ mod tests {
             .session_idle_ttl_secs(),
             86_400
         );
+    }
+
+    #[test]
+    fn missing_file_grace_days_are_converted_to_a_duration() {
+        // A mistyped conversion purges progress for a disk that is away for a
+        // weekend; zero must stay zero ("purge at the next healthy scan").
+        let grace = |days| {
+            ServerConfig {
+                missing_file_grace_days: days,
+                ..Default::default()
+            }
+            .missing_file_grace()
+        };
+        assert_eq!(grace(30), std::time::Duration::from_secs(2_592_000));
+        assert_eq!(grace(1), std::time::Duration::from_secs(86_400));
+        assert_eq!(grace(0), std::time::Duration::ZERO);
     }
 
     #[test]
