@@ -163,12 +163,23 @@ run = "hk install --mise"
 
 # Every task that runs a JS tool depends on this, so a fresh checkout or
 # worktree -- which has no node_modules -- installs them on first use instead
-# of failing with "command not found". Against an up-to-date node_modules it
-# is a sub-second no-op. --frozen-lockfile: bun.lock is the contract, and a
-# check must never rewrite it.
+# of failing with "command not found". --frozen-lockfile: bun.lock is the
+# contract, and a check must never rewrite it.
+#
+# `bun install` is not a no-op against an up-to-date node_modules: it still
+# re-links every workspace's bins, and two overlapping runs fail with EEXIST.
+# So once an install has succeeded it writes a stamp, and mise skips the task
+# -- never starting bun -- while the stamp is newer than every manifest and
+# the lockfile. The stamp lives inside node_modules so deleting node_modules
+# deletes it, and the next run installs. A fresh checkout (or CI restoring a
+# cached node_modules) has manifests newer than any restored stamp, so it
+# installs too. Anything else -- say, one workspace's node_modules deleted by
+# hand -- is `mise run --force deps:js`.
 [tasks."deps:js"]
 description = "Install the JS workspace dependencies from bun.lock"
-run = "bun install --frozen-lockfile"
+sources = ["bun.lock", "package.json", "*/package.json"]
+outputs = ["node_modules/.beam-deps-js.stamp"]
+run = "bun install --frozen-lockfile && touch node_modules/.beam-deps-js.stamp"
 
 # ---------------------------------------------------------------------------
 # Rust

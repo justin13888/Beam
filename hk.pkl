@@ -130,10 +130,12 @@ hooks {
             }
             // Every JS task depends on `deps:js`, so a fresh worktree -- which has
             // no node_modules -- provisions itself. But the three JS steps below
-            // run in parallel, and three `bun install`s racing over one empty
-            // node_modules is how a first push fails with ENOTEMPTY. This step
-            // installs once, and they wait on it; their own `deps:js` then finds
-            // nothing to do. The glob is the union of theirs, so it fires exactly
+            // run in parallel, and overlapping `bun install`s fail (ENOTEMPTY over
+            // an empty node_modules, EEXIST re-linking bins over a full one). This
+            // step installs once, and they wait on it. Their own `deps:js` is then
+            // skipped by mise without starting bun, because the install left a
+            // stamp newer than bun.lock and every package.json (see the task in
+            // mise.toml). The glob is the union of theirs, so it fires exactly
             // when one of them will.
             ["js-deps"] {
                 glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json", "beam-docs/**")
