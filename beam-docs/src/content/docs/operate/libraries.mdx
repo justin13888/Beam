@@ -154,11 +154,13 @@ Some video files are skipped too, because they are not what a library is for:
 - **Hidden files and folders** — any name starting with `.`, at any depth.
 - **NAS and system housekeeping folders** — `@eaDir` (Synology), `#recycle`, `$RECYCLE.BIN`,
   `System Volume Information`, `lost+found`.
-- **Extras folders** inside a title's folder — `Extras`, `Featurettes`, `Behind The Scenes`,
-  `Deleted Scenes`, `Interviews`, `Scenes`, `Shorts`, `Trailers`, `Other`, `Sample`, `Samples`,
-  `Bonus`. A title's folder is one naming a title and year (`Movie (2019)/Trailers/`), a season
-  folder (`Show/Season 1/Deleted Scenes/`), or any folder below the top level
-  (`TV/Show/Extras/`). A top-level folder without a year is taken for a category, so
+- **Extras folders** anywhere below the top of a library — `Extras`, `Featurettes`,
+  `Behind The Scenes`, `Deleted Scenes`, `Interviews`, `Sample`, `Samples`, `Bonus`
+  (`Breaking Bad/Extras/`, a release folder's `Sample/`).
+- **`Trailers`, `Shorts`, `Scenes` and `Other` folders** inside a title's folder. These names can
+  also mean a collection, so they are skipped only in a folder naming a title and year
+  (`Movie (2019)/Trailers/`), a season folder (`Show/Season 1/Scenes/`), or any folder below the
+  top level (`TV/Show/Trailers/`). A top-level folder without a year is taken for a category, so
   `Movies/Trailers/` and a top-level `Shorts/` are collections, and are indexed.
 - **Files named as extras** — a name ending in `-trailer`, `-sample`, `.sample`, `_sample`,
   `-featurette`, `-behindthescenes`, `-deleted` or `-interview`, or a file called just `sample` or

@@ -153,10 +153,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   row -- present or soft-deleted -- is left for it.
 - **FR-216**: The indexer MUST index only video files. It MUST NOT index, hash or probe hidden files
   or anything under a hidden folder; NAS and operating-system housekeeping folders (`@eaDir`,
-  `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); extras folders inside a
-  title's folder -- one naming a title and year, a season folder, or any folder below the top level
-  of a library -- (`Extras`, `Featurettes`, `Behind The Scenes`, `Deleted Scenes`, `Interviews`,
-  `Scenes`, `Shorts`, `Trailers`, `Other`, `Sample(s)`, `Bonus`); files named as extras
+  `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); extras folders below the
+  top level of a library (`Extras`, `Featurettes`, `Behind The Scenes`, `Deleted Scenes`,
+  `Interviews`, `Sample(s)`, `Bonus`), and the extras folder names that can also name a category
+  (`Scenes`, `Shorts`, `Trailers`, `Other`) only inside a title's folder -- one naming a title and
+  year, a season folder, or any folder below the top level of a library; files named as extras
   (`-trailer`, `-sample`, `.sample`, `_sample`, `-featurette`, `-behindthescenes`, `-deleted`,
   `-interview`, or exactly `sample`/`trailer`); or paths matching an administrator's
   `BEAM_SCAN_IGNORE` glob patterns, which live in server configuration, never in files written into
