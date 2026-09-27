@@ -42,6 +42,7 @@ services:
       - BEAM_MISSING_FILE_GRACE_DAYS=${BEAM_MISSING_FILE_GRACE_DAYS:-30}
       - BEAM_WATCH_ENABLED=${BEAM_WATCH_ENABLED:-true}
       - BEAM_WATCH_DEBOUNCE_MS=${BEAM_WATCH_DEBOUNCE_MS:-2000}
+      - BEAM_WATCH_POLL_INTERVAL_SECS=${BEAM_WATCH_POLL_INTERVAL_SECS:-300}
 
       # Metadata enrichment (cameo -> TMDB/AniList). BEAM_TMDB_API_TOKEN
       # absent means TMDB-eligible titles are left un-enriched;
