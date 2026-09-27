@@ -12,7 +12,8 @@ pub struct Show {
     /// What the indexer matches an episode file's series folder to this show
     /// by -- see [`crate::utils::identity`]. Never rewritten by enrichment.
     /// `None` only on a row that predates the key and could not be
-    /// backfilled; such a row is never matched.
+    /// backfilled, or that the indexer released (a show merged into another,
+    /// or a season-folder husk); such a row is never matched.
     pub identity_key: Option<String>,
     pub title_localized: Option<String>,
     pub description: Option<String>,

@@ -4,8 +4,11 @@
 //! The display title is not an identity. Enrichment rewrites it with the
 //! provider's spelling -- `Amelie` becomes `Amélie`, `Spider Man` becomes
 //! `Spider-Man` -- so a lookup by display title misses the enriched row on the
-//! next file and creates a duplicate. The key is derived once, from the
-//! filename parse, stored in its own column, and never touched by enrichment.
+//! next file and creates a duplicate. The key is derived from the filename
+//! parse, stored in its own column, and never touched by enrichment. A change
+//! to this fold changes stored keys too: bump
+//! [`crate::utils::media_path::CLASSIFIER_VERSION`] with it, and the indexer
+//! re-derives every key an older version derived.
 //!
 //! The key is deliberately forgiving about spelling and strict about year:
 //! case, punctuation, `&`/`and` and every combining mark in the Combining

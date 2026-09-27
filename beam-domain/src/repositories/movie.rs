@@ -9,8 +9,9 @@ use crate::providers::enrichment::MovieEnrichment;
 /// Persistence for movies and their entries.
 ///
 /// A movie has two names (issue #183). Its **identity key** is what the
-/// indexer matches a file to it by: derived once from the filename parse and
-/// never rewritten. Its **display title** is what a user sees, and enrichment
+/// indexer matches a file to it by: derived from the filename parse, and
+/// rewritten only when the rules deriving it change ([`Self::rekey`]). Its
+/// **display title** is what a user sees, and enrichment
 /// replaces it with the provider's spelling. Looking a movie up by its display
 /// title is exactly how a renamed movie used to be missed and duplicated, so
 /// the trait offers no such lookup.

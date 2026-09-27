@@ -11,8 +11,9 @@ pub struct Movie {
     pub title: String,
     /// What the indexer matches a file to this movie by -- see
     /// [`crate::utils::identity`]. Never rewritten by enrichment. `None` only
-    /// on a row that predates the key and could not be backfilled; such a row
-    /// is never matched.
+    /// on a row that predates the key and could not be backfilled, or that
+    /// the indexer released when merging it into another; such a row is never
+    /// matched.
     pub identity_key: Option<String>,
     pub title_localized: Option<String>,
     pub description: Option<String>,

@@ -22,6 +22,8 @@ use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
     CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent, UpdateMediaFile,
 };
+use beam_domain::models::movie::{CreateMovieEntry, MovieEntry};
+use beam_domain::models::show::{CreateEpisode, Episode};
 use beam_domain::repositories::{
     EnrichmentStateRepository, FileRepository, LibraryRepository, MediaStreamRepository,
     MovieRepository, ShowRepository,
@@ -245,6 +247,69 @@ struct IdentityBackfill {
     /// Titles whose key another title already holds.
     clashing_movies: Vec<Uuid>,
     clashing_shows: Vec<Uuid>,
+}
+
+/// What [`LocalIndexService::rekey_stale_titles`] did.
+#[derive(Debug, Default)]
+struct IdentityRekey {
+    /// Titles whose key changed in place.
+    rekeyed: u64,
+    /// `(kept, retired)`: titles merged because the current rules read them
+    /// as one.
+    merged_movies: Vec<(Uuid, Uuid)>,
+    merged_shows: Vec<(Uuid, Uuid)>,
+    /// Titles whose files derive more than one key, which keep their old one.
+    ambiguous_movies: Vec<Uuid>,
+    ambiguous_shows: Vec<Uuid>,
+}
+
+/// The one key `rows` derive through `key_of`: from the present files when
+/// any derives one, else from every row. `None` when they derive none, or
+/// more than one.
+fn derived_key(
+    rows: &[&(MediaFile, MediaInference)],
+    key_of: fn(&MediaInference) -> Option<String>,
+) -> Option<String> {
+    let keys = |present_only: bool| {
+        rows.iter()
+            .filter(|(file, _)| !present_only || file.missing_since.is_none())
+            .filter_map(|(_, inferred)| key_of(inferred))
+            .collect::<std::collections::BTreeSet<String>>()
+    };
+    let mut keys = match keys(true) {
+        present if present.is_empty() => keys(false),
+        present => present,
+    };
+    match keys.len() {
+        1 => keys.pop_first(),
+        _ => None,
+    }
+}
+
+/// Whether a provider has matched the title: enrichment, genres and a manual
+/// match hang off such a title, so of two titles merged it is the one kept.
+fn has_provider_ids(
+    tmdb_id: Option<u32>,
+    imdb_id: &Option<String>,
+    tvdb_id: Option<u32>,
+    anilist_id: Option<u32>,
+) -> bool {
+    tmdb_id.is_some() || imdb_id.is_some() || tvdb_id.is_some() || anilist_id.is_some()
+}
+
+/// Whether title `a` survives a merge with title `b`: the one with provider
+/// ids, else the older (`created_at`, then `id`).
+fn survives(
+    a: (&DateTime<Utc>, &Uuid),
+    a_matched: bool,
+    b: (&DateTime<Utc>, &Uuid),
+    b_matched: bool,
+) -> bool {
+    match (a_matched, b_matched) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => a <= b,
+    }
 }
 
 /// The identity key of the movie a file's path names, if it names one.
@@ -1478,18 +1543,403 @@ impl LocalIndexService {
         Ok(report)
     }
 
+    /// Re-derive every identity key an older version of the rules derived
+    /// (issue #182), so a title keyed before a change to the title fold or
+    /// the path inference is found by the next file that names it rather
+    /// than duplicated beside it. `Grey's Anatomy` keyed `grey s anatomy|`
+    /// before apostrophes were folded; its next file derives `greys
+    /// anatomy|`.
+    ///
+    /// Each title's new key is its present files' key, derived exactly as
+    /// the backfill derives one; with no present file, every file row's
+    /// (a volume away at upgrade still names its titles). A title whose
+    /// files name no title of its kind keeps its key and version, and is
+    /// looked at again on the next process start; one whose files disagree
+    /// keeps its key and is named in an admin warning.
+    ///
+    /// A free key is taken in place: the title keeps its id, enrichment,
+    /// genres, provider ids and manual match. A key another title holds means
+    /// the two are one title: the one with provider ids survives (else the
+    /// older), takes the key, and receives the other's files -- its entries,
+    /// or its seasons and episodes, found or created on the survivor -- and
+    /// the other, left with no file, is retired by the scan's orphan cleanup.
+    /// A show named after a season folder (`Season 05`) is released instead,
+    /// never rekeyed, for the reason the backfill leaves one keyless.
+    async fn rekey_stale_titles(&self) -> Result<IdentityRekey, IndexError> {
+        let mut report = IdentityRekey::default();
+
+        let movies = self
+            .movie_repo
+            .find_keyed_before_version(CLASSIFIER_VERSION)
+            .await?;
+        let shows = self
+            .show_repo
+            .find_keyed_before_version(CLASSIFIER_VERSION)
+            .await?;
+        if movies.is_empty() && shows.is_empty() {
+            return Ok(report);
+        }
+
+        // Every file row, soft-deleted ones included, with what its path
+        // names; read once, and kept current as merges move files.
+        let mut entry_files: HashMap<Uuid, Vec<(MediaFile, MediaInference)>> = HashMap::new();
+        let mut episode_files: HashMap<Uuid, Vec<(MediaFile, MediaInference)>> = HashMap::new();
+        for library in self.library_repo.find_all().await? {
+            for file in self
+                .file_repo
+                .find_all_by_library_including_missing(library.id)
+                .await?
+            {
+                let inferred = infer_media(relative_to(&library.root_path, &file.path));
+                match file.content {
+                    Some(MediaFileContent::Movie { movie_entry_id }) => entry_files
+                        .entry(movie_entry_id)
+                        .or_default()
+                        .push((file, inferred)),
+                    Some(MediaFileContent::Episode { episode_id, .. }) => episode_files
+                        .entry(episode_id)
+                        .or_default()
+                        .push((file, inferred)),
+                    None => {}
+                }
+            }
+        }
+
+        // Titles already settled by this pass -- rekeyed, released, or a
+        // merge's survivor or loser -- which a later stale row must not undo.
+        let mut settled: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+
+        for stale in movies {
+            if settled.contains(&stale.id) {
+                continue;
+            }
+            // Re-read: an earlier merge may have changed or released the key.
+            let Some(movie) = self.movie_repo.find_by_id(stale.id).await? else {
+                continue;
+            };
+            if movie.identity_key != stale.identity_key {
+                continue;
+            }
+            let mut rows: Vec<&(MediaFile, MediaInference)> = Vec::new();
+            for entry in self.movie_repo.find_entries_by_movie_id(movie.id).await? {
+                rows.extend(entry_files.get(&entry.id).into_iter().flatten());
+            }
+            let Some(key) = derived_key(&rows, movie_key) else {
+                if rows
+                    .iter()
+                    .any(|(_, inferred)| movie_key(inferred).is_some())
+                {
+                    report.ambiguous_movies.push(movie.id);
+                }
+                continue;
+            };
+            let holder = match self.movie_repo.find_by_identity_key(&key).await? {
+                Some(holder) if holder.id != movie.id => holder,
+                _ => {
+                    if self
+                        .movie_repo
+                        .rekey(movie.id, Some(key.clone()), CLASSIFIER_VERSION)
+                        .await?
+                    {
+                        if movie.identity_key.as_deref() != Some(key.as_str()) {
+                            report.rekeyed += 1;
+                        }
+                        settled.insert(movie.id);
+                    }
+                    continue;
+                }
+            };
+            let (survivor, loser) = if survives(
+                (&movie.created_at, &movie.id),
+                has_provider_ids(
+                    movie.tmdb_id,
+                    &movie.imdb_id,
+                    movie.tvdb_id,
+                    movie.anilist_id,
+                ),
+                (&holder.created_at, &holder.id),
+                has_provider_ids(
+                    holder.tmdb_id,
+                    &holder.imdb_id,
+                    holder.tvdb_id,
+                    holder.anilist_id,
+                ),
+            ) {
+                (movie.id, holder.id)
+            } else {
+                (holder.id, movie.id)
+            };
+            // Release first: the survivor may be taking the loser's key.
+            self.movie_repo
+                .rekey(loser, None, CLASSIFIER_VERSION)
+                .await?;
+            self.movie_repo
+                .rekey(survivor, Some(key), CLASSIFIER_VERSION)
+                .await?;
+            for entry in self.movie_repo.find_entries_by_movie_id(loser).await? {
+                let MovieEntry {
+                    id: entry_id,
+                    library_id,
+                    movie_id: _,
+                    edition,
+                    is_primary,
+                    created_at: _,
+                } = entry;
+                let target = self
+                    .movie_repo
+                    .find_or_create_entry(CreateMovieEntry {
+                        library_id,
+                        movie_id: survivor,
+                        edition,
+                        is_primary,
+                    })
+                    .await?;
+                self.movie_repo
+                    .ensure_library_association(library_id, survivor)
+                    .await?;
+                let moved = entry_files.remove(&entry_id).unwrap_or_default();
+                for (file, _) in &moved {
+                    self.move_file(
+                        file,
+                        MediaFileContent::Movie {
+                            movie_entry_id: target.id,
+                        },
+                    )
+                    .await?;
+                }
+                entry_files.entry(target.id).or_default().extend(moved);
+            }
+            report.merged_movies.push((survivor, loser));
+            settled.insert(survivor);
+            settled.insert(loser);
+        }
+
+        for stale in shows {
+            if settled.contains(&stale.id) {
+                continue;
+            }
+            let Some(show) = self.show_repo.find_by_id(stale.id).await? else {
+                continue;
+            };
+            if show.identity_key != stale.identity_key {
+                continue;
+            }
+            // A husk (see `backfill_identity_keys`): released, so the scan's
+            // reclassification moves its files to the series they name and
+            // orphan cleanup retires it.
+            if season_folder_number(&show.title).is_some() {
+                self.show_repo
+                    .rekey(show.id, None, CLASSIFIER_VERSION)
+                    .await?;
+                settled.insert(show.id);
+                continue;
+            }
+            let mut rows: Vec<&(MediaFile, MediaInference)> = Vec::new();
+            for season in self.show_repo.find_seasons_by_show_id(show.id).await? {
+                for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                    rows.extend(episode_files.get(&episode.id).into_iter().flatten());
+                }
+            }
+            let Some(key) = derived_key(&rows, show_key) else {
+                if rows
+                    .iter()
+                    .any(|(_, inferred)| show_key(inferred).is_some())
+                {
+                    report.ambiguous_shows.push(show.id);
+                }
+                continue;
+            };
+            let holder = match self.show_repo.find_by_identity_key(&key).await? {
+                Some(holder) if holder.id != show.id => holder,
+                _ => {
+                    if self
+                        .show_repo
+                        .rekey(show.id, Some(key.clone()), CLASSIFIER_VERSION)
+                        .await?
+                    {
+                        if show.identity_key.as_deref() != Some(key.as_str()) {
+                            report.rekeyed += 1;
+                        }
+                        settled.insert(show.id);
+                    }
+                    continue;
+                }
+            };
+            let (survivor, loser) = if survives(
+                (&show.created_at, &show.id),
+                has_provider_ids(show.tmdb_id, &show.imdb_id, show.tvdb_id, show.anilist_id),
+                (&holder.created_at, &holder.id),
+                has_provider_ids(
+                    holder.tmdb_id,
+                    &holder.imdb_id,
+                    holder.tvdb_id,
+                    holder.anilist_id,
+                ),
+            ) {
+                (show.id, holder.id)
+            } else {
+                (holder.id, show.id)
+            };
+            self.show_repo
+                .rekey(loser, None, CLASSIFIER_VERSION)
+                .await?;
+            self.show_repo
+                .rekey(survivor, Some(key), CLASSIFIER_VERSION)
+                .await?;
+            for season in self.show_repo.find_seasons_by_show_id(loser).await? {
+                let target_season = self
+                    .show_repo
+                    .find_or_create_season(survivor, season.season_number)
+                    .await?;
+                for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                    let Episode {
+                        id: episode_id,
+                        season_id: _,
+                        episode_number,
+                        title,
+                        description: _,
+                        air_date,
+                        runtime,
+                        thumbnail_url: _,
+                        created_at: _,
+                    } = episode;
+                    // Found or created on the survivor: one episode per
+                    // `(season, number)`, so a number both shows have
+                    // becomes one episode with both shows' files.
+                    let target = self
+                        .show_repo
+                        .find_or_create_episode(CreateEpisode {
+                            season_id: target_season.id,
+                            episode_number,
+                            title,
+                            runtime,
+                            air_date: air_date.as_deref().and_then(|d| {
+                                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()
+                            }),
+                        })
+                        .await?;
+                    let moved = episode_files.remove(&episode_id).unwrap_or_default();
+                    for (file, _) in &moved {
+                        let last_episode_number = match file.content {
+                            Some(MediaFileContent::Episode {
+                                last_episode_number,
+                                ..
+                            }) => last_episode_number,
+                            _ => None,
+                        };
+                        self.show_repo
+                            .ensure_library_association(file.library_id, survivor)
+                            .await?;
+                        self.move_file(
+                            file,
+                            MediaFileContent::Episode {
+                                episode_id: target.id,
+                                last_episode_number,
+                            },
+                        )
+                        .await?;
+                    }
+                    episode_files.entry(target.id).or_default().extend(moved);
+                }
+            }
+            report.merged_shows.push((survivor, loser));
+            settled.insert(survivor);
+            settled.insert(loser);
+        }
+
+        let IdentityRekey {
+            rekeyed,
+            merged_movies,
+            merged_shows,
+            ambiguous_movies,
+            ambiguous_shows,
+        } = &report;
+        if *rekeyed > 0 || !merged_movies.is_empty() || !merged_shows.is_empty() {
+            let merged = merged_movies.len() + merged_shows.len();
+            info!(rekeyed, merged, "Re-derived identity keys from older rules");
+            let pairs = |pairs: &[(Uuid, Uuid)]| {
+                pairs
+                    .iter()
+                    .map(|(survivor, retired)| {
+                        serde_json::json!({ "kept": survivor, "retired": retired })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Info,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "Updated the identity keys of {rekeyed} titles to the current naming \
+                         rules, and merged {merged} titles those rules now read as one"
+                    ),
+                    Some(serde_json::json!({
+                        "rekeyed": rekeyed,
+                        "merged_movies": pairs(merged_movies),
+                        "merged_shows": pairs(merged_shows),
+                    })),
+                )
+                .await;
+        }
+        let ambiguous = ambiguous_movies.len() + ambiguous_shows.len();
+        if ambiguous > 0 {
+            warn!(
+                ambiguous,
+                "titles whose files name more than one title keep their old identity keys"
+            );
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Warning,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "{ambiguous} titles keep identity keys from older naming rules: their \
+                         files name more than one title, so new files may be matched to other \
+                         titles."
+                    ),
+                    Some(serde_json::json!({
+                        "ambiguous_movies": ambiguous_movies,
+                        "ambiguous_shows": ambiguous_shows,
+                    })),
+                )
+                .await;
+        }
+        Ok(report)
+    }
+
+    /// Point `file` at `content`, keeping its status and classifier version.
+    async fn move_file(&self, file: &MediaFile, content: MediaFileContent) -> Result<(), DbErr> {
+        self.file_repo
+            .set_classification(
+                file.id,
+                FileClassification {
+                    content: Some(content),
+                    status: file.status,
+                    classifier_version: file.classifier_version,
+                },
+            )
+            .await
+            .map(|_| ())
+    }
+
     /// Scan every library. Used for the startup scan and the periodic backstop.
     /// A failure in one library is logged and does not abort the others.
     ///
     /// The first call in a process first backfills identity keys for titles
-    /// that predate them; a failed backfill is logged and retried by the next
-    /// call rather than holding up the scan.
+    /// that predate them, then re-derives keys older rules derived; either
+    /// failing is logged and retried by the next call rather than holding up
+    /// the scan. Both run before any file is reclassified, so reclassifying a
+    /// file finds its title by the title's current key.
     pub async fn scan_all_libraries(&self) -> Result<u32, IndexError> {
         {
             let mut done = self.identity_backfill_done.lock().await;
             if !*done {
                 match self.backfill_identity_keys().await {
-                    Ok(_) => *done = true,
+                    Ok(_) => match self.rekey_stale_titles().await {
+                        Ok(_) => *done = true,
+                        Err(e) => error!("Identity key re-derivation failed: {}", e),
+                    },
                     Err(e) => error!("Identity key backfill failed: {}", e),
                 }
             }

@@ -308,6 +308,14 @@ progress; nothing is re-probed. A show a Beam version before these rules named a
 (*Season 01*) has its episodes moved to the show its series folder names, and the emptied
 *Season 01* show is removed by the same scan.
 
+The name each movie and show is [grouped by](#multiple-versions) is versioned with the rules too.
+Before the scan reclassifies anything, Beam works out each title's grouping name again from its
+files, so a title keeps its record — its artwork, description, genres, provider match and
+everyone's progress — when the rules now spell its name differently (`Grey's Anatomy` and a scene
+release's `Greys.Anatomy` group together since these rules). When two titles now group under one
+name, they become one: the one matched to a provider (else the older) is kept, and the other's
+files and episodes join it. The admin Logs tab lists what was updated and merged.
+
 ## Multiple versions
 
 Movies are grouped by their **cleaned title and year** (and [edition](#movie-editions)). Index two

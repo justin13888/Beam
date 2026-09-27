@@ -136,7 +136,7 @@ nullable — as for movies), `identity_key_version` (as for movies), `title_loca
 A movie or show has two names (FR-214, FR-215;
 [#183](https://github.com/justin13888/beam/issues/183)). `title` is what users see, and enrichment
 overwrites it with the provider's spelling. `identity_key` is what the indexer finds the title by,
-and nothing but the indexer's own backfill ever writes it after insert: enrichment's `UPDATE` does
+and nothing but the indexer's own backfill and rekey (below) ever writes it after insert: enrichment's `UPDATE` does
 not name the column. It is `beam_domain::utils::identity::title_identity_key` of the filename
 parse — NFKD-decomposed, every combining mark in the Combining Diacritical Marks block
 (U+0300–U+036F: Latin, Greek and Cyrillic accents alike) dropped, apostrophes (`'` and `’`) elided
@@ -174,6 +174,24 @@ display-title lookup created, the original takes the key. Files that disagree (t
 under one title) or a key another row already holds (the later duplicate) leave the key NULL and are
 named in an admin-log warning; such a row stays listed but is never matched again. A backfill that
 fails is logged and retried by the next `scan_all_libraries`; the scan itself goes ahead.
+
+**Rekey.** A change to the path inference or the title fold changes the key a title's files
+derive: #183 keyed `Grey's Anatomy` as `grey s anatomy|`, and the current fold keys its files
+`greys anatomy|`. Left alone, the next file would create a second title beside the enriched one.
+So each key carries `identity_key_version`, and right after the backfill the same
+`scan_all_libraries` call re-derives every key older than `CLASSIFIER_VERSION`
+(`LocalIndexService::rekey_stale_titles`), before the scan reclassifies any file. The new key is
+the one the title's present files derive, by the backfill's derivation; with no present file, the
+one all its file rows derive. A free key is written in place (`rekey`), so the title keeps its id,
+enrichment, genres, provider ids and manual match. A key another title holds means the current
+rules read the two as one title: the one with provider ids survives (else the older), takes the
+key, and receives the other's files — its entries found or created on the survivor per library and
+edition, its episodes per season and number, so both shows' files of one episode become sources
+of one episode — and the other, now keyless and fileless, is deleted by the scan's orphan cleanup.
+A show whose stored title is a season-folder name is released (key set to NULL) instead, as the
+backfill leaves one keyless. A title whose files derive no key of its kind keeps its key and
+version and is looked at again on the next start; one whose files derive several keeps its key and
+is named in an admin-log warning. Rekeys and merges are listed in an admin-log entry.
 
 **Live titles.** A title is *live* while at least one file behind it is present
 (`missing_since IS NULL`): for a movie, through `movie_entries`; for a show, through `seasons` and

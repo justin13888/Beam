@@ -148,7 +148,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   from the filename parse -- the normalised title and year, and for a show its series folder --
   stored apart from the display title and never changed by enrichment, so a title enrichment renamed
   still receives its later files. Finding or creating a title by its key MUST be atomic: files of
-  one new title indexed concurrently MUST resolve to one title.
+  one new title indexed concurrently MUST resolve to one title. A key MUST record the version of
+  the classification rules (FR-204) that derived it; before a scan reclassifies any file, a key an
+  older version derived MUST be re-derived from the title's files, in place (the title keeping its
+  id and enrichment), and two titles the current rules key alike MUST be merged into one, keeping
+  the one a provider matched, else the older.
 - **FR-215**: A movie or show with no present file MUST be excluded from browse and search as soon as
   its last file is soft-deleted (FR-211), while remaining resolvable by id; it MUST be deleted,
   with its enrichment state, only by a scan whose walk read the whole library and only once no file
