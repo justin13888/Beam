@@ -19,6 +19,7 @@ mod m20260706_000001_users_oidc_only;
 mod m20260711_000001_users_email_optional;
 mod m20260711_000002_users_disabled;
 mod m20260927_000001_files_missing_since;
+mod m20260928_000010_device_auths;
 
 pub struct Migrator;
 
@@ -42,6 +43,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260711_000001_users_email_optional::Migration),
             Box::new(m20260711_000002_users_disabled::Migration),
             Box::new(m20260927_000001_files_missing_since::Migration),
+            Box::new(m20260928_000010_device_auths::Migration),
         ]
     }
 }

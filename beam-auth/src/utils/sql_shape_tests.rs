@@ -472,6 +472,156 @@ mod pending_auth_store {
     }
 }
 
+mod device_auth_store {
+    use super::*;
+    use crate::utils::device_auth_store::{
+        Claim, DeviceAuthStore, NewDeviceAuth, SqlDeviceAuthStore,
+    };
+    use chrono::{DateTime, Utc};
+    use sea_orm::MockExecResult;
+
+    fn new_flow() -> NewDeviceAuth {
+        NewDeviceAuth {
+            handle_hash: "hash-of-handle".to_string(),
+            device_code: "idp-device-code".to_string(),
+            user_code: "BCDF-GHJK".to_string(),
+            verification_uri: "https://idp.test/device".to_string(),
+            verification_uri_complete: None,
+            interval_secs: 5,
+            expires_in_secs: 600,
+        }
+    }
+
+    fn now() -> DateTime<Utc> {
+        chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid instant")
+    }
+
+    /// A stored flow whose next poll is due `due_in_secs` from now (negative:
+    /// already due) and which expires `expires_in_secs` from now.
+    fn row(due_in_secs: i64, expires_in_secs: i64) -> beam_entity::device_auth::Model {
+        let at = |offset: i64| (now() + chrono::Duration::seconds(offset)).into();
+        beam_entity::device_auth::Model {
+            handle_hash: "hash-of-handle".to_string(),
+            device_code: "idp-device-code".to_string(),
+            user_code: "BCDF-GHJK".to_string(),
+            verification_uri: "https://idp.test/device".to_string(),
+            verification_uri_complete: None,
+            interval_secs: 5,
+            next_poll_at: at(due_in_secs),
+            created_at: at(-60),
+            expires_at: at(expires_in_secs),
+        }
+    }
+
+    fn store_over(
+        rows: Vec<beam_entity::device_auth::Model>,
+        rows_affected: u64,
+    ) -> (SqlDeviceAuthStore, Arc<DatabaseConnection>) {
+        let db = connection(
+            MockDatabase::new(DbBackend::Postgres)
+                .append_query_results([rows])
+                .append_exec_results([MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected,
+                }]),
+        );
+        (SqlDeviceAuthStore::with_clock(db.clone(), clock()), db)
+    }
+
+    #[tokio::test]
+    async fn starting_a_flow_sweeps_expired_flows_then_stores_only_the_handle_hash() {
+        let db = connection(empty_mock());
+        let store = SqlDeviceAuthStore::with_clock(db.clone(), clock());
+        let _ = store.create(&new_flow()).await;
+        drop(store);
+
+        let sql = statements(db);
+        assert_contains(&sql[0], r#"DELETE FROM "device_auths""#);
+        assert_filters(&sql[0], "device_auths", "expires_at", "<");
+        assert_contains(&sql[1], r#"INSERT INTO "device_auths""#);
+        for value in ["hash-of-handle", "idp-device-code", "BCDF-GHJK"] {
+            assert_bound(&sql[1], value);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_due_poll_is_claimed_by_an_update_conditional_on_still_being_due() {
+        // The condition is what makes two concurrent polls claim a flow once:
+        // an unconditional UPDATE would let both through to the IdP.
+        let (store, db) = store_over(vec![row(-1, 600)], 1);
+        let claim = store.claim_poll("hash-of-handle").await.unwrap();
+        drop(store);
+
+        assert!(matches!(claim, Claim::Claimed(_)), "{claim:?}");
+        let sql = statements(db);
+        let update = sql
+            .iter()
+            .find(|statement| statement.sql.starts_with("UPDATE"))
+            .expect("a due poll is claimed by an UPDATE");
+        assert_filters(update, "device_auths", "handle_hash", "=");
+        assert_filters(update, "device_auths", "next_poll_at", "<=");
+        assert_bound(update, "hash-of-handle");
+    }
+
+    #[tokio::test]
+    async fn losing_the_claim_to_a_concurrent_poll_is_too_early() {
+        // The row read as due, but the conditional UPDATE matched nothing:
+        // another poll claimed it in between.
+        let (store, _db) = store_over(vec![row(-1, 600)], 0);
+        assert_eq!(
+            store.claim_poll("hash-of-handle").await.unwrap(),
+            Claim::TooEarly { interval_secs: 5 }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_before_the_window_opens_issues_no_write() {
+        let (store, db) = store_over(vec![row(1, 600)], 1);
+        let claim = store.claim_poll("hash-of-handle").await.unwrap();
+        drop(store);
+
+        assert_eq!(claim, Claim::TooEarly { interval_secs: 5 });
+        assert!(
+            statements(db)
+                .iter()
+                .all(|statement| !statement.sql.starts_with("UPDATE")),
+            "a refused poll must not move the window"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flow_at_its_deadline_is_expired() {
+        let (store, _db) = store_over(vec![row(-1, 0)], 1);
+        assert_eq!(
+            store.claim_poll("hash-of-handle").await.unwrap(),
+            Claim::Expired
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flow_one_second_inside_its_lifetime_is_still_pollable() {
+        let (store, _db) = store_over(vec![row(0, 1)], 1);
+        assert!(matches!(
+            store.claim_poll("hash-of-handle").await.unwrap(),
+            Claim::Claimed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ending_a_flow_is_a_single_delete_returning_statement() {
+        let db = connection(empty_mock());
+        let store = SqlDeviceAuthStore::with_clock(db.clone(), clock());
+        let _ = store.consume("hash-of-handle").await;
+        drop(store);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1, "exactly one round trip: {sql:?}");
+        assert_contains(&sql[0], "DELETE FROM");
+        assert_contains(&sql[0], "RETURNING");
+        assert_filters(&sql[0], "device_auths", "handle_hash", "=");
+    }
+}
+
 /// The expiry rules the SQL stores apply to rows they read back, and the
 /// deadlines they write.
 ///
