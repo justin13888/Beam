@@ -1156,6 +1156,59 @@ fi
 exit "$status"
 '''
 
+[tasks."check:hook-git-env"]
+description = "Assert git hook steps run without the GIT_DIR/GIT_WORK_TREE a linked worktree's hook carries"
+# Drives the real pre-push `hook-git-env` step through hk, with the environment
+# git gives a hook in a linked worktree: GIT_DIR alone. hk adds GIT_WORK_TREE
+# itself, exactly as it does in a real push, so this exercises the whole chain
+# -- git's export, hk's addition, and the `scrubbedShell` in hk.pkl that has to
+# remove both before a step spawns anything (#204). The step itself (see the
+# `probe` task below) is what fails.
+#
+# Simulated rather than left to the hook alone because the hook only proves
+# anything when pushed from a linked worktree: from the main checkout git
+# exports nothing, the step passes trivially, and a regression would surface
+# as a cold build failing in ffmpeg-sys-next's build script on someone's next
+# fresh worktree. `--absolute-git-dir` names the admin directory under
+# .git/worktrees in a linked worktree and .git in the main checkout; hk adds
+# GIT_WORK_TREE for both, so this is meaningful from either.
+#
+# stdin is closed because a pre-push hook reads the refs being pushed from it.
+run = '''
+set -eu
+GIT_DIR="$(git rev-parse --absolute-git-dir)" hk run pre-push --step hook-git-env < /dev/null
+'''
+
+[tasks."check:hook-git-env:probe"]
+description = "Fail if GIT_DIR/GIT_WORK_TREE reached this process, then prove a nested git clone works"
+# The pre-push `hook-git-env` step. The variable check comes first and is not
+# only a better error message: with GIT_DIR still set, the `git init` below
+# would reinitialise the repository being pushed rather than create a scratch
+# one, so nothing touches git until both are known to be gone.
+#
+# The clone is the operation #204 broke (ffmpeg-sys-next's build script runs
+# one), so it stays even though the check above already implies it: it would
+# also catch some other variable a future git or hk leaks that breaks a nested
+# clone. The source repository is built with plumbing, which runs no hooks and
+# does not need a configured identity or signing key; the clone checks out its
+# single empty commit.
+run = '''
+set -eu
+for var in GIT_DIR GIT_WORK_TREE; do
+    if printenv "$var" > /dev/null; then
+        echo "$var=$(printenv "$var") reached a hook step. Every step in hk.pkl must run in scrubbedShell (#204)." >&2
+        exit 1
+    fi
+done
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+git init -q "$tmp/src"
+tree="$(git -C "$tmp/src" mktree < /dev/null)"
+commit="$(git -C "$tmp/src" -c user.name=probe -c user.email=probe@invalid -c commit.gpgSign=false commit-tree "$tree" -m probe)"
+git -C "$tmp/src" update-ref HEAD "$commit"
+git clone -q "$tmp/src" "$tmp/clone"
+'''
+
 [tasks."check:compose-invariants"]
 description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, and lets dev admin work"
 # Four properties the dev stack depends on, none of which any other gate sees.
@@ -1736,6 +1789,7 @@ depends = [
     "check:ffmpeg-version",
     "check:mutants-skip-fakes",
     "check:compose-invariants",
+    "check:hook-git-env",
     "codegen:openapi:check",
     "ts:check",
     "ts:test",

@@ -32,6 +32,7 @@ jobs:
       ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
       ffmpeg_image: ${{ steps.filter.outputs.ffmpeg_image }}
       compose: ${{ steps.filter.outputs.compose }}
+      hooks: ${{ steps.filter.outputs.hooks }}
       android: ${{ steps.filter.outputs.android }}
       apple: ${{ steps.filter.outputs.apple }}
     steps:
@@ -133,6 +134,11 @@ jobs:
               - *tooling
               - 'compose*.yaml'
               - 'dex/**'
+            # The git hooks themselves: hk.pkl sets every step's environment,
+            # and the tasks the steps call live in mise.toml (in *tooling).
+            hooks:
+              - *tooling
+              - 'hk.pkl'
 
   commits:
     name: Conventional commits
@@ -260,6 +266,30 @@ jobs:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - run: mise run check:compose-invariants
+
+  # Drives the real pre-push `hook-git-env` step through hk. The runner's
+  # checkout is a main checkout, so git itself would export no GIT_DIR to a
+  # hook here; the task sets it as a linked worktree's hook receives it, so
+  # this exercises the scrub in hk.pkl from any checkout (#204).
+  hook-git-env:
+    name: Hook steps run without GIT_DIR
+    needs: [changes]
+    if: needs.changes.outputs.hooks == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - run: mise run check:hook-git-env
+
+  mutants-skip-fakes:
+    name: Test doubles marked mutants::skip
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - run: mise run check:mutants-skip-fakes
 
   rust-deny:
     name: Supply-chain audit
@@ -734,6 +764,8 @@ jobs:
       - ffmpeg-version
       - ffmpeg-build
       - compose-invariants
+      - hook-git-env
+      - mutants-skip-fakes
       - rust-deny
       - rust-clippy
       - rust-test

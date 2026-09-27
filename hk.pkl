@@ -12,6 +12,36 @@ min_hk_version = "1.57.0"
 
 default_branch = "master"
 
+// Every step runs in hk's default shell, `sh -o errexit -c`, with GIT_DIR and
+// GIT_WORK_TREE removed from its environment (#204). Each hook's `steps` sets
+// it as the `default` every entry amends, so a step added later inherits it
+// without naming it; a step that set its own `shell` would lose it, so none
+// does. (A single `[[true]]` member predicate would say this once, but hk's
+// built-in Pkl evaluator does not parse member predicates.)
+//
+// Git exports GIT_DIR to hooks run from a linked worktree, and hk then adds
+// GIT_WORK_TREE=<worktree root> to each step it starts. Left in place, both
+// reach everything a step spawns -- cargo build scripts, cargo-ndk, Gradle,
+// bun -- and any of those that runs git somewhere else operates on this
+// repository instead. ffmpeg-sys-next's vendored build does exactly that: its
+// build script runs `git clone` into OUT_DIR, which dies with "working tree
+// '<worktree>' already exists" -- only on a fresh worktree's first push, since
+// a warm target/ never reruns that build script. A `mise run` from a terminal
+// never saw either variable, which is why the same gate passed there.
+//
+// Removing them costs the steps nothing: git runs hooks from the work-tree
+// root, whose `.git` file leads git (and hk's own git calls) back to the same
+// repository by discovery. GIT_INDEX_FILE is deliberately kept, because in
+// pre-commit it names the temporary index a `git commit -a` or `git commit
+// <path>` is building, and a step that ran `git add` must write to that one.
+//
+// Through `shell` rather than `prefix`: hk pastes a prefix in front of the
+// command text, so it would wrap only the first command of a compound script
+// such as swift-format's `! command -v xcrun || ...`. `env -u` is not POSIX,
+// but GNU coreutils and the BSD env macOS ships both have it. Guarded by the
+// `hook-git-env` step below and `check:hook-git-env` in mise.toml.
+local scrubbedShell = "env -u GIT_DIR -u GIT_WORK_TREE sh -o errexit -c"
+
 hooks {
     // Fast, staged-file-scoped, auto-fixing. Should finish in seconds: anything
     // that needs to compile Rust belongs in pre-push, not here.
@@ -20,6 +50,9 @@ hooks {
         stage = true
         stash = "git"
         steps {
+            default {
+                shell = scrubbedShell
+            }
             ["rustfmt"] {
                 glob = List("*.rs")
                 check = "rustfmt --edition 2024 --check {{files}}"
@@ -70,6 +103,9 @@ hooks {
     // convco cannot parse them, and rebase resolves them before they land.
     ["commit-msg"] {
         steps {
+            default {
+                shell = scrubbedShell
+            }
             ["convco"] {
                 check = "git rev-parse --verify --quiet MERGE_HEAD > /dev/null || grep -qE '^(fixup|squash)!' {{commit_msg_file}} || convco check --from-stdin --strip < {{commit_msg_file}}"
             }
@@ -82,9 +118,21 @@ hooks {
     // wait on a Rust compile.
     ["pre-push"] {
         steps {
+            default {
+                shell = scrubbedShell
+            }
             ["commits"] {
                 check = "mise run commits:check"
                 exclusive = true
+            }
+            // Milliseconds, and deliberately unglobbed: it probes the hook's
+            // own environment, which no file change predicts. From a linked
+            // worktree this is the live check that `scrubbedShell` above held;
+            // from the main checkout git exports nothing and it passes
+            // trivially, which is why `check:hook-git-env` also drives it
+            // under a simulated linked-worktree hook. See that task.
+            ["hook-git-env"] {
+                check = "mise run check:hook-git-env:probe"
             }
             ["rust-fmt"] {
                 glob = List("*.rs")
