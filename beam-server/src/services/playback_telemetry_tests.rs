@@ -172,6 +172,7 @@ fn media_file(container: Option<&str>, size_bytes: u64, duration: Option<Duratio
         container_format: container.map(str::to_owned),
         content: None,
         status: FileStatus::Known,
+        classifier_version: 0,
         scanned_at: Utc::now(),
         updated_at: Utc::now(),
         missing_since: None,

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use beam_auth::utils::models::CreateUser;
 use beam_auth::utils::session_store::SessionData;
-use beam_domain::models::file::{CreateMediaFile, FileStatus};
+use beam_domain::models::file::{CreateMediaFile, FileStatus, MediaFileContent};
 use beam_domain::models::stream::{
     AudioStreamMetadata, CreateMediaStream, StreamMetadata, StreamType, VideoStreamMetadata,
 };
@@ -134,8 +134,13 @@ async fn seed_hevc_file(fixture: &Fixture) -> Uuid {
             mime_type: Some("video/x-matroska".to_string()),
             duration: Some(Duration::from_secs(7_200)),
             container_format: Some("matroska,webm".to_string()),
-            content: None,
+            // A known file is always some title's content; which title does
+            // not matter here, since telemetry never records it.
+            content: Some(MediaFileContent::Movie {
+                movie_entry_id: Uuid::new_v4(),
+            }),
             status: FileStatus::Known,
+            classifier_version: 0,
         })
         .await
         .unwrap();
