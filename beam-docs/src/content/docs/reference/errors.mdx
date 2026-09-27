@@ -340,6 +340,14 @@ dependency is unhealthy — in practice, the database.
 - **`detail` is not.** It is diagnostic text and it will change.
 - A code is never repurposed. If a condition splits into two, the new one gets a new code.
 
+<Aside type="caution" title="Native clients see only the codes they were built with">
+The Android and Apple apps decode `type` against the codes the server declared when the app was
+built. A code added later — or a `429` from a proxy in front of Beam rather than from Beam — reaches
+an older app as an unreadable response rather than as its status, until the client generator can
+fall back ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)). Web clients read the
+body directly and are unaffected.
+</Aside>
+
 <LinkCard
 	title="API conventions"
 	description="The engineering reference for Beam's REST surface, including this error contract."

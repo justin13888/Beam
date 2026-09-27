@@ -212,8 +212,9 @@ impl ProblemDetail {
 ///
 /// `code` is `about:blank` when the response carried no problem document, and
 /// when the framework answered rather than the application: the 401 from the
-/// session check, the 404 for a URL matching no route. RFC 9457 gives that exact reading -- the status code is the whole
-/// story -- so it is an answer rather than a gap.
+/// session check, the 404 for a URL matching no route. RFC 9457 gives that
+/// exact reading -- the status code is the whole story -- so it is an answer
+/// rather than a gap.
 #[must_use]
 pub fn classify(
     status: u16,

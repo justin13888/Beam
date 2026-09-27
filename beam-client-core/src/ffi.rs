@@ -3086,6 +3086,36 @@ mod tests {
         assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
     }
 
+    /// A 429 whose body is not Beam's `rate-limited` problem -- a reverse
+    /// proxy's own limiter answering in HTML -- is lost the same way.
+    ///
+    /// `browse_media` declares its 429 as that problem, so the generated
+    /// client decodes the body, fails, and reports a decode failure with no
+    /// status: the caller sees a malformed response rather than
+    /// `RateLimited`, and loses `Retry-After` (getkono/spargen#268). Expected
+    /// to fail when that is fixed.
+    #[tokio::test]
+    async fn a_429_a_proxy_wrote_is_not_recognised_as_rate_limiting() {
+        let (client, id, _) = signed_in_client().await;
+        client
+            .use_transport(
+                &id,
+                Arc::new(CannedBackend::answering(
+                    429,
+                    "text/html",
+                    "<html><body>Too Many Requests</body></html>",
+                )),
+            )
+            .expect("the server is registered");
+
+        let error = client
+            .browse_media(BrowseQuery::default())
+            .await
+            .expect_err("the canned 429 fails the call");
+
+        assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
+    }
+
     /// The document the middleware captured is the one the error carries.
     ///
     /// Two 404s a viewer must be told about differently is what issue #123
