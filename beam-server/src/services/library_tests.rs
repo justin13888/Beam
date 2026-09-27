@@ -267,6 +267,91 @@ mod tests {
 
     // ── create_library ────────────────────────────────────────────────────────────
 
+    /// A watcher whose registrations wait for the test to let each one
+    /// through, as a registration walking a large network share would.
+    #[derive(Debug)]
+    struct GatedWatcher {
+        inner: beam_index::services::watcher::InMemoryFsWatcher,
+        gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    #[async_trait::async_trait]
+    impl beam_index::services::watcher::FsWatcher for GatedWatcher {
+        fn watch_library(
+            &self,
+            library_id: Uuid,
+            root: &std::path::Path,
+        ) -> Result<
+            beam_index::services::watch_status::WatchMode,
+            beam_index::services::watcher::WatchError,
+        > {
+            self.gate
+                .lock()
+                .unwrap()
+                .recv()
+                .expect("the test lets the registration through");
+            self.inner.watch_library(library_id, root)
+        }
+
+        fn unwatch_library(
+            &self,
+            library_id: Uuid,
+        ) -> Result<(), beam_index::services::watcher::WatchError> {
+            self.inner.unwatch_library(library_id)
+        }
+
+        fn poll_once(&self) -> Vec<Uuid> {
+            self.inner.poll_once()
+        }
+
+        fn registered_libraries(&self) -> Vec<Uuid> {
+            self.inner.registered_libraries()
+        }
+
+        async fn next_event(&self) -> Option<beam_index::services::watcher::FsEvent> {
+            self.inner.next_event().await
+        }
+    }
+
+    /// Registering a new library's watch can walk its whole tree, so the
+    /// create request does not wait for it: it answers while the
+    /// registration is still held, and the registration lands afterwards.
+    #[tokio::test]
+    async fn creating_a_library_answers_before_its_watch_is_registered() {
+        let video_dir = PathBuf::from("/media/videos");
+        let (open_gate, gate) = std::sync::mpsc::channel();
+        let watcher = Arc::new(GatedWatcher {
+            inner: beam_index::services::watcher::InMemoryFsWatcher::new(),
+            gate: std::sync::Mutex::new(gate),
+        });
+        let service = LocalLibraryService::new(
+            Arc::new(InMemoryLibraryRepository::default()),
+            Arc::new(InMemoryFileRepository::default()),
+            video_dir.clone(),
+            PathBuf::from("/beam-data"),
+            Arc::new(InMemoryNotificationService::new()),
+            Arc::new(MockIndexService::new()),
+            Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            Arc::new(beam_index::runtime::LibraryWatches::new(Some(
+                watcher.clone(),
+            ))),
+        );
+
+        let created = service
+            .create_library("Movies".to_string(), "movies".to_string())
+            .await
+            .expect("the library is created while its registration is held");
+        let id = Uuid::parse_str(&created.id).unwrap();
+        assert!(
+            watcher.inner.watched_libraries().is_empty(),
+            "not registered yet"
+        );
+
+        open_gate.send(()).unwrap();
+        watcher.inner.until_watched(id).await;
+        assert_eq!(watcher.inner.watched_libraries(), vec![id]);
+    }
+
     #[tokio::test]
     async fn test_create_library_valid_path_returns_library_stores_in_repo_publishes_notification()
     {

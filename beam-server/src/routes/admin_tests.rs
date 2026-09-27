@@ -1114,6 +1114,8 @@ async fn a_created_library_is_watched_at_once_and_a_deleted_one_unwatched() {
         .await
         .json();
     let id = uuid::Uuid::parse_str(&created.id).unwrap();
+    // Registered on a task of its own, after the request has answered.
+    fixture.watcher.until_watched(id).await;
     assert_eq!(fixture.watcher.watched_libraries(), vec![id]);
 
     let deleted = client

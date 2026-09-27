@@ -539,9 +539,16 @@ impl LibraryService for LocalLibraryService {
         };
 
         let created = self.library_repo.create(create).await?;
-        // Watched from now, not from the next maintenance cycle. A failure
-        // is logged by the hook, and the cycle registers it instead.
-        self.watch_hook.library_created(&created).await;
+        // Watched from now, not from the next maintenance cycle -- but on a
+        // task of its own: registering walks the library's tree (a native
+        // watch per directory, or a poller's first snapshot of a network
+        // share), which can take minutes the request should not wait for.
+        // A failure is logged by the hook, and the cycle registers the
+        // library instead; a library deleted before its registration lands
+        // is unwatched by that cycle too.
+        let watch_hook = self.watch_hook.clone();
+        let watched = created.clone();
+        tokio::spawn(async move { watch_hook.library_created(&watched).await });
         let DomainLibrary {
             id,
             name,

@@ -564,6 +564,9 @@ pub mod in_memory {
         /// What the next `poll_once` deregisters without reporting, as a
         /// demotion that fails does.
         failed_demotions: std::sync::Mutex<Vec<Uuid>>,
+        /// Bumped whenever the registrations change, so a test can wait for
+        /// one made on another task.
+        changes: tokio::sync::watch::Sender<u64>,
     }
 
     impl InMemoryFsWatcher {
@@ -577,7 +580,17 @@ pub mod in_memory {
                 modes: std::sync::Mutex::new(std::collections::HashMap::new()),
                 demotions: std::sync::Mutex::new(Vec::new()),
                 failed_demotions: std::sync::Mutex::new(Vec::new()),
+                changes: tokio::sync::watch::channel(0).0,
             }
+        }
+
+        /// Wait until `library_id` is registered, however it gets there.
+        pub async fn until_watched(&self, library_id: Uuid) {
+            let mut changes = self.changes.subscribe();
+            changes
+                .wait_for(|_| self.watched_libraries().contains(&library_id))
+                .await
+                .expect("the watcher outlives its subscribers");
         }
 
         /// Make `watch_library` report `mode` for `library_id`.
@@ -622,6 +635,7 @@ pub mod in_memory {
     impl FsWatcher for InMemoryFsWatcher {
         fn watch_library(&self, library_id: Uuid, _root: &Path) -> Result<WatchMode, WatchError> {
             self.watched.lock().unwrap().push(library_id);
+            self.changes.send_modify(|generation| *generation += 1);
             Ok(self
                 .modes
                 .lock()
@@ -633,6 +647,7 @@ pub mod in_memory {
 
         fn unwatch_library(&self, library_id: Uuid) -> Result<(), WatchError> {
             self.watched.lock().unwrap().retain(|id| *id != library_id);
+            self.changes.send_modify(|generation| *generation += 1);
             Ok(())
         }
 
