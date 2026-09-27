@@ -293,7 +293,7 @@ quality/edition/language rip.
 | `file_size` | BIGINT | no | |
 | `mime_type` | TEXT | yes | |
 | `hash_xxh3` | BIGINT | no | content hash used for change detection and dedup |
-| `duration_secs` | DOUBLE PRECISION | yes | |
+| `duration_secs` | DOUBLE PRECISION | yes | NULL until a probe succeeds, and cleared (with `mime_type`, `container_format` and the file's `media_streams`) when changed content fails its probe; the indexer probes a NULL row again on every visit |
 | `container_format` | TEXT | yes | |
 | `language` | TEXT | yes | primary audio/release language tag |
 | `quality` | TEXT | yes | e.g. `"1080p"` — the human label the client's source picker displays |

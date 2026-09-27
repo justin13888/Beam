@@ -86,7 +86,7 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
-    use crate::models::file::{FileStatus, MediaFileContent};
+    use crate::models::file::{FileStatus, MediaFileContent, ProbeUpdate};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Mutex;
@@ -247,14 +247,22 @@ pub mod in_memory {
             if let Some(mtime) = update.mtime {
                 file.mtime = Some(mtime);
             }
-            if let Some(mime_type) = update.mime_type {
-                file.mime_type = Some(mime_type);
-            }
-            if let Some(duration) = update.duration {
-                file.duration = Some(duration);
-            }
-            if let Some(container) = update.container_format {
-                file.container_format = Some(container);
+            match update.probe {
+                ProbeUpdate::Keep => {}
+                ProbeUpdate::Set {
+                    mime_type,
+                    duration,
+                    container_format,
+                } => {
+                    file.mime_type = Some(mime_type);
+                    file.duration = Some(duration);
+                    file.container_format = Some(container_format);
+                }
+                ProbeUpdate::Clear => {
+                    file.mime_type = None;
+                    file.duration = None;
+                    file.container_format = None;
+                }
             }
             if let Some(status) = update.status {
                 file.status = status;

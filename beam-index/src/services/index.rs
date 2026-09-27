@@ -25,7 +25,8 @@ use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
-    CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent, UpdateMediaFile,
+    CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent, ProbeUpdate,
+    UpdateMediaFile,
 };
 use beam_domain::models::movie::{CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, Episode};
@@ -1215,9 +1216,7 @@ impl LocalIndexService {
                     hash: None,
                     size_bytes: Some(size),
                     mtime,
-                    mime_type: None,
-                    duration: None,
-                    container_format: None,
+                    probe: ProbeUpdate::Keep,
                     content: None,
                     status: None,
                 })
@@ -1250,8 +1249,11 @@ impl LocalIndexService {
     ///
     /// A failed probe of a file whose content changed keeps its title and is
     /// marked `Changed`; one with no title stays `Unknown`, which is all the
-    /// `files` CHECK allows it to be. A failed probe of a file whose content
-    /// did not change writes nothing: the next visit tries again.
+    /// `files` CHECK allows it to be. Either way its streams and probe
+    /// results are cleared ([`ProbeUpdate::Clear`]): they described the old
+    /// content, and a row with no duration is probed again on every visit. A
+    /// failed probe of a file whose content did not change writes nothing:
+    /// the next visit tries again.
     async fn reprobe_file(
         &self,
         existing: &MediaFile,
@@ -1280,9 +1282,11 @@ impl LocalIndexService {
                         hash: Some(new_hash),
                         size_bytes: Some(size),
                         mtime,
-                        mime_type: Some(format!("video/{}", metadata.format_name)),
-                        duration: Some(duration),
-                        container_format: Some(metadata.format_name.clone()),
+                        probe: ProbeUpdate::Set {
+                            mime_type: format!("video/{}", metadata.format_name),
+                            duration,
+                            container_format: metadata.format_name.clone(),
+                        },
                         content: None,
                         status: Some(if existing.content.is_some() {
                             FileStatus::Known
@@ -1335,6 +1339,10 @@ impl LocalIndexService {
                 } else {
                     FileStatus::Unknown
                 };
+                // The old content's streams and probe results describe a
+                // file that is gone. Cleared, the row reads as unprobed, so
+                // every later visit probes it again until a probe succeeds.
+                self.stream_repo.delete_by_file_id(existing.id).await?;
                 let updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -1342,9 +1350,7 @@ impl LocalIndexService {
                         hash: Some(new_hash),
                         size_bytes: Some(size),
                         mtime,
-                        mime_type: None,
-                        duration: None,
-                        container_format: None,
+                        probe: ProbeUpdate::Clear,
                         content: None,
                         status: Some(status),
                     })

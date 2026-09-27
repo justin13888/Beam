@@ -13,6 +13,9 @@ use crate::services::admin_log::LocalAdminLogService;
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::scan::{INTERRUPTED, ScanGuard};
 use beam_domain::models::CreateLibrary;
+use beam_domain::models::stream::{
+    AudioStreamMetadata, CreateMediaStream, StreamMetadata, StreamType,
+};
 use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
@@ -108,6 +111,7 @@ struct Harness {
     library: Library,
     library_repo: Arc<InMemoryLibraryRepository>,
     file_repo: Arc<InMemoryFileRepository>,
+    stream_repo: Arc<InMemoryMediaStreamRepository>,
     notifications: Arc<InMemoryNotificationService>,
     clock: Arc<TestClock>,
     hasher: Arc<ScriptedHasher>,
@@ -125,6 +129,7 @@ impl Harness {
 
         let library_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
+        let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
         let notifications = Arc::new(InMemoryNotificationService::new());
         let clock = Arc::new(TestClock::starting_at(now));
         let library = library_repo
@@ -151,7 +156,7 @@ impl Harness {
                 file_repo.clone(),
                 Arc::new(InMemoryMovieRepository::with_files(file_repo.clone())),
                 Arc::new(InMemoryShowRepository::with_files(file_repo.clone())),
-                Arc::new(InMemoryMediaStreamRepository::default()),
+                stream_repo.clone(),
                 hasher.clone(),
                 prober.clone(),
                 notifications.clone(),
@@ -168,6 +173,7 @@ impl Harness {
             library,
             library_repo,
             file_repo,
+            stream_repo,
             notifications,
             clock,
             hasher,
@@ -613,6 +619,78 @@ async fn a_file_that_still_does_not_probe_is_retried_every_visit_and_left_alone(
     let after = h.row(&path).await.unwrap();
     assert_eq!(after.status, FileStatus::Unknown);
     assert_eq!(after.updated_at, before.updated_at, "nothing was written");
+}
+
+/// A probed file whose content changes and whose probe then fails loses the
+/// old content's probe results and streams, so it reads as unprobed: the next
+/// scan probes it again -- without rehashing it -- and restores it as `Known`.
+#[tokio::test]
+async fn a_changed_file_whose_probe_failed_is_probed_again_until_one_succeeds() {
+    let h = Harness::settled().await;
+    let path = h.write("Heat (1995).mkv");
+    h.scan().await;
+    let probed = h.row(&path).await.unwrap();
+    assert_eq!(probed.status, FileStatus::Known);
+    h.stream_repo
+        .insert_streams(vec![CreateMediaStream {
+            file_id: probed.id,
+            index: 0,
+            stream_type: StreamType::Audio,
+            codec: "aac".to_string(),
+            metadata: StreamMetadata::Audio(AudioStreamMetadata {
+                language: None,
+                title: None,
+                channels: 2,
+                sample_rate: 48_000,
+                channel_layout: None,
+                bit_rate: None,
+                is_default: true,
+                is_forced: false,
+            }),
+        }])
+        .await
+        .unwrap();
+    std::fs::write(&path, b"a rewrite whose probe fails").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(written_at().into())
+        .unwrap();
+    h.prober.fails.store(true, Ordering::SeqCst);
+
+    let progress = h.scan().await;
+
+    assert_eq!(progress.changed, 1);
+    let failed = h.row(&path).await.unwrap();
+    assert_eq!(failed.status, FileStatus::Changed);
+    assert_eq!(failed.content, probed.content, "it keeps its title");
+    assert_ne!(failed.hash, probed.hash, "the new content's hash is kept");
+    assert_eq!(
+        (failed.duration, failed.mime_type, failed.container_format),
+        (None, None, None),
+        "the old content's probe results are gone"
+    );
+    assert!(
+        h.stream_repo
+            .find_by_file_id(probed.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "and so are its streams"
+    );
+
+    h.prober.fails.store(false, Ordering::SeqCst);
+    let progress = h.scan().await;
+
+    assert_eq!(h.probes(), 3, "probed again on the next visit");
+    assert_eq!(h.hashes(), 2, "but not rehashed");
+    assert_eq!(progress.changed, 1);
+    let restored = h.row(&path).await.unwrap();
+    assert_eq!(restored.status, FileStatus::Known);
+    assert_eq!(restored.content, probed.content);
+    assert_eq!(restored.duration, Some(Duration::from_secs(60 * 60)));
+    assert_eq!(restored.hash, failed.hash);
 }
 
 /// A row an older build stored unhashed after a failed probe is hashed when

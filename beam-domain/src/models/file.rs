@@ -51,7 +51,7 @@ pub enum FileStatus {
 // than kept as an untested second way to spell the same values.
 
 /// The content type of a media file
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaFileContent {
     /// File is a movie
     Movie { movie_entry_id: Uuid },
@@ -111,11 +111,31 @@ pub struct UpdateMediaFile {
     pub size_bytes: Option<u64>,
     /// `Some` sets the stored mtime; `None` leaves it unchanged.
     pub mtime: Option<DateTime<Utc>>,
-    pub mime_type: Option<String>,
-    pub duration: Option<Duration>,
-    pub container_format: Option<String>,
+    pub probe: ProbeUpdate,
     pub content: Option<MediaFileContent>,
     pub status: Option<FileStatus>,
+}
+
+/// What an [`UpdateMediaFile`] does to a file's probe results -- its MIME
+/// type, duration and container format, which one probe sets together.
+///
+/// A row with no duration is one whose probe has not succeeded, and the
+/// indexer probes it again on every visit (FR-218). So a failed probe of
+/// changed content must [`ProbeUpdate::Clear`] them: kept, the old content's
+/// results would describe a file that is gone and the row would never be
+/// probed again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProbeUpdate {
+    /// Leave them as they are.
+    Keep,
+    /// Replace them with a successful probe's.
+    Set {
+        mime_type: String,
+        duration: Duration,
+        container_format: String,
+    },
+    /// Clear all three: the content changed and its probe failed.
+    Clear,
 }
 
 #[cfg(feature = "entity")]

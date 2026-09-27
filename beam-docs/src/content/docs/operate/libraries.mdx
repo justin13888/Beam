@@ -389,7 +389,9 @@ A file Beam *can* read but cannot probe is **not** a failure. It is indexed with
 counted as added, so a corrupt or truncated video shows up as an unplayable unknown file rather
 than in the scan's failure count. Every later scan tries to probe it again, and the first time a
 probe succeeds — the file was repaired, or finished copying — it is sorted into its movie or show
-like any new file, keeping its record.
+like any new file, keeping its record. The same goes for a file that probed before but whose new
+content does not: it keeps its movie or show, is marked changed, and loses the old content's
+duration and streams until a later scan probes it successfully.
 
 <LinkCard
 	title="Indexing requirements"

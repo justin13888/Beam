@@ -559,7 +559,7 @@ macro_rules! file_repository_contract {
         use ::uuid::Uuid;
         use $crate::models::file::{
             CreateMediaFile, FileClassification, FileStatus, MediaFile, MediaFileContent,
-            UpdateMediaFile,
+            ProbeUpdate, UpdateMediaFile,
         };
         use $crate::repositories::contract::fixture::FileRepositoryFixture;
 
@@ -783,9 +783,7 @@ macro_rules! file_repository_contract {
                         hash: Some(unknown.hash + 1),
                         size_bytes: Some(2048),
                         mtime: None,
-                        mime_type: None,
-                        duration: None,
-                        container_format: None,
+                        probe: ProbeUpdate::Keep,
                         content: None,
                         status: Some(status),
                     })
@@ -813,6 +811,75 @@ macro_rules! file_repository_contract {
                 (stored.hash, stored.size_bytes, stored.classifier_version),
                 (unknown.hash, unknown.size_bytes, 0),
                 "a refused write changes nothing"
+            );
+        }
+
+        /// An update sets, keeps or clears a file's probe results -- MIME
+        /// type, duration and container format -- together, and clearing
+        /// them leaves the rest of the row as it was (issue #181: a failed
+        /// probe of changed content must not keep the old content's results).
+        #[tokio::test]
+        async fn an_update_sets_keeps_or_clears_the_probe_results_together() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let file = movie_file(&fixture, library).await;
+            let repo = fixture.repo();
+            let update = |probe: ProbeUpdate| UpdateMediaFile {
+                id: file.id,
+                hash: None,
+                size_bytes: None,
+                mtime: None,
+                probe,
+                content: None,
+                status: None,
+            };
+            let probe_of = |file: &MediaFile| {
+                (
+                    file.mime_type.clone(),
+                    file.duration,
+                    file.container_format.clone(),
+                )
+            };
+
+            let set = repo
+                .update(update(ProbeUpdate::Set {
+                    mime_type: "video/mp4".to_string(),
+                    duration: ::std::time::Duration::from_secs(90),
+                    container_format: "mp4".to_string(),
+                }))
+                .await
+                .expect("set the probe results");
+            let expected = (
+                Some("video/mp4".to_string()),
+                Some(::std::time::Duration::from_secs(90)),
+                Some("mp4".to_string()),
+            );
+            assert_eq!(probe_of(&set), expected);
+
+            let kept = repo
+                .update(update(ProbeUpdate::Keep))
+                .await
+                .expect("keep the probe results");
+            assert_eq!(probe_of(&kept), expected);
+
+            repo.update(update(ProbeUpdate::Clear))
+                .await
+                .expect("clear the probe results");
+            let cleared = repo
+                .find_by_id(file.id)
+                .await
+                .unwrap()
+                .expect("still present");
+            assert_eq!(probe_of(&cleared), (None, None, None));
+            assert_eq!(
+                (
+                    cleared.hash,
+                    cleared.size_bytes,
+                    cleared.status,
+                    cleared.content.clone()
+                ),
+                (file.hash, file.size_bytes, file.status, file.content.clone()),
+                "clearing the probe results touches nothing else"
             );
         }
 
