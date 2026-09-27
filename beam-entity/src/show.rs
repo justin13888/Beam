@@ -10,6 +10,11 @@ pub struct Model {
     pub id: Uuid,
 
     pub title: String,
+    /// What the indexer matches a file to this title by -- the normalised
+    /// filename parse, never the display `title` (issue #183). `NULL` only on
+    /// a row that predates the column and could not be backfilled.
+    #[sea_orm(unique)]
+    pub identity_key: Option<String>,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<i32>,

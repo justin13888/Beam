@@ -17,6 +17,8 @@
 
 #[path = "pg_integration/file_repository.rs"]
 mod file_repository;
+#[path = "pg_integration/movie_repository.rs"]
+mod movie_repository;
 #[path = "pg_integration/playback_progress.rs"]
 mod playback_progress;
 #[path = "pg_integration/schema.rs"]

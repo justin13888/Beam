@@ -1,12 +1,20 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
 use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show, ShowSearchQuery};
 use beam_domain::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 use beam_domain::repositories::ShowRepository;
+
+/// The `search` condition that keeps only live shows: a present file behind
+/// one of the show's episodes.
+const LIVE_SHOW: &str = "EXISTS (SELECT 1 FROM seasons se \
+     JOIN episodes e ON e.season_id = se.id \
+     JOIN files f ON f.episode_id = e.id \
+     WHERE se.show_id = shows.id AND f.missing_since IS NULL)";
 
 /// SQL-based implementation of the ShowRepository trait.
 #[derive(Debug, Clone)]
@@ -30,18 +38,6 @@ impl ShowRepository for SqlShowRepository {
         Ok(model.map(Show::from))
     }
 
-    async fn find_by_title(&self, title: &str) -> Result<Option<Show>, DbErr> {
-        use beam_entity::show;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-        let model = show::Entity::find()
-            .filter(show::Column::Title.eq(title))
-            .one(self.db.as_ref())
-            .await?;
-
-        Ok(model.map(Show::from))
-    }
-
     async fn find_all(&self) -> Result<Vec<Show>, DbErr> {
         use beam_entity::show;
         use sea_orm::EntityTrait;
@@ -54,7 +50,9 @@ impl ShowRepository for SqlShowRepository {
         use beam_entity::show;
         use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
 
-        let mut conditions: Vec<String> = Vec::new();
+        // Only live shows: some episode with a present file (issue #183).
+        // Binds nothing, so the placeholder numbering below is unaffected.
+        let mut conditions: Vec<String> = vec![LIVE_SHOW.to_string()];
         let mut values: Vec<Value> = Vec::new();
 
         // Pushed first (when present) so its placeholder index is always $1,
@@ -77,11 +75,7 @@ impl ShowRepository for SqlShowRepository {
             conditions.push(format!("year <= ${}", values.len()));
         }
 
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
         let order_by = if query.query.is_some() {
             "ORDER BY similarity(title, $1) DESC, title ASC"
         } else {
@@ -96,23 +90,130 @@ impl ShowRepository for SqlShowRepository {
         Ok(models.into_iter().map(Show::from).collect())
     }
 
-    async fn create(&self, create: CreateShow) -> Result<Show, DbErr> {
+    async fn find_or_create_by_identity(&self, create: CreateShow) -> Result<Show, DbErr> {
         use beam_entity::show;
-        use chrono::Utc;
-        use sea_orm::{ActiveModelTrait, Set};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
+        let CreateShow {
+            identity_key,
+            title,
+            year,
+        } = create;
+
+        // `ON CONFLICT (identity_key) DO NOTHING` then a read by key, as for
+        // movies: two episodes of a new show indexed at once no longer both
+        // read "absent" and create two shows.
         let now = Utc::now();
-        let new_show = show::ActiveModel {
+        let active = show::ActiveModel {
             id: Set(Uuid::new_v4()),
-            title: Set(create.title),
-            year: Set(create.year.map(|y| y as i32)),
+            identity_key: Set(Some(identity_key.clone())),
+            title: Set(title),
+            year: Set(year.map(|y| y as i32)),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
             ..Default::default()
         };
+        show::Entity::insert(active)
+            .on_conflict_do_nothing_on([show::Column::IdentityKey])
+            .exec_without_returning(self.db.as_ref())
+            .await?;
 
-        let result = new_show.insert(self.db.as_ref()).await?;
-        Ok(Show::from(result))
+        let stored = show::Entity::find()
+            .filter(show::Column::IdentityKey.eq(identity_key.as_str()))
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                DbErr::RecordNotFound(format!(
+                    "show keyed {identity_key:?} is not readable after find-or-create"
+                ))
+            })?;
+        Ok(Show::from(stored))
+    }
+
+    async fn find_unkeyed(&self) -> Result<Vec<Show>, DbErr> {
+        use beam_entity::show;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+        // Oldest first: of two legacy duplicates, the original takes the key.
+        let models = show::Entity::find()
+            .filter(show::Column::IdentityKey.is_null())
+            .order_by_asc(show::Column::CreatedAt)
+            .order_by_asc(show::Column::Id)
+            .all(self.db.as_ref())
+            .await?;
+        Ok(models.into_iter().map(Show::from).collect())
+    }
+
+    async fn assign_identity_key(&self, show_id: Uuid, identity_key: &str) -> Result<bool, DbErr> {
+        use beam_entity::show;
+        use sea_orm::sea_query::{Expr, Query};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        // As for movies: `NOT EXISTS` for the ordinary clash, the unique
+        // index for a concurrent one.
+        let result = show::Entity::update_many()
+            .col_expr(
+                show::Column::IdentityKey,
+                Expr::value(Some(identity_key.to_string())),
+            )
+            .filter(show::Column::Id.eq(show_id))
+            .filter(show::Column::IdentityKey.is_null())
+            .filter(Expr::not_exists(
+                Query::select()
+                    .expr(Expr::val(1))
+                    .from(show::Entity)
+                    .and_where(show::Column::IdentityKey.eq(identity_key))
+                    .to_owned(),
+            ))
+            .exec(self.db.as_ref())
+            .await;
+        match result {
+            Ok(result) => Ok(result.rows_affected == 1),
+            Err(err) if super::movie::is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+        let cutoff: sea_orm::prelude::DateTimeWithTimeZone = created_before.into();
+        // Episodes no file row references, then seasons left empty, then
+        // shows left with no season. `seasons` carries no `created_at`, so
+        // this step alone has no cutoff: a season is only ever empty for the
+        // moment between the indexer creating it and creating its first
+        // episode, and a season the watcher creates in that moment is deleted
+        // under it. The watcher's episode insert then fails for that one file,
+        // and the next scan recreates the season and indexes it.
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM episodes e \
+                  WHERE e.created_at < $1 \
+                    AND NOT EXISTS (SELECT 1 FROM files f WHERE f.episode_id = e.id)",
+                [cutoff.into()],
+            ))
+            .await?;
+        self.db
+            .execute_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "DELETE FROM seasons se \
+                  WHERE NOT EXISTS (SELECT 1 FROM episodes e WHERE e.season_id = se.id)",
+            ))
+            .await?;
+        // `ON DELETE CASCADE` takes the library association, enrichment state
+        // and genre links with the show.
+        let shows = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM shows s \
+                  WHERE s.created_at < $1 \
+                    AND NOT EXISTS (SELECT 1 FROM seasons se WHERE se.show_id = s.id)",
+                [cutoff.into()],
+            ))
+            .await?;
+        Ok(shows.rows_affected())
     }
 
     async fn ensure_library_association(
@@ -201,7 +302,6 @@ impl ShowRepository for SqlShowRepository {
 
     async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
         use beam_entity::episode;
-        use chrono::Utc;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
         let CreateEpisode {

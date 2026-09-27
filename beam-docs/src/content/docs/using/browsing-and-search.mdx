@@ -35,11 +35,14 @@ does not fire a query per keystroke.
 Two things it does not do:
 
 - It does **not** search inside descriptions, cast lists or subtitles — titles only.
-- It only finds titles that have been **indexed**. If something is missing, the library may need
-  a scan; ask an administrator, or see [Managing libraries](/operate/libraries/) if that is you.
+- It only finds titles that have been **indexed** and have a file on disk right now. A title whose
+  files have all gone missing — an unplugged drive, a deleted folder — is left out of browsing and
+  search until a file comes back, though a link to its page still works. If something is missing,
+  the library may need a scan; ask an administrator, or see
+  [Managing libraries](/operate/libraries/#when-files-go-missing) if that is you.
 
 ## What search does not cover
 
-Search matches the **title** Beam derived when it indexed the file, not the filename or the folder
-it sits in. If a title looks wrong, that is the derived title rather than a search problem — see
+Search matches the **title** Beam shows — the one derived when it indexed the file, or the
+provider's once metadata enrichment has run — not the filename or the folder it sits in. If a title looks wrong, that is the derived title rather than a search problem — see
 [Managing libraries](/operate/libraries/#how-beam-decides-what-a-file-is).

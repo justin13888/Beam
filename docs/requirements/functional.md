@@ -105,6 +105,15 @@ strength. Each requirement is independently testable. See `product.md` for narra
   been reached. Serialising *every* scan of a library -- admin-triggered, periodic and
   watcher-initiated alike -- is not required here; it is
   [#181](https://github.com/justin13888/beam/issues/181)'s scope.
+- **FR-214**: The indexer MUST match a file to an existing movie or show by an identity key derived
+  from the filename parse -- the normalised title and year, and for a show its series folder --
+  stored apart from the display title and never changed by enrichment, so a title enrichment renamed
+  still receives its later files. Finding or creating a title by its key MUST be atomic: files of
+  one new title indexed concurrently MUST resolve to one title.
+- **FR-215**: A movie or show with no present file MUST be excluded from browse and search as soon as
+  its last file is soft-deleted (FR-211), while remaining resolvable by id; it MUST be deleted,
+  with its enrichment state, only by a scan whose walk read the whole library and only once no file
+  row -- present or soft-deleted -- is left for it.
 
 ## FR-3xx — Metadata Enrichment
 

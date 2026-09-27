@@ -582,11 +582,11 @@ mod tests {
         let (service, movie_repo, _show_repo, state_repo, genre_repo, _clock) = harness(provider);
 
         let movie = movie_repo
-            .create(CreateMovie {
-                title: "The Matrix".to_string(),
-                year: Some(1999),
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new(
+                "The Matrix".to_string(),
+                Some(1999),
+                None,
+            ))
             .await
             .unwrap();
         state_repo
@@ -625,11 +625,7 @@ mod tests {
         });
 
         let movie = movie_repo
-            .create(CreateMovie {
-                title: "The Matrix".to_string(),
-                year: None,
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new("The Matrix".to_string(), None, None))
             .await
             .unwrap();
         state_repo
@@ -657,11 +653,7 @@ mod tests {
         let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
 
         let movie = movie_repo
-            .create(CreateMovie {
-                title: "My Movie".to_string(),
-                year: Some(2020),
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new("My Movie".to_string(), Some(2020), None))
             .await
             .unwrap();
         state_repo
@@ -683,11 +675,7 @@ mod tests {
         let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
 
         let movie = movie_repo
-            .create(CreateMovie {
-                title: "My Movie".to_string(),
-                year: Some(2020),
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new("My Movie".to_string(), Some(2020), None))
             .await
             .unwrap();
         state_repo
@@ -707,11 +695,7 @@ mod tests {
         let (service, movie_repo, _show_repo, state_repo, _genre_repo, clock) = harness(provider);
 
         let movie = movie_repo
-            .create(CreateMovie {
-                title: "My Movie".to_string(),
-                year: Some(2020),
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new("My Movie".to_string(), Some(2020), None))
             .await
             .unwrap();
         state_repo
@@ -747,11 +731,11 @@ mod tests {
         let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
 
         let movie = movie_repo
-            .create(CreateMovie {
-                title: "The Matrix Reloaded".to_string(),
-                year: Some(2003),
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new(
+                "The Matrix Reloaded".to_string(),
+                Some(2003),
+                None,
+            ))
             .await
             .unwrap();
         state_repo
@@ -809,10 +793,7 @@ mod tests {
         let (service, _movie_repo, show_repo, state_repo, genre_repo, _clock) = harness(provider);
 
         let show = show_repo
-            .create(CreateShow {
-                title: "Game of Thrones".to_string(),
-                year: Some(2011),
-            })
+            .find_or_create_by_identity(CreateShow::new("Game of Thrones".to_string(), Some(2011)))
             .await
             .unwrap();
         show_repo.find_or_create_season(show.id, 1).await.unwrap();
@@ -841,11 +822,7 @@ mod tests {
             harness(InMemoryEnrichmentProvider::new(&["tmdb"]));
 
         let movie = movie_repo
-            .create(CreateMovie {
-                title: "Ghost".to_string(),
-                year: None,
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new("Ghost".to_string(), None, None))
             .await
             .unwrap();
         state_repo
@@ -908,11 +885,11 @@ mod tests {
                     harness(provider);
 
                 let matched = movie_repo
-                    .create(CreateMovie {
-                        title: "The Matrix".to_string(),
-                        year: Some(1999),
-                        runtime: None,
-                    })
+                    .find_or_create_by_identity(CreateMovie::new(
+                        "The Matrix".to_string(),
+                        Some(1999),
+                        None,
+                    ))
                     .await
                     .unwrap();
                 state_repo
@@ -921,11 +898,7 @@ mod tests {
                     .unwrap();
 
                 let doomed = movie_repo
-                    .create(CreateMovie {
-                        title: "Ghost".to_string(),
-                        year: None,
-                        runtime: None,
-                    })
+                    .find_or_create_by_identity(CreateMovie::new("Ghost".to_string(), None, None))
                     .await
                     .unwrap();
                 state_repo

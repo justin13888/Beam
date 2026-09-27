@@ -136,15 +136,16 @@ mod tests {
             .expect("session is created")
     }
 
-    /// A movie whose enrichment left `poster_url` pointing at the provider.
+    /// A movie of its own whose enrichment left `poster_url` pointing at the
+    /// provider. Each call parses a different title, so each is a new movie.
     async fn movie_with_poster(fixture: &Fixture, poster_url: Option<&str>) -> Uuid {
         let movie = fixture
             .movies
-            .create(CreateMovie {
-                title: "Arrival".to_string(),
-                year: Some(2016),
-                runtime: None,
-            })
+            .find_or_create_by_identity(CreateMovie::new(
+                format!("Arrival {}", Uuid::new_v4()),
+                Some(2016),
+                None,
+            ))
             .await
             .expect("movie is created");
 
@@ -294,10 +295,7 @@ mod tests {
 
         let show = fixture
             .shows
-            .create(CreateShow {
-                title: "Severance".to_string(),
-                year: Some(2022),
-            })
+            .find_or_create_by_identity(CreateShow::new("Severance".to_string(), Some(2022)))
             .await
             .expect("show is created");
         let season = fixture
@@ -364,10 +362,7 @@ mod tests {
         );
         let show = fixture
             .shows
-            .create(CreateShow {
-                title: "Severance".to_string(),
-                year: Some(2022),
-            })
+            .find_or_create_by_identity(CreateShow::new("Severance".to_string(), Some(2022)))
             .await
             .expect("show is created");
         fixture
