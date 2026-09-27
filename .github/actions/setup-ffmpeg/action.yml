@@ -20,16 +20,24 @@ runs:
         path: /opt/ffmpeg
         key: ffmpeg-9.0-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}-v2
 
+    # Plain apt-get, not awalsh128/cache-apt-pkgs-action: at v1.6.3 (its latest
+    # tag) that action refreshes the package index only under nektos/act
+    # (`update_apt_lists_if_stale` is gated on ACT=true), so on a hosted runner
+    # it resolves versions against the image's baked-in index. Once the mirror
+    # drops a superseded version, the install 404s and configure fails on the
+    # missing nasm (#196). Refreshing the index first removes that failure, and
+    # installing through dpkg means the headers match the image's own .so files,
+    # which the cache key above depends on.
     - name: Install FFmpeg build dependencies
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-      uses: awalsh128/cache-apt-pkgs-action@v1.6.3
-      with:
-        packages: >-
-          build-essential pkg-config yasm nasm wget ca-certificates
-          libx264-dev libx265-dev libvpx-dev
-          libopus-dev libass-dev libfreetype-dev libfontconfig-dev
+      shell: bash
+      run: |
+        sudo apt-get -o Acquire::Retries=3 update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y \
+          build-essential pkg-config yasm nasm wget ca-certificates \
+          libx264-dev libx265-dev libvpx-dev \
+          libopus-dev libass-dev libfreetype-dev libfontconfig-dev \
           libfribidi-dev libogg-dev libssl-dev
-        version: 1.0
 
     - name: Build FFmpeg 9.0 from source
       if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
