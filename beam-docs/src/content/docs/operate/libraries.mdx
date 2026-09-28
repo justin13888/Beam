@@ -433,9 +433,31 @@ Movies/
 
 The folder around the disc is read like a file name (`Heat.1995.DVD9-GROUP/VIDEO_TS` is *Heat* too),
 and the files inside the disc are never read as titles, so every disc's `VTS_01_1.VOB` or
-`00001.m2ts` stays with its own film. A disc directly at the library root, or in a season folder,
-names no film: it is indexed without a title and the admin log says why. A disc of a show's
-episodes is not split into episodes.
+`00001.m2ts` stays with its own film. A folder named only for the disc (`Disc 1`, `DISC2`, `CD2`)
+or only with release words (`DVD9`) is skipped for the folder above it, so `Heat (1995)/Disc
+1/VIDEO_TS` is *Heat*. A disc with no folder naming a film above it, or with a season folder
+anywhere above it (`Show/Season 1/Disc 1/VIDEO_TS`), names no film: it is indexed without a title
+and the admin log says why. A disc of a show's episodes is not split into episodes.
+
+A film spread over several discs plays as one version, disc 1 first, when its disc folders are
+numbered and sit side by side:
+
+```
+Movies/
+├── Lawrence of Arabia (1962)/
+│   ├── Disc 1/
+│   │   └── VIDEO_TS/
+│   └── Disc 2/
+│       └── VIDEO_TS/
+├── Heat (1995) - CD1/
+│   └── VIDEO_TS/
+└── Heat (1995) - CD2/
+    └── VIDEO_TS/
+```
+
+The discs must run from disc 1 with none missing and none numbered twice. If disc 2 of three is
+missing, Beam cannot play them as one film, so it lists each disc as a version of its own until
+disc 2 arrives.
 
 Beam plays a disc's main title, which it reads from the disc without writing anything to it:
 
@@ -450,9 +472,10 @@ disc holds in an `AUDIO_TS` or `CERTIFICATE` folder is skipped.
 
 Beam serves a disc's files as they are and never converts them. A DVD's VOBs are MPEG program
 streams, usually MPEG-2 video with AC-3 audio, and a Blu-ray's clips are MPEG transport streams,
-often with DTS or TrueHD audio. Most browsers play neither, and the Android app does not open VOBs,
-so on those players the version is listed as not playable, with the reason. Remux the disc to a
-single file (`Heat (1995)/Heat (1995).mkv`) to play it everywhere.
+often with DTS or TrueHD audio. The Android app does not open VOBs, so there a DVD version is listed
+as not playable, with the reason; it judges a Blu-ray clip by its codecs. Most browsers play
+neither, and the web player does not yet check what it can play: it tries a disc version and fails.
+Remux the disc to a single file (`Heat (1995)/Heat (1995).mkv`) to play it everywhere.
 
 ### Directory layout for TV
 

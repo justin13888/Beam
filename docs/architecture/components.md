@@ -147,12 +147,16 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   `notification.rs` (the latter two back the admin log and SSE progress events).
 - `disc.rs` — reads a DVD or Blu-ray folder rip for its main title (FR-222, issue #234): the
   title set whose `VTS_nn_0.IFO` lasts longest, else the largest, and the longest `*.mpls` playlist
-  whose clips are all present, else the largest clip. The walk reads a `VIDEO_TS/` or `BDMV/` folder
-  whole through it rather than descending it, classification numbers a main title's files as parts
-  from it, and a watcher event anywhere in a disc reconciles the disc whole. Read-only, with no
+  whose clips are all present, else the largest clip, listing only `VIDEO_TS/` or a Blu-ray's
+  `PLAYLIST/` and `STREAM/`. `read_source` joins the discs of a set of one film (`Disc 1`, `Disc 2`)
+  into one run of parts in disc order. The walk reads a `VIDEO_TS/` or `BDMV/` folder whole through
+  it rather than descending it, classification numbers a source's files as parts from it, every
+  scan or reconcile that reads a disc re-derives its source's parts, and a watcher event anywhere
+  in a disc reconciles the disc whole. Read-only, with no
   link followed: listed with `walkdir`, stat'ed with `StatCursor`, and read through
   `library_file`'s no-follow opener. Tested over `TempDir` discs of minimal IFOs and playlists
-  (`disc_fixtures.rs`), with a property that the parsers never panic.
+  (`disc_fixtures.rs`), with properties that the parsers stay in bounds on pointers near and past
+  the end of their bytes.
 - `providers/cameo.rs` — the `cameo`-backed `EnrichmentProvider` implementation hitting TMDB and
   AniList ([ADR-0006](decisions/ADR-0006-cameo-enrichment.md)). `providers/artwork.rs` and
   `providers/telemetry.rs` are the `reqwest` adapters for artwork fetching and for delivering the

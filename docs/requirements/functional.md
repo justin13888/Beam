@@ -359,24 +359,38 @@ strength. Each requirement is independently testable. See `product.md` for narra
   purges.
 - **FR-222**: A DVD or Blu-ray disc structure copied whole -- a `VIDEO_TS` or `BDMV` folder, in any
   case, at any depth the policy of FR-216 does not exclude -- MUST be indexed as one source of the
-  movie the folder enclosing it names, read as a filename is (FR-204) and completed from the folder
-  above it (`Heat (1995)/VIDEO_TS` is *Heat* (1995); `Heat (1995)/DVD9/VIDEO_TS` too). No file
-  inside a disc is judged by its own name. A disc at the library root, or in a season folder, names
-  no title: its files MUST be indexed without one and the administrator told. The source MUST play
+  movie the nearest folder above it that names one names, read as a filename is (FR-204) and
+  completed from the folder above that (`Heat (1995)/VIDEO_TS` is *Heat* (1995)). A folder that is
+  nothing but a disc token (`Disc 1`, `DISC1`, `CD2`) or release noise (`DVD9`) names no film, so
+  `Heat (1995)/DVD9/VIDEO_TS` and `Heat (1995)/Disc 2/VIDEO_TS` are *Heat* too, and two films' `Disc
+  1` folders MUST NOT make one title. No file inside a disc is judged by its own name. A disc with
+  a season folder anywhere above it (`Show/Season 1/Disc 1/VIDEO_TS`), or with no folder naming a
+  film above it, names no title: its files MUST be indexed without one and the administrator told.
+  The source MUST play
   the disc's main title, read from the disc: for a DVD, the title set whose longest program chain
   lasts longest by its `VTS_nn_0.IFO` -- or, when any title set's IFO cannot be parsed, the title
   set with the most bytes -- whose `VTS_nn_1.VOB`, `VTS_nn_2.VOB`, ... up to the first missing part
   play in turn; for a Blu-ray, the `BDMV/PLAYLIST/*.mpls` whose play items last longest among
   those whose every clip is in `BDMV/STREAM`, its clips played in the playlist's order, each once --
   or, with no such playlist, the largest clip alone. A main title of several files MUST be one
-  source of ordered parts (FR-505); a file's part is its place in the main title and MUST be kept
-  when a rekey re-derives its title from its path (FR-214). Reading a disc MUST follow no link
-  (FR-212) and MUST NOT write anything; a disc that cannot be read whole MUST NOT change its rows,
-  as beneath a folder the walk could not read (FR-211). A watcher event at or inside a disc MUST
-  reconcile the disc whole. A disc's files are served by direct play as they are -- MPEG program
-  stream VOBs and BDAV MPEG transport stream clips -- and never remuxed or transcoded (ADR-0004);
-  the source MUST name its disc structure (`disc_structure`), so a client that cannot play them
-  lists the source as not directly playable, with its reason (ADR-0014).
+  source of ordered parts (FR-505). The discs of a set of one film -- disc folders whose names
+  number them and otherwise agree, in one folder (`Heat (1995)/Disc 1`, `Disc 2`; `Heat (1995) -
+  CD1`, `Heat (1995) - CD2`) -- MUST be one source when the numbers of those whose main titles play
+  something run from 1 with no gap or repeat, playing each disc's main title in disc order as one
+  run of parts; any other set leaves each disc a source of its own. A file's part is its place in
+  that source: it MUST be kept when a rekey re-derives its title from its path (FR-214), and MUST
+  be re-derived whenever a scan or a watcher event reads its disc, so that a main title that changes
+  under unchanged files -- a missing file restored, a disc of a set arriving or leaving -- numbers
+  them anew. Reading a disc MUST follow no link (FR-212), MUST NOT write anything, and MUST list only
+  the folders its main title needs (`VIDEO_TS`, or a Blu-ray's `PLAYLIST` and `STREAM`); a disc
+  that cannot be read whole MUST NOT change its rows, as beneath a folder the walk could not read
+  (FR-211), and neither MUST a set one of whose discs cannot be. A watcher event at or inside a disc
+  MUST reconcile the disc whole. A disc's files are served by direct play as they are -- MPEG
+  program stream VOBs and BDAV MPEG transport stream clips -- and never remuxed or transcoded
+  (ADR-0004); the source MUST name its disc structure (`disc_structure`), so a client that checks
+  what it can play lists the source as not directly playable, with its reason (ADR-0014). The web
+  player does not yet check ([#138](https://github.com/justin13888/beam/issues/138)): it tries a
+  disc source and fails to play it.
 
 ## FR-3xx — Metadata Enrichment
 
