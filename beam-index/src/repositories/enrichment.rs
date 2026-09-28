@@ -5,10 +5,13 @@ use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
 use uuid::Uuid;
 
+use beam_domain::models::catalog::TitleKind;
 use beam_domain::models::enrichment::{
-    EnrichmentState, EnrichmentStatusCounts, EnrichmentTargetId,
+    EnrichmentListFilter, EnrichmentListQuery, EnrichmentState, EnrichmentStatusCounts,
+    EnrichmentTargetId, FieldLocks,
 };
 use beam_domain::repositories::EnrichmentStateRepository;
+use beam_entity::metadata_enrichment;
 
 /// SQL-based implementation of the EnrichmentStateRepository trait.
 #[derive(Debug, Clone)]
@@ -20,6 +23,101 @@ impl SqlEnrichmentStateRepository {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
+}
+
+/// The condition naming `target`'s row.
+fn target_condition(target: EnrichmentTargetId) -> sea_orm::sea_query::SimpleExpr {
+    use sea_orm::ColumnTrait;
+    match target {
+        EnrichmentTargetId::Movie(id) => metadata_enrichment::Column::MovieId.eq(id),
+        EnrichmentTargetId::Show(id) => metadata_enrichment::Column::ShowId.eq(id),
+    }
+}
+
+/// The condition admitting what `filter` admits.
+fn filter_condition(filter: &EnrichmentListFilter) -> sea_orm::Condition {
+    use sea_orm::{ColumnTrait, Condition};
+    let EnrichmentListFilter { status, kind } = *filter;
+    let mut condition = Condition::all();
+    if let Some(status) = status {
+        condition = condition.add(
+            metadata_enrichment::Column::Status
+                .eq(metadata_enrichment::EnrichmentStatus::from(status)),
+        );
+    }
+    match kind {
+        Some(TitleKind::Movie) => {
+            condition = condition.add(metadata_enrichment::Column::MovieId.is_not_null());
+        }
+        Some(TitleKind::Show) => {
+            condition = condition.add(metadata_enrichment::Column::ShowId.is_not_null());
+        }
+        None => {}
+    }
+    condition
+}
+
+/// The `UPDATE` that queues rows for another pass, as `request_refresh`
+/// describes, before its `WHERE`.
+fn queue_update(rematch: bool) -> sea_orm::UpdateMany<metadata_enrichment::Entity> {
+    use sea_orm::ActiveEnum;
+    use sea_orm::EntityTrait;
+    use sea_orm::sea_query::Expr;
+    let mut update = metadata_enrichment::Entity::update_many()
+        .col_expr(
+            metadata_enrichment::Column::Status,
+            metadata_enrichment::EnrichmentStatus::Pending.as_enum(),
+        )
+        .col_expr(metadata_enrichment::Column::ForceRefresh, Expr::value(true))
+        .col_expr(metadata_enrichment::Column::Attempts, Expr::value(0))
+        .col_expr(
+            metadata_enrichment::Column::NextAttemptAt,
+            Expr::value(Option::<chrono::DateTime<chrono::FixedOffset>>::None),
+        )
+        .col_expr(
+            metadata_enrichment::Column::UpdatedAt,
+            Expr::value(chrono::DateTime::<chrono::FixedOffset>::from(Utc::now())),
+        );
+    if rematch {
+        update = update.col_expr(
+            metadata_enrichment::Column::MatchedRef,
+            Expr::value(Option::<String>::None),
+        );
+    }
+    update
+}
+
+/// The statement behind `request_refresh_library`: every title linked to the
+/// library `$1` is queued -- given a row if it has none, queued as
+/// `request_refresh` queues it if it has one -- and both are counted. The
+/// `UPDATE` does not see the rows the `INSERT` makes (one snapshot), so the
+/// two counts are of different titles.
+fn request_refresh_library_sql(rematch: bool) -> String {
+    let rematch = if rematch { ", matched_ref = NULL" } else { "" };
+    format!(
+        "WITH titles AS ( \
+             SELECT movie_id, NULL::uuid AS show_id FROM library_movies WHERE library_id = $1 \
+             UNION \
+             SELECT NULL::uuid, show_id FROM library_shows WHERE library_id = $1 \
+         ), created AS ( \
+             INSERT INTO metadata_enrichment \
+                 (id, movie_id, show_id, status, attempts, force_refresh, created_at, updated_at) \
+             SELECT gen_random_uuid(), t.movie_id, t.show_id, 'pending', 0, true, now(), now() \
+               FROM titles t \
+              WHERE NOT EXISTS (SELECT 1 FROM metadata_enrichment e \
+                                 WHERE e.movie_id = t.movie_id OR e.show_id = t.show_id) \
+             ON CONFLICT DO NOTHING \
+             RETURNING 1 \
+         ), queued AS ( \
+             UPDATE metadata_enrichment \
+                SET status = 'pending', force_refresh = true, attempts = 0, \
+                    next_attempt_at = NULL, updated_at = now(){rematch} \
+              WHERE movie_id IN (SELECT movie_id FROM titles) \
+                 OR show_id IN (SELECT show_id FROM titles) \
+             RETURNING 1 \
+         ) \
+         SELECT ((SELECT count(*) FROM created) + (SELECT count(*) FROM queued))::bigint AS queued"
+    )
 }
 
 #[async_trait]
@@ -58,6 +156,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             matched_ref: Set(None),
             force_refresh: Set(false),
             last_error: Set(None),
+            locked_fields: Set(Vec::new()),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
         };
@@ -244,27 +343,129 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         Ok(true)
     }
 
-    async fn request_refresh_all(&self, rematch: bool) -> Result<u64, DbErr> {
-        use beam_entity::metadata_enrichment;
-        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    async fn request_refresh_library(&self, library_id: Uuid, rematch: bool) -> Result<u64, DbErr> {
+        // One statement bound by the library's id alone: binding each title's
+        // id would overflow the protocol's 65,535 parameters for a library
+        // that large.
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            request_refresh_library_sql(rematch),
+            [library_id.into()],
+        );
+        let row = self
+            .db
+            .query_one_raw(stmt)
+            .await?
+            .ok_or_else(|| DbErr::RecordNotFound("a library refresh returned no row".into()))?;
+        let queued: i64 = row.try_get("", "queued")?;
+        Ok(u64::try_from(queued).unwrap_or(0))
+    }
 
-        let models = metadata_enrichment::Entity::find()
+    async fn request_refresh_all(&self, rematch: bool) -> Result<u64, DbErr> {
+        // One statement: a library of tens of thousands of titles used to be
+        // read whole and written back a row at a time.
+        let result = queue_update(rematch).exec(self.db.as_ref()).await?;
+        Ok(result.rows_affected)
+    }
+
+    async fn find_by_target(
+        &self,
+        target: EnrichmentTargetId,
+    ) -> Result<Option<EnrichmentState>, DbErr> {
+        use sea_orm::{EntityTrait, QueryFilter};
+
+        Ok(metadata_enrichment::Entity::find()
+            .filter(target_condition(target))
+            .one(self.db.as_ref())
+            .await?
+            .map(EnrichmentState::from))
+    }
+
+    async fn set_locked_fields(
+        &self,
+        target: EnrichmentTargetId,
+        locks: &FieldLocks,
+    ) -> Result<EnrichmentState, DbErr> {
+        use sea_orm::sea_query::OnConflict;
+        use sea_orm::{EntityTrait, Set};
+
+        let now: chrono::DateTime<chrono::FixedOffset> = Utc::now().into();
+        let (movie_id, show_id, conflict) = match target {
+            EnrichmentTargetId::Movie(id) => (Some(id), None, metadata_enrichment::Column::MovieId),
+            EnrichmentTargetId::Show(id) => (None, Some(id), metadata_enrichment::Column::ShowId),
+        };
+        let row = metadata_enrichment::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            movie_id: Set(movie_id),
+            show_id: Set(show_id),
+            status: Set(metadata_enrichment::EnrichmentStatus::Pending),
+            attempts: Set(0),
+            next_attempt_at: Set(None),
+            enriched_at: Set(None),
+            match_confidence: Set(None),
+            matched_ref: Set(None),
+            force_refresh: Set(false),
+            last_error: Set(None),
+            locked_fields: Set(locks.to_stored()),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+        // One `INSERT ... ON CONFLICT (movie_id | show_id) DO UPDATE`: a title
+        // with a row keeps it -- its status and match untouched -- and one
+        // without gets a pending row, however two administrators race.
+        let model = metadata_enrichment::Entity::insert(row)
+            .on_conflict(
+                OnConflict::column(conflict)
+                    .update_columns([
+                        metadata_enrichment::Column::LockedFields,
+                        metadata_enrichment::Column::UpdatedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec_with_returning(self.db.as_ref())
+            .await?;
+        Ok(EnrichmentState::from(model))
+    }
+
+    async fn list(&self, query: &EnrichmentListQuery) -> Result<Vec<EnrichmentState>, DbErr> {
+        use sea_orm::{
+            ColumnTrait, Condition, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
+        };
+
+        let EnrichmentListQuery {
+            filter,
+            after,
+            limit,
+        } = *query;
+        let mut select = metadata_enrichment::Entity::find().filter(filter_condition(&filter));
+        if let Some(after) = after {
+            let at: chrono::DateTime<chrono::FixedOffset> = after.updated_at.into();
+            select = select.filter(
+                Condition::any()
+                    .add(metadata_enrichment::Column::UpdatedAt.lt(at))
+                    .add(
+                        Condition::all()
+                            .add(metadata_enrichment::Column::UpdatedAt.eq(at))
+                            .add(metadata_enrichment::Column::Id.lt(after.id)),
+                    ),
+            );
+        }
+        let models = select
+            .order_by(metadata_enrichment::Column::UpdatedAt, Order::Desc)
+            .order_by(metadata_enrichment::Column::Id, Order::Desc)
+            .limit(u64::from(limit.get()))
             .all(self.db.as_ref())
             .await?;
-        let count = models.len() as u64;
-        for model in models {
-            let mut active: metadata_enrichment::ActiveModel = model.into();
-            active.status = Set(metadata_enrichment::EnrichmentStatus::Pending);
-            active.force_refresh = Set(true);
-            active.attempts = Set(0);
-            active.next_attempt_at = Set(None);
-            active.updated_at = Set(Utc::now().into());
-            if rematch {
-                active.matched_ref = Set(None);
-            }
-            active.update(self.db.as_ref()).await?;
-        }
-        Ok(count)
+        Ok(models.into_iter().map(EnrichmentState::from).collect())
+    }
+
+    async fn count(&self, filter: &EnrichmentListFilter) -> Result<u64, DbErr> {
+        use sea_orm::{EntityTrait, PaginatorTrait, QueryFilter};
+
+        metadata_enrichment::Entity::find()
+            .filter(filter_condition(filter))
+            .count(self.db.as_ref())
+            .await
     }
 
     async fn count_by_status(&self) -> Result<EnrichmentStatusCounts, DbErr> {

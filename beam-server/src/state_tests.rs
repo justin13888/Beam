@@ -188,3 +188,84 @@ mod uptime {
         assert_eq!(state.uptime_secs(), 1);
     }
 }
+
+/// FR-307: the admin status says, for each provider, whether it is in use,
+/// asked for but unavailable, or not asked for -- and what to set.
+#[test]
+fn each_providers_status_follows_what_is_asked_for_and_what_is_in_use() {
+    use crate::models::enrichment::{EnrichmentProviderState as State, MetadataProvider};
+
+    let config = |token: Option<&str>, anilist: bool| ServerConfig {
+        tmdb_api_token: token.map(str::to_owned),
+        anilist_enabled: anilist,
+        ..Default::default()
+    };
+    let in_use = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    for (config, available, tmdb, anilist) in [
+        (
+            config(None, false),
+            in_use(&[]),
+            State::NotConfigured,
+            State::NotConfigured,
+        ),
+        (
+            config(Some(""), true),
+            in_use(&["anilist"]),
+            State::NotConfigured,
+            State::Configured,
+        ),
+        (
+            config(Some("t"), true),
+            in_use(&["tmdb", "anilist"]),
+            State::Configured,
+            State::Configured,
+        ),
+        // Asked for, but the client could not be built: enrichment is off.
+        (
+            config(Some("t"), true),
+            in_use(&[]),
+            State::Unavailable,
+            State::Unavailable,
+        ),
+        (
+            config(Some("t"), false),
+            in_use(&["tmdb"]),
+            State::Configured,
+            State::NotConfigured,
+        ),
+    ] {
+        let statuses = provider_statuses(&config, &available);
+        let states: Vec<(MetadataProvider, State)> =
+            statuses.iter().map(|s| (s.provider, s.state)).collect();
+        assert_eq!(
+            states,
+            vec![
+                (MetadataProvider::Tmdb, tmdb),
+                (MetadataProvider::Anilist, anilist)
+            ],
+            "{available:?}"
+        );
+        for status in &statuses {
+            assert_eq!(
+                status.detail.is_some(),
+                status.state != State::Configured,
+                "only a provider that is not in use says what to do: {status:?}"
+            );
+        }
+    }
+    let unset = provider_statuses(&config(None, false), &[]);
+    assert!(
+        unset[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("BEAM_TMDB_API_TOKEN")
+    );
+    assert!(
+        unset[1]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("BEAM_ANILIST_ENABLED")
+    );
+}

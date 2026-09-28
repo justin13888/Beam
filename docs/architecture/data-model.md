@@ -213,6 +213,10 @@ rules read the two as one title: the one with provider ids survives (else the ol
 key, and receives the other's files — its entries found or created on the survivor per library and
 edition, its episodes per season and number, so both shows' files of one episode become sources
 of one episode — and the other, now keyless and fileless, is deleted by the scan's orphan cleanup.
+What an administrator set on the retired title goes with its files (issue #185): its
+administrator's pin moves to the survivor, which is queued to be fetched by it, unless the survivor
+has an administrator's pin of its own — then the survivor's stands and an admin-log warning names
+the one dropped — and its locked fields join the survivor's.
 A show whose stored key's title part is a season-folder name (`season 05|`) is released (key set to
 NULL) instead, as the
 backfill leaves one keyless. A title whose files derive no key of its kind keeps its key and
@@ -519,13 +523,22 @@ movie *or* show, never both, never neither).
 | `matched_ref` | TEXT | yes | canonical `"provider:id"` string, e.g. `"tmdb:603"` |
 | `force_refresh` | BOOLEAN | no | default `false`; set by the re-enrich admin action, cleared once processed |
 | `last_error` | TEXT | yes | most recent failure/unmatched detail, for admin triage |
+| `locked_fields` | TEXT[] | no | default `'{}'`; the fields an administrator locked, which enrichment leaves as they are (issue #185): `title`, `original_title`, `description`, `year`, `release_date`, `runtime`, `poster`, `backdrop`, `rating`, `genres` -- a `CHECK` (`<@`) holds it to these. External ids are never lockable: they are the match |
 | `created_at` | TIMESTAMPTZ | no | |
-| `updated_at` | TIMESTAMPTZ | no | |
+| `updated_at` | TIMESTAMPTZ | no | when the row last changed: queued, attempted, or locked -- the admin list's order |
 
 **CHECK constraint:** exactly one of `movie_id` / `show_id` is set. Unique indexes on `movie_id` and
 on `show_id` guarantee at most one enrichment row per title — a rescan or refresh updates the
-existing row, and multiple files mapping to the same title share one row. Composite index on
-`(status, next_attempt_at)` for the worker's due-row poll.
+existing row, and multiple files mapping to the same title share one row, and they are the
+conflict target of the lock upsert. Composite index on `(status, next_attempt_at)` for the
+worker's due-row poll, and `idx_metadata_enrichment_list` on `(status, updated_at DESC, id DESC)`
+and `idx_metadata_enrichment_recent` on `(updated_at DESC, id DESC)` for the admin list, filtered
+by status and not (FR-303).
+
+A lock changes what the next pass writes, not whether one runs: a locked column is left out of
+the title's `UPDATE`, and locked `genres` leave the genre links alone. An administrator's
+fix-match is not stored here but as the title's pin (`pinned_ref`, `pin_source = 'admin'`), which
+the worker fetches by.
 
 ## Admin / log tables
 

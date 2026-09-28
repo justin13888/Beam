@@ -141,7 +141,9 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   on it again, and fails its queued scan as cancelled at once — the retirement is a guard the library
   service commits only once the delete succeeds, so a failed delete gives the library back; a file is hashed only once it has gone
   `BEAM_SCAN_SETTLE_SECS` without a write; issue #181); `enrichment/` (queue-driven async worker with retry/backoff and
-  candidate matching/scoring); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
+  candidate matching/scoring, honouring field locks and announcing each outcome; `control.rs` is
+  the administrator's control of it -- the list by status, candidates, fix-match as an
+  administrator's pin, locks and refreshes, issue #185); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
   `notification.rs` (the latter two back the admin log and SSE progress events).
 - `providers/cameo.rs` — the `cameo`-backed `EnrichmentProvider` implementation hitting TMDB and
   AniList ([ADR-0006](decisions/ADR-0006-cameo-enrichment.md)). `providers/artwork.rs` and

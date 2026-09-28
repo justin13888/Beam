@@ -6,6 +6,8 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use beam_domain::models::enrichment::{EnrichmentStatus, EnrichmentTargetId};
+
 use crate::services::scan::ScanEvent;
 
 const BROADCAST_CAPACITY: usize = 256;
@@ -26,7 +28,39 @@ pub enum EventCategory {
     /// [`AdminEvent::scan`]. Broadcast live and never kept in the recent
     /// event log, which a scan of a large library would otherwise flush.
     ScanProgress,
+    /// What one enrichment attempt made of a title (FR-309): enriched, left
+    /// unmatched, to be retried, or failed. Every such event carries
+    /// [`AdminEvent::enrichment`]. Broadcast live and, like scan progress,
+    /// never kept in the recent event log, which a sweep of a large library
+    /// would otherwise flush; the title's standing is in the enrichment list.
+    Enrichment,
     System,
+}
+
+impl EventCategory {
+    /// Whether events of this category are live state rather than history:
+    /// broadcast to subscribers and never kept in the recent event log.
+    #[must_use]
+    pub const fn is_live_only(self) -> bool {
+        match self {
+            EventCategory::ScanProgress | EventCategory::Enrichment => true,
+            EventCategory::LibraryScan | EventCategory::System => false,
+        }
+    }
+}
+
+/// The title an [`EventCategory::Enrichment`] event reports on, and where
+/// its enrichment now stands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnrichmentEvent {
+    pub target: EnrichmentTargetId,
+    /// The title's display title, when the title still exists.
+    pub title: Option<String>,
+    pub status: EnrichmentStatus,
+    /// The `"provider:id"` the title is matched to, if any.
+    pub matched_ref: Option<String>,
+    /// Why it was not enriched; `None` once it was.
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,10 +74,13 @@ pub struct AdminEvent {
     pub library_name: Option<String>,
     /// The scan job an [`EventCategory::ScanProgress`] event reports on.
     pub scan: Option<ScanEvent>,
+    /// The title an [`EventCategory::Enrichment`] event reports on.
+    pub enrichment: Option<EnrichmentEvent>,
 }
 
 impl AdminEvent {
-    pub fn info(
+    pub fn new(
+        level: EventLevel,
         category: EventCategory,
         message: impl Into<String>,
         library_id: Option<String>,
@@ -52,13 +89,29 @@ impl AdminEvent {
         Self {
             id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
-            level: EventLevel::Info,
+            level,
             category,
             message: message.into(),
             library_id,
             library_name,
             scan: None,
+            enrichment: None,
         }
+    }
+
+    pub fn info(
+        category: EventCategory,
+        message: impl Into<String>,
+        library_id: Option<String>,
+        library_name: Option<String>,
+    ) -> Self {
+        Self::new(
+            EventLevel::Info,
+            category,
+            message,
+            library_id,
+            library_name,
+        )
     }
 
     pub fn warning(
@@ -67,16 +120,13 @@ impl AdminEvent {
         library_id: Option<String>,
         library_name: Option<String>,
     ) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            level: EventLevel::Warning,
+        Self::new(
+            EventLevel::Warning,
             category,
-            message: message.into(),
+            message,
             library_id,
             library_name,
-            scan: None,
-        }
+        )
     }
 
     pub fn error(
@@ -85,21 +135,24 @@ impl AdminEvent {
         library_id: Option<String>,
         library_name: Option<String>,
     ) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            level: EventLevel::Error,
+        Self::new(
+            EventLevel::Error,
             category,
-            message: message.into(),
+            message,
             library_id,
             library_name,
-            scan: None,
-        }
+        )
     }
 
     /// Attach the scan job this event reports on.
     pub fn with_scan(mut self, scan: ScanEvent) -> Self {
         self.scan = Some(scan);
+        self
+    }
+
+    /// Attach the title this event reports on.
+    pub fn with_enrichment(mut self, enrichment: EnrichmentEvent) -> Self {
+        self.enrichment = Some(enrichment);
         self
     }
 }
@@ -138,7 +191,7 @@ impl NotificationService for LocalNotificationService {
     fn publish(&self, event: AdminEvent) {
         // Progress is live state, not history: a subscriber sees it as it
         // happens, and the log keeps what an administrator reads later.
-        if event.category != EventCategory::ScanProgress {
+        if !event.category.is_live_only() {
             let mut log = self.event_log.write();
             if log.len() >= self.max_log_size {
                 log.pop_front();
@@ -290,6 +343,41 @@ mod tests {
             .map(|event| event.category)
             .collect();
         assert_eq!(kept, vec![EventCategory::LibraryScan]);
+    }
+
+    /// Enrichment outcomes are live too (FR-309): a sweep of a large library
+    /// announces every title, and the log keeps what an administrator reads
+    /// later.
+    #[tokio::test]
+    async fn enrichment_outcomes_are_broadcast_but_not_kept_in_the_log() {
+        let svc = LocalNotificationService::new();
+        let mut live = svc.subscribe();
+        let title = EnrichmentEvent {
+            target: EnrichmentTargetId::Movie(Uuid::nil()),
+            title: Some("Heat".to_string()),
+            status: EnrichmentStatus::Enriched,
+            matched_ref: Some("tmdb:949".to_string()),
+            error: None,
+        };
+        svc.publish(
+            AdminEvent::info(EventCategory::Enrichment, "Enriched \"Heat\"", None, None)
+                .with_enrichment(title.clone()),
+        );
+        svc.publish(AdminEvent::info(
+            EventCategory::System,
+            "Started",
+            None,
+            None,
+        ));
+
+        let first = live.recv().await.expect("the outcome is broadcast");
+        assert_eq!(first.enrichment, Some(title));
+        let kept: Vec<EventCategory> = svc
+            .recent_events(10)
+            .into_iter()
+            .map(|event| event.category)
+            .collect();
+        assert_eq!(kept, vec![EventCategory::System]);
     }
 
     #[test]

@@ -868,6 +868,9 @@ impl AdminStatus {
         let wire::AdminStatusResponse {
             counts,
             enrichment,
+            // Which metadata providers are configured (issue #185) is an operator
+            // diagnostic the native admin screens do not show yet.
+            enrichment_providers: _,
             recent_scans,
             uptime_secs,
             version,
@@ -958,6 +961,9 @@ impl AdminEvent {
     pub fn from_generated(event: wire::AdminEventDto) -> Self {
         let wire::AdminEventDto {
             category,
+            // An enrichment outcome reads, in the feed, as its message; the
+            // structured title is for the admin screens that act on it.
+            enrichment: _,
             id,
             level,
             library_id,
@@ -974,7 +980,11 @@ impl AdminEvent {
                 // scan event it is; the numbers are in the message too.
                 wire::AdminEventCategoryDto::LibraryScan
                 | wire::AdminEventCategoryDto::ScanProgress => EventCategory::LibraryScan,
-                wire::AdminEventCategoryDto::System => EventCategory::System,
+                // An enrichment outcome (issue #185) has no category of its own in
+                // the native apps yet; it reads as the server event it is.
+                wire::AdminEventCategoryDto::Enrichment | wire::AdminEventCategoryDto::System => {
+                    EventCategory::System
+                }
             },
             message,
             library_id,

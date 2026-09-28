@@ -18,11 +18,15 @@ use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
 use beam_index::providers::telemetry::ReqwestTelemetrySink;
 use beam_index::runtime::LibraryWatches;
+use beam_index::services::enrichment::control::{EnrichmentControl, EnrichmentControlDeps};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::index::{IndexService, LocalIndexService};
 use beam_index::services::watch_status::WatchStatus;
 use metrics_exporter_prometheus::PrometheusHandle;
 
+use crate::models::enrichment::{
+    EnrichmentProviderState, EnrichmentProviderStatus, MetadataProvider,
+};
 use crate::{
     config::ServerConfig,
     services::{
@@ -145,6 +149,9 @@ pub struct AppServices {
     pub library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
     pub file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
     pub enrichment_repo: Arc<dyn beam_domain::repositories::EnrichmentStateRepository>,
+    /// An administrator's control of enrichment (issue #185): the list by
+    /// status, candidates, fix-match, field locks, and refreshes.
+    pub enrichment_control: Arc<EnrichmentControl>,
     /// Read directly by the artwork endpoint, which resolves a title id to the
     /// provider URL enrichment stored on it. Same precedent as the repositories
     /// above; shared with the metadata and playback services.
@@ -352,8 +359,9 @@ impl AppServices {
                 movie_repo.clone(),
                 show_repo.clone(),
                 genre_repo.clone(),
-                enrichment_provider,
+                enrichment_provider.clone(),
                 admin_log_service.clone(),
+                notification_service.clone(),
                 clock.clone(),
             )
             .with_policy(EnrichmentPolicy {
@@ -362,6 +370,16 @@ impl AppServices {
                 ..EnrichmentPolicy::default()
             }),
         );
+        let enrichment_control = Arc::new(EnrichmentControl::new(EnrichmentControlDeps {
+            movies: movie_repo.clone(),
+            shows: show_repo.clone(),
+            states: enrichment_repo.clone(),
+            libraries: library_repo.clone(),
+            provider: enrichment_provider,
+            admin_log: admin_log_service.clone(),
+            nfo_pins: index_service.clone(),
+            worker: enrichment_service.notify_handle(),
+        }));
 
         let playback_service = Arc::new(DbPlaybackService::new(
             playback_repo,
@@ -430,19 +448,16 @@ impl AppServices {
                 Arc::new(OsPathValidator),
                 library_watches.clone(),
             )),
-            metadata: Arc::new(
-                DbMetadataService::new(MetadataRepositories {
-                    movies: movie_repo.clone(),
-                    shows: show_repo.clone(),
-                    files: file_repo.clone(),
-                    streams: stream_repo,
-                    catalog: Arc::new(beam_index::repositories::SqlCatalogRepository::new(
-                        db.clone(),
-                    )),
-                    genres: genre_repo.clone(),
-                })
-                .with_enrichment_repo(enrichment_repo.clone()),
-            ),
+            metadata: Arc::new(DbMetadataService::new(MetadataRepositories {
+                movies: movie_repo.clone(),
+                shows: show_repo.clone(),
+                files: file_repo.clone(),
+                streams: stream_repo,
+                catalog: Arc::new(beam_index::repositories::SqlCatalogRepository::new(
+                    db.clone(),
+                )),
+                genres: genre_repo.clone(),
+            })),
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
@@ -451,6 +466,7 @@ impl AppServices {
             library_repo,
             file_repo,
             enrichment_repo,
+            enrichment_control,
             movie_repo,
             show_repo,
             artwork,
@@ -524,6 +540,60 @@ pub(crate) fn provider_from_build(
             Ok(Arc::new(NoopEnrichmentProvider))
         }
     }
+}
+
+/// Whether each metadata provider is configured, for the admin status
+/// (FR-307): what the configuration asks for, against what the running
+/// provider reports it can use (`available`). A provider in use is
+/// configured; one the configuration asks for but the provider lacks could
+/// not be built; one it does not ask for is not configured -- and a title
+/// only it could match stays un-enriched.
+pub(crate) fn provider_statuses(
+    config: &ServerConfig,
+    available: &[String],
+) -> Vec<EnrichmentProviderStatus> {
+    MetadataProvider::ALL
+        .into_iter()
+        .map(|provider| {
+            let requested = match provider {
+                MetadataProvider::Tmdb => config
+                    .tmdb_api_token
+                    .as_deref()
+                    .is_some_and(|token| !token.is_empty()),
+                MetadataProvider::Anilist => config.anilist_enabled,
+            };
+            let in_use = available.iter().any(|name| name == provider.as_str());
+            let (state, detail) = match (in_use, requested) {
+                (true, _) => (EnrichmentProviderState::Configured, None),
+                (false, true) => (
+                    EnrichmentProviderState::Unavailable,
+                    Some(
+                        "configured, but its client could not be built; the server log says why"
+                            .to_owned(),
+                    ),
+                ),
+                (false, false) => (
+                    EnrichmentProviderState::NotConfigured,
+                    Some(
+                        match provider {
+                            MetadataProvider::Tmdb => {
+                                "set BEAM_TMDB_API_TOKEN to enrich titles from TMDB"
+                            }
+                            MetadataProvider::Anilist => {
+                                "set BEAM_ANILIST_ENABLED=true to enrich titles from AniList"
+                            }
+                        }
+                        .to_owned(),
+                    ),
+                ),
+            };
+            EnrichmentProviderStatus {
+                provider,
+                state,
+                detail,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

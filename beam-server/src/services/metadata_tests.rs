@@ -10,8 +10,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::services::metadata::{
-        BrowseRequest, DbMetadataService, MediaFilter, MediaSearchFilters, MediaSortField,
-        MetadataRepositories, MetadataService, SortOrder,
+        BrowseRequest, DbMetadataService, MediaSearchFilters, MediaSortField, MetadataRepositories,
+        MetadataService, SortOrder,
     };
     use beam_domain::models::movie::Movie;
     use beam_domain::models::{Episode, MediaFile, MediaFileContent, MovieEntry, Season, Show};
@@ -268,13 +268,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_refresh_metadata_is_ok() {
-        let service = make_service();
-        let result = service.refresh_metadata(MediaFilter::All).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn test_get_media_sources_unknown_id_returns_not_found() {
         use crate::services::metadata::MetadataError;
 
@@ -305,35 +298,6 @@ mod tests {
         assert!(
             matches!(missing, Err(MetadataError::MediaNotFound)),
             "a well-formed id that resolves to nothing stays MediaNotFound"
-        );
-    }
-
-    /// The refresh path parses the same id and had the same defect.
-    ///
-    /// Needs an enrichment repo: without one `refresh_metadata` is documented
-    /// to be a no-op and returns `Ok(())` before it ever reads the id, so a
-    /// service built without one cannot exercise the parse at all.
-    #[tokio::test]
-    async fn test_refresh_metadata_malformed_id_is_not_an_internal_error() {
-        use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
-
-        use crate::services::metadata::{MediaFilter, MetadataError};
-
-        let service = service(
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-        )
-        .with_enrichment_repo(Arc::new(InMemoryEnrichmentStateRepository::default()));
-
-        let result = service
-            .refresh_metadata(MediaFilter::ByMediaId("not-a-uuid".to_owned()))
-            .await;
-
-        assert!(
-            matches!(result, Err(MetadataError::InvalidId)),
-            "expected InvalidId, got {result:?}"
         );
     }
 
@@ -842,6 +806,7 @@ mod tests {
                     backdrop_url: backdrop_url.map(str::to_string),
                     ..ShowEnrichment::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .expect("in-memory enrichment succeeds");
@@ -987,8 +952,8 @@ mod browse {
     use crate::services::cursor;
     use crate::services::metadata::{
         BrowseRequest, DEFAULT_PAGE_SIZE, DbMetadataService, MAX_PAGE_SIZE, MediaConnection,
-        MediaFilter, MediaSearchFilters, MediaSortField, MediaTypeFilter, MetadataError,
-        MetadataRepositories, MetadataService, PageDirection, PageRequest, SortOrder,
+        MediaSearchFilters, MediaSortField, MediaTypeFilter, MetadataError, MetadataRepositories,
+        MetadataService, PageDirection, PageRequest, SortOrder,
     };
 
     /// Every double, with the catalogue and genre store reading the title
@@ -1054,6 +1019,7 @@ mod browse {
                         rating: Some(8.4),
                         ..Default::default()
                     },
+                    &beam_domain::models::enrichment::FieldLocks::none(),
                 )
                 .await
                 .unwrap();
@@ -1415,9 +1381,6 @@ mod browse {
                 catalog: Arc::new(MockCatalogRepository::new()),
                 genres: library.genres.clone(),
             })
-            .with_enrichment_repo(Arc::new(
-                beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
-            ))
         };
         let id = Uuid::new_v4();
 
@@ -1430,13 +1393,6 @@ mod browse {
         assert!(
             matches!(sources, Err(MetadataError::InternalError(_))),
             "{sources:?}"
-        );
-        let refresh = service(failing())
-            .refresh_metadata(MediaFilter::ByMediaId(id.to_string()))
-            .await;
-        assert!(
-            matches!(refresh, Err(MetadataError::InternalError(_))),
-            "{refresh:?}"
         );
     }
 
@@ -1722,6 +1678,7 @@ mod browse {
                         rating: Some(rating),
                         ..Default::default()
                     },
+                    &beam_domain::models::enrichment::FieldLocks::none(),
                 )
                 .await
                 .unwrap();

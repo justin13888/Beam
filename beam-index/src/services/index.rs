@@ -26,12 +26,14 @@ use crate::services::scan::{
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
+use beam_domain::models::enrichment::{EnrichmentTargetId, FieldLocks};
 use beam_domain::models::file::{
     CreateMediaFile, FileClassification, FileIdentity, FileRelink, FileStatus, MediaFile,
     MediaFileContent, ProbeUpdate, UpdateMediaFile, displaced_from, mtime_as_stored,
 };
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode};
+use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
     AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
     MediaStreamRepository, MovieRepository, PlaybackProgressRepository, ShowRepository,
@@ -2713,6 +2715,99 @@ impl LocalIndexService {
         Ok(report)
     }
 
+    /// Carry to `survivor` what an administrator set on `loser` (issue #185),
+    /// which a merge retires: its pin -- no NFO can bring an administrator's
+    /// pin back -- and its field locks, the union of both titles'. Each side
+    /// is the title with the pin it holds and who set it. A survivor an
+    /// administrator pinned to another id keeps its own pin, and the
+    /// administrator is told which was dropped.
+    async fn carry_admin_state(
+        &self,
+        survivor: (EnrichmentTargetId, Option<&str>, Option<PinSource>),
+        loser: (EnrichmentTargetId, Option<&str>, Option<PinSource>),
+    ) -> Result<(), IndexError> {
+        let (survivor, survivor_pin, survivor_source) = survivor;
+        let (loser, loser_pin, loser_source) = loser;
+        let survivor_admin_pin = survivor_pin.filter(|_| survivor_source == Some(PinSource::Admin));
+        let loser_admin_pin = loser_pin
+            .filter(|_| loser_source == Some(PinSource::Admin))
+            .and_then(ProviderPin::parse);
+        let mut rematch = false;
+        match (survivor_admin_pin, loser_admin_pin) {
+            (_, None) => {}
+            (Some(kept), Some(dropped)) => {
+                warn!(%kept, %dropped, "merged two titles an administrator pinned to different ids");
+                let _ = self
+                    .admin_log
+                    .log(
+                        AdminLogLevel::Warning,
+                        AdminLogCategory::Enrichment,
+                        format!(
+                            "Merged two titles an administrator pinned to different ids: the \
+                             pin to {kept} is kept, the pin to {dropped} is dropped"
+                        ),
+                        Some(serde_json::json!({
+                            "kept": survivor.id(),
+                            "retired": loser.id(),
+                            "kept_pin": kept,
+                            "dropped_pin": dropped.to_ref_string(),
+                        })),
+                    )
+                    .await;
+            }
+            (None, Some(pin)) => {
+                // Released first: one id pins one title.
+                let carried = match (loser, survivor) {
+                    (EnrichmentTargetId::Movie(loser), EnrichmentTargetId::Movie(survivor)) => {
+                        self.movie_repo.clear_admin_pin(loser).await?
+                            && self
+                                .movie_repo
+                                .set_pinned_ref(survivor, &pin, PinSource::Admin)
+                                .await?
+                    }
+                    (EnrichmentTargetId::Show(loser), EnrichmentTargetId::Show(survivor)) => {
+                        self.show_repo.clear_admin_pin(loser).await?
+                            && self
+                                .show_repo
+                                .set_pinned_ref(survivor, &pin, PinSource::Admin)
+                                .await?
+                    }
+                    _ => false,
+                };
+                if carried {
+                    info!(title = %survivor.id(), %pin, "carried an administrator's pin through a merge");
+                    rematch = true;
+                } else {
+                    warn!(title = %survivor.id(), %pin, "an administrator's pin could not be carried through a merge");
+                }
+            }
+        }
+
+        let Some(states) = &self.enrichment_repo else {
+            return Ok(());
+        };
+        let loser_locks = states
+            .find_by_target(loser)
+            .await?
+            .map(|state| state.locked_fields)
+            .unwrap_or_default();
+        if !loser_locks.is_empty() {
+            let survivor_locks = states
+                .find_by_target(survivor)
+                .await?
+                .map(|state| state.locked_fields)
+                .unwrap_or_default();
+            let union: FieldLocks = survivor_locks.iter().chain(loser_locks.iter()).collect();
+            states.set_locked_fields(survivor, &union).await?;
+        }
+        if rematch {
+            // Fetched by the pin it now carries, not the match it had.
+            states.ensure_pending(survivor).await?;
+            states.request_refresh(survivor, true).await?;
+        }
+        Ok(())
+    }
+
     /// Re-derive every identity key an older version of the rules derived
     /// (issue #182), so a title keyed before a change to the title fold or
     /// the path inference is found by the next file that names it rather
@@ -2890,6 +2985,24 @@ impl LocalIndexService {
                 }
                 entry_files.entry(target.id).or_default().extend(moved);
             }
+            let (kept, retired) = if survivor == movie.id {
+                (&movie, &holder)
+            } else {
+                (&holder, &movie)
+            };
+            self.carry_admin_state(
+                (
+                    EnrichmentTargetId::Movie(survivor),
+                    kept.pinned_ref.as_deref(),
+                    kept.pin_source,
+                ),
+                (
+                    EnrichmentTargetId::Movie(loser),
+                    retired.pinned_ref.as_deref(),
+                    retired.pin_source,
+                ),
+            )
+            .await?;
             report.merged_movies.push((survivor, loser));
             settled.insert(survivor);
             settled.insert(loser);
@@ -3037,6 +3150,24 @@ impl LocalIndexService {
                     episode_files.entry(target.id).or_default().extend(moved);
                 }
             }
+            let (kept, retired) = if survivor == show.id {
+                (&show, &holder)
+            } else {
+                (&holder, &show)
+            };
+            self.carry_admin_state(
+                (
+                    EnrichmentTargetId::Show(survivor),
+                    kept.pinned_ref.as_deref(),
+                    kept.pin_source,
+                ),
+                (
+                    EnrichmentTargetId::Show(loser),
+                    retired.pinned_ref.as_deref(),
+                    retired.pin_source,
+                ),
+            )
+            .await?;
             report.merged_shows.push((survivor, loser));
             settled.insert(survivor);
             settled.insert(loser);
