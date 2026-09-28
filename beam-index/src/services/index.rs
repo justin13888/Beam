@@ -1227,12 +1227,15 @@ impl LocalIndexService {
                 // than colliding with it; the episode's title and runtime stay
                 // those the first file (or enrichment since) established. A
                 // multi-episode file attaches to its first episode and carries
-                // the rest of its range itself.
+                // the rest of its range itself. Its runtime is the whole
+                // range's, so it is not the episode's: a new episode from it
+                // has none until enrichment supplies one (#189).
+                let spans_episodes = last_episode.is_some_and(|last| last > first_episode);
                 let create_episode = CreateEpisode {
                     season_id: season.id,
                     episode_number: first_episode,
                     title: episode_title.unwrap_or_else(|| format!("Episode {first_episode}")),
-                    runtime,
+                    runtime: if spans_episodes { None } else { runtime },
                     air_date,
                 };
                 let episode = self

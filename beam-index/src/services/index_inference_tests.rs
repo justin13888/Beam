@@ -282,6 +282,30 @@ async fn a_multi_episode_file_attaches_to_its_first_episode_and_carries_its_rang
         1,
         "the range is on the file, not extra episode rows"
     );
+    // The probed hour is three episodes' runtime, not the first's (#189).
+    assert_eq!(episode.runtime, None);
+}
+
+#[tokio::test]
+async fn a_single_episode_file_gives_a_new_episode_its_probed_runtime() {
+    let h = Harness::new().await;
+    // A range of one is a single episode, however it is written.
+    for rel in [
+        "Show/Season 01/Show.S01E01.mkv",
+        "Show/Season 01/Show.S01E02-E02.mkv",
+    ] {
+        h.write(rel);
+    }
+
+    h.scan().await;
+
+    for rel in [
+        "Show/Season 01/Show.S01E01.mkv",
+        "Show/Season 01/Show.S01E02-E02.mkv",
+    ] {
+        let (_, episode, _) = h.episode_of(rel);
+        assert_eq!(episode.runtime, Some(PROBED_RUNTIME), "{rel}");
+    }
 }
 
 #[tokio::test]
