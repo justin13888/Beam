@@ -14,9 +14,9 @@ use crate::models::search::PageInfo;
 /// and names its codec as FFmpeg does (`h264`, `eac3`, `subrip`).
 ///
 /// A movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`) is one
-/// source whose `parts` play in sequence (issue #233): a client plays each
-/// part's `stream_url` in turn -- a concatenated playlist -- and Beam never
-/// joins them (ADR-0004). A whole file is a source of one part. The fields
+/// source whose `parts` play in sequence (issue #233): a client is expected
+/// to play each part's `stream_url` in turn -- a concatenated playlist -- and
+/// Beam never joins them (ADR-0004). A whole file is a source of one part. The fields
 /// that name one file -- `file_id`, the tracks, `stream_url`,
 /// `download_url`, `mime_type` and `container_format` -- are the first
 /// part's; `size_bytes` and `duration_secs` are the whole source's.
@@ -91,7 +91,9 @@ impl MediaSourceConnection {
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct SourcePart {
     pub file_id: Uuid,
-    /// The part the filename names (`CD2` is `2`); absent for a whole file.
+    /// The part the filename names (`CD2` is `2`), from 1; absent for a
+    /// whole file.
+    #[schema(minimum = 1)]
     pub part_number: Option<u32>,
     pub size_bytes: u64,
     pub duration_secs: Option<f64>,

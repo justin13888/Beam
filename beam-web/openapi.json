@@ -12818,9 +12818,9 @@
               "null"
             ],
             "maximum": 4294967295.0,
-            "minimum": 0.0,
+            "minimum": 1.0,
             "format": "uint32",
-            "description": "The part the filename names (`CD2` is `2`); absent for a whole file."
+            "description": "The part the filename names (`CD2` is `2`), from 1; absent for a\nwhole file."
           },
           "size_bytes": {
             "type": "integer",
@@ -13100,7 +13100,7 @@
           "stream_url",
           "download_url"
         ],
-        "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.\n\nThe one track model Beam has (issue #189): every video, audio and\nsubtitle track here is tied to this file, addressed by its stream index,\nand names its codec as FFmpeg does (`h264`, `eac3`, `subrip`).\n\nA movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`) is one\nsource whose `parts` play in sequence (issue #233): a client plays each\npart's `stream_url` in turn -- a concatenated playlist -- and Beam never\njoins them (ADR-0004). A whole file is a source of one part. The fields\nthat name one file -- `file_id`, the tracks, `stream_url`,\n`download_url`, `mime_type` and `container_format` -- are the first\npart's; `size_bytes` and `duration_secs` are the whole source's."
+        "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.\n\nThe one track model Beam has (issue #189): every video, audio and\nsubtitle track here is tied to this file, addressed by its stream index,\nand names its codec as FFmpeg does (`h264`, `eac3`, `subrip`).\n\nA movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`) is one\nsource whose `parts` play in sequence (issue #233): a client is expected\nto play each part's `stream_url` in turn -- a concatenated playlist -- and\nBeam never joins them (ADR-0004). A whole file is a source of one part. The fields\nthat name one file -- `file_id`, the tracks, `stream_url`,\n`download_url`, `mime_type` and `container_format` -- are the first\npart's; `size_bytes` and `duration_secs` are the whole source's."
       },
       "PageInfo": {
         "properties": {
