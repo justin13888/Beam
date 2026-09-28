@@ -213,6 +213,10 @@ rules read the two as one title: the one with provider ids survives (else the ol
 key, and receives the other's files — its entries found or created on the survivor per library and
 edition, its episodes per season and number, so both shows' files of one episode become sources
 of one episode — and the other, now keyless and fileless, is deleted by the scan's orphan cleanup.
+What an administrator set on the retired title goes with its files (issue #185): its
+administrator's pin moves to the survivor, which is queued to be fetched by it, unless the survivor
+has an administrator's pin of its own — then the survivor's stands and an admin-log warning names
+the one dropped — and its locked fields join the survivor's.
 A show whose stored key's title part is a season-folder name (`season 05|`) is released (key set to
 NULL) instead, as the
 backfill leaves one keyless. A title whose files derive no key of its kind keeps its key and

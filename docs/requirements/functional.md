@@ -159,7 +159,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   the classification rules (FR-204) that derived it; before a scan reclassifies any file, a key an
   older version derived MUST be re-derived from the title's files, in place (the title keeping its
   id and enrichment), and two titles the current rules key alike MUST be merged into one, keeping
-  the one a provider matched, else the older. Every path that reclassifies -- the scan of every
+  the one a provider matched, else the older, and carrying to it the other's administrator's pin
+  and locked fields (FR-313) -- a survivor an administrator pinned keeping its own pin. Every path that reclassifies -- the scan of every
   library, the administrator's scan of one, a watcher event -- MUST first run the identity-key
   backfill and re-derivation if they have not succeeded in the process, and while they have not
   (they failed, and are retried by the next such path) MUST NOT reclassify a file an older version
