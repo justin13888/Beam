@@ -55,6 +55,11 @@ metrics-util = { workspace = true }
 mockall = "0.15.0"
 proptest = "1.11.0"
 
+# A FIFO put in a subtitle file's place, which delivery must refuse without
+# waiting on it. Already in the tree through beam-index.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
 [features]
 test-utils = ["beam-domain/test-utils", "beam-index/test-utils"]
 vendored-ffmpeg = ["beam-index/vendored-ffmpeg"]

@@ -27,6 +27,8 @@ use kynos::response::range::source::ByteSource;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::error;
 
+use beam_index::library_file::open_regular_file;
+
 use crate::routes::api_error::{DeliveryError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::tags::Playback;
@@ -47,22 +49,35 @@ pub struct FilePath {
 /// source stands in without special runtime infrastructure. Kynos ships
 /// `InMemory(Bytes)` for exactly that.
 pub struct FileByteSource {
-    path: PathBuf,
+    /// The one handle every span is read from, so the bytes served are those
+    /// of the file that was opened and statted -- never of whatever the path
+    /// names by the time a span is read.
+    file: tokio::sync::Mutex<tokio::fs::File>,
     length: u64,
 }
 
 impl FileByteSource {
-    /// Reads the file's metadata without reading a byte of its contents.
+    /// Opens the file and reads its metadata from the handle, without reading
+    /// a byte of its contents.
     ///
-    /// Shared with subtitle delivery, which serves a sidecar file the same
-    /// way; each caller says what a file it cannot open means to its client.
+    /// Opened as every read of a library file is: never through a symbolic
+    /// link, and only a regular file -- a link, FIFO or device put in the
+    /// file's place since it was indexed fails here (FR-212,
+    /// [`beam_index::library_file`]). Shared with subtitle delivery, which
+    /// serves a sidecar file the same way; each caller says what a file it
+    /// cannot open means to its client.
     pub(crate) async fn open(path: PathBuf) -> std::io::Result<(Self, SystemTime, u64)> {
-        let metadata = tokio::fs::metadata(&path).await?;
+        let (file, metadata) =
+            tokio::task::spawn_blocking(move || open_regular_file(&path)).await??;
 
         let length = metadata.len();
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-        Ok((Self { path, length }, modified, length))
+        let source = Self {
+            file: tokio::sync::Mutex::new(tokio::fs::File::from_std(file)),
+            length,
+        };
+        Ok((source, modified, length))
     }
 }
 
@@ -78,7 +93,7 @@ impl ByteSource for FileByteSource {
     /// Reads exactly the span asked for. The whole file is never held: a client
     /// seeking to the two-hour mark of a 40 GiB remux costs one span.
     async fn read_span(&self, first: u64, last: u64) -> Result<Bytes, Self::Error> {
-        let mut file = tokio::fs::File::open(&self.path).await?;
+        let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(first)).await?;
 
         let span = usize::try_from(last - first + 1).unwrap_or(0);

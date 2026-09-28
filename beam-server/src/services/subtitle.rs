@@ -7,7 +7,8 @@
 //! Subtitles embedded in a video are never extracted (ADR-0004); a client
 //! reads those from the stream it is already playing.
 
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -18,8 +19,9 @@ use uuid::Uuid;
 use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat};
 use beam_domain::repositories::{FileRepository, SidecarSubtitleRepository};
 use beam_domain::utils::subtitle::{normalize_webvtt, srt_to_webvtt};
+use beam_index::library_file::open_regular_file;
 
-use crate::services::sources::has_webvtt_rendition;
+use crate::services::sources::{SUBTITLE_CONVERT_MAX_BYTES, has_webvtt_rendition};
 
 /// Why a subtitle could not be served.
 #[derive(Debug, Error)]
@@ -150,18 +152,9 @@ impl SubtitleService for DbSubtitleService {
         let sidecar = self.find(file_id, subtitle_id).await?;
         let format = sidecar.info.format;
         // Decided on the recorded size first, as the sources route decided
-        // whether to offer the rendition at all ...
+        // whether to offer the rendition at all, and again by `render_file`
+        // on the file as it is now.
         if !has_webvtt_rendition(format, sidecar.size_bytes) {
-            return Err(SubtitleError::RenditionUnavailable);
-        }
-        let missing = |err: std::io::Error| {
-            error!(path = ?sidecar.path, ?err, "failed to read a subtitle file");
-            SubtitleError::SourceFileMissing
-        };
-        let metadata = tokio::fs::metadata(&sidecar.path).await.map_err(missing)?;
-        // ... and again on the file as it is now, which may have grown since
-        // the scan that recorded it.
-        if !has_webvtt_rendition(format, metadata.len()) {
             return Err(SubtitleError::RenditionUnavailable);
         }
         let render: fn(&[u8]) -> String = match format {
@@ -171,15 +164,45 @@ impl SubtitleService for DbSubtitleService {
                 return Err(SubtitleError::RenditionUnavailable);
             }
         };
-        let bytes = tokio::fs::read(&sidecar.path).await.map_err(missing)?;
-        let source_length = bytes.len() as u64;
-        let text = tokio::task::spawn_blocking(move || render(&bytes))
+        let path = sidecar.path;
+        tokio::task::spawn_blocking(move || render_file(&path, format, render))
             .await
-            .map_err(|err| SubtitleError::Internal(format!("subtitle conversion failed: {err}")))?;
-        Ok(WebVttRendition {
-            text,
-            modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            source_length,
-        })
+            .map_err(|err| SubtitleError::Internal(format!("subtitle conversion failed: {err}")))?
     }
+}
+
+/// Read the subtitle file at `path` and render it, all from one handle.
+///
+/// Opened as every read of a library file is -- never through a symbolic
+/// link, and only a regular file ([`open_regular_file`]) -- so a sidecar
+/// replaced by a link, a FIFO or a device since the scan is
+/// [`SubtitleError::SourceFileMissing`], never another file's contents. The
+/// size is checked again on the handle, as the file may have grown since the
+/// scan, and the read is bounded by the ceiling whatever the handle claims.
+fn render_file(
+    path: &Path,
+    format: SubtitleFormat,
+    render: fn(&[u8]) -> String,
+) -> Result<WebVttRendition, SubtitleError> {
+    let missing = |err: std::io::Error| {
+        error!(?path, ?err, "failed to read a subtitle file");
+        SubtitleError::SourceFileMissing
+    };
+    let (file, metadata) = open_regular_file(path).map_err(missing)?;
+    if !has_webvtt_rendition(format, metadata.len()) {
+        return Err(SubtitleError::RenditionUnavailable);
+    }
+    let mut bytes = Vec::new();
+    file.take(SUBTITLE_CONVERT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(missing)?;
+    let source_length = bytes.len() as u64;
+    if !has_webvtt_rendition(format, source_length) {
+        return Err(SubtitleError::RenditionUnavailable);
+    }
+    Ok(WebVttRendition {
+        text: render(&bytes),
+        modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        source_length,
+    })
 }

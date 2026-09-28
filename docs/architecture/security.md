@@ -152,6 +152,19 @@ laughs); and the XML parser (`roxmltree`, which resolves no external resources) 
 10 000 nodes. A rejected NFO is logged and ignored: the file is classified by its path. Subtitle
 files are only stat-ed and their names read; their contents are never opened by the indexer.
 
+Delivery reads library files too, and a file can change between the scan that recorded it and the
+request that reads it. Every file the server serves — a video on `/stream` and `/download`, a
+subtitle file as stored or as WebVTT (FR-512) — is opened through the same helper as an NFO
+(`beam_index::library_file::open_regular_file`): read-only, `O_NOFOLLOW | O_NONBLOCK` on Unix, and
+refused unless the open handle `fstat`s as a regular file. So a file replaced by a symbolic link to
+something outside the library (`/proc/self/environ`, a secrets file), by a FIFO, or by a device such
+as `/dev/zero` answers `#source-file-missing`, as a deleted file does, and is never read. Length,
+modification time and every byte served come from that one handle, never from a second lookup of
+the path. A subtitle is treated as hostile input as an NFO is: the WebVTT rendition reads at most
+8 MiB of it, checked against the handle's size and again against the bytes read, and converts it in
+time linear in its length whatever markup it holds, so a crafted file cannot hold a worker for
+longer than an honest file of the same size.
+
 ## Operational hardening
 
 - Startup logs redact secrets: `ServerConfig` has a hand-written `Debug` impl that redacts

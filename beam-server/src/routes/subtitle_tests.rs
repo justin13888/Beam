@@ -429,6 +429,58 @@ async fn a_subtitle_deleted_from_disk_is_source_file_missing() {
     }
 }
 
+/// A subtitle replaced since it was indexed -- by a symbolic link out of the
+/// library, or by a FIFO -- is not read (FR-212): neither route serves the
+/// link's target, and neither waits on the FIFO for a writer. Both are
+/// `#source-file-missing`, as a deleted file is.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_subtitle_replaced_by_a_link_or_a_fifo_is_source_file_missing() {
+    const SECRET: &[u8] = b"1\n00:00:01,000 --> 00:00:02,000\nDATABASE_URL=postgres://secret\n";
+    let f = fixture();
+    let video = f.video();
+    let outside = f.path("outside.srt");
+    std::fs::write(&outside, SECRET).expect("write the file outside");
+
+    let mut replaced = Vec::new();
+    for name in ["Movie.en.srt", "Movie.fr.vtt"] {
+        let id = f.sidecar(video, name, SRT).await;
+        std::fs::remove_file(f.path(name)).expect("remove the subtitle");
+        std::os::unix::fs::symlink(&outside, f.path(name)).expect("link it out");
+        replaced.push((name, id));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let id = f.sidecar(video, "Movie.de.srt", SRT).await;
+        std::fs::remove_file(f.path("Movie.de.srt")).expect("remove the subtitle");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &f.path("Movie.de.srt"),
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .expect("make a FIFO");
+        replaced.push(("Movie.de.srt", id));
+    }
+    let token = f.session().await;
+
+    for (name, id) in replaced {
+        for path in [url(video, id), format!("{}/webvtt", url(video, id))] {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                f.client().get(&path).cookie("beam_session", &token).send(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: {path} waited on the file"));
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{name}: {path}");
+            assert_eq!(
+                problem_type(response.bytes()),
+                "https://beam.justinchung.net/reference/errors/#source-file-missing",
+                "{name}: {path}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_malformed_id_is_refused_before_any_lookup() {
     let f = fixture();

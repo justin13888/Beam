@@ -471,6 +471,37 @@ async fn stream_file_missing_from_disk_is_404() {
         .assert_status(StatusCode::NOT_FOUND);
 }
 
+/// A video replaced by a symbolic link since it was indexed is not followed
+/// (FR-212): the link's target -- any file the server can read -- is never
+/// served, whatever it holds.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_video_replaced_by_a_link_is_not_followed() {
+    let dir = TempDir::new().unwrap();
+    let outside = dir.path().join("secrets.env");
+    std::fs::write(&outside, b"DATABASE_URL=postgres://secret").unwrap();
+    let path = dir.path().join("video.mkv");
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+
+    let fixture = make_test_state(vec![make_located_file(
+        TEST_FILE_ID,
+        path.to_str().unwrap(),
+    )]);
+    let client = build_client(&fixture);
+    let token = seed_session_token(&fixture).await;
+
+    for url in [STREAM, DOWNLOAD] {
+        let response = client.get(url).cookie("beam_session", &token).send().await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{url}");
+        let problem: serde_json::Value =
+            serde_json::from_slice(response.bytes()).expect("a problem document");
+        assert_eq!(
+            problem["type"], "https://beam.justinchung.net/reference/errors/#source-file-missing",
+            "{url}"
+        );
+    }
+}
+
 /// When the file ID is not present in the library service, return 404.
 #[tokio::test]
 async fn stream_file_unknown_to_the_library_is_404() {

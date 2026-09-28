@@ -19,6 +19,8 @@ use beam_domain::models::show::Show;
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::utils::nfo::{MAX_NFO_BYTES, Nfo, NfoKind, parse_nfo};
 
+use crate::library_file::open_regular_file;
+
 use super::*;
 
 /// The NFO a Kodi-style library keeps in a series folder.
@@ -135,25 +137,6 @@ pub(super) struct NfoRead {
     pub(super) nfo: Option<Nfo>,
 }
 
-/// Open `path` for reading, never through a symbolic link: on Unix with
-/// `O_NOFOLLOW`, so a link swapped in after the caller's `lstat` fails to open
-/// rather than being followed out of the library (issue #186). The open is
-/// also non-blocking, so a FIFO swapped in after that `lstat` opens at once --
-/// and is then refused as not a regular file -- rather than waiting forever
-/// for a writer; on a regular file `O_NONBLOCK` changes nothing.
-pub(super) fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
-        );
-    }
-    options.open(path)
-}
-
 #[cfg(test)]
 thread_local! {
     /// How many NFOs this thread has read the bytes of: what a test counts to
@@ -174,21 +157,13 @@ pub(super) fn read_nfo_file(path: &Path) -> Option<NfoRead> {
         warn!(path = %path.display(), bytes = meta.len(), "NFO is larger than Beam reads; ignored");
         return None;
     }
-    let file = match open_no_follow(path) {
-        Ok(file) => file,
+    // The open file is statted before it is read: a write after this stat
+    // moves the stamp, so the next read sees it, whereas a stamp taken after
+    // the read could vouch for content the read never saw.
+    let (file, meta) = match open_regular_file(path) {
+        Ok(opened) => opened,
         Err(err) => {
             warn!(path = %path.display(), error = %err, "could not open an NFO; ignored");
-            return None;
-        }
-    };
-    // Stat the open file before reading it: a write after this stat moves the
-    // stamp, so the next read sees it, whereas a stamp taken after the read
-    // could vouch for content the read never saw.
-    let meta = match file.metadata() {
-        Ok(meta) if meta.is_file() => meta,
-        Ok(_) => return None,
-        Err(err) => {
-            warn!(path = %path.display(), error = %err, "could not stat an NFO; ignored");
             return None;
         }
     };
