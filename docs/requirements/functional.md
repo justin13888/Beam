@@ -200,12 +200,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   it has gone `BEAM_SCAN_SETTLE_SECS` without a write (measured with the injected `Clock`), and a
   file whose probe failed MUST be probed again on each visit and classified when a probe succeeds;
   when a file's content changes and its probe fails, the old content's probe results and streams
-  MUST be cleared rather than kept; when its size or modification time moved but its content did
-  not, the new size and modification time MUST be recorded so it is not hashed again on the next
-  visit. At most one `files` row MAY exist per path. Deleting a library MUST first stop anything
-  from starting on it -- a scan of any trigger, or a watcher reconcile -- then fail a queued scan of
-  it as cancelled at once and wait (bounded) for a running one to stop; if the delete itself then
-  fails, the library MUST be scanned and reconciled again as before.
+  MUST be cleared rather than kept; when its size, modification time or identity (FR-221: inode and
+  change time) moved but its content did not, the new size, modification time and identity MUST be
+  recorded so it is not hashed again on the next visit. At most one `files` row MAY exist per
+  path. Deleting a library MUST first stop anything from starting on it -- a scan of any trigger,
+  or a watcher reconcile -- then fail a queued scan of it as cancelled at once and wait (bounded)
+  for a running one to stop; if the delete itself then fails, the library MUST be scanned and
+  reconciled again as before.
 - **FR-219**: Classification (FR-204) MUST also read the Kodi-style NFO describing a file --
   `<stem>.nfo` beside it, else `movie.nfo` in its folder, and for an episode `tvshow.nfo` in its
   folder or, when that is a season folder, the series folder above; never one at the library root
