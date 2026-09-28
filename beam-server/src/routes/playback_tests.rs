@@ -232,6 +232,29 @@ impl Fixture {
             .await
     }
 
+    /// The parts of a multi-part `movie_id`, in part order: one edition's
+    /// files in one folder, numbered from 1, each lasting 100 seconds.
+    async fn movie_parts(&self, movie_id: Uuid, count: u32) -> Vec<Uuid> {
+        let entry = self
+            .movies
+            .find_or_create_entry(CreateMovieEntry {
+                library_id: self.library_id,
+                movie_id,
+                edition: None,
+            })
+            .await
+            .unwrap();
+        let mut parts = Vec::new();
+        for part in 1..=count {
+            let content = MediaFileContent::Movie {
+                movie_entry_id: entry.id,
+                part_number: Some(part),
+            };
+            parts.push(self.file(content, 1_000, 100).await);
+        }
+        parts
+    }
+
     async fn show(&self, title: &str) -> Uuid {
         let show = self
             .shows
@@ -352,6 +375,67 @@ async fn set_watched(
 }
 
 // ── Reporting ────────────────────────────────────────────────────────────────
+
+/// A multi-part movie is played through its last part: the end of an
+/// earlier part is only where the next one starts, so reaching it marks
+/// nothing, and the viewer resumes in the part they stopped in.
+#[tokio::test]
+async fn an_earlier_part_reaching_its_end_marks_nothing_and_resumes_in_that_part() {
+    let fixture = fixture();
+    let client = client(&fixture);
+    let token = session(&fixture).await;
+    let movie = fixture.movie("Heat").await;
+    let parts = fixture.movie_parts(movie, 3).await;
+
+    let response = report(&client, &token, parts[0], 99.0, Some(100.0)).await;
+    assert_eq!(response.status(), StatusCode::OK, "{}", response.text());
+    let state: UserTitleState = response.json();
+    assert_eq!(
+        (state.played, state.position_secs, state.play_count),
+        (false, 99.0, 0),
+        "part 1 at 99% is not the movie's end"
+    );
+    let shelf = continue_watching(&client, &token).await;
+    let rows: Vec<(Uuid, Uuid, f64)> = shelf
+        .items
+        .iter()
+        .map(|i| (i.media_id, i.file_id, i.position_secs))
+        .collect();
+    assert_eq!(rows, vec![(movie, parts[0], 99.0)], "resumed in part 1");
+
+    watch(&client, &token, parts[1], 97.0).await;
+    let state = progress(&client, &token, movie).await;
+    assert_eq!((state.played, state.position_secs), (false, 97.0));
+    let shelf = continue_watching(&client, &token).await;
+    assert_eq!(shelf.items[0].file_id, parts[1], "resumed in part 2");
+
+    let past_the_end = report(&client, &token, parts[1], 180.0, Some(100.0)).await;
+    assert_eq!(
+        past_the_end.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a position is held to its own part's duration"
+    );
+}
+
+#[tokio::test]
+async fn the_last_part_reaching_its_end_marks_the_movie_played() {
+    let fixture = fixture();
+    let client = client(&fixture);
+    let token = session(&fixture).await;
+    let movie = fixture.movie("Heat").await;
+    let parts = fixture.movie_parts(movie, 2).await;
+    watch(&client, &token, parts[0], 99.0).await;
+
+    watch(&client, &token, parts[1], 95.0).await;
+
+    let state = progress(&client, &token, movie).await;
+    assert_eq!(
+        (state.played, state.position_secs, state.play_count),
+        (true, 0.0, 1),
+        "95% of the last part is the end"
+    );
+    assert!(continue_watching(&client, &token).await.items.is_empty());
+}
 
 #[tokio::test]
 async fn every_route_requires_a_session() {

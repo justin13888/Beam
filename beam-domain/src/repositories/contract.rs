@@ -270,6 +270,7 @@ macro_rules! watch_state_repository_contract {
                 file_id,
                 position_secs,
                 duration_secs: Some(100.0),
+                finishes_title: true,
             }
         }
 

@@ -224,6 +224,24 @@ impl SourceCatalog {
         ))
     }
 
+    /// Whether `file_id` plays the end of the movie's source it belongs to:
+    /// a whole file does, and of a multi-part movie only the last part --
+    /// the others end where the next one starts. A file in none of the
+    /// movie's sources is taken as whole.
+    pub async fn plays_movie_end(&self, movie_id: Uuid, file_id: Uuid) -> Result<bool, DbErr> {
+        Ok(self
+            .ranked_movie_sources(movie_id)
+            .await?
+            .iter()
+            .find(|source| source.parts.iter().any(|part| part.file.id == file_id))
+            .is_none_or(|source| {
+                source
+                    .parts
+                    .last()
+                    .is_some_and(|last| last.file.id == file_id)
+            }))
+    }
+
     /// The movie's present files, the primary first.
     pub async fn movie_files(&self, movie_id: Uuid) -> Result<Vec<PlayableFile>, DbErr> {
         Ok(playable(&self.ranked_movie_sources(movie_id).await?, None))

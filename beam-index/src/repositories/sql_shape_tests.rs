@@ -153,6 +153,7 @@ mod watch_state {
                     file_id: Uuid::from_u128(8),
                     position_secs: 12.0,
                     duration_secs: Some(100.0),
+                    finishes_title: true,
                 })
                 .await;
             drop(repo);
@@ -202,6 +203,7 @@ mod watch_state {
                 file_id: Uuid::from_u128(8),
                 position_secs: 97.0,
                 duration_secs: Some(100.0),
+                finishes_title: true,
             })
             .await;
         drop(repo);

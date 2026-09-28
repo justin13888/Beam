@@ -713,6 +713,7 @@ impl Harness {
                 file_id: file.id,
                 position_secs: 600.0,
                 duration_secs: Some(3600.0),
+                finishes_title: true,
             })
             .await
             .unwrap();

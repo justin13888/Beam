@@ -709,13 +709,25 @@ impl PlaybackService for DbPlaybackService {
         };
 
         let mut span = None;
+        let mut finishes_title = true;
         let target = match file.content {
-            Some(MediaFileContent::Movie { movie_entry_id, .. }) => {
+            Some(MediaFileContent::Movie {
+                movie_entry_id,
+                part_number,
+            }) => {
                 let entry = self
                     .movies
                     .find_entry_by_id(movie_entry_id)
                     .await?
                     .ok_or_else(belongs_to_no_title)?;
+                // A part before the last of a multi-part movie ends where the
+                // next part starts: reaching its end finishes nothing.
+                if part_number.is_some() {
+                    finishes_title = self
+                        .sources
+                        .plays_movie_end(entry.movie_id, file_id)
+                        .await?;
+                }
                 WatchTarget::Movie {
                     movie_id: entry.movie_id,
                 }
@@ -751,6 +763,7 @@ impl PlaybackService for DbPlaybackService {
             file_id,
             position_secs: report.position_secs,
             duration_secs: report.duration_secs,
+            finishes_title,
         };
         let reaches_end = record.reaches_end();
         let state = self.watch_state.record_progress(record).await?;

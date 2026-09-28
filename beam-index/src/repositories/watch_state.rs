@@ -185,6 +185,7 @@ impl WatchStateRepository for SqlWatchStateRepository {
             file_id,
             position_secs,
             duration_secs,
+            finishes_title: _,
         } = report;
         let (movie_id, episode_id, show_id) = target_columns(target);
         // What a first report writes; on conflict the CASEs below derive the

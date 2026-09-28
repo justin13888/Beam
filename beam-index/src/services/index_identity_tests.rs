@@ -1425,6 +1425,8 @@ async fn an_upgrade_merges_the_parts_a_pre_stacking_build_indexed_as_films() {
             file_id: cd2_id,
             position_secs: 600.0,
             duration_secs: Some(3000.0),
+            // Part 2 of 2 plays the end.
+            finishes_title: true,
         })
         .await
         .unwrap();
@@ -2038,6 +2040,7 @@ async fn a_merge_carries_each_viewers_watch_state_to_the_kept_title() {
         file_id: Uuid::new_v4(),
         position_secs,
         duration_secs: Some(100.0),
+        finishes_title: true,
     };
     let movie = |movie_id| WatchTarget::Movie { movie_id };
     for (user, target, position) in [

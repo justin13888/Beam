@@ -102,19 +102,27 @@ pub struct RecordProgress {
     pub target: WatchTarget,
     pub file_id: Uuid,
     pub position_secs: f64,
-    /// The duration `position_secs` is measured against, if known.
+    /// The duration `position_secs` is measured against, if known: the
+    /// reported file's own.
     pub duration_secs: Option<f64>,
+    /// Whether the end of the reported file is the end of the title. It is
+    /// not for a part of a multi-part movie before its last: that part's end
+    /// is only where the next one starts.
+    pub finishes_title: bool,
 }
 
 impl RecordProgress {
     /// Whether this report reaches the end of the title: at or past
-    /// [`COMPLETED_THRESHOLD`] of a known, positive duration. A report with
-    /// no duration never completes -- a still-probing or corrupt file reports
-    /// none, and would otherwise mark any position finished.
+    /// [`COMPLETED_THRESHOLD`] of a known, positive duration, in a file that
+    /// finishes the title. A report with no duration never completes -- a
+    /// still-probing or corrupt file reports none, and would otherwise mark
+    /// any position finished.
     #[must_use]
     pub fn reaches_end(&self) -> bool {
-        self.duration_secs
-            .is_some_and(|d| d > 0.0 && self.position_secs >= d * COMPLETED_THRESHOLD)
+        self.finishes_title
+            && self
+                .duration_secs
+                .is_some_and(|d| d > 0.0 && self.position_secs >= d * COMPLETED_THRESHOLD)
     }
 }
 
@@ -254,6 +262,7 @@ mod tests {
             file_id: Uuid::nil(),
             position_secs,
             duration_secs,
+            finishes_title: true,
         }
     }
 
@@ -274,6 +283,17 @@ mod tests {
                 ends,
                 "{position} of {duration:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_file_that_does_not_finish_the_title_never_reaches_its_end() {
+        for position in [95.0, 100.0] {
+            let report = RecordProgress {
+                finishes_title: false,
+                ..report(position, Some(100.0))
+            };
+            assert!(!report.reaches_end(), "{position} of an earlier part");
         }
     }
 

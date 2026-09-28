@@ -482,7 +482,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
   and return the position to the start; a later report short of the end MUST NOT unmark it. The
   server MUST refuse (422) a negative or non-finite position, a non-positive duration, and a
   position past the end -- the reported duration, else the file's probed one -- by more than 2
-  seconds or 1% of it, whichever is larger, taking a position within that as the end.
+  seconds or 1% of it, whichever is larger, taking a position within that as the end. For a
+  multi-part movie a position is kept within the part reported, and the duration is that part's:
+  only a report on its last part MAY mark the movie played, and a report on an earlier part MUST
+  record its position without marking it.
 - **FR-508**: The server MUST expose an endpoint returning the current user's continue-watching
   rows, most recently played first: one per movie with a resume position, and one per show at the
   episode to watch next -- the episode last touched if it has a position, else the first later

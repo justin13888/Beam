@@ -105,6 +105,7 @@ async fn concurrent_reports_for_one_title_all_succeed_and_leave_one_row() {
                 file_id: file,
                 position_secs: f64::from(i),
                 duration_secs: Some(100.0),
+                finishes_title: true,
             })
             .await
         }));
