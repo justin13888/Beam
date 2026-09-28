@@ -5,6 +5,26 @@ use uuid::Uuid;
 
 use crate::utils::classification::ContainerTags;
 
+/// The instant `mtime` reads back as once a
+/// [`crate::repositories::FileRepository`] has stored it (issue #229).
+///
+/// `files.mtime` is a `TIMESTAMPTZ`, which Postgres keeps in whole
+/// microseconds, and the driver encodes an instant as whole microseconds
+/// since 2000-01-01 -- truncating toward that epoch, so an instant before it
+/// rounds up. A filesystem reports nanoseconds, so an mtime read from disk
+/// almost never equals the one its row holds: every comparison of the two
+/// first brings the file's to this precision.
+pub fn mtime_as_stored(mtime: DateTime<Utc>) -> DateTime<Utc> {
+    let epoch = DateTime::from_timestamp(946_684_800, 0).expect("2000-01-01 is a valid instant");
+    // chrono spans about 262,000 years either side of year 0, so no instant
+    // is further from 2000-01-01 than about 8.3e18 microseconds -- inside
+    // i64's 9.2e18.
+    let micros = (mtime - epoch)
+        .num_microseconds()
+        .expect("chrono's range fits in i64 microseconds from 2000-01-01");
+    epoch + chrono::TimeDelta::microseconds(micros)
+}
+
 /// Represents a media file in the library
 #[derive(Debug, Clone)]
 pub struct MediaFile {
@@ -13,7 +33,8 @@ pub struct MediaFile {
     pub path: PathBuf,
     pub hash: u64,
     pub size_bytes: u64,
-    /// Filesystem modification time; paired with `size_bytes` for change detection.
+    /// Filesystem modification time; paired with `size_bytes` for change
+    /// detection. Held at the precision [`mtime_as_stored`] describes.
     pub mtime: Option<DateTime<Utc>>,
     pub mime_type: Option<String>,
     pub duration: Option<Duration>,

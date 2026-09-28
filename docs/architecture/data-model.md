@@ -125,14 +125,22 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `updated_at` | TIMESTAMPTZ | no | |
 
 A trigram GIN index on `title` (via the `pg_trgm` extension) backs catalog search; `shows.title`
-has the same.
+has the same. `idx_movies_title_sort` on `(lower(title), id)` serves the default browse order and
+`idx_movies_added_sort` on `(created_at, id)` the `date_added` one: each branch of the catalogue
+query orders and seeks on exactly those columns, so it reads the index in order. Unfiltered or
+filtered only by kind, it stops at the page size; with a selective genre, search or minimum-rating
+filter it may read up to the whole index before the page fills, so that page is bounded by the
+catalogue rather than the page size. `idx_shows_title_sort` and `idx_shows_added_sort` are the same
+on `shows`. Year, rating and runtime sorts have no index.
 
 ### `shows`
 Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `identity_key` (unique,
 nullable — as for movies), `identity_key_version` (as for movies), `pinned_ref` (unique, nullable —
 as for movies, pinned by a `tvshow.nfo`), `pin_source` (as for movies), `title_localized`, `description`, `year`, `poster_url`,
 `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id` (each unique, nullable),
-`created_at`, `updated_at`.
+`rating_tmdb` (REAL, nullable — the provider rating on the same 0-10 scale as
+`movies.rating_tmdb`; added by `m20261003_000001_catalogue_browse` and filled on a show's next
+enrichment), `created_at`, `updated_at`.
 
 ### Title identity and lifetime
 
@@ -213,8 +221,8 @@ is named in an admin-log warning. Rekeys and merges are listed in an admin-log e
 
 **Live titles.** A title is *live* while at least one file behind it is present
 (`missing_since IS NULL`): for a movie, through `movie_entries`; for a show, through `seasons` and
-`episodes`. `MovieRepository::search` / `ShowRepository::search` — browse and search — return only
-live titles, with the check an `EXISTS` in the same statement. Detail reads by id do not filter, so
+`episodes`. The `CatalogRepository` — browse and search — lists only live titles, with the check
+an `EXISTS` inside each branch of its one statement. Detail reads by id do not filter, so
 a bookmark or continue-watching tile still resolves while its file is away.
 
 **Retirement.** A scan whose walk read the whole tree finishes by deleting orphans:
@@ -305,7 +313,7 @@ quality/edition/language rip.
 | `scanned_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 | `file_status` | ENUM (`file_status`) | no | `known` \| `changed` \| `unknown`; default `known` |
-| `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash; NULL rows are treated as "suspected changed" |
+| `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash. The column keeps whole microseconds and a filesystem reports nanoseconds, so the indexer brings a file's mtime to the stored precision (`beam_domain::models::file::mtime_as_stored`) before comparing it with its row ([#229](https://github.com/justin13888/beam/issues/229)); NULL rows are treated as "suspected changed" |
 | `missing_since` | TIMESTAMPTZ | yes | soft-delete stamp: NULL while the file is on disk; the instant the indexer first found it gone otherwise (FR-211) |
 | `last_episode_number` | INTEGER | yes | the last episode of a multi-episode file (`S01E01E02`); the file's `episode_id` is its first. A `CHECK` (`files_last_episode_requires_episode`) allows it only alongside `episode_id` |
 | `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, the NFOs beside it and its `container_tags`, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |

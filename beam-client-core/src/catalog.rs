@@ -556,7 +556,7 @@ impl MediaSummary {
     fn from_movie(movie: &wire::MovieMetadata, record: &ServerRecord) -> Self {
         let title = &movie.title;
         Self {
-            id: movie.id.clone(),
+            id: movie.id.to_string(),
             kind: MediaKind::Movie,
             title: title
                 .localized
@@ -570,7 +570,7 @@ impl MediaSummary {
             genres: movie.genres.clone(),
             runtime_minutes: narrow_u32(movie.runtime),
             tmdb_rating: narrow_u32(movie.ratings.as_ref().and_then(|ratings| ratings.tmdb)),
-            file_id: movie.file_id.clone(),
+            file_id: movie.file_id.map(|id| id.to_string()),
             season_count: 0,
             episode_count: 0,
         }
@@ -581,30 +581,22 @@ impl MediaSummary {
         // A series' own poster wins. One without -- specials, season-less
         // shows, a series the provider has no art for -- borrows the first
         // season poster there is, so it still renders as more than a blank
-        // placeholder. Genres, rating and runtime are recorded per season, so
-        // a tile takes them from the first season that has any.
+        // placeholder. Genres, rating and the season and episode counts are
+        // the show's own; browse sends no seasons, only the counts. Runtime
+        // is recorded per season, so a tile takes the first there is.
         let poster = show.poster_url.clone().or_else(|| {
             show.seasons
                 .iter()
                 .find_map(|season| season.poster_url.clone())
         });
-        let genres = show
-            .seasons
-            .iter()
-            .find(|season| !season.genres.is_empty())
-            .map(|season| season.genres.clone())
-            .unwrap_or_default();
-        let rating = show
-            .seasons
-            .iter()
-            .find_map(|season| season.ratings.as_ref().and_then(|ratings| ratings.tmdb));
+        let rating = show.ratings.as_ref().and_then(|ratings| ratings.tmdb);
         let runtime = show
             .seasons
             .iter()
             .find_map(|season| season.episode_runtime);
 
         Self {
-            id: show.id.clone(),
+            id: show.id.to_string(),
             kind: MediaKind::Show,
             title: title
                 .localized
@@ -615,16 +607,12 @@ impl MediaSummary {
             description: show.description.clone(),
             poster_url: absolute(record, poster),
             backdrop_url: absolute(record, show.backdrop_url.clone()),
-            genres,
+            genres: show.genres.clone(),
             runtime_minutes: narrow_u32(runtime),
             tmdb_rating: narrow_u32(rating),
             file_id: None,
-            season_count: u32::try_from(show.seasons.len()).unwrap_or(u32::MAX),
-            episode_count: show
-                .seasons
-                .iter()
-                .map(|season| u32::try_from(season.episodes.len()).unwrap_or(u32::MAX))
-                .sum(),
+            season_count: narrow_u32(Some(show.season_count)).unwrap_or(0),
+            episode_count: narrow_u32(Some(show.episode_count)).unwrap_or(0),
         }
     }
 }
@@ -632,14 +620,14 @@ impl MediaSummary {
 impl EpisodeSummary {
     fn from_generated(episode: &wire::EpisodeMetadata, record: &ServerRecord) -> Self {
         Self {
-            id: episode.id.clone(),
+            id: episode.id.to_string(),
             episode_number: narrow_u32(Some(episode.episode_number)).unwrap_or(0),
             title: episode.title.clone(),
             description: episode.description.clone(),
             thumbnail_url: absolute(record, episode.thumbnail_url.clone()),
             air_date: episode.air_date.clone(),
             duration_secs: episode.duration,
-            file_id: episode.file_id.clone(),
+            file_id: episode.file_id.map(|id| id.to_string()),
         }
     }
 }
@@ -685,11 +673,11 @@ impl MediaPage {
     /// Normalise a generated connection.
     #[must_use]
     pub fn from_generated(connection: wire::MediaConnection, record: &ServerRecord) -> Self {
-        let wire::MediaConnection { edges, page_info } = connection;
+        let wire::MediaConnection { items, page_info } = connection;
         Self {
-            items: edges
+            items: items
                 .into_iter()
-                .map(|edge| MediaSummary::from_generated(edge.node, record))
+                .map(|item| MediaSummary::from_generated(item, record))
                 .collect(),
             end_cursor: page_info.end_cursor,
             has_next_page: page_info.has_next_page,
@@ -1087,8 +1075,14 @@ mod tests {
         serde_json::from_str(json).expect("the fixture should match the generated type")
     }
 
+    const MOVIE_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const MOVIE_FILE_ID: &str = "f1f1f1f1-0000-4000-8000-000000000001";
+    const SHOW_ID: &str = "22222222-2222-4222-8222-222222222222";
+    const EPISODE_ONE_FILE_ID: &str = "f1f1f1f1-0000-4000-8000-000000000001";
+    const RETURN_EPISODE_ID: &str = "e0000003-0000-4000-8000-000000000003";
+
     const MOVIE: &str = r#"{"Movie":{
-        "id":"m1",
+        "id":"11111111-1111-4111-8111-111111111111",
         "title":{"original":"Le Samourai","localized":"The Samurai"},
         "genres":["Crime","Drama"],
         "streams":[],
@@ -1098,26 +1092,42 @@ mod tests {
         "description":"A contract killer.",
         "poster_url":"/artwork/m1/poster.jpg",
         "backdrop_url":"/artwork/m1/backdrop.jpg",
-        "file_id":"f1",
+        "file_id":"f1f1f1f1-0000-4000-8000-000000000001",
         "ratings":{"tmdb":81}
     }}"#;
 
     const SHOW: &str = r#"{"Show":{
-        "id":"s1",
+        "id":"22222222-2222-4222-8222-222222222222",
         "title":{"original":"Le Bureau"},
         "description":"Undercover.",
         "year":2015,
+        "genres":["Drama","Thriller"],
+        "ratings":{"tmdb":88},
+        "season_count":2,
+        "episode_count":3,
         "seasons":[
-            {"id":"s1","season_number":1,"dates":{},"genres":[],"episodes":[
-                {"id":"e1","episode_number":1,"title":"Pilot","streams":[],"file_id":"f1"},
-                {"id":"e2","episode_number":2,"title":"Second","streams":[]}
+            {"id":"5e500001-0000-4000-8000-000000000001","season_number":1,"dates":{},"genres":[],"episodes":[
+                {"id":"e0000001-0000-4000-8000-000000000001","episode_number":1,"title":"Pilot","streams":[],"file_id":"f1f1f1f1-0000-4000-8000-000000000001"},
+                {"id":"e0000002-0000-4000-8000-000000000002","episode_number":2,"title":"Second","streams":[]}
             ]},
-            {"id":"s2","season_number":2,"dates":{},"genres":["Thriller"],"episode_runtime":52,
-             "poster_url":"/artwork/s1/2.jpg","ratings":{"tmdb":88},"episodes":[
-                {"id":"e3","episode_number":1,"title":"Return","streams":[],"file_id":"f3",
+            {"id":"5e500002-0000-4000-8000-000000000002","season_number":2,"dates":{},"genres":[],"episode_runtime":52,
+             "poster_url":"/artwork/s1/2.jpg","episodes":[
+                {"id":"e0000003-0000-4000-8000-000000000003","episode_number":1,"title":"Return","streams":[],"file_id":"f3f3f3f3-0000-4000-8000-000000000003",
                  "thumbnail_url":"/artwork/e3.jpg","duration":3120.0,"air_date":"2016-01-01"}
             ]}
         ]
+    }}"#;
+
+    /// A show as browse sends it: its counts and its own genres and rating,
+    /// and no seasons.
+    const BROWSED_SHOW: &str = r#"{"Show":{
+        "id":"22222222-2222-4222-8222-222222222222",
+        "title":{"original":"Le Bureau"},
+        "genres":["Drama"],
+        "ratings":{"tmdb":91},
+        "season_count":5,
+        "episode_count":50,
+        "seasons":[]
     }}"#;
 
     #[test]
@@ -1129,7 +1139,8 @@ mod tests {
         assert_eq!(summary.year, Some(1967));
         assert_eq!(summary.runtime_minutes, Some(105));
         assert_eq!(summary.tmdb_rating, Some(81));
-        assert_eq!(summary.file_id.as_deref(), Some("f1"));
+        assert_eq!(summary.file_id.as_deref(), Some(MOVIE_FILE_ID));
+        assert_eq!(summary.id, MOVIE_ID);
     }
 
     #[test]
@@ -1155,12 +1166,15 @@ mod tests {
     /// A series carrying its own artwork, as the server publishes it whenever
     /// enrichment found any, alongside a season that also has a poster.
     const SHOW_WITH_ARTWORK: &str = r#"{"Show":{
-        "id":"s1",
+        "id":"22222222-2222-4222-8222-222222222222",
         "title":{"original":"Le Bureau"},
+        "genres":[],
+        "season_count":1,
+        "episode_count":0,
         "poster_url":"/v1/artwork/show/s1/poster",
         "backdrop_url":"/v1/artwork/show/s1/backdrop",
         "seasons":[
-            {"id":"s2","season_number":2,"dates":{},"genres":[],
+            {"id":"5e500002-0000-4000-8000-000000000002","season_number":2,"dates":{},"genres":[],
              "poster_url":"/artwork/s1/2.jpg","episodes":[]}
         ]
     }}"#;
@@ -1179,9 +1193,9 @@ mod tests {
     }
 
     #[test]
-    fn a_show_borrows_artwork_and_genres_from_the_first_season_when_the_show_has_none() {
+    fn a_show_borrows_artwork_from_the_first_season_when_the_show_has_none() {
         // A series with no poster of its own would otherwise render as an
-        // untitled grey placeholder, and genres are recorded per season.
+        // untitled grey placeholder.
         let summary = MediaSummary::from_generated(node(SHOW), &record());
         assert_eq!(summary.backdrop_url, None, "no season carries a backdrop");
         assert_eq!(summary.kind, MediaKind::Show);
@@ -1189,17 +1203,32 @@ mod tests {
             summary.poster_url.as_deref(),
             Some("https://beam.local:8000/artwork/s1/2.jpg")
         );
-        assert_eq!(summary.genres, vec!["Thriller".to_owned()]);
-        assert_eq!(summary.tmdb_rating, Some(88));
         assert_eq!(summary.runtime_minutes, Some(52));
     }
 
     #[test]
-    fn a_show_counts_its_seasons_and_every_episode_across_them() {
+    fn a_show_takes_its_genres_rating_and_counts_from_itself() {
         let summary = MediaSummary::from_generated(node(SHOW), &record());
+        assert_eq!(
+            summary.genres,
+            vec!["Drama".to_owned(), "Thriller".to_owned()]
+        );
+        assert_eq!(summary.tmdb_rating, Some(88));
         assert_eq!(summary.season_count, 2);
         assert_eq!(summary.episode_count, 3);
         assert_eq!(summary.file_id, None, "a series is not itself playable");
+    }
+
+    /// Browse sends a show without its seasons (issue #187): the tile's
+    /// counts, genres and rating come from the show, not from seasons it
+    /// does not have.
+    #[test]
+    fn a_browsed_show_without_seasons_still_carries_its_counts() {
+        let summary = MediaSummary::from_generated(node(BROWSED_SHOW), &record());
+        assert_eq!(summary.season_count, 5);
+        assert_eq!(summary.episode_count, 50);
+        assert_eq!(summary.genres, vec!["Drama".to_owned()]);
+        assert_eq!(summary.tmdb_rating, Some(91));
     }
 
     #[test]
@@ -1208,10 +1237,10 @@ mod tests {
         let MediaDetail::Show { seasons, summary } = &detail else {
             panic!("a Show node must lower to a Show detail");
         };
-        assert_eq!(summary.id, "s1");
+        assert_eq!(summary.id, SHOW_ID);
         assert_eq!(seasons.len(), 2);
         assert_eq!(seasons[0].episodes.len(), 2);
-        assert_eq!(seasons[1].episodes[0].id, "e3");
+        assert_eq!(seasons[1].episodes[0].id, RETURN_EPISODE_ID);
         assert_eq!(
             seasons[1].episodes[0].thumbnail_url.as_deref(),
             Some("https://beam.local:8000/artwork/e3.jpg")
@@ -1231,7 +1260,10 @@ mod tests {
         let MediaDetail::Show { seasons, .. } = &detail else {
             panic!("a Show node must lower to a Show detail");
         };
-        assert_eq!(seasons[0].episodes[0].file_id.as_deref(), Some("f1"));
+        assert_eq!(
+            seasons[0].episodes[0].file_id.as_deref(),
+            Some(EPISODE_ONE_FILE_ID)
+        );
         assert_eq!(seasons[0].episodes[1].file_id, None);
     }
 
@@ -1239,13 +1271,13 @@ mod tests {
     fn movie_detail_lowers_to_the_movie_branch() {
         let detail = MediaDetail::from_generated(node(MOVIE), &record());
         assert!(matches!(detail, MediaDetail::Movie { .. }));
-        assert_eq!(detail.summary().id, "m1");
+        assert_eq!(detail.summary().id, MOVIE_ID);
     }
 
     #[test]
     fn a_connection_becomes_a_page_that_carries_its_cursor() {
         let json = format!(
-            r#"{{"edges":[{{"cursor":"c1","node":{MOVIE}}}],
+            r#"{{"items":[{MOVIE}],
                  "page_info":{{"has_next_page":true,"has_previous_page":false,"end_cursor":"c1"}}}}"#
         );
         let connection: wire::MediaConnection =

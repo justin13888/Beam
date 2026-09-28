@@ -1,5 +1,6 @@
 pub mod admin_log;
 pub mod artwork;
+pub mod cursor;
 pub mod hash;
 pub mod health;
 pub mod library;
@@ -16,6 +17,5 @@ pub use beam_index::services::index::{IndexError, IndexService, LocalIndexServic
 
 // Re-export types for convenience
 pub use metadata::{
-    MediaConnection, MediaEdge, MediaSearchFilters, MediaSortField, MediaTypeFilter, PageInfo,
-    SortOrder,
+    MediaConnection, MediaSearchFilters, MediaSortField, MediaTypeFilter, PageInfo, SortOrder,
 };

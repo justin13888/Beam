@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry, MovieSearchQuery};
+use crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
 use crate::models::pin::{PinSource, ProviderPin};
 use crate::providers::enrichment::MovieEnrichment;
 
@@ -18,7 +18,8 @@ use crate::providers::enrichment::MovieEnrichment;
 /// the trait offers no such lookup.
 ///
 /// A movie is **live** while at least one of its files is present (not
-/// soft-deleted, issue #179). Browse and search show only live movies; a read
+/// soft-deleted, issue #179). Browse and search -- the
+/// [`crate::repositories::CatalogRepository`] -- list only live movies; a read
 /// by id still resolves a movie that is not live, so a bookmark or a
 /// continue-watching entry does not dangle while its file is away.
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
@@ -28,10 +29,10 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Movie>, DbErr>;
     /// Every movie, live or not.
     async fn find_all(&self) -> Result<Vec<Movie>, DbErr>;
-    /// Server-side filtered/ranked search, replacing `find_all` + in-memory
-    /// filtering for the browse/search API. Returns only live movies. Results
-    /// are ordered best-match-first when `query.query` is set, else by title.
-    async fn search(&self, query: &MovieSearchQuery) -> Result<Vec<Movie>, DbErr>;
+    /// The movies among `ids`, live or not, in no particular order; an id
+    /// naming no movie is skipped. One statement however many ids, and none
+    /// for an empty slice -- this is how a catalogue page reads its movies.
+    async fn find_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Movie>, DbErr>;
     /// The movie keyed `create.identity_key`, inserting it only if no movie
     /// carries that key yet. An existing movie is returned **unchanged**:
     /// `create.title`, `year` and `runtime` only populate a new row, so a
@@ -140,10 +141,11 @@ pub mod in_memory {
     ///
     /// Whether a movie is live depends on its files, which live in another
     /// repository. [`InMemoryMovieRepository::with_files`] links the double to
-    /// the file double the test uses, and then it answers `search` and
-    /// `delete_orphaned` from those files exactly as the SQL joins do. The
-    /// unlinked `Default` knows of no files and so treats every movie as live:
-    /// `search` hides nothing and `delete_orphaned` removes nothing.
+    /// the file double the test uses, and then it answers liveness (read by
+    /// the catalogue double) and `delete_orphaned` from those files exactly as
+    /// the SQL joins do. The unlinked `Default` knows of no files and so treats
+    /// every movie as live: the catalogue hides nothing and `delete_orphaned`
+    /// removes nothing.
     #[derive(Debug, Default)]
     pub struct InMemoryMovieRepository {
         pub movies: Mutex<HashMap<Uuid, Movie>>,
@@ -184,7 +186,7 @@ pub mod in_memory {
         }
 
         /// Movie ids with a present file, or `None` when unlinked.
-        fn live_movies(&self) -> Option<HashSet<Uuid>> {
+        pub fn live_movie_ids(&self) -> Option<HashSet<Uuid>> {
             let live_entries = self.referenced_entries(true)?;
             let entries = self.entries.lock().unwrap();
             Some(
@@ -206,53 +208,12 @@ pub mod in_memory {
             Ok(self.movies.lock().unwrap().values().cloned().collect())
         }
 
-        async fn search(&self, query: &MovieSearchQuery) -> Result<Vec<Movie>, DbErr> {
-            use crate::models::search::title_match_score;
-
-            let live = self.live_movies();
-            let mut scored: Vec<(f64, Movie)> = self
-                .movies
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|m| live.as_ref().is_none_or(|live| live.contains(&m.id)))
-                .filter(|m| {
-                    if query.year.is_some_and(|y| m.year != Some(y)) {
-                        return false;
-                    }
-                    if query.year_from.is_some_and(|yf| m.year.unwrap_or(0) < yf) {
-                        return false;
-                    }
-                    if query
-                        .year_to
-                        .is_some_and(|yt| m.year.unwrap_or(u32::MAX) > yt)
-                    {
-                        return false;
-                    }
-                    if let Some(min_r) = query.min_rating {
-                        let rating = m.rating_tmdb.map(|r| (r * 10.0) as u32).unwrap_or(0);
-                        if rating < min_r {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .filter_map(|m| {
-                    let score = match &query.query {
-                        Some(q) => title_match_score(&m.title, q),
-                        None => 1.0,
-                    };
-                    (score > 0.0).then(|| (score, m.clone()))
-                })
-                .collect();
-
-            scored.sort_by(|(a_score, a), (b_score, b)| {
-                b_score
-                    .partial_cmp(a_score)
-                    .unwrap()
-                    .then_with(|| a.title.cmp(&b.title))
-            });
-            Ok(scored.into_iter().map(|(_, m)| m).collect())
+        async fn find_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Movie>, DbErr> {
+            let movies = self.movies.lock().unwrap();
+            Ok(ids
+                .iter()
+                .filter_map(|id| movies.get(id).cloned())
+                .collect())
         }
 
         async fn find_or_create_by_identity(&self, create: CreateMovie) -> Result<Movie, DbErr> {
@@ -519,6 +480,9 @@ pub mod in_memory {
                 movie.tmdb_id = enrichment.tmdb_id;
                 movie.imdb_id = enrichment.imdb_id.clone();
                 movie.anilist_id = enrichment.anilist_id;
+                movie.runtime = enrichment
+                    .runtime_mins
+                    .map(|mins| std::time::Duration::from_secs(u64::from(mins) * 60));
                 movie.rating_tmdb = enrichment.rating;
                 movie.updated_at = chrono::Utc::now();
             }

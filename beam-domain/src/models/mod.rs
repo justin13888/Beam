@@ -1,5 +1,6 @@
 pub mod admin_log;
 pub mod applied_nfo;
+pub mod catalog;
 pub mod enrichment;
 pub mod file;
 pub mod genre;
@@ -16,6 +17,7 @@ pub mod stream;
 
 pub use admin_log::*;
 pub use applied_nfo::*;
+pub use catalog::*;
 pub use enrichment::*;
 pub use file::*;
 pub use genre::*;

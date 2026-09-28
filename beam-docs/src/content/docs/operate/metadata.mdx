@@ -75,6 +75,11 @@ Failures retry automatically with a growing delay. You can also trigger a re-enr
 from the admin area — the right move after fixing a filename, or after adding a TMDB token to a
 library that was indexed without one.
 
+A show's rating is stored when the show is enriched. A show an older Beam enriched — before
+shows kept a rating — has none until it is enriched again, so it is left out of a minimum-rating filter and sorts with the unrated titles
+until then. Re-enriching everything from the admin area fills them in at once; otherwise they fill
+in as titles are refreshed.
+
 ## Tuning
 
 `BEAM_ENRICH_BATCH_SIZE` and `BEAM_ENRICH_INTERVAL_SECS` control throughput.

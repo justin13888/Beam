@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,7 +7,7 @@ use uuid::Uuid;
 
 use beam_domain::models::Genre;
 use beam_domain::repositories::GenreRepository;
-use beam_domain::repositories::genre::slugify;
+use beam_domain::repositories::genre::{slugify, sort_genre_names};
 
 /// SQL-based implementation of the GenreRepository trait.
 #[derive(Debug, Clone)]
@@ -17,6 +18,50 @@ pub struct SqlGenreRepository {
 impl SqlGenreRepository {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
+    }
+
+    /// The genre names of each owner in `ids`, read through the junction
+    /// `junction` whose owner column is `owner` -- one statement, none for no
+    /// ids.
+    async fn names_by_owner(
+        &self,
+        junction: &str,
+        owner: &str,
+        ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<String>>, DbErr> {
+        use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
+
+        #[derive(Debug, FromQueryResult)]
+        struct Named {
+            owner_id: Uuid,
+            name: String,
+        }
+
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders: Vec<String> = (1..=ids.len()).map(|n| format!("${n}")).collect();
+        let values: Vec<Value> = ids.iter().map(|id| (*id).into()).collect();
+        let sql = format!(
+            "SELECT j.{owner} AS owner_id, g.name FROM {junction} j \
+             JOIN genres g ON g.id = j.genre_id WHERE j.{owner} IN ({})",
+            placeholders.join(", ")
+        );
+        let rows = Named::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            values,
+        ))
+        .all(self.db.as_ref())
+        .await?;
+        let mut names: HashMap<Uuid, Vec<String>> = HashMap::new();
+        for Named { owner_id, name } in rows {
+            names.entry(owner_id).or_default().push(name);
+        }
+        for list in names.values_mut() {
+            sort_genre_names(list);
+        }
+        Ok(names)
     }
 
     async fn upsert_genres(&self, names: &[String]) -> Result<Vec<Uuid>, DbErr> {
@@ -101,5 +146,21 @@ impl GenreRepository for SqlGenreRepository {
 
         let models = genre::Entity::find().all(self.db.as_ref()).await?;
         Ok(models.into_iter().map(Genre::from).collect())
+    }
+
+    async fn movie_genre_names(
+        &self,
+        movie_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<String>>, DbErr> {
+        self.names_by_owner("movie_genres", "movie_id", movie_ids)
+            .await
+    }
+
+    async fn show_genre_names(
+        &self,
+        show_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<String>>, DbErr> {
+        self.names_by_owner("show_genres", "show_id", show_ids)
+            .await
     }
 }

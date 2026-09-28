@@ -791,6 +791,36 @@ async fn a_changed_file_still_being_written_keeps_its_row_until_it_settles() {
     assert_eq!(after.missing_since, None, "a deferred file is not missing");
 }
 
+// ─── Unchanged files ─────────────────────────────────────────────────────────
+
+/// A file on a filesystem with nanosecond mtimes -- ext4, btrfs, xfs -- is
+/// recorded at the microsecond precision a row keeps, and a later scan that
+/// finds it unchanged does not hash it again (issue #229).
+#[tokio::test]
+async fn an_unchanged_file_with_a_sub_microsecond_mtime_is_not_rehashed() {
+    let h = Harness::settled().await;
+    let path = h.write("Heat (1995).mkv");
+    let on_disk = written_at() + chrono::TimeDelta::nanoseconds(802_029_432);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(on_disk.into())
+        .unwrap();
+    h.scan().await;
+    assert_eq!(h.hashes(), 1);
+    assert_eq!(
+        h.row(&path).await.unwrap().mtime,
+        Some(written_at() + chrono::TimeDelta::microseconds(802_029)),
+        "recorded to the microsecond"
+    );
+
+    let progress = h.scan().await;
+
+    assert_eq!(h.hashes(), 1, "an unchanged file is not rehashed");
+    assert_eq!(progress.changed, 0);
+}
+
 // ─── Probes that failed ──────────────────────────────────────────────────────
 
 /// A file whose first probe failed keeps its real hash, and is classified the

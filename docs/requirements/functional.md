@@ -367,7 +367,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
 ## FR-4xx — Browse, Search & Detail
 
 - **FR-401**: The web client MUST provide a library browsing view listing movies and shows with
-  poster art, title, and, where available, genres and rating.
+  poster art, title, and, where available, genres and rating. The browse endpoint returns each
+  title's genres, rating and external identifiers, and each show's season and episode counts, so
+  a tile needs no further request; it accepts a `genre` filter by name or slug
+  ([#187](https://github.com/justin13888/beam/issues/187)).
 - **FR-402**: The server MUST expose a movie detail endpoint returning enriched metadata and the set
   of available file versions (for source selection, per FR-205).
 - **FR-403**: The server MUST expose a show detail endpoint supporting season and episode

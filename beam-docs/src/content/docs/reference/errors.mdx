@@ -66,6 +66,33 @@ that could not tell "malformed" from "absent".
 **What to do.** Ask for the sources of one of its episode ids. An episode that has no files yet is
 not this error — it returns an empty list.
 
+### invalid-cursor
+
+**400.** From `GET /v1/media`. The `after` or `before` cursor is not one this server issued for the
+requested sort: it was altered, it came from an older server whose cursors this one cannot read, or
+it was issued under a different `sort_by` or `sort_order`.
+
+**What to do.** Start again from the first page without a cursor. A cursor names a place in *one*
+ordering, so a client that changes the sort must drop the cursor it holds. A cursor does not go
+stale when titles are added or removed: a page after a title that has since left the listing still
+starts where that title was.
+
+### invalid-pagination
+
+**400.** From `GET /v1/media`. The page parameters ask for something the server does not answer:
+`first` or `last` outside 1 to 100, or a forward parameter (`first`, `after`) combined with a
+backward one (`last`, `before`).
+
+**What to do.** Page forwards with `first` and `after`, or backwards with `last` and `before`, at
+most 100 items at a time.
+
+### invalid-search-query
+
+**400.** From `GET /v1/media`. The `query` text holds a NUL character (`%00` in the URL). No title
+can contain one, so the search is refused rather than run.
+
+**What to do.** Strip control characters from the search text before sending it.
+
 ### library-not-found
 
 **404.** No library has this id.

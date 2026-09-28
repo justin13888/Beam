@@ -1,8 +1,7 @@
-//! Pure, provider-agnostic helpers shared by the movie/show search repository
-//! methods. `Sql*Repository` implementations use real Postgres `pg_trgm`
-//! similarity server-side; `InMemory*Repository` fakes use
-//! [`title_match_score`] as an offline stand-in so unit tests never need a
-//! running database.
+//! Pure, provider-agnostic helpers for the catalogue's title search. The SQL
+//! catalogue uses real Postgres `pg_trgm` similarity server-side; the
+//! in-memory catalogue uses [`title_match_score`] as an offline stand-in so
+//! unit tests never need a running database.
 
 /// A rough, offline substitute for Postgres trigram similarity: scores how
 /// well `title` matches `query` so the in-memory repository fakes can rank

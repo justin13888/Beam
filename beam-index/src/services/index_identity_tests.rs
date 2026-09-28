@@ -13,10 +13,7 @@ use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::InMemoryNotificationService;
-use beam_domain::models::{
-    CreateLibrary, CreateMovie, CreateMovieEntry, Library, Movie, MovieSearchQuery, Show,
-    ShowSearchQuery,
-};
+use beam_domain::models::{CreateLibrary, CreateMovie, CreateMovieEntry, Library, Movie, Show};
 use beam_domain::providers::enrichment::{MovieEnrichment, ShowEnrichment};
 use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
@@ -306,6 +303,7 @@ impl Harness {
             imdb_id: None,
             tvdb_id: None,
             anilist_id: None,
+            rating_tmdb: None,
             created_at: now,
             updated_at: now,
         };
@@ -598,28 +596,38 @@ async fn a_title_whose_only_file_is_missing_is_hidden_but_kept() {
     h.write("Other.2020.mkv");
     h.scan().await;
 
-    let listed_movies: Vec<Uuid> = h
-        .movie_repo
-        .search(&MovieSearchQuery::default())
-        .await
-        .unwrap()
-        .iter()
-        .map(|m| m.id)
-        .collect();
-    assert!(
-        !listed_movies.contains(&movie.id),
-        "hidden from browse at once"
+    // The catalogue reads the same doubles the indexer wrote through.
+    let catalog = beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository::new(
+        h.movie_repo.clone(),
+        h.show_repo.clone(),
+        Arc::new(beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default()),
+    );
+    let listed: Vec<Uuid> = beam_domain::repositories::CatalogRepository::browse(
+        &catalog,
+        &beam_domain::models::catalog::CatalogQuery {
+            filters: Default::default(),
+            sort: beam_domain::models::catalog::CatalogSort {
+                field: beam_domain::models::catalog::CatalogSortField::Title,
+                direction: beam_domain::models::catalog::SortDirection::Asc,
+            },
+            seek: beam_domain::models::catalog::Seek::Forward(None),
+            limit: std::num::NonZeroU32::new(100).unwrap(),
+        },
+    )
+    .await
+    .unwrap()
+    .iter()
+    .map(|position| position.id)
+    .collect();
+    let other = h.movies().into_iter().find(|m| m.title == "Other").unwrap();
+    assert_eq!(
+        listed,
+        vec![other.id],
+        "both titles hidden from browse at once"
     );
     assert!(
         h.movie_repo.find_by_id(movie.id).await.unwrap().is_some(),
         "but kept: its file is only soft-deleted"
-    );
-    assert!(
-        h.show_repo
-            .search(&ShowSearchQuery::default())
-            .await
-            .unwrap()
-            .is_empty()
     );
     assert!(h.show_repo.find_by_id(show.id).await.unwrap().is_some());
     assert_eq!(h.completion_details().await["titles_removed"], 0);

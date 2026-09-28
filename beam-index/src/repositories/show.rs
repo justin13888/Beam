@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -5,17 +6,11 @@ use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
-use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show, ShowSearchQuery};
+use beam_domain::models::catalog::ShowChildCounts;
+use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 use beam_domain::repositories::ShowRepository;
-
-/// The `search` condition that keeps only live shows: a present file behind
-/// one of the show's episodes.
-const LIVE_SHOW: &str = "EXISTS (SELECT 1 FROM seasons se \
-     JOIN episodes e ON e.season_id = se.id \
-     JOIN files f ON f.episode_id = e.id \
-     WHERE se.show_id = shows.id AND f.missing_since IS NULL)";
 
 /// SQL-based implementation of the ShowRepository trait.
 #[derive(Debug, Clone)]
@@ -47,48 +42,71 @@ impl ShowRepository for SqlShowRepository {
         Ok(models.into_iter().map(Show::from).collect())
     }
 
-    async fn search(&self, query: &ShowSearchQuery) -> Result<Vec<Show>, DbErr> {
+    async fn find_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Show>, DbErr> {
         use beam_entity::show;
-        use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-        // Only live shows: some episode with a present file (issue #183).
-        // Binds nothing, so the placeholder numbering below is unaffected.
-        let mut conditions: Vec<String> = vec![LIVE_SHOW.to_string()];
-        let mut values: Vec<Value> = Vec::new();
-
-        // Pushed first (when present) so its placeholder index is always $1,
-        // letting ORDER BY reuse it without recomputing the index.
-        if let Some(q) = &query.query {
-            values.push(q.clone().into());
-            conditions
-                .push("(similarity(title, $1) > 0.2 OR title ILIKE '%' || $1 || '%')".to_string());
+        if ids.is_empty() {
+            return Ok(Vec::new());
         }
-        if let Some(y) = query.year {
-            values.push((y as i32).into());
-            conditions.push(format!("year = ${}", values.len()));
-        }
-        if let Some(yf) = query.year_from {
-            values.push((yf as i32).into());
-            conditions.push(format!("year >= ${}", values.len()));
-        }
-        if let Some(yt) = query.year_to {
-            values.push((yt as i32).into());
-            conditions.push(format!("year <= ${}", values.len()));
-        }
-
-        let where_clause = format!("WHERE {}", conditions.join(" AND "));
-        let order_by = if query.query.is_some() {
-            "ORDER BY similarity(title, $1) DESC, title ASC"
-        } else {
-            "ORDER BY title ASC"
-        };
-
-        let sql = format!("SELECT * FROM shows {where_clause} {order_by}");
-        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
-        let models = show::Model::find_by_statement(stmt)
+        let models = show::Entity::find()
+            .filter(show::Column::Id.is_in(ids.iter().copied()))
             .all(self.db.as_ref())
             .await?;
         Ok(models.into_iter().map(Show::from).collect())
+    }
+
+    async fn child_counts(
+        &self,
+        show_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, ShowChildCounts>, DbErr> {
+        use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
+
+        #[derive(Debug, FromQueryResult)]
+        struct Counted {
+            show_id: Uuid,
+            seasons: i64,
+            episodes: i64,
+        }
+
+        if show_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders: Vec<String> = (1..=show_ids.len()).map(|n| format!("${n}")).collect();
+        let values: Vec<Value> = show_ids.iter().map(|id| (*id).into()).collect();
+        // `COUNT(DISTINCT se.id)`: the join repeats a season once per episode.
+        // `COUNT(e.id)` skips the NULL a season without episodes joins to.
+        let sql = format!(
+            "SELECT se.show_id, COUNT(DISTINCT se.id) AS seasons, COUNT(e.id) AS episodes \
+             FROM seasons se LEFT JOIN episodes e ON e.season_id = se.id \
+             WHERE se.show_id IN ({}) GROUP BY se.show_id",
+            placeholders.join(", ")
+        );
+        let rows = Counted::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            values,
+        ))
+        .all(self.db.as_ref())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |Counted {
+                     show_id,
+                     seasons,
+                     episodes,
+                 }| {
+                    (
+                        show_id,
+                        ShowChildCounts {
+                            seasons: u32::try_from(seasons).unwrap_or(u32::MAX),
+                            episodes: u32::try_from(episodes).unwrap_or(u32::MAX),
+                        },
+                    )
+                },
+            )
+            .collect())
     }
 
     async fn find_or_create_by_identity(&self, create: CreateShow) -> Result<Show, DbErr> {
@@ -554,6 +572,7 @@ impl ShowRepository for SqlShowRepository {
         active.tmdb_id = Set(enrichment.tmdb_id.map(|id| id as i32));
         active.imdb_id = Set(enrichment.imdb_id.clone());
         active.anilist_id = Set(enrichment.anilist_id.map(|id| id as i32));
+        active.rating_tmdb = Set(enrichment.rating);
         active.updated_at = Set(chrono::Utc::now().into());
         active.update(self.db.as_ref()).await?;
         Ok(())

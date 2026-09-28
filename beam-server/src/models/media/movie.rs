@@ -4,11 +4,12 @@ use super::{ExternalIdentifiers, Ratings, Title};
 use chrono::{DateTime, Utc};
 use kynos::Schema;
 use serde::Serialize;
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct MovieMetadata {
-    /// Stable identifier for this movie (UUID).
-    pub id: String,
+    /// Stable identifier for this movie.
+    pub id: Uuid,
     /// Title of the movie
     pub title: Title,
     /// Optional description of the movie
@@ -25,17 +26,19 @@ pub struct MovieMetadata {
     pub poster_url: Option<String>,
     /// Optional URL to the movie's backdrop image
     pub backdrop_url: Option<String>,
-    /// Movie genres
-    pub genres: Vec<String>, // TODO: Replace String with specific enum
+    /// Genre names, sorted case-insensitively.
+    pub genres: Vec<String>,
     /// Movie ratings
     pub ratings: Option<Ratings>,
     /// External identifiers to movie
     pub identifiers: Option<ExternalIdentifiers>,
 
-    /// List of unique streams associated with this movie
+    /// List of unique streams associated with this movie. Empty in a browse
+    /// result, which does not read files; the detail route fills it.
     pub streams: Vec<MediaStreamMetadata>,
-    /// Identifier of the primary streamable file, if any.
-    pub file_id: Option<String>,
+    /// Identifier of the primary streamable file, if any. Absent in a browse
+    /// result, as `streams` is empty there.
+    pub file_id: Option<Uuid>,
     //
     // TODO: Add people involved (cast, crew, directors, writers, etc.)
 }

@@ -3,8 +3,11 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
+use crate::models::catalog::ShowChildCounts;
 use crate::models::pin::{PinSource, ProviderPin};
-use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show, ShowSearchQuery};
+use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show};
 use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 
 /// Persistence for shows, their seasons and their episodes.
@@ -12,7 +15,8 @@ use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 /// A show is keyed and kept live exactly as a movie is -- see
 /// [`crate::repositories::MovieRepository`]: the indexer matches a series
 /// folder to a show by its identity key, never its display title, and a show
-/// is live while at least one episode has a present file.
+/// is live -- listed by the [`crate::repositories::CatalogRepository`] --
+/// while at least one episode has a present file.
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait ShowRepository: Send + Sync + std::fmt::Debug {
@@ -20,9 +24,16 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Show>, DbErr>;
     /// Every show, live or not.
     async fn find_all(&self) -> Result<Vec<Show>, DbErr>;
-    /// Server-side filtered/ranked search, mirroring
-    /// `MovieRepository::search`: only live shows.
-    async fn search(&self, query: &ShowSearchQuery) -> Result<Vec<Show>, DbErr>;
+    /// The shows among `ids`, as [`crate::repositories::MovieRepository::find_by_ids`].
+    async fn find_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Show>, DbErr>;
+    /// How many seasons and episodes each of `show_ids` has, counting every
+    /// season and episode row whether or not a file backs it -- the same rows
+    /// a show's detail lists. A show with no season is absent from the map.
+    /// One statement however many ids, and none for an empty slice.
+    async fn child_counts(
+        &self,
+        show_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, ShowChildCounts>, DbErr>;
     /// The show keyed `create.identity_key`, inserting it only if no show
     /// carries that key yet. An existing show is returned unchanged; a show
     /// with no key is never matched.
@@ -193,7 +204,7 @@ pub mod in_memory {
 
         /// Show ids with an episode that has a present file, or `None` when
         /// unlinked.
-        fn live_shows(&self) -> Option<HashSet<Uuid>> {
+        pub fn live_show_ids(&self) -> Option<HashSet<Uuid>> {
             let live_episodes = self.referenced_episodes(true)?;
             let episodes = self.episodes.lock().unwrap();
             let seasons = self.seasons.lock().unwrap();
@@ -217,47 +228,29 @@ pub mod in_memory {
             Ok(self.shows.lock().unwrap().values().cloned().collect())
         }
 
-        async fn search(&self, query: &ShowSearchQuery) -> Result<Vec<Show>, DbErr> {
-            use crate::models::search::title_match_score;
+        async fn find_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Show>, DbErr> {
+            let shows = self.shows.lock().unwrap();
+            Ok(ids.iter().filter_map(|id| shows.get(id).cloned()).collect())
+        }
 
-            let live = self.live_shows();
-            let mut scored: Vec<(f64, Show)> = self
-                .shows
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|s| live.as_ref().is_none_or(|live| live.contains(&s.id)))
-                .filter(|s| {
-                    if query.year.is_some_and(|y| s.year != Some(y)) {
-                        return false;
-                    }
-                    if query.year_from.is_some_and(|yf| s.year.unwrap_or(0) < yf) {
-                        return false;
-                    }
-                    if query
-                        .year_to
-                        .is_some_and(|yt| s.year.unwrap_or(u32::MAX) > yt)
-                    {
-                        return false;
-                    }
-                    true
-                })
-                .filter_map(|s| {
-                    let score = match &query.query {
-                        Some(q) => title_match_score(&s.title, q),
-                        None => 1.0,
-                    };
-                    (score > 0.0).then(|| (score, s.clone()))
-                })
-                .collect();
-
-            scored.sort_by(|(a_score, a), (b_score, b)| {
-                b_score
-                    .partial_cmp(a_score)
-                    .unwrap()
-                    .then_with(|| a.title.cmp(&b.title))
-            });
-            Ok(scored.into_iter().map(|(_, s)| s).collect())
+        async fn child_counts(
+            &self,
+            show_ids: &[Uuid],
+        ) -> Result<HashMap<Uuid, ShowChildCounts>, DbErr> {
+            // `episodes` before `seasons`, the order `delete_orphaned` and
+            // `live_show_ids` take them in.
+            let episodes = self.episodes.lock().unwrap();
+            let seasons = self.seasons.lock().unwrap();
+            let mut counts: HashMap<Uuid, ShowChildCounts> = HashMap::new();
+            for season in seasons.values().filter(|s| show_ids.contains(&s.show_id)) {
+                let entry = counts.entry(season.show_id).or_default();
+                entry.seasons += 1;
+                entry.episodes += episodes
+                    .values()
+                    .filter(|e| e.season_id == season.id)
+                    .count() as u32;
+            }
+            Ok(counts)
         }
 
         async fn find_or_create_by_identity(&self, create: CreateShow) -> Result<Show, DbErr> {
@@ -290,6 +283,7 @@ pub mod in_memory {
                 imdb_id: None,
                 tvdb_id: None,
                 anilist_id: None,
+                rating_tmdb: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
@@ -567,6 +561,7 @@ pub mod in_memory {
                 show.tmdb_id = enrichment.tmdb_id;
                 show.imdb_id = enrichment.imdb_id.clone();
                 show.anilist_id = enrichment.anilist_id;
+                show.rating_tmdb = enrichment.rating;
                 show.updated_at = chrono::Utc::now();
             }
             Ok(())
@@ -687,6 +682,7 @@ pub mod in_memory_fixture {
                 imdb_id: None,
                 tvdb_id: None,
                 anilist_id: None,
+                rating_tmdb: None,
                 created_at: now,
                 updated_at: now,
             };

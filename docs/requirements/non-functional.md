@@ -114,7 +114,16 @@ requirements (referenced below as FR-xxx).
 
 - **NFR-301**: Search (FR-404) MUST be executed as a server-side Postgres query using `pg_trgm`
   similarity. The server MUST NOT implement search by loading the full title set into application
-  memory and filtering in application code, regardless of library size.
+  memory and filtering in application code, regardless of library size. Browse and search MUST
+  also sort and page in the database: one page costs one ordered, limited query plus a fixed
+  number of reads by id. An unfiltered or kind-only page in the default `title` order or in
+  `date_added` order, first or after a cursor, MUST be read through an ordered index scan that
+  stops at the page size, never a read of every title; the `pg-integration` tier pins this with
+  `EXPLAIN` on a seeded catalogue. A page with a selective `genre`, `query` or `min_rating` filter
+  walks the same index but may read up to all of it before it fills, so its cost is bounded by the
+  catalogue rather than the page. The `year`, `rating` and `runtime` sorts are deliberately
+  unindexed and do sort every matching title in the database
+  ([#187](https://github.com/justin13888/beam/issues/187)).
 - **NFR-302**: Metadata enrichment (FR-301–FR-309) MUST run asynchronously relative to request
   handling and library scanning, and MUST NOT hold a scan or an HTTP request open while waiting on an
   external TMDB/AniList call.

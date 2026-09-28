@@ -53,6 +53,7 @@ beam-test-support = { path = "../beam-test-support" }
 futures = "0.3.34"
 metrics-util = { workspace = true }
 mockall = "0.15.0"
+proptest = "1.11.0"
 sea-orm = { workspace = true, features = ["mock"] }
 tempfile = "3.27.0"
 

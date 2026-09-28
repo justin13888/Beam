@@ -103,6 +103,8 @@ pub struct ShowEnrichment {
     pub year: Option<u32>,
     pub poster_url: Option<String>,
     pub backdrop_url: Option<String>,
+    /// The provider's rating on its 0-10 scale, as `MovieEnrichment::rating`.
+    pub rating: Option<f32>,
     pub genres: Vec<String>,
 }
 

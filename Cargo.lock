@@ -687,6 +687,7 @@ dependencies = [
  "num",
  "num_cpus",
  "parking_lot",
+ "proptest",
  "rayon",
  "regex",
  "reqwest 0.13.4",
@@ -721,6 +722,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64 0.23.1",
  "beam-auth",
  "beam-domain",
  "beam-entity",

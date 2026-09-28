@@ -931,10 +931,11 @@ mod movie_entry {
     }
 }
 
-/// Title identity and liveness (issue #183), for movies and shows alike.
+/// Title identity (issue #183), for movies and shows alike. Liveness is the
+/// catalogue's: see `catalog_tests`.
 mod title_identity {
     use super::*;
-    use beam_domain::models::{CreateMovie, CreateShow, MovieSearchQuery, ShowSearchQuery};
+    use beam_domain::models::{CreateMovie, CreateShow};
     use beam_domain::providers::enrichment::{MovieEnrichment, ShowEnrichment};
     use beam_domain::repositories::{MovieRepository, ShowRepository};
 
@@ -985,6 +986,7 @@ mod title_identity {
             imdb_id: None,
             tvdb_id: None,
             anilist_id: None,
+            rating_tmdb: None,
             created_at: now,
             updated_at: now,
         }
@@ -1022,39 +1024,6 @@ mod title_identity {
                 read.sql
             );
         }
-    }
-
-    /// Browse and search list only titles with a present file: the
-    /// soft-delete filter sits inside the liveness join of every search.
-    #[tokio::test]
-    async fn search_keeps_only_titles_with_a_present_file() {
-        let db = connection(empty_mock());
-        let movies = SqlMovieRepository::new(db.clone());
-        let _ = movies.search(&MovieSearchQuery::default()).await;
-        let _ = movies
-            .search(&MovieSearchQuery {
-                query: Some("amelie".to_string()),
-                year: Some(2001),
-                ..Default::default()
-            })
-            .await;
-        let shows = SqlShowRepository::new(db.clone());
-        let _ = shows.search(&ShowSearchQuery::default()).await;
-        drop((movies, shows));
-
-        let sql = statements(db);
-        for statement in &sql[..2] {
-            assert_contains(statement, "JOIN files f ON f.movie_entry_id = me.id");
-            assert_contains(statement, "me.movie_id = movies.id");
-            assert_contains(statement, "f.missing_since IS NULL");
-        }
-        assert_contains(&sql[2], "JOIN files f ON f.episode_id = e.id");
-        assert_contains(&sql[2], "se.show_id = shows.id");
-        assert_contains(&sql[2], "f.missing_since IS NULL");
-        // The liveness condition binds nothing, so the query text stays `$1`
-        // and ORDER BY's reuse of it still ranks by the search text.
-        assert_bound(&sql[1], "amelie");
-        assert_contains(&sql[1], "similarity(title, $1)");
     }
 
     /// Enrichment writes display fields only. An `UPDATE` that set

@@ -25,6 +25,7 @@ mod m20260929_000001_classifier_v2;
 mod m20260930_000001_playback_telemetry;
 mod m20261001_000001_files_unique_path;
 mod m20261002_000001_nfo_sidecars;
+mod m20261003_000001_catalogue_browse;
 
 pub struct Migrator;
 
@@ -54,6 +55,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260930_000001_playback_telemetry::Migration),
             Box::new(m20261001_000001_files_unique_path::Migration),
             Box::new(m20261002_000001_nfo_sidecars::Migration),
+            Box::new(m20261003_000001_catalogue_browse::Migration),
         ]
     }
 }

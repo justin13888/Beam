@@ -19,9 +19,12 @@ The Explore view searches and filters across everything you can see. Filters ava
 | Type | Movie or show |
 | Genre | Any genre present in your library |
 | Year | A range, from and to |
-| Minimum rating | 6, 7, 8 or 9 out of 10 |
-| Sort by | Title or year (a rating sort is offered but currently falls back to title) |
+| Minimum rating | 6, 7, 8 or 9 out of 10 — movies and shows alike; an unrated title is left out |
+| Sort by | Title, year or rating |
 | Order | Ascending or descending |
+
+A title with no value for the sort — no year, no rating yet — goes **last** in either order, rather
+than first when you sort ascending.
 
 Filters are reflected in the URL, so a filtered view is a link you can bookmark or share with
 another user of the same server.
@@ -30,7 +33,8 @@ another user of the same server.
 
 Search runs on the server and matches on **title similarity**, so a near-miss or a small typo
 still finds the right thing. Results update as you type, with a short pause so that a fast typist
-does not fire a query per keystroke.
+does not fire a query per keystroke. Matches are listed in the sort you chose — by title unless
+you picked another — not ranked by how closely they match.
 
 Two things it does not do:
 

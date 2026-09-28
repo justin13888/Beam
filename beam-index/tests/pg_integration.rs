@@ -17,8 +17,12 @@
 
 #[path = "pg_integration/applied_nfo.rs"]
 mod applied_nfo;
+#[path = "pg_integration/catalog_repository.rs"]
+mod catalog_repository;
 #[path = "pg_integration/file_repository.rs"]
 mod file_repository;
+#[path = "pg_integration/genre_repository.rs"]
+mod genre_repository;
 #[path = "pg_integration/library_shape.rs"]
 mod library_shape;
 #[path = "pg_integration/movie_repository.rs"]

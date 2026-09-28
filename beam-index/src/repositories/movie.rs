@@ -5,16 +5,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
-use beam_domain::models::{CreateMovie, CreateMovieEntry, Movie, MovieEntry, MovieSearchQuery};
+use beam_domain::models::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::providers::enrichment::MovieEnrichment;
 use beam_domain::repositories::MovieRepository;
-
-/// The `search` condition that keeps only live movies: a present file behind
-/// one of the movie's entries.
-const LIVE_MOVIE: &str = "EXISTS (SELECT 1 FROM movie_entries me \
-     JOIN files f ON f.movie_entry_id = me.id \
-     WHERE me.movie_id = movies.id AND f.missing_since IS NULL)";
 
 /// Whether `err` is a unique-index violation.
 pub(crate) fn is_unique_violation(err: &DbErr) -> bool {
@@ -54,53 +48,15 @@ impl MovieRepository for SqlMovieRepository {
         Ok(models.into_iter().map(Movie::from).collect())
     }
 
-    async fn search(&self, query: &MovieSearchQuery) -> Result<Vec<Movie>, DbErr> {
+    async fn find_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Movie>, DbErr> {
         use beam_entity::movie;
-        use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-        // Only live movies: at least one present file behind one of their
-        // entries (issue #183). Binds nothing, so the placeholder numbering
-        // below is unaffected.
-        let mut conditions: Vec<String> = vec![LIVE_MOVIE.to_string()];
-        let mut values: Vec<Value> = Vec::new();
-
-        // Pushed first (when present) so its placeholder index is always $1,
-        // letting ORDER BY reuse it without recomputing the index.
-        if let Some(q) = &query.query {
-            values.push(q.clone().into());
-            conditions
-                .push("(similarity(title, $1) > 0.2 OR title ILIKE '%' || $1 || '%')".to_string());
+        if ids.is_empty() {
+            return Ok(Vec::new());
         }
-        if let Some(y) = query.year {
-            values.push((y as i32).into());
-            conditions.push(format!("year = ${}", values.len()));
-        }
-        if let Some(yf) = query.year_from {
-            values.push((yf as i32).into());
-            conditions.push(format!("year >= ${}", values.len()));
-        }
-        if let Some(yt) = query.year_to {
-            values.push((yt as i32).into());
-            conditions.push(format!("year <= ${}", values.len()));
-        }
-        if let Some(min_r) = query.min_rating {
-            values.push((min_r as i32).into());
-            conditions.push(format!(
-                "COALESCE(rating_tmdb * 10, 0) >= ${}",
-                values.len()
-            ));
-        }
-
-        let where_clause = format!("WHERE {}", conditions.join(" AND "));
-        let order_by = if query.query.is_some() {
-            "ORDER BY similarity(title, $1) DESC, title ASC"
-        } else {
-            "ORDER BY title ASC"
-        };
-
-        let sql = format!("SELECT * FROM movies {where_clause} {order_by}");
-        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
-        let models = movie::Model::find_by_statement(stmt)
+        let models = movie::Entity::find()
+            .filter(movie::Column::Id.is_in(ids.iter().copied()))
             .all(self.db.as_ref())
             .await?;
         Ok(models.into_iter().map(Movie::from).collect())
