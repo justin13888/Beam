@@ -1,8 +1,8 @@
 //! Row seeding for the `pg-integration` tier.
 //!
 //! A real Postgres enforces the foreign keys the in-memory doubles do not, so a
-//! test that wants a `playback_progress` row first needs a `users` row and a
-//! `files` row -- and a `files` row needs a library, a movie, and a movie entry
+//! test that wants a `watch_state` row first needs a `users` row and a
+//! title -- and a `files` row needs a library, a movie, and a movie entry
 //! behind it. These helpers insert the minimum chain, with fresh identifiers on
 //! every call so concurrently-running tests never observe one another's rows.
 
@@ -54,9 +54,8 @@ pub async fn library(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
     Ok(id)
 }
 
-/// Insert a movie and a movie entry inside `library_id`, returning the entry's
-/// id -- the polymorphic parent a movie file hangs off.
-pub async fn movie_entry(db: &DatabaseConnection, library_id: Uuid) -> Result<Uuid, DbErr> {
+/// Insert a movie with no entry or file, and return its id.
+pub async fn movie(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
     let movie_id = Uuid::new_v4();
     beam_entity::movie::ActiveModel {
         id: Set(movie_id),
@@ -83,6 +82,13 @@ pub async fn movie_entry(db: &DatabaseConnection, library_id: Uuid) -> Result<Uu
     }
     .insert(db)
     .await?;
+    Ok(movie_id)
+}
+
+/// Insert a movie and a movie entry inside `library_id`, returning the entry's
+/// id -- the polymorphic parent a movie file hangs off.
+pub async fn movie_entry(db: &DatabaseConnection, library_id: Uuid) -> Result<Uuid, DbErr> {
+    let movie_id = movie(db).await?;
 
     let entry_id = Uuid::new_v4();
     beam_entity::movie_entry::ActiveModel {
@@ -136,10 +142,8 @@ pub async fn file(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
     Ok(file_id)
 }
 
-/// Insert a show, a season and an episode, returning the episode's id -- the
-/// polymorphic parent an episode file hangs off. Shows are not owned by a
-/// library, so unlike [`movie_entry`] this takes none.
-pub async fn episode(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
+/// Insert a show with no season, and return its id.
+pub async fn show(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
     let show_id = Uuid::new_v4();
     beam_entity::show::ActiveModel {
         id: Set(show_id),
@@ -163,12 +167,34 @@ pub async fn episode(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
     }
     .insert(db)
     .await?;
+    Ok(show_id)
+}
+
+/// Insert a show, a season and an episode, returning the episode's id -- the
+/// polymorphic parent an episode file hangs off. Shows are not owned by a
+/// library, so unlike [`movie_entry`] this takes none.
+pub async fn episode(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
+    let show_id = show(db).await?;
+    episode_of(db, show_id).await
+}
+
+/// Insert a further episode of `show_id` -- episode 1 of a season numbered
+/// one past the show's last -- and return its id.
+pub async fn episode_of(db: &DatabaseConnection, show_id: Uuid) -> Result<Uuid, DbErr> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+    let last = beam_entity::season::Entity::find()
+        .filter(beam_entity::season::Column::ShowId.eq(show_id))
+        .order_by_desc(beam_entity::season::Column::SeasonNumber)
+        .one(db)
+        .await?
+        .map_or(0, |season| season.season_number);
 
     let season_id = Uuid::new_v4();
     beam_entity::season::ActiveModel {
         id: Set(season_id),
         show_id: Set(show_id),
-        season_number: Set(1),
+        season_number: Set(last + 1),
         poster_url: Set(None),
         first_aired: Set(None),
         last_aired: Set(None),

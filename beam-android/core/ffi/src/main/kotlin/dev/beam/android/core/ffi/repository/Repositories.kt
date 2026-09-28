@@ -149,10 +149,10 @@ public interface PlaybackRepository {
     /** Partially-watched titles, ready to resume. */
     public suspend fun continueWatching(limit: UInt?): List<ContinueWatchingEntry>
 
-    /** One page of watch history. */
+    /** One page of watch history: [first] rows after the page whose end cursor is [after]. */
     public suspend fun history(
-        limit: UInt?,
-        offset: UInt?,
+        first: UInt?,
+        after: String?,
     ): HistoryPage
 
     /** Report where the viewer is, subject to the shared throttle. */

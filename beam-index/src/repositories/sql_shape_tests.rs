@@ -107,126 +107,229 @@ fn assert_bound(statement: &Statement, expected: &str) {
     );
 }
 
-mod playback_progress {
+mod watch_state {
     use super::*;
-    use beam_domain::models::playback_progress::UpsertPlaybackProgress;
-    use beam_domain::repositories::PlaybackProgressRepository;
+    use beam_domain::models::watch_state::{
+        HistoryPosition, RecordProgress, TitleRef, WatchTarget,
+    };
+    use beam_domain::repositories::WatchStateRepository;
 
-    use crate::repositories::SqlPlaybackProgressRepository;
+    use crate::repositories::SqlWatchStateRepository;
 
-    /// The list reads join `files` on the progress row's file and keep only
-    /// present files, in the same statement that carries the `LIMIT`/`OFFSET`
-    /// or the `COUNT` -- so a missing file cannot take a slot in a page or in
-    /// the total (issue #179).
-    #[track_caller]
-    fn assert_joins_present_files(statement: &Statement) {
-        assert_contains(
-            statement,
-            r#"INNER JOIN "files" ON "playback_progress"."file_id" = "files"."id""#,
-        );
-        assert_contains(statement, r#""files"."missing_since" IS NULL"#);
+    fn movie(n: u128) -> WatchTarget {
+        WatchTarget::Movie {
+            movie_id: Uuid::from_u128(n),
+        }
+    }
+
+    fn episode(n: u128) -> WatchTarget {
+        WatchTarget::Episode {
+            episode_id: Uuid::from_u128(n),
+            show_id: Uuid::from_u128(999),
+        }
+    }
+
+    /// The statements that write, leaving out the transaction's own.
+    fn writes(sql: &[Statement]) -> Vec<&Statement> {
+        sql.iter()
+            .filter(|s| {
+                let head = s.sql.trim_start();
+                head.starts_with("INSERT")
+                    || head.starts_with("UPDATE")
+                    || head.starts_with("DELETE")
+            })
+            .collect()
     }
 
     #[tokio::test]
-    async fn upsert_targets_the_user_file_unique_index_and_updates_the_mutable_columns() {
+    async fn a_report_is_one_upsert_on_the_titles_unique_index() {
+        for (target, column) in [(movie(1), "movie_id"), (episode(2), "episode_id")] {
+            let db = connection(empty_mock());
+            let repo = SqlWatchStateRepository::new(db.clone());
+            let _ = repo
+                .record_progress(RecordProgress {
+                    user_id: Uuid::from_u128(7),
+                    target,
+                    file_id: Uuid::from_u128(8),
+                    position_secs: 12.0,
+                    duration_secs: Some(100.0),
+                })
+                .await;
+            drop(repo);
+
+            let sql = statements(db);
+            assert_eq!(sql.len(), 1, "a report must be a single statement");
+            assert_contains(
+                &sql[0],
+                &format!("ON CONFLICT (user_id, {column}) DO UPDATE"),
+            );
+            // Played is sticky and a play is counted only off the end.
+            assert_contains(
+                &sql[0],
+                "completed = watch_state.completed OR excluded.completed",
+            );
+            assert_contains(&sql[0], "THEN watch_state.play_count + 1");
+            assert!(
+                !sql[0].sql.contains("id = excluded.id"),
+                "the primary key must survive the conflict:\n{}",
+                sql[0].sql
+            );
+            assert_bound(&sql[0], "12.0");
+            assert_bound(&sql[0], &Uuid::from_u128(8).to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_report_past_the_end_writes_the_start_and_played() {
         let db = connection(empty_mock());
-        let repo = SqlPlaybackProgressRepository::new(db.clone());
+        let repo = SqlWatchStateRepository::new(db.clone());
         let _ = repo
-            .upsert(UpsertPlaybackProgress {
-                user_id: Uuid::nil(),
-                file_id: Uuid::nil(),
-                position_secs: 12.0,
+            .record_progress(RecordProgress {
+                user_id: Uuid::from_u128(7),
+                target: movie(1),
+                file_id: Uuid::from_u128(8),
+                position_secs: 97.0,
                 duration_secs: Some(100.0),
             })
             .await;
         drop(repo);
 
         let sql = statements(db);
-        assert_eq!(sql.len(), 1, "the upsert must be a single statement");
-        assert_contains(&sql[0], r#"ON CONFLICT ("user_id", "file_id") DO UPDATE"#);
-        for column in ["position_secs", "duration_secs", "completed", "updated_at"] {
-            assert_contains(&sql[0], &format!(r#""{column}" = "excluded"."{column}""#));
+        let values = bound_values(&sql[0]);
+        assert!(
+            values.iter().any(|v| v.contains("0.0")) && !values.iter().any(|v| v.contains("97")),
+            "the end is stored as the start: {values:?}"
+        );
+        assert!(values.iter().any(|v| v.contains("true")), "{values:?}");
+    }
+
+    #[tokio::test]
+    async fn marking_nothing_issues_no_statement() {
+        let db = connection(empty_mock());
+        let repo = SqlWatchStateRepository::new(db.clone());
+        repo.mark_played(Uuid::nil(), &[]).await.unwrap();
+        repo.mark_unplayed(Uuid::nil(), &[]).await.unwrap();
+        drop(repo);
+
+        assert!(statements(db).is_empty());
+    }
+
+    #[tokio::test]
+    async fn marking_writes_one_statement_per_index_without_repeats() {
+        let db = connection(empty_mock());
+        let repo = SqlWatchStateRepository::new(db.clone());
+        repo.mark_played(
+            Uuid::from_u128(7),
+            &[episode(2), movie(1), episode(3), episode(2)],
+        )
+        .await
+        .unwrap();
+        drop(repo);
+
+        let sql = statements(db);
+        let writes = writes(&sql);
+        assert_eq!(writes.len(), 2, "{sql:?}");
+        assert_contains(writes[0], "ON CONFLICT (user_id, movie_id) DO UPDATE");
+        assert_contains(writes[1], "ON CONFLICT (user_id, episode_id) DO UPDATE");
+        assert_eq!(
+            writes[1].sql.matches(", true, 1, $2)").count(),
+            2,
+            "a repeated episode would touch its row twice, which Postgres refuses:\n{}",
+            writes[1].sql
+        );
+        // A title already at its end keeps its count and its time.
+        assert_contains(writes[0], "THEN watch_state.play_count");
+        assert_contains(writes[0], "THEN watch_state.last_played_at");
+    }
+
+    #[tokio::test]
+    async fn dismissing_binds_the_title_column() {
+        for (title, column) in [
+            (TitleRef::Movie(Uuid::from_u128(1)), "movie_id"),
+            (TitleRef::Show(Uuid::from_u128(2)), "show_id"),
+        ] {
+            let db = connection(empty_mock());
+            let repo = SqlWatchStateRepository::new(db.clone());
+            repo.dismiss(Uuid::from_u128(7), title).await.unwrap();
+            drop(repo);
+
+            let sql = statements(db);
+            assert_eq!(sql.len(), 1);
+            assert_contains(&sql[0], "SET dismissed_at = $3");
+            assert_contains(&sql[0], &format!("AND {column} = $2"));
+            assert_bound(&sql[0], &Uuid::from_u128(7).to_string());
         }
-        assert!(
-            !sql[0].sql.contains(r#""id" = "excluded"."id""#),
-            "the primary key must survive the conflict, not be overwritten:\n{}",
-            sql[0].sql
-        );
     }
 
     #[tokio::test]
-    async fn find_by_user_and_file_filters_on_both_columns() {
+    async fn clearing_deletes_only_an_unplayed_row_then_rewinds() {
         let db = connection(empty_mock());
-        let repo = SqlPlaybackProgressRepository::new(db.clone());
-        let user = Uuid::from_u128(1);
-        let file = Uuid::from_u128(2);
-        let _ = repo.find_by_user_and_file(user, file).await;
+        let repo = SqlWatchStateRepository::new(db.clone());
+        repo.clear_progress(Uuid::from_u128(7), episode(2))
+            .await
+            .unwrap();
         drop(repo);
 
         let sql = statements(db);
-        assert_filters(&sql[0], "playback_progress", "user_id", "=");
-        assert_filters(&sql[0], "playback_progress", "file_id", "=");
-        assert_bound(&sql[0], &user.to_string());
-        assert_bound(&sql[0], &file.to_string());
+        let writes = writes(&sql);
+        assert_eq!(writes.len(), 2);
+        assert_contains(writes[0], "DELETE FROM watch_state");
+        assert_contains(writes[0], "episode_id = $2 AND NOT completed");
+        assert_contains(writes[1], "SET position_secs = 0");
     }
 
     #[tokio::test]
-    async fn find_in_progress_excludes_completed_orders_desc_and_limits() {
+    async fn candidates_group_per_title_and_page() {
         let db = connection(empty_mock());
-        let repo = SqlPlaybackProgressRepository::new(db.clone());
-        let _ = repo.find_in_progress_by_user(Uuid::from_u128(7), 5).await;
-        drop(repo);
-
-        let sql = statements(db);
-        assert_eq!(sql.len(), 1);
-        assert_joins_present_files(&sql[0]);
-        assert_filters(&sql[0], "playback_progress", "user_id", "=");
-        assert_filters(&sql[0], "playback_progress", "completed", "=");
-        assert_contains(&sql[0], r#"ORDER BY "playback_progress"."updated_at" DESC"#);
-        assert_contains(&sql[0], "LIMIT $3");
-        assert_bound(&sql[0], "5");
-    }
-
-    #[tokio::test]
-    async fn find_page_keeps_completed_rows_and_binds_limit_and_offset() {
-        let db = connection(empty_mock());
-        let repo = SqlPlaybackProgressRepository::new(db.clone());
-        let _ = repo.find_page_by_user(Uuid::from_u128(7), 25, 50).await;
+        let repo = SqlWatchStateRepository::new(db.clone());
+        let _ = repo
+            .find_continue_candidates(Uuid::from_u128(7), 20, 40)
+            .await;
         drop(repo);
 
         let sql = statements(db);
         assert_eq!(sql.len(), 1);
-        assert_joins_present_files(&sql[0]);
-        assert_filters(&sql[0], "playback_progress", "user_id", "=");
-        assert!(
-            !sql[0].sql.contains(r#""playback_progress"."completed" ="#),
-            "history includes completed rows, so it must not filter on `completed`:\n{}",
-            sql[0].sql
+        assert_contains(&sql[0], "GROUP BY movie_id, show_id");
+        assert_contains(
+            &sql[0],
+            "HAVING max(last_played_at) > coalesce(max(dismissed_at), '-infinity')",
         );
-        assert_contains(&sql[0], r#"ORDER BY "playback_progress"."updated_at" DESC"#);
+        assert_contains(&sql[0], "bool_or(position_secs > 0)");
+        assert_contains(&sql[0], "ORDER BY max(last_played_at) DESC");
+        assert_contains(&sql[0], "LIMIT $2 OFFSET $3");
+        assert_bound(&sql[0], "20");
+        assert_bound(&sql[0], "40");
+    }
+
+    #[tokio::test]
+    async fn a_history_page_seeks_past_its_position_newest_first() {
+        let db = connection(empty_mock());
+        let repo = SqlWatchStateRepository::new(db.clone());
+        let after = HistoryPosition {
+            last_played_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            id: Uuid::from_u128(5),
+        };
+        let _ = repo
+            .find_history_page(Uuid::from_u128(7), Some(after), 25)
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert_contains(&sql[0], "(last_played_at, id) < ($2, $3)");
+        assert_contains(&sql[0], "ORDER BY last_played_at DESC, id DESC LIMIT $4");
+        assert_bound(&sql[0], &Uuid::from_u128(5).to_string());
         assert_bound(&sql[0], "25");
-        assert_bound(&sql[0], "50");
     }
 
     #[tokio::test]
-    async fn count_by_user_is_scoped_to_the_user() {
-        let db = connection(connection_with_count(3));
-        let repo = SqlPlaybackProgressRepository::new(db.clone());
-        let user = Uuid::from_u128(9);
-        assert_eq!(repo.count_by_user(user).await.unwrap(), 3);
+    async fn last_played_at_asks_nothing_of_no_files() {
+        let db = connection(empty_mock());
+        let repo = SqlWatchStateRepository::new(db.clone());
+        assert!(repo.last_played_at(Vec::new()).await.unwrap().is_empty());
         drop(repo);
 
-        let sql = statements(db);
-        assert_eq!(sql.len(), 1);
-        assert_joins_present_files(&sql[0]);
-        assert_filters(&sql[0], "playback_progress", "user_id", "=");
-        assert_bound(&sql[0], &user.to_string());
-    }
-
-    /// A mock whose single query result is a `COUNT(*)` of `n`.
-    fn connection_with_count(n: i64) -> MockDatabase {
-        MockDatabase::new(DbBackend::Postgres)
-            .append_query_results([vec![row([("num_items", Value::BigInt(Some(n)))])]])
+        assert!(statements(db).is_empty());
     }
 }
 

@@ -9,11 +9,11 @@ pub mod genre;
 pub mod library;
 pub mod library_shape;
 pub mod movie;
-pub mod playback_progress;
 pub mod playback_telemetry;
 pub mod show;
 pub mod sidecar_subtitle;
 pub mod stream;
+pub mod watch_state;
 
 // SQL implementations
 pub use admin_log::SqlAdminLogRepository;
@@ -25,11 +25,11 @@ pub use genre::SqlGenreRepository;
 pub use library::SqlLibraryRepository;
 pub use library_shape::SqlLibraryShapeRepository;
 pub use movie::SqlMovieRepository;
-pub use playback_progress::SqlPlaybackProgressRepository;
 pub use playback_telemetry::SqlPlaybackTelemetryRepository;
 pub use show::SqlShowRepository;
 pub use sidecar_subtitle::SqlSidecarSubtitleRepository;
 pub use stream::SqlMediaStreamRepository;
+pub use watch_state::SqlWatchStateRepository;
 
 /// The `LIKE` pattern, escaped with `\`, that matches a stored path strictly
 /// beneath the directory `dir`: its text, wildcards escaped, then a

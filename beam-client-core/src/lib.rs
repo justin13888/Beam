@@ -104,6 +104,7 @@ mod tests {
                 "genres": [],
                 "ratings": {},
                 "identifiers": {},
+                "user_state": { "played": false, "position_secs": 0.0, "play_count": 0 },
             }
         });
         let show = serde_json::json!({

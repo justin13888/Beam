@@ -11,6 +11,7 @@ use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show};
 use beam_domain::models::{FieldLocks, MetadataField, PinSource, ProviderPin};
 use beam_domain::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 use beam_domain::repositories::ShowRepository;
+use beam_domain::utils::next_up::OutlineEpisode;
 
 /// SQL-based implementation of the ShowRepository trait.
 #[derive(Debug, Clone)]
@@ -560,6 +561,47 @@ impl ShowRepository for SqlShowRepository {
             .one(self.db.as_ref())
             .await?;
         Ok(model.map(Season::from))
+    }
+
+    async fn episode_outline(&self, show_id: Uuid) -> Result<Vec<OutlineEpisode>, DbErr> {
+        use sea_orm::{DbBackend, FromQueryResult, Statement};
+
+        #[derive(Debug, FromQueryResult)]
+        struct Outlined {
+            episode_id: Uuid,
+            season_number: i32,
+            episode_number: i32,
+            playable: bool,
+        }
+
+        let rows = Outlined::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT e.id AS episode_id, se.season_number, e.episode_number, \
+                    EXISTS (SELECT 1 FROM files f \
+                             WHERE f.episode_id = e.id AND f.missing_since IS NULL) AS playable \
+               FROM episodes e JOIN seasons se ON se.id = e.season_id \
+              WHERE se.show_id = $1 \
+              ORDER BY se.season_number, e.episode_number",
+            [show_id.into()],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |Outlined {
+                     episode_id,
+                     season_number,
+                     episode_number,
+                     playable,
+                 }| OutlineEpisode {
+                    episode_id,
+                    season_number: u32::try_from(season_number).unwrap_or(0),
+                    episode_number: u32::try_from(episode_number).unwrap_or(0),
+                    playable,
+                },
+            )
+            .collect())
     }
 
     async fn apply_enrichment(

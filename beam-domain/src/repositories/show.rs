@@ -10,6 +10,7 @@ use crate::models::enrichment::{FieldLocks, MetadataField};
 use crate::models::pin::{PinSource, ProviderPin};
 use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show};
 use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
+use crate::utils::next_up::OutlineEpisode;
 
 /// Persistence for shows, their seasons and their episodes.
 ///
@@ -135,6 +136,10 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// Reverse lookup from `Episode::season_id` to the season (and, via
     /// `Season::show_id`, the show).
     async fn find_season_by_id(&self, season_id: Uuid) -> Result<Option<Season>, DbErr>;
+    /// Every episode of `show_id`, by season and episode number, each with
+    /// whether a present file backs it -- what next-up walks (issue #188).
+    /// One statement however many episodes the show has.
+    async fn episode_outline(&self, show_id: Uuid) -> Result<Vec<OutlineEpisode>, DbErr>;
     /// Apply enrichment-provider data to an existing show. Overwrites the
     /// current values except those `locks` holds, same as
     /// `MovieRepository::apply_enrichment`, and likewise never touches the
@@ -580,6 +585,29 @@ pub mod in_memory {
 
         async fn find_season_by_id(&self, season_id: Uuid) -> Result<Option<Season>, DbErr> {
             Ok(self.seasons.lock().unwrap().get(&season_id).cloned())
+        }
+
+        async fn episode_outline(&self, show_id: Uuid) -> Result<Vec<OutlineEpisode>, DbErr> {
+            // Unlinked, every episode is playable, as every show is live.
+            let present = self.referenced_episodes(true);
+            let episodes = self.episodes.lock().unwrap();
+            let seasons = self.seasons.lock().unwrap();
+            let mut outline: Vec<OutlineEpisode> = episodes
+                .values()
+                .filter_map(|episode| {
+                    let season = seasons.get(&episode.season_id)?;
+                    (season.show_id == show_id).then(|| OutlineEpisode {
+                        episode_id: episode.id,
+                        season_number: season.season_number,
+                        episode_number: episode.episode_number,
+                        playable: present
+                            .as_ref()
+                            .is_none_or(|present| present.contains(&episode.id)),
+                    })
+                })
+                .collect();
+            outline.sort_by_key(|e| (e.season_number, e.episode_number));
+            Ok(outline)
         }
 
         async fn apply_enrichment(

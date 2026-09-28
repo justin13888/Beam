@@ -168,6 +168,19 @@ impl SourceCatalog {
         ))
     }
 
+    /// The movie's present files, the primary first.
+    pub async fn movie_files(&self, movie_id: Uuid) -> Result<Vec<PlayableFile>, DbErr> {
+        Ok(playable(&self.ranked_movie_files(movie_id).await?, None))
+    }
+
+    /// The episode's present files, the primary first.
+    pub async fn episode_files(&self, episode: &Episode) -> Result<Vec<PlayableFile>, DbErr> {
+        Ok(playable(
+            &self.ranked_episode_files(episode.id).await?,
+            Some(episode.episode_number),
+        ))
+    }
+
     async fn build_all(
         &self,
         ranked: Vec<RankedFile>,
@@ -180,6 +193,37 @@ impl SourceCatalog {
         }
         Ok(sources)
     }
+}
+
+/// One present file of a title, as continue-watching and history pick the
+/// one to play.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayableFile {
+    pub file_id: Uuid,
+    pub duration_secs: Option<f64>,
+    /// The file holds a run of episodes, so its duration is not one
+    /// episode's.
+    pub spans_episodes: bool,
+}
+
+impl PlayableFile {
+    /// The file to play of `files` (primary first): `last` -- the one the
+    /// viewer last played -- while it is still among them, else the primary.
+    pub fn pick(files: &[Self], last: Option<Uuid>) -> Option<&Self> {
+        last.and_then(|last| files.iter().find(|file| file.file_id == last))
+            .or_else(|| files.first())
+    }
+}
+
+fn playable(ranked: &[RankedFile], episode_number: Option<u32>) -> Vec<PlayableFile> {
+    ranked
+        .iter()
+        .map(|ranked| PlayableFile {
+            file_id: ranked.file.id,
+            duration_secs: ranked.file.duration.map(|d| d.as_secs_f64()),
+            spans_episodes: episode_span(&ranked.file, episode_number).is_some(),
+        })
+        .collect()
 }
 
 fn primary(ranked: &[RankedFile], episode_number: Option<u32>) -> PrimarySource {

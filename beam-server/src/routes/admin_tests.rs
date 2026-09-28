@@ -53,43 +53,7 @@ use crate::services::metadata::{MediaConnection, MetadataError, MetadataService,
 use crate::services::notification::{
     AdminEvent, EventCategory, InMemoryNotificationService, NotificationService,
 };
-use crate::services::playback::{
-    ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackReadError, PlaybackService,
-};
 use crate::state::{AppServices, AppState};
-
-#[derive(Debug)]
-struct StubPlaybackService;
-
-#[async_trait::async_trait]
-impl PlaybackService for StubPlaybackService {
-    async fn report_progress(
-        &self,
-        _user_id: uuid::Uuid,
-        _file_id: uuid::Uuid,
-        _position_secs: f64,
-        _duration_secs: Option<f64>,
-    ) -> Result<PlaybackProgressDto, PlaybackError> {
-        unimplemented!("not called in admin route tests")
-    }
-
-    async fn get_continue_watching(
-        &self,
-        _user_id: uuid::Uuid,
-        _limit: u32,
-    ) -> Result<Vec<ContinueWatchingItem>, PlaybackReadError> {
-        unimplemented!("not called in admin route tests")
-    }
-
-    async fn get_history(
-        &self,
-        _user_id: uuid::Uuid,
-        _limit: u64,
-        _offset: u64,
-    ) -> Result<(Vec<crate::services::playback::HistoryItem>, u64), PlaybackReadError> {
-        unimplemented!("not called in admin route tests")
-    }
-}
 
 #[derive(Debug)]
 struct StubHashService;
@@ -134,6 +98,20 @@ impl MetadataService for StubMetadataService {
         _media_id: &str,
     ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
         unimplemented!("not called in admin route tests")
+    }
+
+    async fn get_episode_detail(
+        &self,
+        _episode_id: uuid::Uuid,
+    ) -> Result<Option<crate::models::EpisodeDetail>, MetadataError> {
+        Ok(None)
+    }
+
+    async fn get_season_detail(
+        &self,
+        _season_id: uuid::Uuid,
+    ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
+        Ok(None)
     }
 }
 
@@ -337,7 +315,7 @@ fn build_fixture(
         Arc::new(prober),
         notification.clone(),
         admin_log.clone(),
-        Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         )
         .with_clock(clock.clone()),
     );
@@ -364,7 +342,14 @@ fn build_fixture(
         notification: notification.clone(),
         admin_log,
         user_repo: user_repo.clone(),
-        playback: Arc::new(StubPlaybackService),
+        playback: crate::routes::test_support::in_memory_playback(
+            Arc::new(beam_domain::services::TestClock::new()),
+            Arc::new(beam_domain::repositories::file::in_memory::InMemoryFileRepository::default()),
+            Arc::new(
+                beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
+            ),
+            Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default()),
+        ),
         genre_repo: Arc::new(
             beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
         ),

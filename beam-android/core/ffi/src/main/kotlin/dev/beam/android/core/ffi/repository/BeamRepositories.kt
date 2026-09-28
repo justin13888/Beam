@@ -159,9 +159,9 @@ internal class BeamPlaybackRepository
             client.continueWatching(limit)
 
         override suspend fun history(
-            limit: UInt?,
-            offset: UInt?,
-        ): HistoryPage = client.history(limit, offset)
+            first: UInt?,
+            after: String?,
+        ): HistoryPage = client.history(first, after)
 
         override suspend fun reportProgress(
             fileId: String,

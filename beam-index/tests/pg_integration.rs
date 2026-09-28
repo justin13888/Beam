@@ -29,8 +29,6 @@ mod genre_repository;
 mod library_shape;
 #[path = "pg_integration/movie_repository.rs"]
 mod movie_repository;
-#[path = "pg_integration/playback_progress.rs"]
-mod playback_progress;
 #[path = "pg_integration/playback_telemetry.rs"]
 mod playback_telemetry;
 #[path = "pg_integration/schema.rs"]
@@ -39,3 +37,5 @@ mod schema;
 mod show_repository;
 #[path = "pg_integration/sidecar_subtitle.rs"]
 mod sidecar_subtitle;
+#[path = "pg_integration/watch_state.rs"]
+mod watch_state;

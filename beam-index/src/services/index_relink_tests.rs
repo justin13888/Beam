@@ -20,16 +20,16 @@ use crate::services::hash::{HashConfig, LocalHashService};
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::CreateLibrary;
 use beam_domain::models::admin_log::AdminLog;
-use beam_domain::models::playback_progress::UpsertPlaybackProgress;
+use beam_domain::models::watch_state::{RecordProgress, WatchTarget};
 use beam_domain::repositories::AdminLogRepository;
-use beam_domain::repositories::PlaybackProgressRepository;
+use beam_domain::repositories::WatchStateRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use beam_domain::services::TestClock;
 use tempfile::TempDir;
 
@@ -627,7 +627,7 @@ struct Harness {
     notifications: Arc<InMemoryNotificationService>,
     prober: Arc<CountingProber>,
     hasher: Arc<CountingHasher>,
-    progress: Arc<InMemoryPlaybackProgressRepository>,
+    progress: Arc<InMemoryWatchStateRepository>,
     service: LocalIndexService,
 }
 
@@ -653,10 +653,7 @@ impl Harness {
             calls: AtomicUsize::new(0),
         });
         let clock = Arc::new(TestClock::starting_at(instant(0)));
-        let progress = Arc::new(InMemoryPlaybackProgressRepository::new(
-            clock.clone(),
-            file_repo.clone(),
-        ));
+        let progress = Arc::new(InMemoryWatchStateRepository::new(clock.clone()));
         let library = library_repo
             .create(CreateLibrary {
                 name: "Moves".to_string(),
@@ -703,8 +700,13 @@ impl Harness {
     async fn watch(&self, path: &Path) {
         let file = self.present(path).await;
         self.progress
-            .upsert(UpsertPlaybackProgress {
+            .record_progress(RecordProgress {
                 user_id: Uuid::new_v4(),
+                // The title does not matter to the indexer: only the file
+                // the report named does.
+                target: WatchTarget::Movie {
+                    movie_id: Uuid::new_v4(),
+                },
                 file_id: file.id,
                 position_secs: 600.0,
                 duration_secs: Some(3600.0),
@@ -1368,7 +1370,7 @@ async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
         Arc::new(LocalAdminLogService::new(Arc::new(
             InMemoryAdminLogRepository::default(),
         ))),
-        Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 
     for removed in [

@@ -16,10 +16,10 @@ use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library_shape::in_memory::InMemoryLibraryShapeRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
 use beam_domain::repositories::playback_telemetry::in_memory::InMemoryPlaybackTelemetryRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
 use beam_domain::repositories::{
@@ -36,8 +36,9 @@ use crate::services::health::InMemoryDependencyProbe;
 use crate::services::library::LibraryError;
 use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
 use crate::services::notification::InMemoryNotificationService;
-use crate::services::playback::DbPlaybackService;
+use crate::services::playback::{DbPlaybackService, PlaybackRepositories, PlaybackService};
 use crate::services::playback_telemetry::{PlaybackTelemetryConfig, PlaybackTelemetryService};
+use crate::services::sources::SourceCatalog;
 use crate::services::telemetry::{LibraryReportConfig, LibraryReportService};
 use crate::state::{AppServices, AppState};
 
@@ -138,11 +139,51 @@ impl MetadataService for StubMetadataService {
     ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
         unimplemented!("not called in routing tests")
     }
+
+    async fn get_episode_detail(
+        &self,
+        _episode_id: uuid::Uuid,
+    ) -> Result<Option<crate::models::EpisodeDetail>, MetadataError> {
+        Ok(None)
+    }
+
+    async fn get_season_detail(
+        &self,
+        _season_id: uuid::Uuid,
+    ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
+        Ok(None)
+    }
 }
 
 /// A defaults-shaped [`AppState`] over stub services and a healthy in-memory
 /// dependency probe, for tests that exercise router wiring rather than any
 /// individual service.
+/// The real playback service over in-memory stores: what a routing test gets
+/// when it exercises no playback route, and the base the playback tests
+/// build their own over.
+pub(crate) fn in_memory_playback(
+    clock: Arc<dyn beam_domain::services::Clock>,
+    files: Arc<InMemoryFileRepository>,
+    movies: Arc<InMemoryMovieRepository>,
+    shows: Arc<InMemoryShowRepository>,
+) -> Arc<dyn PlaybackService> {
+    let sources = Arc::new(SourceCatalog::new(
+        movies.clone(),
+        files.clone(),
+        Arc::new(InMemoryMediaStreamRepository::default()),
+        Arc::new(
+            beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
+        ),
+    ));
+    Arc::new(DbPlaybackService::new(PlaybackRepositories {
+        watch_state: Arc::new(InMemoryWatchStateRepository::new(clock)),
+        files,
+        movies,
+        shows,
+        sources,
+    }))
+}
+
 pub(crate) fn make_app_state() -> AppState {
     make_app_state_with(|_| {})
 }
@@ -379,16 +420,12 @@ fn make_app_state_with_services(
     let file_repo = Arc::new(InMemoryFileRepository::default());
     let movie_repo = Arc::new(InMemoryMovieRepository::default());
     let show_repo = Arc::new(InMemoryShowRepository::default());
-    let playback: Arc<dyn crate::services::playback::PlaybackService> =
-        Arc::new(DbPlaybackService::new(
-            Arc::new(InMemoryPlaybackProgressRepository::new(
-                clock.clone(),
-                file_repo.clone(),
-            )),
-            file_repo,
-            movie_repo.clone(),
-            show_repo.clone(),
-        ));
+    let playback = in_memory_playback(
+        clock.clone(),
+        file_repo,
+        movie_repo.clone(),
+        show_repo.clone(),
+    );
     let artwork = cold_artwork_cache();
     let library_repo = Arc::new(
         beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),

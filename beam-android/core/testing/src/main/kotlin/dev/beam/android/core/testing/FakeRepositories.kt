@@ -158,7 +158,11 @@ public class FakePlaybackRepository : PlaybackRepository {
         listOf(Fixtures.continueWatching())
 
     /** The page returned by [history]. */
-    public var historyPage: HistoryPage = HistoryPage(listOf(Fixtures.historyEntry()), 1uL)
+    public var historyPage: HistoryPage =
+        HistoryPage(listOf(Fixtures.historyEntry()), 1uL, endCursor = "c1", hasNextPage = false)
+
+    /** The `after` cursor of every [history] request, in order. */
+    public val historyAfters: MutableList<String?> = mutableListOf()
 
     /**
      * Every progress report, in order.
@@ -217,9 +221,10 @@ public class FakePlaybackRepository : PlaybackRepository {
     }
 
     override suspend fun history(
-        limit: UInt?,
-        offset: UInt?,
+        first: UInt?,
+        after: String?,
     ): HistoryPage {
+        historyAfters += after
         failWith?.let { throw it }
         return historyPage
     }

@@ -1,6 +1,7 @@
 use super::{ExternalIdentifiers, Ratings};
 
 use super::Title;
+use crate::models::playback::{UserGroupState, UserTitleState};
 use chrono::{DateTime, Utc};
 use kynos::Schema;
 use serde::Serialize;
@@ -35,6 +36,9 @@ pub struct ShowMetadata {
     /// List of seasons in the show. Empty in a browse result, which carries
     /// `season_count` and `episode_count` instead; the detail route fills it.
     pub seasons: Vec<SeasonMetadata>,
+    /// How much of the show the signed-in viewer has watched. Absent in a
+    /// browse result; the detail route fills it.
+    pub user_state: Option<UserGroupState>,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
@@ -61,6 +65,8 @@ pub struct SeasonMetadata {
     /// Always absent: identifiers are recorded per show, on
     /// `ShowMetadata::identifiers`.
     pub identifiers: Option<ExternalIdentifiers>,
+    /// How much of the season the signed-in viewer has watched.
+    pub user_state: Option<UserGroupState>,
     // Add people involved (cast, crew, directors, writers, etc.)
 }
 
@@ -98,5 +104,38 @@ pub struct EpisodeMetadata {
     /// How many sources the episode has; their tracks are on
     /// `GET /v1/media/{id}/sources`.
     pub source_count: u32,
+    /// The signed-in viewer's state for the episode.
+    pub user_state: UserTitleState,
+}
+
+/// The show an episode or season belongs to, as its detail page heads it.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+pub struct ShowRef {
+    pub id: Uuid,
+    pub title: Title,
+    pub poster_url: Option<String>,
+    pub backdrop_url: Option<String>,
+}
+
+/// What `GET /v1/episodes/{id}` returns: one episode, where it sits, and
+/// its neighbours.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+pub struct EpisodeDetail {
+    pub episode: EpisodeMetadata,
+    pub season_id: Uuid,
+    pub season_number: u32,
+    pub show: ShowRef,
+    /// The episode before this one in the show, by season then episode
+    /// number -- across a season boundary; absent for the first.
+    pub previous_episode_id: Option<Uuid>,
+    /// The episode after this one, likewise; absent for the last.
+    pub next_episode_id: Option<Uuid>,
+}
+
+/// What `GET /v1/seasons/{id}` returns: one season with its episodes.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+pub struct SeasonDetail {
+    pub season: SeasonMetadata,
+    pub show: ShowRef,
 }
 // TODO: detect discrepancy in video file length to detected episode length

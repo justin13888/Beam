@@ -20,6 +20,10 @@ public data class HistoryUiState(
     val entries: List<HistoryEntry> = emptyList(),
     /** How many the server holds in total. */
     val total: ULong = 0uL,
+    /** Where the entries loaded so far end, to page on from. */
+    val endCursor: String? = null,
+    /** Whether the server holds a page after the entries loaded so far. */
+    val hasNextPage: Boolean = false,
     /** Whether the first page is in flight. */
     val isLoading: Boolean = false,
     /** Whether a further page is in flight. */
@@ -29,10 +33,10 @@ public data class HistoryUiState(
 ) {
     /** Whether there are more entries to fetch. */
     public val hasMore: Boolean
-        get() = entries.size.toULong() < total
+        get() = hasNextPage
 }
 
-/** Watch history, paged by offset. */
+/** Watch history, paged by cursor. */
 @HiltViewModel
 public class HistoryViewModel
     @Inject
@@ -49,7 +53,7 @@ public class HistoryViewModel
         /** Fetch the first page again. */
         public fun refresh() {
             mutableState.update { it.copy(isLoading = true, error = null) }
-            viewModelScope.launch { fetch(offset = 0u, replacing = true) }
+            viewModelScope.launch { fetch(after = null, replacing = true) }
         }
 
         /** Fetch the next page. */
@@ -58,20 +62,22 @@ public class HistoryViewModel
             if (!current.hasMore || current.isLoadingMore || current.isLoading) return
             mutableState.update { it.copy(isLoadingMore = true) }
             viewModelScope.launch {
-                fetch(offset = current.entries.size.toUInt(), replacing = false)
+                fetch(after = current.endCursor, replacing = false)
             }
         }
 
         private suspend fun fetch(
-            offset: UInt,
+            after: String?,
             replacing: Boolean,
         ) {
             try {
-                val page = playback.history(limit = PAGE_SIZE, offset = offset)
+                val page = playback.history(first = PAGE_SIZE, after = after)
                 mutableState.update {
                     it.copy(
                         entries = if (replacing) page.items else it.entries + page.items,
                         total = page.total,
+                        endCursor = page.endCursor,
+                        hasNextPage = page.hasNextPage,
                         isLoading = false,
                         isLoadingMore = false,
                         error = null,

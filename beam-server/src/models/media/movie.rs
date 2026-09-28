@@ -1,4 +1,5 @@
 use super::{ExternalIdentifiers, Ratings, Title};
+use crate::models::playback::UserTitleState;
 use chrono::{DateTime, Utc};
 use kynos::Schema;
 use serde::Serialize;
@@ -38,6 +39,8 @@ pub struct MovieMetadata {
     /// How many sources the movie has. Absent in a browse result, which does
     /// not read files; their tracks are on `GET /v1/media/{id}/sources`.
     pub source_count: Option<u32>,
+    /// The signed-in viewer's state for the movie.
+    pub user_state: UserTitleState,
     //
     // TODO: Add people involved (cast, crew, directors, writers, etc.)
 }

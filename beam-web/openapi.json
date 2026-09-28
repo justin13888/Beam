@@ -868,7 +868,7 @@
         "tags": [
           "media"
         ],
-        "summary": "Fetch a single media item's full metadata by id.",
+        "summary": "Fetch a single media item's full metadata by id, with the caller's state for the movie, or for the show and each of its seasons and episodes.",
         "operationId": "getMediaDetail",
         "parameters": [
           {
@@ -1233,13 +1233,329 @@
         ]
       }
     },
+    "/v1/episodes/{id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "One episode: its metadata and the caller's state for it, its season, its show, and the episodes either side of it in the show.",
+        "operationId": "getEpisodeDetail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Episode or season id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodeDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/seasons/{id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "One season: its episodes with the caller's state for each and for the season, and its show.",
+        "operationId": "getSeasonDetail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Episode or season id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
     "/v1/media": {
       "get": {
         "tags": [
           "media"
         ],
         "summary": "Browse/search the media library with cursor-based pagination, sorting, and filtering.",
-        "description": "Only titles with at least one present file are listed.",
+        "description": "Only titles with at least one present file are listed. Each movie carries\nthe caller's state for it; a show carries none here.",
         "operationId": "browseMedia",
         "parameters": [
           {
@@ -1672,6 +1988,7 @@
           "playback"
         ],
         "summary": "Record how far through a file the caller has watched.",
+        "description": "The position is kept for the file's movie or episode, not the file, so\nany source of the title resumes from it. Reaching 95% of the duration\nmarks the title played and returns the position to the start; rewinding\nafterwards never unplays it. A position past the end by more than 2\nseconds or 1% -- whichever is larger -- is refused; one within that is\ntaken as the end.",
         "operationId": "reportPlaybackProgress",
         "parameters": [
           {
@@ -1795,21 +2112,40 @@
             }
           },
           "422": {
-            "description": "Unprocessable Entity",
+            "description": "Unprocessable Entity; Validation failed",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "allOf": [
+                  "oneOf": [
                     {
-                      "$ref": "#/components/schemas/Problem"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
                     },
                     {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "about:blank"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#validation-failed"
+                            }
+                          }
                         }
-                      }
+                      ]
                     }
                   ]
                 }
@@ -1821,7 +2157,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PlaybackProgressDto"
+                  "$ref": "#/components/schemas/UserTitleState"
                 }
               }
             }
@@ -1878,18 +2214,665 @@
         ]
       }
     },
+    "/v1/media/{id}/progress": {
+      "get": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "The caller's state for a movie or an episode: where to resume, and whether it is played. A title never played answers all zeros.",
+        "operationId": "getTitleProgress",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A movie, show, season or episode id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Progress is not available at the show level",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#progress-not-available-for-show"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserTitleState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Forget where the caller stopped in a movie or an episode. A title the caller has played stays played; one never finished is forgotten.",
+        "operationId": "clearTitleProgress",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A movie, show, season or episode id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Progress is not available at the show level",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#progress-not-available-for-show"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/media/{id}/watched": {
+      "put": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Mark a movie, an episode, a season or a whole show watched.",
+        "description": "A season or a show marks each of its episodes; an episode added later\nis unwatched. Marking a title already watched changes nothing.",
+        "operationId": "markWatched",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A movie, show, season or episode id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Mark a movie, an episode, a season or a whole show unwatched: its played state, play count and resume position are all forgotten.",
+        "operationId": "markUnwatched",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A movie, show, season or episode id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
     "/v1/continue-watching": {
       "get": {
         "tags": [
           "playback"
         ],
-        "summary": "The caller's partially-watched files, most recently updated first.",
+        "summary": "What the caller is part-way through: one row per movie to resume, and one per show -- the episode to resume, or the next one to start -- most recently played first.",
+        "description": "A show the caller has caught up on is not listed, nor a title removed\nwith `DELETE /v1/continue-watching/{id}` until it is played again.",
         "operationId": "getContinueWatching",
         "parameters": [
           {
-            "name": "limit",
+            "name": "first",
             "in": "query",
-            "description": "Max items to return (default 20).",
+            "description": "At most this many titles (1-50, default 20).",
             "required": false,
             "schema": {
               "type": [
@@ -1958,21 +2941,40 @@
             }
           },
           "400": {
-            "description": "Bad Request",
+            "description": "Bad Request; Invalid pagination",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "allOf": [
+                  "oneOf": [
                     {
-                      "$ref": "#/components/schemas/Problem"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
                     },
                     {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "about:blank"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
                         }
-                      }
+                      ]
                     }
                   ]
                 }
@@ -1984,10 +2986,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ContinueWatchingItem"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/ContinueWatchingConnection"
                 }
               }
             }
@@ -2022,41 +3021,22 @@
         ]
       }
     },
-    "/v1/history": {
-      "get": {
+    "/v1/continue-watching/{id}": {
+      "delete": {
         "tags": [
           "playback"
         ],
-        "summary": "Chronological watch history (completed and in-progress), most-recently- updated first.",
-        "description": "`limit` defaults to 50 and is clamped to 1..=100; `offset` defaults to 0.\nThe response carries `total` (the user's history rows whose file is\npresent) so a single request paginates without a separate count endpoint.\nA row whose file is missing from disk is left out of both `items` and\n`total`. `items.len()` can still be below `limit` when a row's title can no\nlonger be resolved: that row is skipped, while `total` still counts it.",
-        "operationId": "getHistory",
+        "summary": "Remove a title from the caller's continue-watching until they next play it. An episode or a season id removes its show. Its progress is kept.",
+        "operationId": "dismissContinueWatching",
         "parameters": [
           {
-            "name": "limit",
-            "in": "query",
-            "description": "Max items to return (default 50, max 100).",
-            "required": false,
+            "name": "id",
+            "in": "path",
+            "description": "A movie, show, season or episode id.",
+            "required": true,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "minimum": 0.0,
-              "format": "uint64"
-            }
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "description": "Number of items to skip (default 0).",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "minimum": 0.0,
-              "format": "uint64"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -2137,12 +3117,217 @@
               }
             }
           },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/history": {
+      "get": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Every movie and episode the caller has played or marked watched, most recently first, a page at a time.",
+        "description": "`total` counts every title in the history; a title whose files are all\ngone is counted but not listed, so a page can hold fewer than `first`.",
+        "operationId": "getHistory",
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "description": "This many titles (1-100, default 50).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 4294967295.0,
+              "minimum": 0.0,
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page on from.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Referer",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Invalid cursor; Invalid pagination",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid cursor"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid pagination"
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "200": {
             "description": "OK",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HistoryResponse"
+                  "$ref": "#/components/schemas/HistoryConnection"
                 }
               }
             }
@@ -12287,6 +13472,57 @@
         },
         "type": "object"
       },
+      "UserTitleState": {
+        "properties": {
+          "played": {
+            "type": "boolean",
+            "description": "Watched to the end at least once, or marked watched. Rewinding never\nclears it; marking the title unwatched does."
+          },
+          "position_secs": {
+            "type": "number",
+            "format": "double",
+            "description": "Where to resume, in seconds from the start: 0 for a title not started\nand for one just finished. A played title with a position is being\nrewatched."
+          },
+          "duration_secs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The duration `position_secs` was measured against, when known."
+          },
+          "play_count": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "How many times the title was watched to the end or marked watched."
+          },
+          "last_played_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the viewer last played or marked the title; absent if never."
+          },
+          "last_file_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The source the viewer last played, to resume on it. Absent when none\nwas played, or its file has since been removed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "played",
+          "position_secs",
+          "play_count"
+        ],
+        "description": "The viewer's state for one movie or episode.\n\nA title never played reads as all zeros: not played, at the start, no\nplays, never played."
+      },
       "EpisodeMetadata": {
         "properties": {
           "id": {
@@ -12348,6 +13584,10 @@
             "minimum": 0.0,
             "format": "uint32",
             "description": "How many sources the episode has; their tracks are on\n`GET /v1/media/{id}/sources`."
+          },
+          "user_state": {
+            "$ref": "#/components/schemas/UserTitleState",
+            "description": "The signed-in viewer's state for the episode."
           }
         },
         "type": "object",
@@ -12355,8 +13595,38 @@
           "id",
           "episode_number",
           "title",
-          "source_count"
+          "source_count",
+          "user_state"
         ]
+      },
+      "UserGroupState": {
+        "properties": {
+          "played": {
+            "type": "boolean",
+            "description": "Every episode is played -- and there is at least one."
+          },
+          "watched_episode_count": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "How many of the episodes are played."
+          },
+          "episode_count": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "How many episodes there are."
+          }
+        },
+        "type": "object",
+        "required": [
+          "played",
+          "watched_episode_count",
+          "episode_count"
+        ],
+        "description": "The viewer's state for a season or a whole show."
       },
       "SeasonMetadata": {
         "properties": {
@@ -12428,6 +13698,17 @@
               }
             ],
             "description": "Always absent: identifiers are recorded per show, on\n`ShowMetadata::identifiers`."
+          },
+          "user_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserGroupState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How much of the season the signed-in viewer has watched."
           }
         },
         "type": "object",
@@ -12530,6 +13811,17 @@
             },
             "type": "array",
             "description": "List of seasons in the show. Empty in a browse result, which carries\n`season_count` and `episode_count` instead; the detail route fills it."
+          },
+          "user_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserGroupState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How much of the show the signed-in viewer has watched. Absent in a\nbrowse result; the detail route fills it."
           }
         },
         "type": "object",
@@ -12656,13 +13948,18 @@
             "minimum": 0.0,
             "format": "uint32",
             "description": "How many sources the movie has. Absent in a browse result, which does\nnot read files; their tracks are on `GET /v1/media/{id}/sources`."
+          },
+          "user_state": {
+            "$ref": "#/components/schemas/UserTitleState",
+            "description": "The signed-in viewer's state for the movie."
           }
         },
         "type": "object",
         "required": [
           "id",
           "title",
-          "genres"
+          "genres",
+          "user_state"
         ]
       },
       "MediaMetadata": {
@@ -13090,6 +14387,95 @@
         ],
         "description": "Every source of a movie or an episode, primary first: what\n`GET /v1/media/{id}/sources` returns.\n\nA connection, as `GET /v1/media` answers, though a title's sources\nare few enough that it is never paged: `items` is the whole list, both of\n`page_info`'s `has_*_page` flags are `false`, and it carries no cursors."
       },
+      "ShowRef": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "$ref": "#/components/schemas/Title"
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backdrop_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "description": "The show an episode or season belongs to, as its detail page heads it."
+      },
+      "EpisodeDetail": {
+        "properties": {
+          "episode": {
+            "$ref": "#/components/schemas/EpisodeMetadata"
+          },
+          "season_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "season_number": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32"
+          },
+          "show": {
+            "$ref": "#/components/schemas/ShowRef"
+          },
+          "previous_episode_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The episode before this one in the show, by season then episode\nnumber -- across a season boundary; absent for the first."
+          },
+          "next_episode_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The episode after this one, likewise; absent for the last."
+          }
+        },
+        "type": "object",
+        "required": [
+          "episode",
+          "season_id",
+          "season_number",
+          "show"
+        ],
+        "description": "What `GET /v1/episodes/{id}` returns: one episode, where it sits, and\nits neighbours."
+      },
+      "SeasonDetail": {
+        "properties": {
+          "season": {
+            "$ref": "#/components/schemas/SeasonMetadata"
+          },
+          "show": {
+            "$ref": "#/components/schemas/ShowRef"
+          }
+        },
+        "type": "object",
+        "required": [
+          "season",
+          "show"
+        ],
+        "description": "What `GET /v1/seasons/{id}` returns: one season with its episodes."
+      },
       "MediaSortField": {
         "type": "string",
         "enum": [
@@ -13142,73 +14528,62 @@
         "properties": {
           "position_secs": {
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "description": "Where the viewer is, in seconds from the start of the file: at least\n0, and no further than the end."
           },
           "duration_secs": {
             "type": [
               "number",
               "null"
             ],
-            "format": "double"
+            "format": "double",
+            "description": "How long the file is, in seconds, if the player knows; the probed\nduration is used otherwise. Positive."
           }
         },
         "type": "object",
         "required": [
           "position_secs"
-        ]
+        ],
+        "description": "Body of `PUT /v1/files/{file_id}/progress`."
       },
-      "PlaybackProgressDto": {
-        "properties": {
-          "file_id": {
-            "type": "string"
-          },
-          "position_secs": {
-            "type": "number",
-            "format": "double"
-          },
-          "duration_secs": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "completed": {
-            "type": "boolean"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "type": "object",
-        "required": [
-          "file_id",
-          "position_secs",
-          "completed",
-          "updated_at"
-        ]
+      "ContinueWatchingReason": {
+        "type": "string",
+        "enum": [
+          "resume",
+          "next_up"
+        ],
+        "description": "Why a continue-watching row is offered."
       },
       "ContinueWatchingItem": {
         "properties": {
-          "file_id": {
-            "type": "string"
+          "reason": {
+            "$ref": "#/components/schemas/ContinueWatchingReason"
           },
           "media_id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid",
+            "description": "The movie or show, for its detail page."
           },
           "media_type": {
-            "type": "string"
+            "$ref": "#/components/schemas/MediaTypeFilter"
           },
           "episode_id": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "format": "uuid",
+            "description": "The episode to play; absent for a movie."
+          },
+          "file_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The source to play: the one the viewer last played if it is still\npresent, else the title's primary source."
           },
           "position_secs": {
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "description": "Where to start, in seconds: 0 for the next episode."
           },
           "duration_secs": {
             "type": [
@@ -13217,37 +14592,113 @@
             ],
             "format": "double"
           },
-          "updated_at": {
+          "last_played_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "When the viewer last played anything of the title."
+          },
+          "title": {
+            "type": "string",
+            "description": "The movie's or the show's title."
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The movie's or show's poster, else the season's."
+          },
+          "backdrop_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "season_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32"
+          },
+          "episode_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32"
+          },
+          "episode_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thumbnail_url": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object",
         "required": [
-          "file_id",
+          "reason",
           "media_id",
           "media_type",
+          "file_id",
           "position_secs",
-          "updated_at"
+          "last_played_at",
+          "title"
         ],
-        "description": "One row in the continue-watching list. `media_id`/`media_type` let the\nclient link to the detail page; `episode_id` is set only for episodes, so\nthe client can additionally deep-link to the right episode within a show."
+        "description": "One row of continue-watching: a movie to resume, or the one episode of a\nshow to watch next. Carries what a row displays, so a client renders it\nwithout a request per row."
+      },
+      "ContinueWatchingConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContinueWatchingItem"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Always a single, complete page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "description": "What `GET /v1/continue-watching` returns: at most `first` titles, most\nrecently played first -- one row per movie, one per show.\n\nA shelf, not a paged list: `items` is the whole answer, both of\n`page_info`'s `has_*_page` flags are `false`, and it carries no cursors."
       },
       "HistoryItem": {
         "properties": {
-          "file_id": {
-            "type": "string"
-          },
           "media_id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid",
+            "description": "The movie or show, for its detail page."
           },
           "media_type": {
-            "type": "string"
+            "$ref": "#/components/schemas/MediaTypeFilter"
           },
           "episode_id": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "format": "uuid",
+            "description": "The episode; absent for a movie."
+          },
+          "file_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The source to play: the one last played if still present, else the\nprimary."
           },
           "position_secs": {
             "type": "number",
@@ -13260,32 +14711,88 @@
             ],
             "format": "double"
           },
-          "completed": {
+          "played": {
             "type": "boolean"
           },
-          "updated_at": {
+          "play_count": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32"
+          },
+          "last_played_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "title": {
+            "type": "string"
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backdrop_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "season_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32"
+          },
+          "episode_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32"
+          },
+          "episode_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thumbnail_url": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object",
         "required": [
-          "file_id",
           "media_id",
           "media_type",
+          "file_id",
           "position_secs",
-          "completed",
-          "updated_at"
+          "played",
+          "play_count",
+          "last_played_at",
+          "title"
         ],
-        "description": "One row in the watch-history list. Same resolved shape as\n[`ContinueWatchingItem`] but additionally carries `completed`, since history\nlists finished items too (continue-watching filters them out)."
+        "description": "One row of watch history: a movie or an episode the viewer played or\nmarked watched, with what a row displays."
       },
-      "HistoryResponse": {
+      "HistoryConnection": {
         "properties": {
           "items": {
             "items": {
               "$ref": "#/components/schemas/HistoryItem"
             },
             "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo"
           },
           "total": {
             "type": "integer",
@@ -13296,9 +14803,10 @@
         "type": "object",
         "required": [
           "items",
+          "page_info",
           "total"
         ],
-        "description": "A page of watch history. `total` counts the user's history rows (completed\nand in-progress) whose file is present, so the client can paginate; a row\nwhose file is missing from disk is in neither `items` nor `total`. `items`\nmay still hold fewer than the requested `limit` when a row's title can no\nlonger be resolved (that row is skipped here but still counted in\n`total`)."
+        "description": "A page of watch history, most recently played first.\n\nPass `page_info.end_cursor` as `after` for the next page. `total` counts\nevery title in the viewer's history; a title whose files are all gone is\ncounted but not listed, so a page can hold fewer than `first` items."
       },
       "PlaybackClientKind": {
         "type": "string",

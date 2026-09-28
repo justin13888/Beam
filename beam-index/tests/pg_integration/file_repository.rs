@@ -138,9 +138,9 @@ mod contract {
     beam_domain::file_repository_contract!(setup);
 }
 
-/// Marking a file missing is what keeps its playback progress: the row, and so
-/// the `playback_progress.file_id` foreign key, is untouched. Only a real
-/// Postgres enforces that key.
+/// Marking a file missing keeps the watched state last played from it: the
+/// row, and so the `watch_state.last_file_id` foreign key, is untouched. Only
+/// a real Postgres enforces that key.
 #[tokio::test]
 async fn marking_a_file_missing_keeps_its_playback_progress() {
     let db = postgres::connection().await;
@@ -159,10 +159,11 @@ async fn marking_a_file_missing_keeps_its_playback_progress() {
     assert_eq!(progress_rows(db.as_ref(), file).await, 1);
 }
 
-/// Purging is the one delete, and `ON DELETE CASCADE` takes the progress with
-/// it rather than failing on the foreign key.
+/// Purging is the one delete. The watched state is the title's, not the
+/// file's (issue #188): `ON DELETE SET NULL` keeps the row and forgets only
+/// which file it was last played from.
 #[tokio::test]
-async fn purging_a_missing_file_cascades_to_its_playback_progress() {
+async fn purging_a_missing_file_keeps_the_watched_state_without_the_file() {
     let db = postgres::connection().await;
     let user = seed::user(db.as_ref()).await.unwrap();
     let file = seed::file(db.as_ref()).await.unwrap();
@@ -175,11 +176,12 @@ async fn purging_a_missing_file_cascades_to_its_playback_progress() {
     assert_eq!(repo.purge_missing(vec![file]).await.unwrap(), 1);
 
     assert_eq!(progress_rows(db.as_ref(), file).await, 0);
+    assert_eq!(fileless_rows(db.as_ref(), user).await, 1);
 }
 
 /// A relinked file keeps its playback progress (issue #180): the relink is
-/// an update of the row the `playback_progress.file_id` foreign key points
-/// at, never a delete and re-insert that would cascade the progress away.
+/// an update of the row the `watch_state.last_file_id` foreign key points
+/// at, never a delete and re-insert that would forget the file.
 #[tokio::test]
 async fn relinking_a_missing_file_keeps_its_playback_progress() {
     let db = postgres::connection().await;
@@ -266,27 +268,44 @@ async fn a_swap_exchanges_paths_under_the_unique_path_index() {
     assert_eq!(progress_rows(db.as_ref(), ronin).await, 1);
 }
 
+/// A watched-state row for the movie `file` belongs to, last played from it.
 async fn insert_progress(db: &sea_orm::DatabaseConnection, user: uuid::Uuid, file: uuid::Uuid) {
     use sea_orm::{ConnectionTrait, Statement};
 
     db.execute_raw(Statement::from_sql_and_values(
         db.get_database_backend(),
-        "INSERT INTO playback_progress \
-         (id, user_id, file_id, position_secs, duration_secs, completed, updated_at) \
-         VALUES ($1, $2, $3, 1.0, 100.0, false, now())",
+        "INSERT INTO watch_state \
+         (id, user_id, movie_id, last_file_id, position_secs, duration_secs, last_played_at) \
+         SELECT $1, $2, me.movie_id, f.id, 1.0, 100.0, now() \
+           FROM files f JOIN movie_entries me ON me.id = f.movie_entry_id WHERE f.id = $3",
         [uuid::Uuid::new_v4().into(), user.into(), file.into()],
     ))
     .await
     .expect("insert progress");
 }
 
+/// The watched-state rows last played from `file`.
 async fn progress_rows(db: &sea_orm::DatabaseConnection, file: uuid::Uuid) -> usize {
     use sea_orm::{ConnectionTrait, Statement};
 
     db.query_all_raw(Statement::from_sql_and_values(
         db.get_database_backend(),
-        "SELECT id FROM playback_progress WHERE file_id = $1",
+        "SELECT id FROM watch_state WHERE last_file_id = $1",
         [file.into()],
+    ))
+    .await
+    .expect("query progress")
+    .len()
+}
+
+/// `user`'s watched-state rows whose last file is gone.
+async fn fileless_rows(db: &sea_orm::DatabaseConnection, user: uuid::Uuid) -> usize {
+    use sea_orm::{ConnectionTrait, Statement};
+
+    db.query_all_raw(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "SELECT id FROM watch_state WHERE user_id = $1 AND last_file_id IS NULL",
+        [user.into()],
     ))
     .await
     .expect("query progress")
