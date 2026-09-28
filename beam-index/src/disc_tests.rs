@@ -276,6 +276,20 @@ fn a_playback_time_is_read_to_the_frame() {
 }
 
 proptest! {
+    /// No bytes make either parser panic -- a disc is read as found --
+    /// whether or not they open with the header each parser looks for.
+    #[test]
+    fn parsing_any_bytes_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {
+        let _ = dvd_title_set_duration(&bytes);
+        let _ = blu_ray_playlist(&bytes);
+        let mut ifo = b"DVDVIDEO-VTS".to_vec();
+        ifo.extend_from_slice(&bytes);
+        let _ = dvd_title_set_duration(&ifo);
+        let mut mpls = b"MPLS0200".to_vec();
+        mpls.extend_from_slice(&bytes);
+        let _ = blu_ray_playlist(&mpls);
+    }
+
     /// What a fixture writes, the parser reads: an IFO's longest chain, and
     /// a playlist's clips and total.
     #[test]

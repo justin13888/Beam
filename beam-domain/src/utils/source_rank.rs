@@ -271,9 +271,6 @@ mod tests {
         );
     }
 
-    /// A stack that does not start at part 1, or skips a number, is missing
-    /// a part or is not one film: every file of it is a source of its own,
-    /// and other stacks are untouched.
     /// A set of discs is one stack only when the edition holds each of its
     /// discs from 1 once; a gap or a repeat leaves each disc its own stack,
     /// and a file of no set is its folder's.
@@ -345,6 +342,9 @@ mod tests {
         }
     }
 
+    /// A stack that does not start at part 1, or skips a number, is missing
+    /// a part or is not one film: every file of it is a source of its own,
+    /// and other stacks are untouched.
     #[test]
     fn a_stack_missing_a_part_is_not_stacked() {
         assert_eq!(
