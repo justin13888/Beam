@@ -40,9 +40,9 @@ source at its first part and stop there, and advancing through the parts is the 
 work split from #233. Either way every request is still a direct play of one file: the server
 never concatenates or remuxes parts, which would be the transcoding ADR-0004 rules out. Playback progress stays per file, so resuming a multi-part movie
 resumes the part that was playing. Continue-watching reads those per-file rows, so a movie with
-progress on two of its parts is listed once per part; the title-level watch state of
-[#188](https://github.com/justin13888/beam/issues/188) resolves that, and counts a stacked movie as
-played only when the report is on its last part. Sources
+progress on two of its parts is listed once per part. Once the title-level watch state of
+[#188](https://github.com/justin13888/beam/issues/188) lands, it resolves that, and counts a stacked
+movie as played only when the report is on its last part. Sources
 accept a movie id or an episode id; a show id is rejected with 400, since shows have no files of
 their own. Episode sources landed in
 [#102](https://github.com/justin13888/beam/pull/102), closing
