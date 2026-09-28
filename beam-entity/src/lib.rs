@@ -3,6 +3,7 @@
 //! These entities map to the database tables created by migrations.
 
 pub mod admin_log;
+pub mod applied_nfo;
 pub mod device_auth;
 pub mod episode;
 pub mod files;
@@ -24,9 +25,11 @@ pub mod season;
 pub mod session;
 pub mod show;
 pub mod show_genre;
+pub mod sidecar_subtitle;
 pub mod user;
 
 pub use admin_log::Entity as AdminLog;
+pub use applied_nfo::Entity as AppliedNfo;
 pub use device_auth::Entity as DeviceAuth;
 pub use episode::Entity as Episode;
 pub use files::Entity as Files;
@@ -48,4 +51,5 @@ pub use season::Entity as Season;
 pub use session::Entity as Session;
 pub use show::Entity as Show;
 pub use show_genre::Entity as ShowGenre;
+pub use sidecar_subtitle::Entity as SidecarSubtitle;
 pub use user::Entity as User;

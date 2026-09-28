@@ -27,7 +27,13 @@ use crate::utils::identity::{normalize_title, title_identity_key};
 /// reaches files and titles indexed before it. Bump it whenever a path would
 /// classify differently or a title would key differently. Rows and keys
 /// stored before versions existed carry `0`.
-pub const CLASSIFIER_VERSION: u16 = 1;
+///
+/// - `1`: path inference v2 and the identity-key fold (issues #182, #183).
+/// - `2`: an NFO beside the file, and its container tags, are read too
+///   ([`crate::utils::classification`], issue #184). Keys are derived exactly
+///   as by `1`, so the re-derivation this bump triggers changes none; the
+///   reclassification it triggers is what applies NFOs already on disk.
+pub const CLASSIFIER_VERSION: u16 = 2;
 
 /// A title and year as a path spells them -- what a movie or show is keyed by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,57 +267,60 @@ fn is_box_set_of(folder: &str, show: &str) -> bool {
 }
 
 /// Infer what the file at `rel_path` -- relative to its library root -- is.
-pub fn infer_media(rel_path: &Path) -> MediaInference {
-    let components: Vec<String> = rel_path
+/// A path's folders (root first) and its file's stem, or `None` for a path
+/// with no file name.
+fn split_path(rel_path: &Path) -> Option<(Vec<String>, String)> {
+    let mut components: Vec<String> = rel_path
         .components()
         .filter_map(|c| match c {
             Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
             _ => None,
         })
         .collect();
-    let Some((file_name, dirs)) = components.split_last() else {
-        return MediaInference::Movie(MovieInference {
-            title: TitleGuess {
-                title: String::new(),
-                year: None,
-            },
-            edition: None,
-        });
-    };
-    let stem = Path::new(file_name)
+    let file_name = components.pop()?;
+    let stem = Path::new(&file_name)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let parsed = parse_media_filename(&stem);
+    Some((components, stem))
+}
 
-    let parent = dirs.last().map(String::as_str);
-    let parent_season_folder = parent.and_then(season_folder);
-    let parent_season = parent_season_folder.as_ref().map(|folder| folder.season);
-    // A folder of nothing but a season range (`Breaking Bad/Season 1-2/`)
-    // holds seasons of the show above it: a season folder whose season is
-    // unknown.
-    let parent_is_bare_range = parent.is_some_and(is_bare_season_range);
-    let filename_series = (!parsed.title.is_empty()).then(|| TitleGuess {
+/// The series the filename names: its parsed title, if it has one.
+fn filename_series_of(parsed: &ParsedFilename) -> Option<TitleGuess> {
+    (!parsed.title.is_empty()).then(|| TitleGuess {
         title: parsed.title.clone(),
         year: parsed.year,
-    });
-    // The show the folders name. Above a season folder or a bare season
-    // range: the series folder (that folder's parent), unless the season
-    // folder's own text before its season token names a different title --
-    // a season pack under a category folder -- or there is no series
-    // folder. A series folder that is a box set of the filename's show
-    // (`Breaking Bad Complete Series`) names that show. Otherwise the parent
-    // folder.
-    let season_prefix: Option<&str> = match &parent_season_folder {
+    })
+}
+
+/// The show the folders above a file name, and -- when the file's folder is
+/// a season folder or a bare season range -- the text before its season
+/// token.
+///
+/// Above a season folder or a bare season range: the series folder (that
+/// folder's parent), unless the season folder's own text before its season
+/// token names a different title -- a season pack under a category folder --
+/// or there is no series folder. A series folder that is a box set of the
+/// filename's show (`Breaking Bad Complete Series`) names that show.
+/// Otherwise the parent folder.
+fn folder_series<'a>(
+    dirs: &'a [String],
+    filename_series: &Option<TitleGuess>,
+) -> (Option<&'a str>, Option<TitleGuess>) {
+    let parent = dirs.last().map(String::as_str);
+    let season_prefix: Option<&str> = match parent.and_then(season_folder) {
         Some(folder) => Some(folder.prefix),
-        None => parent_is_bare_range.then_some(""),
+        // A folder of nothing but a season range (`Breaking Bad/Season
+        // 1-2/`) holds seasons of the show above it: a season folder whose
+        // season is unknown.
+        None => parent.is_some_and(is_bare_season_range).then_some(""),
     };
-    let folder_series: Option<TitleGuess> = match season_prefix {
+    let series = match season_prefix {
         Some(season_prefix) => {
             let series_dir = dirs.len().checked_sub(2).and_then(|i| title_of(&dirs[i]));
             match (series_dir, title_of(season_prefix)) {
                 (Some(dir), Some(prefix)) if !same_title(&dir.title, &prefix.title) => Some(prefix),
-                (Some(dir), _) => match &filename_series {
+                (Some(dir), _) => match filename_series {
                     Some(file) if is_box_set_of(&dir.title, &file.title) => Some(TitleGuess {
                         title: file.title.clone(),
                         year: dir.year.or(file.year),
@@ -323,6 +332,62 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         }
         None => parent.and_then(title_of),
     };
+    (season_prefix, series)
+}
+
+/// The show a file at `rel_path` is an episode of when something other than
+/// its path -- an NFO, its container tags -- says it is an episode: the show
+/// its folders name (the series folder above a season folder, else its
+/// parent folder), else the title its filename spells. The filename never
+/// overrides a folder here, as it does for a path that is itself an episode's
+/// (`TV Shows/Breaking.Bad.S01E01.mkv`): a name with no episode marker
+/// (`Show/01 Pilot.m4v`) is the episode's, not the show's.
+pub(crate) fn hinted_series(rel_path: &Path) -> TitleGuess {
+    let unknown = || TitleGuess {
+        title: UNKNOWN_SHOW.to_string(),
+        year: None,
+    };
+    let Some((dirs, stem)) = split_path(rel_path) else {
+        return unknown();
+    };
+    let filename_series = filename_series_of(&parse_media_filename(&stem));
+    let (_, folder) = folder_series(&dirs, &filename_series);
+    folder.or(filename_series).unwrap_or_else(unknown)
+}
+
+/// The movie a file at `rel_path` is when something other than its path --
+/// an NFO -- says it is a movie: what [`infer_media`] reads a path with no
+/// episode marker as.
+pub(crate) fn movie_reading(rel_path: &Path) -> MovieInference {
+    match split_path(rel_path) {
+        Some((dirs, stem)) => {
+            let parsed = parse_media_filename(&stem);
+            movie_of(parsed, stem, dirs.last().map(String::as_str))
+        }
+        None => MovieInference {
+            title: TitleGuess {
+                title: String::new(),
+                year: None,
+            },
+            edition: None,
+        },
+    }
+}
+
+/// Infer what the file at `rel_path` -- relative to its library root -- is.
+pub fn infer_media(rel_path: &Path) -> MediaInference {
+    let Some((dirs, stem)) = split_path(rel_path) else {
+        return MediaInference::Movie(movie_reading(rel_path));
+    };
+    let dirs = dirs.as_slice();
+    let parsed = parse_media_filename(&stem);
+
+    let parent = dirs.last().map(String::as_str);
+    let parent_season = parent.and_then(season_folder).map(|folder| folder.season);
+    let parent_is_bare_range = parent.is_some_and(is_bare_season_range);
+    let filename_series = filename_series_of(&parsed);
+    // The show the folders name; see `folder_series`.
+    let (season_prefix, folder_series) = folder_series(dirs, &filename_series);
     let series = || -> TitleGuess {
         let chosen = match (
             season_prefix,
@@ -448,6 +513,11 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         );
     }
 
+    MediaInference::Movie(movie_of(parsed, stem, parent))
+}
+
+/// The movie a filename parse names, completed from its parent folder.
+fn movie_of(parsed: ParsedFilename, stem: String, parent: Option<&str>) -> MovieInference {
     let ParsedFilename {
         title,
         year,
@@ -473,7 +543,7 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
             year,
         },
     };
-    MediaInference::Movie(MovieInference { title, edition })
+    MovieInference { title, edition }
 }
 
 /// An absolute episode number found in a stem.

@@ -926,3 +926,165 @@ async fn the_unique_path_migration_merges_duplicate_rows_and_their_progress() {
 
     scoped.drop_schema().await.expect("drop schema");
 }
+
+/// Issue #184's migration: one provider id pins one title, a sidecar subtitle
+/// goes with its video file and is held to the text formats, and `down()`
+/// takes all of it away so `up()` can apply again.
+#[tokio::test]
+async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
+    use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
+
+    let scoped = ScopedSchema::create("nfo_sidecars")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+
+    // Applied up to and including this migration, so rolling back one step
+    // reverts exactly it, however many migrations come after it.
+    let through_this_one = beam_migration::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20261002_000001_nfo_sidecars")
+        .expect("the migration is registered")
+        + 1;
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(through_this_one as u32))
+        .await
+        .expect("every migration through this one applies");
+
+    let text = |sql: &'static str| async move {
+        db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
+            .await
+            .expect("query")
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "v").expect("a text column v"))
+            .collect::<Vec<String>>()
+    };
+    let seed = [
+        "INSERT INTO libraries (id, name, root_path, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
+        "INSERT INTO movies (id, title, identity_key, pinned_ref, pin_source, created_at, \
+                             updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000b', 'The Matrix', 'the matrix|1999', 'tmdb:603', \
+          'nfo', now(), now()), \
+         ('00000000-0000-0000-0000-00000000000c', 'Heat', 'heat|1995', NULL, NULL, now(), now()), \
+         ('00000000-0000-0000-0000-00000000000d', 'Alien', 'alien|1979', NULL, NULL, now(), now())",
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) VALUES \
+         ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', \
+          '00000000-0000-0000-0000-00000000000b', NULL, true, now())",
+        "INSERT INTO files (id, movie_entry_id, library_id, file_path, file_size, hash_xxh3, \
+                            scanned_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-000000000001', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/m.mkv', 1, 1, now(), now())",
+        "INSERT INTO sidecar_subtitles (id, file_id, library_id, path, format, language, \
+                                        size_bytes, created_at, updated_at) VALUES \
+         (gen_random_uuid(), '00000000-0000-0000-0000-0000000000f1', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/m.en.srt', 'srt', 'eng', 10, now(), now())",
+        "INSERT INTO applied_nfos (id, library_id, path, size_bytes, content_hash, created_at, \
+                                   updated_at) VALUES \
+         (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', '/videos/movie.nfo', 2, \
+          'c0ffee', now(), now())",
+    ];
+    for sql in seed {
+        db.execute_unprepared(sql).await.expect("seed rows");
+    }
+
+    for (refused, why) in [
+        (
+            "UPDATE movies SET pinned_ref = 'tmdb:603', pin_source = 'admin' \
+              WHERE id = '00000000-0000-0000-0000-00000000000c'",
+            "one provider id pins one movie",
+        ),
+        (
+            "UPDATE movies SET pinned_ref = 'tmdb:949' \
+              WHERE id = '00000000-0000-0000-0000-00000000000c'",
+            "a pin says who set it",
+        ),
+        (
+            "UPDATE movies SET pin_source = 'nfo' \
+              WHERE id = '00000000-0000-0000-0000-00000000000d'",
+            "no source without a pin",
+        ),
+        (
+            "UPDATE movies SET pinned_ref = 'tmdb:949', pin_source = 'user' \
+              WHERE id = '00000000-0000-0000-0000-00000000000c'",
+            "a pin is set by an NFO or an administrator",
+        ),
+        (
+            "INSERT INTO sidecar_subtitles (id, file_id, library_id, path, format, size_bytes, \
+                                            created_at, updated_at) VALUES \
+             (gen_random_uuid(), '00000000-0000-0000-0000-0000000000f1', \
+              '00000000-0000-0000-0000-00000000000a', '/videos/m.sup', 'sup', 1, now(), now())",
+            "an image-based subtitle format is refused",
+        ),
+        (
+            "INSERT INTO sidecar_subtitles (id, file_id, library_id, path, format, size_bytes, \
+                                            created_at, updated_at) VALUES \
+             (gen_random_uuid(), '00000000-0000-0000-0000-0000000000f1', \
+              '00000000-0000-0000-0000-00000000000a', '/videos/m.en.srt', 'srt', 1, now(), now())",
+            "one row per subtitle path",
+        ),
+        (
+            "INSERT INTO applied_nfos (id, library_id, path, size_bytes, content_hash, \
+                                       created_at, updated_at) VALUES \
+             (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', '/videos/movie.nfo', \
+              2, 'c0ffee', now(), now())",
+            "one record per NFO path",
+        ),
+        (
+            "INSERT INTO applied_nfos (id, library_id, path, size_bytes, content_hash, \
+                                       created_at, updated_at) VALUES \
+             (gen_random_uuid(), '00000000-0000-0000-0000-0000000000ff', '/videos/other.nfo', \
+              2, 'c0ffee', now(), now())",
+            "an NFO record belongs to a library",
+        ),
+        (
+            "UPDATE files SET container_tags = '[\"show\"]'::jsonb \
+              WHERE id = '00000000-0000-0000-0000-0000000000f1'",
+            "a file's container tags are a JSON object",
+        ),
+    ] {
+        assert!(db.execute_unprepared(refused).await.is_err(), "{why}");
+    }
+    db.execute_unprepared(
+        "UPDATE files SET container_tags = '{\"show\": \"The Office\", \"season\": 2}'::jsonb \
+          WHERE id = '00000000-0000-0000-0000-0000000000f1'",
+    )
+    .await
+    .expect("a file stores the tags its probe read");
+    db.execute_unprepared(
+        "UPDATE movies SET pinned_ref = NULL, pin_source = NULL \
+          WHERE id = '00000000-0000-0000-0000-00000000000b'",
+    )
+    .await
+    .expect("any number of titles may be unpinned");
+
+    db.execute_unprepared("DELETE FROM files WHERE id = '00000000-0000-0000-0000-0000000000f1'")
+        .await
+        .expect("delete the video file");
+    assert_eq!(
+        text("SELECT count(*)::text AS v FROM sidecar_subtitles").await,
+        vec!["0"],
+        "a sidecar subtitle goes with its video file"
+    );
+
+    beam_migration::Migrator::down(db, Some(1))
+        .await
+        .expect("the migration rolls back");
+    assert!(
+        text(
+            "SELECT (table_name || '.' || column_name)::text AS v \
+               FROM information_schema.columns \
+              WHERE table_schema = current_schema() \
+                AND (column_name IN ('pinned_ref', 'pin_source', 'container_tags') \
+                     OR table_name IN ('sidecar_subtitles', 'applied_nfos'))"
+        )
+        .await
+        .is_empty(),
+        "down() drops the tables and every column it added"
+    );
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+        .await
+        .expect("the migration reapplies over the rolled-back schema");
+
+    scoped.drop_schema().await.expect("drop schema");
+}

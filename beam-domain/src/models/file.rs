@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::utils::classification::ContainerTags;
+
 /// The instant `mtime` reads back as once a
 /// [`crate::repositories::FileRepository`] has stored it (issue #229).
 ///
@@ -51,6 +53,11 @@ pub struct MediaFile {
     /// (see [`crate::utils::media_path::CLASSIFIER_VERSION`]). A row decided
     /// by older rules is reclassified from its path by the next scan.
     pub classifier_version: u16,
+    /// The file-level container tags classification reads, as the last
+    /// successful probe read them (issue #184); `None` while the file has no
+    /// successful probe -- or had its last one before these were stored. A
+    /// reclassification reads these rather than probing the file again.
+    pub container_tags: Option<ContainerTags>,
 }
 
 /// Status of the file in the library
@@ -112,6 +119,8 @@ pub struct CreateMediaFile {
     pub status: FileStatus,
     /// See [`MediaFile::classifier_version`].
     pub classifier_version: u16,
+    /// See [`MediaFile::container_tags`].
+    pub container_tags: Option<ContainerTags>,
 }
 
 /// A file's classification, replaced as a whole when a scan reclassifies it
@@ -179,7 +188,8 @@ pub fn displaced_from(path: &std::path::Path) -> Option<PathBuf> {
 }
 
 /// What an [`UpdateMediaFile`] does to a file's probe results -- its MIME
-/// type, duration and container format, which one probe sets together.
+/// type, duration, container format and container tags, which one probe
+/// sets together.
 ///
 /// A row with no duration is one whose probe has not succeeded, and the
 /// indexer probes it again on every visit (FR-218). So a failed probe of
@@ -195,9 +205,17 @@ pub enum ProbeUpdate {
         mime_type: String,
         duration: Duration,
         container_format: String,
+        container_tags: ContainerTags,
     },
-    /// Clear all three: the content changed and its probe failed.
+    /// Clear them all: the content changed and its probe failed.
     Clear,
+}
+
+/// The `files.container_tags` value of `tags`.
+#[cfg(feature = "entity")]
+pub fn container_tags_json(tags: &ContainerTags) -> serde_json::Value {
+    // A struct of strings and integers always serializes.
+    serde_json::to_value(tags).unwrap_or_default()
 }
 
 #[cfg(feature = "entity")]
@@ -251,6 +269,11 @@ impl From<beam_entity::files::Model> for MediaFile {
             updated_at: model.updated_at.with_timezone(&Utc),
             missing_since: model.missing_since.map(|d| d.with_timezone(&Utc)),
             classifier_version: model.classifier_version as u16,
+            // The column holds only what `container_tags_json` wrote; a value
+            // that does not read back is treated as no tags.
+            container_tags: model
+                .container_tags
+                .and_then(|json| serde_json::from_value(json).ok()),
         }
     }
 }

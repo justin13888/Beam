@@ -51,6 +51,12 @@ pub struct Model {
     /// The version of the classification rules that decided this row's
     /// content; `0` for rows classified before versions existed.
     pub classifier_version: i16,
+
+    /// The file-level container tags classification reads (`title`, `show`,
+    /// `season`, `episode`, `year`), as a JSON object, from the last
+    /// successful probe; `NULL` while there is none (issue #184).
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub container_tags: Option<Json>,
 }
 
 /// The `file_status` column is a Postgres enum type, not text (see

@@ -100,6 +100,20 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   emits a
   non-fatal admin warning when two renditions of the same movie/episode have runtimes that diverge
   past `DivergencePolicy`'s relative+absolute thresholds, a likely misnamed/mismatched file);
+  `index_hints.rs` (reads the NFOs beside a video -- read-only opens of regular files, at most
+  1 MiB -- finds or creates a title by the provider id they pin before its identity key, and
+  re-pins the titles an NFO describes when a scan or the watcher finds its content changed since
+  it was last applied, per `applied_nfos` -- the watcher leaving to the scan a changed NFO that
+  may have moved with a video --, and carries the NFO records of the videos one scan or
+  event relinks to their new paths, the whole batch judged at once so a swap or rotation carries
+  each NFO as a move does, `carry_nfos_on_relink`) and `index_sidecars.rs` (records the
+  text subtitles beside indexed videos as `sidecar_subtitles`, from the scan's walk and from
+  watcher events), both child modules of `index.rs` (FR-219, FR-220). Both run inside the
+  library's lock: a scan re-pins and reconciles subtitles as a phase of its job, after every file
+  has been settled, hashed, probed and relinked (FR-221), so a moved video's subtitles are those
+  beside its new path; the watcher reconciles a relinked video's subtitle rows, and the subtitles
+  and NFOs beneath a directory event; and a watcher event for an NFO or a subtitle is handed back
+  `Deferred` while the library is held, like any other (FR-218);
   `watcher.rs`
   (`FsWatcher` trait, production `NotifyFsWatcher` — inotify on Linux, with a manual-mode
   `notify::PollWatcher` for roots `filesystem_probe.rs` (`statfs(2)`) classifies as a network
@@ -176,8 +190,8 @@ This crate is what lets services be tested purely against in-memory fakes.
   `genre.rs`, `enrichment.rs`, `playback_progress.rs`, `search.rs`, `admin_log.rs`) with
   `#[cfg(feature = "entity")] impl From<beam_entity::X::Model>` conversions — the `entity` feature
   is optional so the crate compiles and tests without `sea-orm`.
-- `repositories/` — one trait per aggregate (movie, show, file, library, stream, genre,
-  enrichment, playback-progress, admin-log, library-shape), each with an `InMemory*` fake and, behind
+- `repositories/` — one trait per aggregate (movie, show, file, library, stream, sidecar subtitle,
+  genre, enrichment, playback-progress, admin-log, library-shape), each with an `InMemory*` fake and, behind
   `test-utils`, a `mockall` mock for strict contract tests.
 - `providers/` — `EnrichmentProvider`: search/get movie and show metadata by external ID, resolve
   image URLs. Ships `InMemoryEnrichmentProvider` (test-utils) and `NoopEnrichmentProvider` (a
@@ -185,7 +199,10 @@ This crate is what lets services be tested purely against in-memory fakes.
 - `utils/` — pure helpers: `hash.rs` (XXH3), `file.rs` (`FileType`), `identity.rs` (title identity
   keys), `filename.rs` (scene-filename title/year/episode/edition parsing of one stem),
   `media_path.rs` (`infer_media`: what a path relative to a library root is, folders included --
-  season folders, absolute numbering -- versioned by `CLASSIFIER_VERSION`), and `path_policy.rs`
+  season folders, absolute numbering -- versioned by `CLASSIFIER_VERSION`), `nfo.rs` (Kodi NFO
+  parsing), `classification.rs` (`classify`: path inference refined by an NFO and container tags,
+  keys always the path's), `sidecar.rs` (which video a subtitle file belongs to, and its language
+  and flags), and `path_policy.rs`
   (`PathPolicy`: which paths are media, sidecars, excluded or ignored, including the
   `BEAM_SCAN_IGNORE` globs). The scan and the watcher both decide through these (FR-204, FR-216).
 

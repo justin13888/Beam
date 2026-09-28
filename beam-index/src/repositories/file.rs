@@ -7,6 +7,7 @@ use sea_orm::prelude::DateTimeWithTimeZone;
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
+use beam_domain::models::file::container_tags_json;
 use beam_domain::models::{
     CreateMediaFile, FileClassification, FileRelink, MediaFile, MediaFileContent, ProbeUpdate,
     UpdateMediaFile, displaced_path,
@@ -28,26 +29,6 @@ fn content_columns(content: Option<MediaFileContent>) -> (Option<Uuid>, Option<U
         ),
         None => (None, None, None),
     }
-}
-
-/// The `LIKE` pattern, escaped with `\`, that matches a stored path strictly
-/// beneath the directory `dir`: its text, wildcards escaped, then a
-/// separator and anything. The separator keeps `/a/S1` from matching
-/// `/a/S10/x.mkv`, and escaping keeps a `_` or `%` in a directory's name
-/// from matching any character.
-fn beneath_pattern(dir: &Path) -> String {
-    let dir = dir.to_string_lossy();
-    let dir = dir.trim_end_matches(std::path::MAIN_SEPARATOR);
-    let mut pattern = String::with_capacity(dir.len() + 2);
-    for c in dir.chars() {
-        if matches!(c, '\\' | '%' | '_') {
-            pattern.push('\\');
-        }
-        pattern.push(c);
-    }
-    pattern.push(std::path::MAIN_SEPARATOR);
-    pattern.push('%');
-    pattern
 }
 
 use beam_domain::repositories::FileRepository;
@@ -133,6 +114,31 @@ impl FileRepository for SqlFileRepository {
         Ok(models.into_iter().map(MediaFile::from).collect())
     }
 
+    async fn find_all_under(&self, library_id: Uuid, dir: &Path) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        // `starts_with` rather than `LIKE`: the directory is a literal, and a
+        // `_` or `%` in a folder name is not a wildcard. The separator makes
+        // the prefix match whole components only.
+        let mut prefix = dir.to_string_lossy().into_owned();
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        let models = files::Entity::find()
+            .filter(files::Column::LibraryId.eq(library_id))
+            .filter(files::Column::MissingSince.is_null())
+            .filter(Expr::cust_with_values(
+                r#"starts_with("files"."file_path", $1)"#,
+                [prefix],
+            ))
+            .all(self.db.as_ref())
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
     /// A reconcile read: no `missing_since` filter. Served by
     /// `idx_files_hash`.
     async fn find_by_library_and_hash_including_missing(
@@ -163,7 +169,10 @@ impl FileRepository for SqlFileRepository {
 
         let models = files::Entity::find()
             .filter(files::Column::LibraryId.eq(library_id))
-            .filter(files::Column::FilePath.like(LikeExpr::new(beneath_pattern(dir)).escape('\\')))
+            .filter(
+                files::Column::FilePath
+                    .like(LikeExpr::new(super::beneath_pattern(dir)).escape('\\')),
+            )
             .all(self.db.as_ref())
             .await?;
 
@@ -226,6 +235,7 @@ impl FileRepository for SqlFileRepository {
             missing_since: Set(None),
             last_episode_number: Set(last_episode_number),
             classifier_version: Set(create.classifier_version as i16),
+            container_tags: Set(create.container_tags.as_ref().map(container_tags_json)),
         };
 
         let result = new_file.insert(self.db.as_ref()).await?;
@@ -256,15 +266,18 @@ impl FileRepository for SqlFileRepository {
                 mime_type,
                 duration,
                 container_format,
+                container_tags,
             } => {
                 active_model.mime_type = Set(Some(mime_type));
                 active_model.duration_secs = Set(Some(duration.as_secs_f64()));
                 active_model.container_format = Set(Some(container_format));
+                active_model.container_tags = Set(Some(container_tags_json(&container_tags)));
             }
             ProbeUpdate::Clear => {
                 active_model.mime_type = Set(None);
                 active_model.duration_secs = Set(None);
                 active_model.container_format = Set(None);
+                active_model.container_tags = Set(None);
             }
         }
         if let Some(status) = update.status {

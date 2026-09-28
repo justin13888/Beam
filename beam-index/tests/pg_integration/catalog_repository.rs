@@ -196,6 +196,7 @@ impl PgFixture {
                     content: Some(content),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .unwrap();

@@ -1,4 +1,5 @@
 pub mod admin_log;
+pub mod applied_nfo;
 pub mod catalog;
 // Shared behavioural contracts, instantiated over the in-memory doubles here and
 // over the SeaORM implementations in `beam-index` under `pg-integration`.
@@ -15,9 +16,11 @@ pub mod movie;
 pub mod playback_progress;
 pub mod playback_telemetry;
 pub mod show;
+pub mod sidecar_subtitle;
 pub mod stream;
 
 pub use admin_log::AdminLogRepository;
+pub use applied_nfo::AppliedNfoRepository;
 pub use catalog::CatalogRepository;
 pub use enrichment::EnrichmentStateRepository;
 pub use file::FileRepository;
@@ -28,4 +31,5 @@ pub use movie::MovieRepository;
 pub use playback_progress::PlaybackProgressRepository;
 pub use playback_telemetry::PlaybackTelemetryRepository;
 pub use show::ShowRepository;
+pub use sidecar_subtitle::SidecarSubtitleRepository;
 pub use stream::MediaStreamRepository;

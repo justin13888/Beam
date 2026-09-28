@@ -42,6 +42,12 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
         &self,
         library_id: Uuid,
     ) -> Result<Vec<MediaFile>, DbErr>;
+    /// Visible read: every present file in the library whose path lies
+    /// beneath the directory `dir`, at any depth. `dir` is a literal prefix
+    /// matched a whole component at a time: `/a/b` holds `/a/b/c.mkv`, never
+    /// `/a/bc.mkv`. Used to find the files one NFO can describe without
+    /// reading the whole library (issue #184).
+    async fn find_all_under(&self, library_id: Uuid, dir: &Path) -> Result<Vec<MediaFile>, DbErr>;
     /// Reconcile read: every file in the library whose content hash is
     /// `hash`, missing ones included. The indexer asks it for the row a new
     /// path might be a moved or renamed file of (issue #180); a file in
@@ -210,6 +216,22 @@ pub mod in_memory {
                 .collect())
         }
 
+        async fn find_all_under(
+            &self,
+            library_id: Uuid,
+            dir: &Path,
+        ) -> Result<Vec<MediaFile>, DbErr> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|f| f.missing_since.is_none() && f.library_id == library_id)
+                .filter(|f| f.path != dir && f.path.starts_with(dir))
+                .cloned()
+                .collect())
+        }
+
         async fn find_by_library_and_hash_including_missing(
             &self,
             library_id: Uuid,
@@ -288,6 +310,7 @@ pub mod in_memory {
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
                 classifier_version: create.classifier_version,
+                container_tags: create.container_tags,
             };
             check_status(&file)?;
             let mut files = self.files.lock().unwrap();
@@ -327,15 +350,18 @@ pub mod in_memory {
                     mime_type,
                     duration,
                     container_format,
+                    container_tags,
                 } => {
                     file.mime_type = Some(mime_type);
                     file.duration = Some(duration);
                     file.container_format = Some(container_format);
+                    file.container_tags = Some(container_tags);
                 }
                 ProbeUpdate::Clear => {
                     file.mime_type = None;
                     file.duration = None;
                     file.container_format = None;
+                    file.container_tags = None;
                 }
             }
             if let Some(status) = update.status {

@@ -20,6 +20,14 @@ pub struct Model {
     /// stored before versions existed. The indexer re-derives a key older
     /// than the current rules from the title's files.
     pub identity_key_version: i16,
+    /// The provider id an NFO pins this title to, as `"provider:id"`
+    /// (`tmdb:603`); see `beam_domain::models::pin`. Unique; `NULL` when no
+    /// NFO pins it.
+    #[sea_orm(unique)]
+    pub pinned_ref: Option<String>,
+    /// Who set `pinned_ref`: `nfo` or `admin` (a `CHECK` holds it to these),
+    /// `NULL` exactly when `pinned_ref` is.
+    pub pin_source: Option<String>,
     pub title_localized: Option<String>,
     pub description: Option<String>,
     pub year: Option<i32>,

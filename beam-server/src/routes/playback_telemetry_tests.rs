@@ -142,6 +142,7 @@ async fn seed_hevc_file(fixture: &Fixture) -> Uuid {
             }),
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
         })
         .await
         .unwrap();

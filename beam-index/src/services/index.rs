@@ -29,29 +29,46 @@ use beam_domain::models::file::{
     CreateMediaFile, FileClassification, FileRelink, FileStatus, MediaFile, MediaFileContent,
     ProbeUpdate, UpdateMediaFile, displaced_from, mtime_as_stored,
 };
-use beam_domain::models::movie::{CreateMovieEntry, MovieEntry};
-use beam_domain::models::show::{CreateEpisode, Episode};
+use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, MovieEntry};
+use beam_domain::models::show::{CreateEpisode, CreateShow, Episode};
 use beam_domain::repositories::{
-    EnrichmentStateRepository, FileRepository, LibraryRepository, MediaStreamRepository,
-    MovieRepository, PlaybackProgressRepository, ShowRepository,
+    AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
+    MediaStreamRepository, MovieRepository, PlaybackProgressRepository, ShowRepository,
+    SidecarSubtitleRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
+use beam_domain::utils::classification::{Classification, ContainerTags, Hints, classify};
 use beam_domain::utils::filename::{ParsedFilename, parse_media_filename};
 use beam_domain::utils::identity::title_identity_key;
 use beam_domain::utils::media_path::{
-    CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, UnclassifiableReason,
-    infer_media, season_folder_number,
+    CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, TitleGuess,
+    UnclassifiableReason, infer_media, season_folder_number,
 };
 use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path};
 
-/// Read the size and modification time of a file in a single stat call --
-/// the only place the indexer reads an mtime. The mtime comes back at the
-/// precision a row keeps ([`mtime_as_stored`]), so it compares equal to the
-/// row of an unchanged file (issue #229).
+/// Read the size and modification time of a file in a single stat call,
+/// the mtime as [`stored_mtime`] reads it.
 fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
     let meta = std::fs::metadata(path)?;
-    let mtime: Option<DateTime<Utc>> = meta.modified().ok().map(|t| mtime_as_stored(t.into()));
-    Ok((meta.len(), mtime))
+    Ok((meta.len(), stored_mtime(&meta)))
+}
+
+/// The modification time `meta` records -- the only way the indexer reads an
+/// mtime, for a media file or a sidecar. It comes back at the precision a row
+/// keeps ([`mtime_as_stored`]), so it compares equal to the row of an
+/// unchanged file (issue #229).
+fn stored_mtime(meta: &std::fs::Metadata) -> Option<DateTime<Utc>> {
+    meta.modified().ok().map(|t| mtime_as_stored(t.into()))
+}
+
+/// The container tags a probe read, as classification takes them (issue #184).
+fn container_tags(metadata: &VideoFileMetadata) -> ContainerTags {
+    ContainerTags::from_tags(
+        metadata
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    )
 }
 
 /// What a walk of a library root found on disk.
@@ -81,6 +98,10 @@ struct WalkOutcome {
     /// Whether the walk hit an error it could not attribute to a path. Nothing
     /// then scopes what the walk failed to see, so no row is marked missing.
     unscoped_failure: bool,
+    /// Every text subtitle beside the media (issue #184).
+    subtitles: Vec<sidecars::WalkedSidecar>,
+    /// Every NFO beside the media (issue #184).
+    nfos: Vec<hints::WalkedNfo>,
 }
 
 /// Walks a library root and collects every regular file beneath it.
@@ -115,6 +136,8 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
     let mut excluded = 0usize;
     let mut failed_subtrees: Vec<PathBuf> = Vec::new();
     let mut unscoped_failure = false;
+    let mut subtitles: Vec<sidecars::WalkedSidecar> = Vec::new();
+    let mut nfos: Vec<hints::WalkedNfo> = Vec::new();
     let walk = WalkDir::new(start)
         .follow_links(false)
         .into_iter()
@@ -152,7 +175,21 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
                         match policy.disposition(relative_to(root, &path)) {
                             PathDisposition::Media => files.push(path),
                             PathDisposition::Excluded(_) => excluded += 1,
-                            PathDisposition::Sidecar | PathDisposition::Ignored => {}
+                            PathDisposition::Sidecar => {
+                                if sidecars::is_text_subtitle(&path) {
+                                    subtitles.push(sidecars::WalkedSidecar {
+                                        path,
+                                        size: meta.len(),
+                                        mtime: stored_mtime(&meta),
+                                    });
+                                } else if hints::is_nfo(&path) {
+                                    nfos.push(hints::WalkedNfo {
+                                        stamp: hints::change_stamp(&meta),
+                                        path,
+                                    });
+                                }
+                            }
+                            PathDisposition::Ignored => {}
                         }
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -180,6 +217,8 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
         excluded,
         failed_subtrees,
         unscoped_failure,
+        subtitles,
+        nfos,
     }
 }
 
@@ -879,6 +918,8 @@ pub struct LocalIndexService {
     progress_repo: Arc<dyn PlaybackProgressRepository>,
     path_policy: PathPolicy,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
+    sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
+    applied_nfo_repo: Option<Arc<dyn AppliedNfoRepository>>,
     divergence_policy: DivergencePolicy,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,
@@ -924,6 +965,8 @@ impl LocalIndexService {
             admin_log,
             path_policy: PathPolicy::default(),
             enrichment_repo: None,
+            sidecar_repo: None,
+            applied_nfo_repo: None,
             divergence_policy: DivergencePolicy::default(),
             clock: Arc::new(RealClock),
             id_generator: Arc::new(UuidGenerator),
@@ -991,6 +1034,25 @@ impl LocalIndexService {
     /// which disables enrichment-queue bookkeeping entirely.
     pub fn with_enrichment_repo(mut self, repo: Arc<dyn EnrichmentStateRepository>) -> Self {
         self.enrichment_repo = Some(repo);
+        self
+    }
+
+    /// Wire up sidecar subtitles (issue #184): when set, every text subtitle
+    /// beside an indexed video is recorded as a subtitle of that video.
+    /// Defaults to `None`, which indexes no sidecar subtitles.
+    pub fn with_sidecar_repo(mut self, repo: Arc<dyn SidecarSubtitleRepository>) -> Self {
+        self.sidecar_repo = Some(repo);
+        self
+    }
+
+    /// Wire up what each NFO held when it was last applied (issue #184): when
+    /// set, a scan re-applies exactly the NFOs whose content changed since,
+    /// and an NFO a watcher event reports unchanged is not applied again.
+    /// Defaults to `None`, which leaves re-applying NFOs to watcher events
+    /// alone: without a record, a scan cannot tell an edited NFO from one it
+    /// already applied.
+    pub fn with_applied_nfo_repo(mut self, repo: Arc<dyn AppliedNfoRepository>) -> Self {
+        self.applied_nfo_repo = Some(repo);
         self
     }
 
@@ -1075,8 +1137,11 @@ impl LocalIndexService {
         Ok(count)
     }
 
-    /// Classify a file from its path relative to `library.root_path`,
-    /// finding or creating its movie or show by identity key (issue #182).
+    /// Classify a file from its path relative to `library.root_path`, the
+    /// NFOs beside it and its container `tags` (issue #184), finding or
+    /// creating its movie or show: by the provider id an NFO pins it to, else
+    /// by identity key (issues #182, #183). The key is always the path's; an
+    /// NFO or a tag only says what a new title is shown as.
     ///
     /// `None` when the path says the file is media but not which: an episode
     /// file with no episode number in a season folder. Such a file is kept as
@@ -1086,10 +1151,32 @@ impl LocalIndexService {
         path: &Path,
         library: &Library,
         runtime: Option<Duration>,
+        tags: &ContainerTags,
     ) -> Result<Option<MediaFileContent>, IndexError> {
-        use beam_domain::models::{CreateEpisode, CreateMovie, CreateMovieEntry, CreateShow};
-
-        match infer_media(relative_to(&library.root_path, path)) {
+        let hints::NfoFiles {
+            file: file_nfo,
+            show: show_nfo,
+        } = hints::locate_nfos(&library.root_path, path);
+        let Classification {
+            inference,
+            display,
+            pin,
+        } = classify(
+            relative_to(&library.root_path, path),
+            &Hints {
+                file_nfo: file_nfo.as_ref().map(|located| &located.nfo),
+                show_nfo: show_nfo.as_ref().map(|located| &located.nfo),
+                tags,
+            },
+        );
+        // What classification read is applied by it (FR-219): a movie by its
+        // own NFO, an episode by its show's and its own.
+        let consumed: Vec<&hints::LocatedNfo> = match &inference {
+            MediaInference::Movie(_) => file_nfo.iter().collect(),
+            MediaInference::Episode(_) => show_nfo.iter().chain(file_nfo.iter()).collect(),
+            MediaInference::Unclassifiable(_) => Vec::new(),
+        };
+        match inference {
             MediaInference::Episode(EpisodeInference {
                 series,
                 season: season_num,
@@ -1112,23 +1199,19 @@ impl LocalIndexService {
                 // One `ON CONFLICT` statement on the show's identity key: the
                 // show is found however enrichment has since renamed it, and
                 // two episodes of a new show indexed at once share one row.
-                let show = self
-                    .show_repo
-                    .find_or_create_by_identity(CreateShow::new(series.title, series.year))
-                    .await?;
+                // A new show is shown as its NFO or tags name it.
+                let mut create = CreateShow::new(series.title, series.year);
+                if let Some(TitleGuess { title, year }) = display {
+                    create.title = title;
+                    create.year = year;
+                }
+                let show = self.show_for(create, pin.as_ref(), path).await?;
+                self.record_consumed_nfos(library, &consumed).await?;
 
                 // Ensure library-show association exists
                 self.show_repo
                     .ensure_library_association(library.id, show.id)
                     .await?;
-
-                if let Some(enrichment_repo) = &self.enrichment_repo {
-                    enrichment_repo
-                        .ensure_pending(beam_domain::models::enrichment::EnrichmentTargetId::Show(
-                            show.id,
-                        ))
-                        .await?;
-                }
 
                 let season = self
                     .show_repo
@@ -1160,25 +1243,21 @@ impl LocalIndexService {
                 }))
             }
             MediaInference::Movie(MovieInference { title, edition }) => {
-                // Found by identity key, never by display title: enrichment
-                // may have renamed the movie since its first file (#183).
-                let movie = self
-                    .movie_repo
-                    .find_or_create_by_identity(CreateMovie::new(title.title, title.year, runtime))
-                    .await?;
+                // Found by pin or identity key, never by display title:
+                // enrichment may have renamed the movie since its first file
+                // (#183). A new movie is shown as its NFO names it.
+                let mut create = CreateMovie::new(title.title, title.year, runtime);
+                if let Some(TitleGuess { title, year }) = display {
+                    create.title = title;
+                    create.year = year;
+                }
+                let movie = self.movie_for(create, pin.as_ref(), path).await?;
+                self.record_consumed_nfos(library, &consumed).await?;
 
                 // Ensure library-movie association exists
                 self.movie_repo
                     .ensure_library_association(library.id, movie.id)
                     .await?;
-
-                if let Some(enrichment_repo) = &self.enrichment_repo {
-                    enrichment_repo
-                        .ensure_pending(beam_domain::models::enrichment::EnrichmentTargetId::Movie(
-                            movie.id,
-                        ))
-                        .await?;
-                }
 
                 // One entry per edition of the film in this library: every
                 // copy of the same edition is another file of that entry.
@@ -1299,8 +1378,9 @@ impl LocalIndexService {
     }
 
     /// Bring a row classified by older rules up to [`CLASSIFIER_VERSION`]:
-    /// reclassify it from its path, attaching it to the title the current
-    /// rules name, and stamp the version. The row keeps its id -- and so its
+    /// reclassify it from its path, the NFOs beside it and the container tags
+    /// its last probe stored, attaching it to the title the current rules
+    /// name, and stamp the version. The row keeps its id -- and so its
     /// playback progress -- its hash and its probe results; nothing is
     /// re-probed. A title the move leaves with no file (a show a legacy
     /// build named after a `Season 01` folder) is retired by the scan's
@@ -1314,8 +1394,11 @@ impl LocalIndexService {
         path: &Path,
         library: &Library,
     ) -> Result<(), IndexError> {
+        // The tags the file's last probe read, as stored: a file placed by
+        // its tags keeps its place without being probed again.
+        let tags = existing.container_tags.clone().unwrap_or_default();
         let content = self
-            .classify_media_content(path, library, existing.duration)
+            .classify_media_content(path, library, existing.duration, &tags)
             .await?;
         let status = match (&content, existing.status) {
             (None, _) => FileStatus::Unknown,
@@ -1434,6 +1517,7 @@ impl LocalIndexService {
                         content: None,
                         status: FileStatus::Unknown,
                         classifier_version: 0,
+                        container_tags: None,
                     })
                     .await?;
                 self.check_and_report_duplicate(&file).await;
@@ -1442,8 +1526,9 @@ impl LocalIndexService {
         };
 
         let duration = Duration::from_secs_f64(metadata.duration_seconds());
+        let tags = container_tags(&metadata);
         let content = self
-            .classify_media_content(path, library, Some(duration))
+            .classify_media_content(path, library, Some(duration), &tags)
             .await?;
         let status = if content.is_some() {
             FileStatus::Known
@@ -1465,6 +1550,7 @@ impl LocalIndexService {
                 content,
                 status,
                 classifier_version: CLASSIFIER_VERSION,
+                container_tags: Some(tags),
             })
             .await?;
 
@@ -1558,10 +1644,27 @@ impl LocalIndexService {
                 self.clock.now(),
             )
             .await?;
-        for (row, path, _) in relinks {
-            // A row kept aside is reported by the path it was displaced
-            // from: the one it is kept at never existed on disk.
-            let from = displaced_from(&row.path).unwrap_or_else(|| row.path.clone());
+        // A row kept aside is reported by the path it was displaced from:
+        // the one it is kept at never existed on disk.
+        let moves: Vec<(PathBuf, MediaFile)> = relinks
+            .iter()
+            .map(|(row, path, _)| {
+                let from = displaced_from(&row.path).unwrap_or_else(|| row.path.clone());
+                let moved = MediaFile {
+                    path: path.clone(),
+                    ..row.clone()
+                };
+                (from, moved)
+            })
+            .collect();
+        // The videos' NFOs' applied state moves with them, all at once, so a
+        // swap or a rotation carries each NFO as a move does (FR-219). A
+        // failure is the NFOs', not the moves': they are only re-applied
+        // later.
+        if let Err(e) = self.carry_nfos_on_relink(library, &moves).await {
+            warn!(library_id = %library.id, error = %e, "could not carry moved videos' NFO records");
+        }
+        for ((row, path, _), (from, _)) in relinks.iter().zip(&moves) {
             info!(
                 file_id = %row.id,
                 from = %from.display(),
@@ -1790,6 +1893,7 @@ impl LocalIndexService {
                 self.insert_media_streams(existing.id, &metadata).await?;
 
                 let duration = Duration::from_secs_f64(metadata.duration_seconds());
+                let tags = container_tags(&metadata);
                 let mut updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -1801,6 +1905,7 @@ impl LocalIndexService {
                             mime_type: format!("video/{}", metadata.format_name),
                             duration,
                             container_format: metadata.format_name.clone(),
+                            container_tags: tags.clone(),
                         },
                         content: None,
                         status: Some(if existing.content.is_some() {
@@ -1811,8 +1916,10 @@ impl LocalIndexService {
                     })
                     .await?;
                 if existing.content.is_none() {
+                    // Classified as a new file is: the path, the NFOs beside
+                    // it, and the tags this probe just read (issue #184).
                     let content = self
-                        .classify_media_content(path, library, Some(duration))
+                        .classify_media_content(path, library, Some(duration), &tags)
                         .await?;
                     let status = if content.is_some() {
                         FileStatus::Known
@@ -2994,6 +3101,24 @@ impl LocalIndexService {
             }
         };
 
+        // A subtitle or an NFO beside the media (issue #184). Handled here,
+        // before the file-row bookkeeping below -- which still marks missing a
+        // row a build before issue #182 made of one.
+        if self
+            .path_policy
+            .disposition(relative_to(&library.root_path, &path))
+            == PathDisposition::Sidecar
+        {
+            let is_file = meta.as_ref().is_some_and(std::fs::Metadata::is_file);
+            if hints::is_nfo(&path) {
+                self.reconcile_nfo_event(&library, &path, is_file, &[])
+                    .await?;
+            } else {
+                self.reconcile_sidecar_event(&library, &path, is_file)
+                    .await?;
+            }
+        }
+
         let outcome = match meta {
             Some(meta) if meta.is_file() => {
                 self.reconcile_file(&path, &library, reclassify).await?
@@ -3081,8 +3206,20 @@ impl LocalIndexService {
                 let outcome = self
                     .process_new_file(path, library, RelinkSource::Repository, None)
                     .await?;
-                if outcome == FileOutcome::Added {
-                    record_file_outcome("new");
+                match outcome {
+                    FileOutcome::Added => {
+                        record_file_outcome("new");
+                        self.attach_adjacent_sidecars(library, path).await?;
+                    }
+                    // A moved video's subtitles are those beside it now
+                    // (issue #184); its NFOs' records moved with it as it was
+                    // relinked, and changes to them are their own events'.
+                    FileOutcome::Relinked => self.relink_sidecars(library, path).await?,
+                    FileOutcome::Changed
+                    | FileOutcome::Unchanged
+                    | FileOutcome::Deferred(_)
+                    | FileOutcome::LeftToScan
+                    | FileOutcome::Failed => {}
                 }
                 Ok(outcome)
             }
@@ -3092,8 +3229,10 @@ impl LocalIndexService {
     /// Nothing is at `path` any more -- or only a symlink, which is not part
     /// of the library. Its row, if it has one, is marked missing; with none,
     /// `path` was a directory, and every row beneath it whose file is gone is
-    /// marked missing (issue #180). The watcher never purges: that waits for
-    /// a scan and the grace period.
+    /// marked missing (issue #180), and the record of every NFO beneath it
+    /// forgotten, as a removed NFO's own event forgets its record (FR-219):
+    /// Beam saw it gone, so one put back is applied again. The watcher never
+    /// purges: that waits for a scan and the grace period.
     ///
     /// A path the policy never indexes anything beneath -- an excluded
     /// directory, a hidden or ignored name, a sidecar file -- is not looked
@@ -3137,20 +3276,32 @@ impl LocalIndexService {
             .into_iter()
             .filter(|row| row.missing_since.is_none() && path_is_absent(&row.path))
             .collect();
-        if gone.is_empty() {
-            return Ok(());
+        if !gone.is_empty() {
+            let video_files_seen = usize::from(root_holds_a_video_file(
+                &library.root_path,
+                &self.path_policy,
+            ));
+            let indexed_video_files = gone.iter().filter(|row| is_video_path(&row.path)).count();
+            if root_looks_unmounted(video_files_seen, indexed_video_files) {
+                warn!(
+                    path = %path.display(),
+                    root = %library.root_path.display(),
+                    "library root holds no video files; leaving a removed directory to the next scan"
+                );
+                return Ok(());
+            }
         }
-        let video_files_seen = usize::from(root_holds_a_video_file(
-            &library.root_path,
-            &self.path_policy,
-        ));
-        let indexed_video_files = gone.iter().filter(|row| is_video_path(&row.path)).count();
-        if root_looks_unmounted(video_files_seen, indexed_video_files) {
-            warn!(
-                path = %path.display(),
-                root = %library.root_path.display(),
-                "library root holds no video files; leaving a removed directory to the next scan"
-            );
+        if let Some(repo) = &self.applied_nfo_repo {
+            let forgotten = repo.delete_beneath(library.id, path).await?;
+            if forgotten > 0 {
+                info!(
+                    path = %path.display(),
+                    forgotten,
+                    "Forgot the NFOs of a removed directory"
+                );
+            }
+        }
+        if gone.is_empty() {
             return Ok(());
         }
         info!(
@@ -3193,6 +3344,8 @@ impl LocalIndexService {
             excluded: _,
             failed_subtrees,
             unscoped_failure,
+            subtitles,
+            nfos,
         } = if self
             .path_policy
             .excludes_directory(relative_to(&library.root_path, dir))
@@ -3203,12 +3356,15 @@ impl LocalIndexService {
                 excluded: 0,
                 failed_subtrees: Vec::new(),
                 unscoped_failure: false,
+                subtitles: Vec::new(),
+                nfos: Vec::new(),
             }
         } else {
             walk_under(&library.root_path, dir, &self.path_policy)
         };
 
         let mut retry_after: Option<Duration> = None;
+        let mut left_to_scan: Vec<PathBuf> = Vec::new();
         for path in &files {
             let outcome = match self.reconcile_file(path, library, false).await {
                 Ok(outcome) => outcome,
@@ -3219,8 +3375,39 @@ impl LocalIndexService {
                     FileOutcome::Failed
                 }
             };
-            if let FileOutcome::Deferred(after) = outcome {
-                retry_after = Some(retry_after.map_or(after, |before| before.min(after)));
+            match outcome {
+                FileOutcome::Deferred(after) => {
+                    retry_after = Some(retry_after.map_or(after, |before| before.min(after)));
+                }
+                FileOutcome::LeftToScan => left_to_scan.push(path.clone()),
+                FileOutcome::Added
+                | FileOutcome::Relinked
+                | FileOutcome::Changed
+                | FileOutcome::Unchanged
+                | FileOutcome::Failed => {}
+            }
+        }
+
+        // What sits beside the media beneath it (issue #184), once its videos
+        // are at their paths: each subtitle is recorded against the video
+        // that owns it, and each NFO applied as its own event would apply it
+        // -- a watcher that reports a renamed directory reports nothing of
+        // the files inside it. A changed NFO beside a video left to the scan
+        // is left to the scan with it (FR-219).
+        for subtitle in &subtitles {
+            if let Err(e) = self
+                .reconcile_sidecar_event(library, &subtitle.path, true)
+                .await
+            {
+                warn!(path = %subtitle.path.display(), error = %e, "failed to reconcile a subtitle of a changed directory");
+            }
+        }
+        for nfo in &nfos {
+            if let Err(e) = self
+                .reconcile_nfo_event(library, &nfo.path, true, &left_to_scan)
+                .await
+            {
+                warn!(path = %nfo.path.display(), error = %e, "failed to reconcile an NFO of a changed directory");
             }
         }
 
@@ -3623,7 +3810,10 @@ impl LocalIndexService {
             excluded: excluded_count,
             failed_subtrees,
             unscoped_failure,
+            subtitles: walked_subtitles,
+            nfos: walked_nfos,
         } = walk_library_root(&library.root_path, &self.path_policy);
+        let walked_media = walked_files.clone();
 
         // An unmounted volume usually leaves its mount point behind as an empty
         // directory, which passes the guard above -- or one holding only a
@@ -3816,6 +4006,31 @@ impl LocalIndexService {
             return Err(IndexError::Cancelled);
         }
 
+        // Phase 3c: What sits beside the media (issue #184). The NFOs whose
+        // content changed since they were last applied re-pin their titles,
+        // and every subtitle is recorded against the video that owns it --
+        // after phase 3a, so a relinked video's are judged at its new path. A
+        // failure here is the scan's, like a failure to record a file: it is
+        // reported and the scan goes on.
+        if let Err(e) = self
+            .reapply_changed_nfos(library, &walked_nfos, &failed_subtrees, unscoped_failure)
+            .await
+        {
+            error!(library_id = %lib_uuid, error = %e, "re-applying changed NFOs failed");
+        }
+        if let Err(e) = self
+            .reconcile_sidecars(
+                library,
+                &walked_media,
+                &walked_subtitles,
+                &failed_subtrees,
+                unscoped_failure,
+            )
+            .await
+        {
+            error!(library_id = %lib_uuid, error = %e, "reconciling sidecar subtitles failed");
+        }
+
         // Phase 4: Soft-delete the rows the walk did not see, and purge the
         // ones that have been missing for the whole grace period. Nothing is
         // deleted on first sight: a file that is gone now may only be on a
@@ -3977,9 +4192,19 @@ impl LocalIndexService {
     }
 }
 
+#[path = "index_hints.rs"]
+mod hints;
+
+#[path = "index_sidecars.rs"]
+mod sidecars;
+
 #[cfg(test)]
 #[path = "index_missing_tests.rs"]
 mod missing_tests;
+
+#[cfg(test)]
+#[path = "index_nfo_sidecar_tests.rs"]
+mod nfo_sidecar_tests;
 
 #[cfg(test)]
 #[path = "index_identity_tests.rs"]
@@ -4091,7 +4316,12 @@ mod tests {
                 PathBuf::new()
             };
             let content = self
-                .classify_media_content(path, &test_library(lib_id, &root), Some(runtime))
+                .classify_media_content(
+                    path,
+                    &test_library(lib_id, &root),
+                    Some(runtime),
+                    &ContainerTags::default(),
+                )
                 .await?;
             Ok(content.expect("the path classifies"))
         }
@@ -5234,6 +5464,8 @@ mod tests {
                     id: movie_id,
                     title: "Avatar".to_string(),
                     identity_key: None,
+                    pinned_ref: None,
+                    pin_source: None,
                     title_localized: None,
                     description: None,
                     year: None,
@@ -5298,6 +5530,7 @@ mod tests {
                 }),
                 status: FileStatus::Known,
                 classifier_version: 0,
+                container_tags: None,
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
@@ -5386,6 +5619,8 @@ mod tests {
                     id: show_id,
                     title: "Season 1".to_string(),
                     identity_key: None,
+                    pinned_ref: None,
+                    pin_source: None,
                     title_localized: None,
                     description: None,
                     year: None,
@@ -5463,6 +5698,7 @@ mod tests {
                 content: Some(beam_domain::models::MediaFileContent::episode(episode_id)),
                 status: FileStatus::Known,
                 classifier_version: 0,
+                container_tags: None,
                 scanned_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 missing_since: None,
@@ -5809,6 +6045,7 @@ mod tests {
             }),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5886,6 +6123,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5944,6 +6182,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -5966,6 +6205,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -6677,6 +6917,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -6698,6 +6939,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             missing_since: None,
@@ -6780,6 +7022,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -6840,6 +7083,7 @@ mod tests {
             }),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -6904,6 +7148,7 @@ mod tests {
             }),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -6974,6 +7219,7 @@ mod tests {
             content: None,
             status: FileStatus::Unknown,
             classifier_version: CLASSIFIER_VERSION,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -7044,6 +7290,7 @@ mod tests {
             content: None,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,
@@ -7292,6 +7539,7 @@ mod tests {
             content,
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
             scanned_at: Utc::now(),
             updated_at: Utc::now(),
             missing_since: None,

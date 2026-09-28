@@ -341,6 +341,7 @@ async fn indexed_movie(
             }),
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
         })
         .await
         .unwrap();
@@ -491,6 +492,7 @@ impl Library {
                 content: Some(MediaFileContent::episode(episode.id)),
                 status: FileStatus::Known,
                 classifier_version: 0,
+                container_tags: None,
             })
             .await
             .unwrap();

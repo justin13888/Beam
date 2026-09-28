@@ -106,6 +106,8 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `title` | TEXT | no | the **display** title: the filename parse until enrichment replaces it with the provider's. Never used to find the movie |
 | `identity_key` | TEXT | yes | unique — what the indexer matches a file to this movie by; see *Title identity* below. NULL only on a row that predates the column and could not be backfilled |
 | `identity_key_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that derived `identity_key`. A key an older version derived is re-derived from the title's files (*Rekey* below); `0` marks keys stored before versions existed |
+| `pinned_ref` | TEXT | yes | unique — the provider id an NFO beside the media pins the movie to, as `"provider:id"` (`tmdb:603`, `imdb:tt0133093`; `beam_domain::models::pin::ProviderPin`). A file whose NFO names it joins this movie before any key is consulted, and enrichment fetches the movie by it (issue #184). Never written by enrichment; NULL when the movie is not pinned |
+| `pin_source` | TEXT | yes | who set `pinned_ref`: `nfo` or `admin` (a `CHECK` holds it to these, and to being NULL exactly when `pinned_ref` is). An NFO never replaces an `admin` pin (FR-312) |
 | `title_localized` | TEXT | yes | |
 | `description` | TEXT | yes | |
 | `year` | INTEGER | yes | |
@@ -133,7 +135,8 @@ on `shows`. Year, rating and runtime sorts have no index.
 
 ### `shows`
 Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `identity_key` (unique,
-nullable — as for movies), `identity_key_version` (as for movies), `title_localized`, `description`, `year`, `poster_url`,
+nullable — as for movies), `identity_key_version` (as for movies), `pinned_ref` (unique, nullable —
+as for movies, pinned by a `tvshow.nfo`), `pin_source` (as for movies), `title_localized`, `description`, `year`, `poster_url`,
 `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id` (each unique, nullable),
 `rating_tmdb` (REAL, nullable — the provider rating on the same 0-10 scale as
 `movies.rating_tmdb`; added by `m20261003_000001_catalogue_browse` and filled on a show's next
@@ -301,7 +304,7 @@ quality/edition/language rip.
 | `file_size` | BIGINT | no | |
 | `mime_type` | TEXT | yes | |
 | `hash_xxh3` | BIGINT | no | content hash used for change detection and dedup |
-| `duration_secs` | DOUBLE PRECISION | yes | NULL until a probe succeeds, and cleared (with `mime_type`, `container_format` and the file's `media_streams`) when changed content fails its probe; the indexer probes a NULL row again on every visit |
+| `duration_secs` | DOUBLE PRECISION | yes | NULL until a probe succeeds, and cleared (with `mime_type`, `container_format`, `container_tags` and the file's `media_streams`) when changed content fails its probe; the indexer probes a NULL row again on every visit |
 | `container_format` | TEXT | yes | |
 | `language` | TEXT | yes | primary audio/release language tag |
 | `quality` | TEXT | yes | e.g. `"1080p"` — the human label the client's source picker displays |
@@ -313,7 +316,8 @@ quality/edition/language rip.
 | `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash. The column keeps whole microseconds and a filesystem reports nanoseconds, so the indexer brings a file's mtime to the stored precision (`beam_domain::models::file::mtime_as_stored`) before comparing it with its row ([#229](https://github.com/justin13888/beam/issues/229)); NULL rows are treated as "suspected changed" |
 | `missing_since` | TIMESTAMPTZ | yes | soft-delete stamp: NULL while the file is on disk; the instant the indexer first found it gone otherwise (FR-211) |
 | `last_episode_number` | INTEGER | yes | the last episode of a multi-episode file (`S01E01E02`); the file's `episode_id` is its first. A `CHECK` (`files_last_episode_requires_episode`) allows it only alongside `episode_id` |
-| `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |
+| `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, the NFOs beside it and its `container_tags`, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |
+| `container_tags` | JSONB | yes | the file-level container tags classification reads (`title`, `show`, `season`, `episode`, `year`; `beam_domain::utils::classification::ContainerTags`) as the last successful probe read them, `title` and `show` each cut to at most 512 bytes (`MAX_TAG_VALUE_BYTES`) on a character boundary. Set with the other probe results, cleared with them when changed content fails its probe; NULL while the file has no successful probe, or had it before this column existed. A `CHECK` (`files_container_tags_object`) holds it to a JSON object. A reclassification reads it instead of probing again, so a file placed by its tags keeps its place (FR-219) |
 
 **CHECK constraint** (table-level): exactly one of `movie_entry_id` / `episode_id` is set — *unless*
 `file_status = 'unknown'`, in which case both must be NULL (a file the indexer found but could not
@@ -396,6 +400,51 @@ One row per elementary stream (video/audio/subtitle track) within a `files` row,
 | `channel_layout` | TEXT | yes | audio only |
 
 Unique index on `(file_id, stream_index)`. Indexes on `file_id`, `stream_type`, `language`.
+
+### `sidecar_subtitles`
+A text subtitle file beside an indexed video, recorded as a subtitle of that video (issue #184). A
+table of its own rather than `media_streams` rows (decision D184-1 on PR #225): `stream_index` is
+the container's own index, unique per file and replaced wholesale when a changed file is re-probed,
+and every current reader of `media_streams` describes what is inside the container. Written by the
+scan and the watcher from what a subtitle's filename says; the file itself is only ever stat-ed.
+Not yet read by any endpoint — serving sidecar subtitles is issue #189's.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | UUID | no | PK |
+| `file_id` | UUID | no | FK → `files.id`, cascade — the video the subtitle belongs to |
+| `library_id` | UUID | no | FK → `libraries.id`, cascade |
+| `path` | TEXT | no | unique (`sidecar_subtitles_path_unique`) — the subtitle file; upserted by it |
+| `format` | TEXT | no | `srt` \| `vtt` \| `ass` \| `ssa` (a `CHECK`); image formats are not indexed (ADR-0004) |
+| `language` | TEXT | yes | ISO 639-2/B, as FFmpeg writes a Matroska track's language |
+| `title` | TEXT | yes | what else the name carries (`Commentary`, a BCP 47 region such as `pt-BR`) |
+| `is_forced` / `is_sdh` / `is_default` | BOOLEAN | no | default `false` |
+| `size_bytes` | BIGINT | no | `CHECK (size_bytes >= 0)`; with `mtime`, what a scan compares to skip an unchanged subtitle |
+| `mtime` | TIMESTAMPTZ | yes | whole microseconds, as `files.mtime`: the indexer compares a subtitle's mtime with its row at that precision (`mtime_as_stored`, [#229](https://github.com/justin13888/beam/issues/229)) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | no | |
+
+Indexes on `file_id` and `library_id`. A row no scan finds any more, or whose video is no longer
+indexed, is deleted outright: nothing references it. Purging a video's `files` row takes its
+subtitles with it.
+
+### `applied_nfos`
+What each NFO beside the media held when the indexer last applied it (issue #184, FR-219). An NFO
+is re-applied exactly when its size or content hash differs from its row, never by comparing its
+modification time with a scan's. Classification records the NFOs it reads for a new file; a scan
+and a watcher event record the ones they re-apply.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | UUID | no | PK |
+| `library_id` | UUID | no | FK → `libraries.id`, cascade |
+| `path` | TEXT | no | unique (`applied_nfos_path_unique`) — the NFO; recorded by it |
+| `size_bytes` | BIGINT | no | `CHECK (size_bytes >= 0)` |
+| `content_hash` | TEXT | no | XXH3-128 of the NFO's bytes, as hex — tells one version of the file from the next |
+| `change_stamp` | TEXT | yes | the NFO's size, modification and change times as a stat reported them; a scan that finds the same stamp does not read the NFO again. NULL where the platform has no change time, or when the NFO was written within two seconds of being read |
+| `created_at` / `updated_at` | TIMESTAMPTZ | no | |
+
+Index on `library_id`. The row of an NFO no scan finds any more, or that the watcher reports
+removed, is deleted outright.
 
 ### `playback_progress`
 Resume/continue-watching state, one row per (user, file) the user has started.
@@ -504,6 +553,10 @@ Indexes: `created_at DESC` (recent-first admin log view), `level`.
   never races itself to the insert.
 - **One entry per `(library_id, movie_id, edition)`:** editions are a per-library, per-movie
   namespace.
+- **One title per pin:** `movies.pinned_ref` and `shows.pinned_ref` are unique, so a provider id an
+  NFO names pins at most one movie and one show.
+- **One sidecar subtitle per path:** `sidecar_subtitles.path` is unique.
+- **One applied-NFO record per path:** `applied_nfos.path` is unique.
 - **One season per `(show_id, season_number)`, one episode per `(season_id, episode_number)`:**
   prevents duplicate rows on rescans.
 - **`users` identity is `(oidc_issuer, oidc_subject)`, not a password:** no end-user credential is

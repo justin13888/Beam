@@ -13,6 +13,10 @@ mutants = { workspace = true }
 num = { version = "0.4.3", features = ["serde"] }
 parking_lot = "0.12.5"
 regex = { workspace = true }
+# Kodi `.nfo` files (issue #184): a read-only DOM with no dependencies of its
+# own beyond memchr, that refuses a DTD and caps the node count -- so a hostile
+# file in a library root cannot expand entities or exhaust memory.
+roxmltree = "0.21.1"
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

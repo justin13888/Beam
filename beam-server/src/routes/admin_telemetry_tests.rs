@@ -89,6 +89,7 @@ async fn seeded_store() -> InMemoryLibraryShapeRepository {
             }),
             status: FileStatus::Known,
             classifier_version: 0,
+            container_tags: None,
         })
         .await
         .unwrap();

@@ -100,9 +100,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
     `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title
     (status `unknown`) and reported through the admin log, never guessed into a movie.
 
-  Every row MUST record the version of these rules that classified it, and a scan MUST reclassify a
-  row classified by an older version from its path -- keeping its id, hash and probe results -- so a
-  change to the rules reaches files indexed before it.
+  An NFO beside the file and the file's container tags refine this (FR-219). Every row MUST record
+  the version of these rules that classified it, and a scan MUST reclassify a row classified by an
+  older version from its path, the NFOs beside it and the container tags its probe stored --
+  keeping its id, hash and probe results -- so
+  a change to the rules reaches files indexed before it.
 - **FR-205**: The server MUST support multiple indexed file versions (distinct `files` rows) under a
   single logical movie or episode entry, to support the source-selection delivery scenario.
 - **FR-206**: The server MUST detect and de-duplicate files that have already been indexed, based on
@@ -204,6 +206,83 @@ strength. Each requirement is independently testable. See `product.md` for narra
   from starting on it -- a scan of any trigger, or a watcher reconcile -- then fail a queued scan of
   it as cancelled at once and wait (bounded) for a running one to stop; if the delete itself then
   fails, the library MUST be scanned and reconciled again as before.
+- **FR-219**: Classification (FR-204) MUST also read the Kodi-style NFO describing a file --
+  `<stem>.nfo` beside it, else `movie.nfo` in its folder, and for an episode `tvshow.nfo` in its
+  folder or, when that is a season folder, the series folder above; never one at the library root
+  or in a category folder above a show's own folder -- and the file's container tags, in the
+  priority NFO, then path, then tags. The container tags a probe read MUST be stored with the
+  file, replaced by each successful probe and cleared when changed content fails its probe, so a
+  reclassification reads them without probing the file again; a text tag MUST be kept to at most
+  512 bytes, cut on a character boundary. An NFO's root (`<movie>`, or `<episodedetails>` with a
+  season and episode) decides whether the file is a movie or an episode; container tags (`show`,
+  `season_number`, `episode_sort`, `title`, `date`/`year`) only fill what the path leaves open. An
+  NFO or a tag MUST NOT change the identity key a title is matched by (FR-214), which stays the
+  path's; it supplies the display title and year a new title is created with. A provider id in a
+  movie or show NFO (`<uniqueid>`, a legacy id element, or a provider URL; TMDB, then AniList, then
+  IMDb, then TheTVDB) MUST pin the title: a file whose NFO names a pin MUST join the title pinned
+  to it, or enriched with that id, before its key is consulted; one id pins at most one title; a
+  second NFO naming another id for a pinned title MUST be reported through the admin log and not
+  applied, then or at any later scan. An NFO added or edited after indexing MUST re-pin, at the
+  next scan or watcher event, exactly the titles of the files it is *the* NFO of -- located as
+  above, so never through a root NFO, one further above a file, or a `movie.nfo` beside a file
+  with its own `<stem>.nfo` -- but never an administrator's pin (FR-312). Whether an NFO is
+  re-applied MUST turn on its content alone: the size and content hash last applied are recorded
+  per NFO (`applied_nfos`), so an NFO whose modification time is old (`cp -p`), skewed by another
+  host's clock, or older than a scan that died is still applied, and one whose content did not
+  change is never applied again. An NFO whose pin is refused because another title already holds
+  that id MUST NOT be recorded as applied, so a later scan tries it again -- unless the title
+  holding it got it from that same NFO (one describing several titles: a `movie.nfo` beside two
+  movies, a `tvshow.nfo` over episodes of two shows), which no retry can change: such an NFO MUST
+  be recorded as applied, pin one title -- the one with the lowest id, so the same one at every
+  scan -- and be reported once through the admin log. Deleting
+  an NFO forgets its record and leaves the pin it set; an NFO created at that path again is one
+  added after indexing and re-pins, so a kept, conflicting NFO deleted and recreated replaces the
+  title's pin. That holds only when Beam saw the NFO gone, and the same whether the NFO alone or a
+  folder holding it went -- a watcher removal event for either, or a scan while it was missing; one
+  put back unseen with the same bytes is an unchanged NFO. A video relinked to its row (FR-221) is
+  not classified again, so the NFOs classification would read for it at its new path MUST take
+  their applied state by one rule, judged for every video one scan or watcher event relinks
+  together, against the records as they stood before, so that neither the order the videos are
+  met in nor how their folders' names sort changes the outcome: an NFO whose content its path's
+  record does not hold (or that has no record) has *moved* when its content is what the record of
+  an NFO path one of those videos had holds, and the file there no longer holds it -- gone, or
+  holding other content. An NFO several of those videos locate (a folder's `movie.nfo`, a show's
+  `tvshow.nfo`) MUST be judged once, over all of them. A moved NFO MUST be recorded as applied and
+  change no pin -- a kept, conflicting NFO stays kept -- whether it moved to a free path or, in a
+  swap or rotation of files or folders, to a path whose own NFO moved on in turn. An NFO whose
+  content no such record holds is an edited or a new one: at a path already recorded, or where an
+  NFO any video locating it had at its old path is gone from disk and recorded, it is edited and
+  applied as edited; one whose path's record already holds its content is left alone, so a video
+  moved beside an NFO already recorded does not take it; any other -- never applied to the title,
+  or forgotten by a removal seen first -- MUST be applied, to every video locating it, as a new
+  file's NFO is, keeping a title's other pin, and recorded. An NFO forgotten by a removal and put
+  back at the same path is therefore one added after indexing and re-pins its title, while one
+  that comes back with its video at another path keeps the title's pin. A watcher event sees a
+  move one name at a time, so it MUST leave a changed NFO as it is -- neither applied nor
+  recorded -- for the next scan to judge as above when the NFO may be one half of a move: a video
+  it may describe was left to the scan by the same event (FR-221) or is no longer the file its
+  row records, or its content is what another NFO path's record holds and the file there no
+  longer holds it.
+  A walk that could not read where an NFO lives, or a removal reported while the library root is
+  gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
+  folder. Every NFO MUST be read with a read-only open of a regular file (never through a
+  symbolic link, FR-212 -- on Unix with `O_NOFOLLOW`, and `O_NONBLOCK` so a FIFO cannot stall
+  the read) and at most 1 MiB of it; an NFO larger than that, not
+  UTF-8, declaring a document type, or over 10 000 XML nodes MUST be ignored and the file
+  classified by its path. Reading these MUST NOT write anything under a library root (FR-202).
+- **FR-220**: A text subtitle file (`.srt`, `.vtt`, `.ass`, `.ssa`) beside an indexed video, named
+  after the video's filename stem (the longest stem when several match) or in a `Subs`/`Subtitles`
+  folder beside it, MUST be recorded as a subtitle of that video in `sidecar_subtitles`, with the
+  ISO 639-2/B language, forced, SDH and default flags, and title its name's tokens give. A scan MUST
+  record new and changed subtitles, writing only what changed, and delete the rows of subtitles no
+  longer found or no longer owned by an indexed video -- except beneath a path the walk could not
+  read (FR-211); the watcher MUST do the same for a single subtitle, and a video it indexes MUST
+  pick up the subtitles already beside it. A video relinked to its row (FR-221) MUST own the
+  subtitles beside its new path, and no longer those beside its old one: the scan judges subtitles
+  and NFOs after its relinks, and the watcher reconciles a relinked video's subtitle rows, and the
+  subtitles and NFOs beneath a directory it reconciles. An NFO's record stays keyed by the NFO's own
+  path (FR-219). Image-based subtitles are not indexed. Serving sidecar
+  subtitles is [#189](https://github.com/justin13888/beam/issues/189)'s scope.
 - **FR-221**: A file's `files` row MUST follow the file's content within its library. A path whose
   content hash (non-zero) and size match a row of the same library whose own content has left its
   path -- the path is gone, the row is marked missing (FR-211) and its path not walked, or the path
@@ -274,6 +353,16 @@ strength. Each requirement is independently testable. See `product.md` for narra
   client which stored one — a download record, rendered offline — still resolves. Freshness is
   carried by the `ETag` instead, which is derived from the provider URL and therefore changes
   exactly when the artwork does.
+- **FR-312**: A title an NFO pins (FR-219) MUST be enriched in this order: a match an administrator
+  set first; else, when a configured provider resolves the pin's id (TMDB or AniList), a fetch by
+  that id at full confidence, with no search; else a search as usual, whose match MUST be left
+  unmatched, with the reason recorded, when it carries a different id of the pinned provider.
+  Pinning a title, or re-pinning it, MUST queue it for enrichment with its stored match cleared; a
+  rematch MUST clear the match and keep the pin. A pin MUST record who set it, an NFO or an
+  administrator: an administrator's manual match
+  ([#185](https://github.com/justin13888/beam/issues/185)) sets an administrator's pin, which takes
+  precedence over any NFO's and which no NFO -- re-read, edited, or named by a new file -- replaces,
+  so an administrator never has to edit a file in a library to correct Beam.
 
 ## FR-4xx — Browse, Search & Detail
 

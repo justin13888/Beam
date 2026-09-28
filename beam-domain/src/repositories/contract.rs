@@ -188,6 +188,33 @@ pub mod fixture {
         /// The repository under contract, empty.
         fn repo(&self) -> &dyn crate::repositories::PlaybackTelemetryRepository;
     }
+
+    /// Everything the [`crate::applied_nfo_repository_contract`] suite needs
+    /// from a backing store: the libraries a record hangs off, which Postgres
+    /// holds to a foreign key.
+    #[async_trait::async_trait]
+    pub trait AppliedNfoFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::AppliedNfoRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
+    }
+
+    /// Everything the [`crate::sidecar_subtitle_repository_contract`] suite
+    /// needs from a backing store: the libraries and video files a subtitle
+    /// row hangs off, which Postgres holds to foreign keys.
+    #[async_trait::async_trait]
+    pub trait SidecarSubtitleFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::SidecarSubtitleRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
+
+        /// A video file in `library_id`.
+        async fn new_video_file(&self, library_id: Uuid) -> Uuid;
+    }
 }
 
 /// Behavioural contract for [`crate::repositories::PlaybackProgressRepository`].
@@ -624,6 +651,7 @@ macro_rules! file_repository_contract {
             MediaFileContent, ProbeUpdate, UpdateMediaFile, displaced_path,
         };
         use $crate::repositories::contract::fixture::FileRepositoryFixture;
+        use $crate::utils::classification::ContainerTags;
 
         /// A fixed, non-epoch instant: `missing_since` is `timestamptz`, and a
         /// whole second survives Postgres's microsecond precision unchanged.
@@ -654,9 +682,19 @@ macro_rules! file_repository_contract {
                     content: Some(content),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: Some(some_tags()),
                 })
                 .await
                 .expect("create a file")
+        }
+
+        /// Tags a probe could have read; some left out, as most files do.
+        fn some_tags() -> ContainerTags {
+            ContainerTags {
+                show: Some("The Office".to_string()),
+                season: Some(2),
+                ..ContainerTags::default()
+            }
         }
 
         async fn movie_file(fixture: &impl FileRepositoryFixture, library_id: Uuid) -> MediaFile {
@@ -678,6 +716,83 @@ macro_rules! file_repository_contract {
         fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
             ids.sort();
             ids
+        }
+
+        /// The files beneath a directory are those whose path starts with it a
+        /// whole component at a time, at any depth -- the directory name is a
+        /// literal, never a pattern -- and present, in that library.
+        #[tokio::test]
+        async fn the_files_under_a_directory_are_the_present_ones_beneath_it() {
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let other_library = fixture.new_library().await;
+            let root = PathBuf::from(format!("/videos/{library}"));
+            let mut by_name = ::std::collections::HashMap::new();
+            for (name, in_library) in [
+                ("Show/a.mkv", library),
+                ("Show/Season 1/b.mkv", library),
+                ("Show/Season 1/Extras/c.mkv", library),
+                ("Show 2/d.mkv", library),
+                ("Showtime/e.mkv", library),
+                ("Sho_/f.mkv", library),
+                ("Sh%/g.mkv", library),
+                ("Show/gone.mkv", library),
+                ("Show/elsewhere.mkv", other_library),
+            ] {
+                let movie_entry_id = fixture.new_movie_entry(in_library).await;
+                let unique = Uuid::new_v4();
+                let file = fixture
+                    .repo()
+                    .create(CreateMediaFile {
+                        library_id: in_library,
+                        path: root.join(name),
+                        hash: (unique.as_u128() as u64) >> 1,
+                        size_bytes: 1024,
+                        mtime: None,
+                        mime_type: None,
+                        duration: None,
+                        container_format: None,
+                        content: Some(MediaFileContent::Movie { movie_entry_id }),
+                        status: FileStatus::Known,
+                        classifier_version: 0,
+                        container_tags: None,
+                    })
+                    .await
+                    .expect("create a file");
+                by_name.insert(name, file.id);
+            }
+            fixture
+                .repo()
+                .mark_missing(vec![by_name["Show/gone.mkv"]], at(0))
+                .await
+                .unwrap();
+            let under = |dir: &'static str| {
+                let dir = root.join(dir);
+                let repo = fixture.repo();
+                async move { ids(&repo.find_all_under(library, &dir).await.unwrap()) }
+            };
+            let named = |names: &[&str]| sorted(names.iter().map(|n| by_name[n]).collect());
+
+            assert_eq!(
+                under("Show").await,
+                named(&[
+                    "Show/a.mkv",
+                    "Show/Season 1/b.mkv",
+                    "Show/Season 1/Extras/c.mkv"
+                ]),
+                "every present file beneath, at any depth; not `Show 2` or `Showtime`"
+            );
+            assert_eq!(
+                under("Show/Season 1").await,
+                named(&["Show/Season 1/b.mkv", "Show/Season 1/Extras/c.mkv"])
+            );
+            assert_eq!(under("Sho_").await, named(&["Sho_/f.mkv"]), "`_` is literal");
+            assert_eq!(under("Sh%").await, named(&["Sh%/g.mkv"]), "`%` is literal");
+            assert_eq!(
+                under("Show/a.mkv").await,
+                Vec::<Uuid>::new(),
+                "a file is not beneath itself"
+            );
         }
 
         /// One row per path (issue #181): a second file at a path is refused
@@ -703,6 +818,7 @@ macro_rules! file_repository_contract {
                     content: Some(MediaFileContent::Movie { movie_entry_id }),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await;
 
@@ -762,6 +878,7 @@ macro_rules! file_repository_contract {
                         content: Some(MediaFileContent::Movie { movie_entry_id }),
                         status: FileStatus::Known,
                         classifier_version: 0,
+                        container_tags: None,
                     })
                     .await
                     .expect("create a file");
@@ -878,6 +995,11 @@ macro_rules! file_repository_contract {
             let stored = repo.find_by_id(file.id).await.unwrap().expect("still present");
             assert!(stored.content.is_none());
             assert_eq!(stored.classifier_version, 8);
+            assert_eq!(
+                stored.container_tags,
+                Some(some_tags()),
+                "reclassifying reads the tags; it never replaces them"
+            );
         }
 
         /// A file with no content is `Unknown`: `Known` and `Changed` name a
@@ -902,6 +1024,7 @@ macro_rules! file_repository_contract {
                     content: None,
                     status,
                     classifier_version: 0,
+                    container_tags: None,
                 }
             };
             for status in [FileStatus::Known, FileStatus::Changed] {
@@ -977,39 +1100,49 @@ macro_rules! file_repository_contract {
                     file.mime_type.clone(),
                     file.duration,
                     file.container_format.clone(),
+                    file.container_tags.clone(),
                 )
             };
+            let tags = ContainerTags {
+                title: Some("The Dundies".to_string()),
+                show: Some("The Office".to_string()),
+                season: Some(2),
+                episode: Some(1),
+                year: Some(2005),
+            };
 
-            let set = repo
-                .update(update(ProbeUpdate::Set {
-                    mime_type: "video/mp4".to_string(),
-                    duration: ::std::time::Duration::from_secs(90),
-                    container_format: "mp4".to_string(),
-                }))
-                .await
-                .expect("set the probe results");
+            repo.update(update(ProbeUpdate::Set {
+                mime_type: "video/mp4".to_string(),
+                duration: ::std::time::Duration::from_secs(90),
+                container_format: "mp4".to_string(),
+                container_tags: tags.clone(),
+            }))
+            .await
+            .expect("set the probe results");
             let expected = (
                 Some("video/mp4".to_string()),
                 Some(::std::time::Duration::from_secs(90)),
                 Some("mp4".to_string()),
+                Some(tags),
             );
-            assert_eq!(probe_of(&set), expected);
+            let stored = || async {
+                repo.find_by_id(file.id)
+                    .await
+                    .unwrap()
+                    .expect("still present")
+            };
+            assert_eq!(probe_of(&stored().await), expected);
 
-            let kept = repo
-                .update(update(ProbeUpdate::Keep))
+            repo.update(update(ProbeUpdate::Keep))
                 .await
                 .expect("keep the probe results");
-            assert_eq!(probe_of(&kept), expected);
+            assert_eq!(probe_of(&stored().await), expected);
 
             repo.update(update(ProbeUpdate::Clear))
                 .await
                 .expect("clear the probe results");
-            let cleared = repo
-                .find_by_id(file.id)
-                .await
-                .unwrap()
-                .expect("still present");
-            assert_eq!(probe_of(&cleared), (None, None, None));
+            let cleared = stored().await;
+            assert_eq!(probe_of(&cleared), (None, None, None, None));
             assert_eq!(
                 (
                     cleared.hash,
@@ -1036,6 +1169,11 @@ macro_rules! file_repository_contract {
                 .unwrap()
                 .expect("a new file is visible");
             assert_eq!(found.missing_since, None);
+            assert_eq!(
+                found.container_tags,
+                Some(some_tags()),
+                "the tags it was created with are stored"
+            );
         }
 
         #[tokio::test]
@@ -1266,6 +1404,7 @@ macro_rules! file_repository_contract {
                     content: Some(MediaFileContent::Movie { movie_entry_id }),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .expect("create a file")
@@ -1551,6 +1690,7 @@ macro_rules! file_repository_contract {
                     content: Some(MediaFileContent::Movie { movie_entry_id }),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .expect("create a file")
@@ -1665,6 +1805,7 @@ macro_rules! show_repository_contract {
                     content: Some(MediaFileContent::episode(episode_id)),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .expect("create an episode file")
@@ -2404,6 +2545,233 @@ macro_rules! show_repository_contract {
                 "an unknown title is not rekeyed"
             );
         }
+
+        #[tokio::test]
+        async fn a_pin_finds_the_show_pinned_to_it_before_one_matched_to_its_id() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let pin = ProviderPin::Tmdb(603);
+            assert!(repo.find_by_pin(&pin).await.unwrap().is_none());
+
+            let matched = repo
+                .find_or_create_by_identity(new_show("Matched"))
+                .await
+                .unwrap();
+            repo.apply_enrichment(
+                matched.id,
+                &ShowEnrichment {
+                    title: "Matched".to_string(),
+                    tmdb_id: Some(603),
+                    imdb_id: Some("tt0133093".to_string()),
+                    anilist_id: Some(5114),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            for by_id in [
+                ProviderPin::Tmdb(603),
+                ProviderPin::Imdb("tt0133093".to_string()),
+                ProviderPin::Anilist(5114),
+            ] {
+                assert_eq!(
+                    repo.find_by_pin(&by_id).await.unwrap().map(|t| t.id),
+                    Some(matched.id),
+                    "the show enrichment matched to {by_id}"
+                );
+            }
+
+            let pinned = repo
+                .find_or_create_by_identity(new_show("Pinned"))
+                .await
+                .unwrap();
+            assert!(
+                repo.set_pinned_ref(pinned.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                repo.find_by_pin(&pin).await.unwrap().map(|t| t.id),
+                Some(pinned.id),
+                "a pin before a match"
+            );
+            assert_eq!(
+                repo.find_by_id(pinned.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pinned_ref
+                    .as_deref(),
+                Some("tmdb:603")
+            );
+            assert!(
+                repo.find_by_pin(&ProviderPin::Tvdb(81189))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an id nothing carries finds nothing"
+            );
+        }
+
+        #[tokio::test]
+        async fn one_pin_pins_one_show_and_a_show_can_be_repinned() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let a = repo
+                .find_or_create_by_identity(new_show("A"))
+                .await
+                .unwrap();
+            let b = repo
+                .find_or_create_by_identity(new_show("B"))
+                .await
+                .unwrap();
+            let pin = ProviderPin::Anilist(5114);
+
+            assert!(
+                repo.set_pinned_ref(a.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(b.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "another show holds the pin"
+            );
+            assert_eq!(
+                repo.find_by_id(b.id).await.unwrap().unwrap().pinned_ref,
+                None
+            );
+            assert!(
+                repo.set_pinned_ref(a.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "pinning a show to its own pin again is no clash"
+            );
+
+            assert!(
+                repo.set_pinned_ref(a.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                repo.find_by_id(a.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pinned_ref
+                    .as_deref(),
+                Some("tmdb:1"),
+                "a new pin replaces the old"
+            );
+            assert!(
+                repo.set_pinned_ref(b.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "a released pin is free"
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(Uuid::new_v4(), &ProviderPin::Tvdb(7), PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "no show, no pin"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_nfo_pin_never_replaces_an_administrators_pin_of_a_show() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let title = repo
+                .find_or_create_by_identity(new_show("Pinned"))
+                .await
+                .unwrap();
+            let stored = |title: Option<_>| {
+                title.map(|t: $crate::models::Show| (t.pinned_ref, t.pin_source))
+            };
+
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:1".to_string()), Some(PinSource::Nfo))),
+                "the pin is recorded with who set it"
+            );
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(2), PinSource::Admin)
+                    .await
+                    .unwrap(),
+                "an administrator replaces an NFO's pin"
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(title.id, &ProviderPin::Tmdb(3), PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "an NFO never replaces an administrator's pin"
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:2".to_string()), Some(PinSource::Admin)))
+            );
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(4), PinSource::Admin)
+                    .await
+                    .unwrap(),
+                "an administrator replaces their own pin"
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:4".to_string()), Some(PinSource::Admin)))
+            );
+        }
+
+        #[tokio::test]
+        async fn enrichment_never_rewrites_a_shows_pin() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let title = repo
+                .find_or_create_by_identity(new_show("Pinned"))
+                .await
+                .unwrap();
+            assert!(
+                repo.set_pinned_ref(
+                    title.id,
+                    &ProviderPin::Imdb("tt0113277".to_string()),
+                    PinSource::Nfo
+                )
+                .await
+                .unwrap()
+            );
+            repo.apply_enrichment(
+                title.id,
+                &ShowEnrichment {
+                    title: "Provider".to_string(),
+                    tmdb_id: Some(949),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                repo.find_by_id(title.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pinned_ref
+                    .as_deref(),
+                Some("imdb:tt0113277")
+            );
+        }
     };
 }
 
@@ -2476,6 +2844,7 @@ macro_rules! movie_repository_contract {
                         }),
                         status: FileStatus::Known,
                         classifier_version: 0,
+                        container_tags: None,
                     })
                     .await
                     .expect("create a movie file"),
@@ -3060,6 +3429,233 @@ macro_rules! movie_repository_contract {
                 "an unknown title is not rekeyed"
             );
         }
+
+        #[tokio::test]
+        async fn a_pin_finds_the_movie_pinned_to_it_before_one_matched_to_its_id() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let pin = ProviderPin::Tmdb(603);
+            assert!(repo.find_by_pin(&pin).await.unwrap().is_none());
+
+            let matched = repo
+                .find_or_create_by_identity(new_movie("Matched"))
+                .await
+                .unwrap();
+            repo.apply_enrichment(
+                matched.id,
+                &MovieEnrichment {
+                    title: "Matched".to_string(),
+                    tmdb_id: Some(603),
+                    imdb_id: Some("tt0133093".to_string()),
+                    anilist_id: Some(5114),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            for by_id in [
+                ProviderPin::Tmdb(603),
+                ProviderPin::Imdb("tt0133093".to_string()),
+                ProviderPin::Anilist(5114),
+            ] {
+                assert_eq!(
+                    repo.find_by_pin(&by_id).await.unwrap().map(|t| t.id),
+                    Some(matched.id),
+                    "the movie enrichment matched to {by_id}"
+                );
+            }
+
+            let pinned = repo
+                .find_or_create_by_identity(new_movie("Pinned"))
+                .await
+                .unwrap();
+            assert!(
+                repo.set_pinned_ref(pinned.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                repo.find_by_pin(&pin).await.unwrap().map(|t| t.id),
+                Some(pinned.id),
+                "a pin before a match"
+            );
+            assert_eq!(
+                repo.find_by_id(pinned.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pinned_ref
+                    .as_deref(),
+                Some("tmdb:603")
+            );
+            assert!(
+                repo.find_by_pin(&ProviderPin::Tvdb(81189))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an id nothing carries finds nothing"
+            );
+        }
+
+        #[tokio::test]
+        async fn one_pin_pins_one_movie_and_a_movie_can_be_repinned() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let a = repo
+                .find_or_create_by_identity(new_movie("A"))
+                .await
+                .unwrap();
+            let b = repo
+                .find_or_create_by_identity(new_movie("B"))
+                .await
+                .unwrap();
+            let pin = ProviderPin::Anilist(5114);
+
+            assert!(
+                repo.set_pinned_ref(a.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(b.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "another movie holds the pin"
+            );
+            assert_eq!(
+                repo.find_by_id(b.id).await.unwrap().unwrap().pinned_ref,
+                None
+            );
+            assert!(
+                repo.set_pinned_ref(a.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "pinning a movie to its own pin again is no clash"
+            );
+
+            assert!(
+                repo.set_pinned_ref(a.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                repo.find_by_id(a.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pinned_ref
+                    .as_deref(),
+                Some("tmdb:1"),
+                "a new pin replaces the old"
+            );
+            assert!(
+                repo.set_pinned_ref(b.id, &pin, PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "a released pin is free"
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(Uuid::new_v4(), &ProviderPin::Tvdb(7), PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "no movie, no pin"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_nfo_pin_never_replaces_an_administrators_pin_of_a_movie() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let title = repo
+                .find_or_create_by_identity(new_movie("Pinned"))
+                .await
+                .unwrap();
+            let stored = |title: Option<_>| {
+                title.map(|t: $crate::models::Movie| (t.pinned_ref, t.pin_source))
+            };
+
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(1), PinSource::Nfo)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:1".to_string()), Some(PinSource::Nfo))),
+                "the pin is recorded with who set it"
+            );
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(2), PinSource::Admin)
+                    .await
+                    .unwrap(),
+                "an administrator replaces an NFO's pin"
+            );
+            assert!(
+                !repo
+                    .set_pinned_ref(title.id, &ProviderPin::Tmdb(3), PinSource::Nfo)
+                    .await
+                    .unwrap(),
+                "an NFO never replaces an administrator's pin"
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:2".to_string()), Some(PinSource::Admin)))
+            );
+            assert!(
+                repo.set_pinned_ref(title.id, &ProviderPin::Tmdb(4), PinSource::Admin)
+                    .await
+                    .unwrap(),
+                "an administrator replaces their own pin"
+            );
+            assert_eq!(
+                stored(repo.find_by_id(title.id).await.unwrap()),
+                Some((Some("tmdb:4".to_string()), Some(PinSource::Admin)))
+            );
+        }
+
+        #[tokio::test]
+        async fn enrichment_never_rewrites_a_movies_pin() {
+            use $crate::models::pin::{PinSource, ProviderPin};
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let title = repo
+                .find_or_create_by_identity(new_movie("Pinned"))
+                .await
+                .unwrap();
+            assert!(
+                repo.set_pinned_ref(
+                    title.id,
+                    &ProviderPin::Imdb("tt0113277".to_string()),
+                    PinSource::Nfo
+                )
+                .await
+                .unwrap()
+            );
+            repo.apply_enrichment(
+                title.id,
+                &MovieEnrichment {
+                    title: "Provider".to_string(),
+                    tmdb_id: Some(949),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                repo.find_by_id(title.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .pinned_ref
+                    .as_deref(),
+                Some("imdb:tt0113277")
+            );
+        }
     };
 }
 
@@ -3192,6 +3788,7 @@ macro_rules! library_shape_repository_contract {
                     content,
                     status,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .expect("create a file")
@@ -3901,6 +4498,380 @@ macro_rules! playback_telemetry_repository_contract {
     };
 }
 
+/// Behavioural contract for [`crate::repositories::SidecarSubtitleRepository`]
+/// (issue #184): one row per subtitle path, upserted in place, listed by file
+/// and by library in path order, and deleted by id.
+///
+/// `$setup` names an `async fn() -> impl SidecarSubtitleFixture`.
+#[macro_export]
+macro_rules! sidecar_subtitle_repository_contract {
+    ($setup:path) => {
+        use ::std::path::PathBuf;
+        use ::uuid::Uuid;
+        use $crate::models::sidecar::{SidecarInfo, SubtitleFormat, UpsertSidecarSubtitle};
+        use $crate::repositories::contract::fixture::SidecarSubtitleFixture;
+
+        /// A fixed, non-epoch instant a whole second survives Postgres's
+        /// microsecond precision at.
+        fn at(offset_secs: i64) -> ::chrono::DateTime<::chrono::Utc> {
+            ::chrono::DateTime::from_timestamp(1_700_000_000 + offset_secs, 0)
+                .expect("valid instant")
+        }
+
+        /// A subtitle of `file_id` at a path of its own -- a fresh UUID keeps
+        /// concurrently running Postgres tests apart -- named `name`.
+        fn subtitle(
+            library_id: Uuid,
+            file_id: Uuid,
+            dir: &str,
+            name: &str,
+        ) -> UpsertSidecarSubtitle {
+            UpsertSidecarSubtitle {
+                file_id,
+                library_id,
+                path: PathBuf::from(format!("/videos/{dir}/{name}")),
+                info: SidecarInfo {
+                    format: SubtitleFormat::Srt,
+                    language: Some("eng".to_string()),
+                    title: None,
+                    is_forced: false,
+                    is_sdh: false,
+                    is_default: false,
+                },
+                size_bytes: 100,
+                mtime: Some(at(0)),
+            }
+        }
+
+        #[tokio::test]
+        async fn an_upsert_inserts_once_then_updates_the_row_at_its_path_in_place() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let video = fixture.new_video_file(library).await;
+            let other_video = fixture.new_video_file(library).await;
+            let dir = Uuid::new_v4().to_string();
+            let first = subtitle(library, video, &dir, "Movie.en.srt");
+
+            let inserted = repo.upsert_by_path(first.clone()).await.unwrap();
+            assert!(first.matches(&inserted), "{inserted:?}");
+            assert_eq!(
+                repo.find_by_path(&first.path).await.unwrap().map(|r| r.id),
+                Some(inserted.id)
+            );
+
+            let changed = UpsertSidecarSubtitle {
+                file_id: other_video,
+                info: SidecarInfo {
+                    format: SubtitleFormat::Ass,
+                    language: None,
+                    title: Some("Commentary".to_string()),
+                    is_forced: true,
+                    is_sdh: true,
+                    is_default: true,
+                },
+                size_bytes: 250,
+                mtime: None,
+                ..first.clone()
+            };
+            let updated = repo.upsert_by_path(changed.clone()).await.unwrap();
+            assert_eq!(updated.id, inserted.id, "one row per path, kept in place");
+            assert_eq!(updated.created_at, inserted.created_at);
+            assert!(changed.matches(&updated), "{updated:?}");
+            let stored = repo.find_by_path(&first.path).await.unwrap().unwrap();
+            assert!(changed.matches(&stored), "{stored:?}");
+            assert!(repo.find_by_file_id(video).await.unwrap().is_empty());
+            assert_eq!(repo.find_by_file_id(other_video).await.unwrap().len(), 1);
+        }
+
+        /// `sidecar_subtitles.mtime` is a `TIMESTAMPTZ`, as `files.mtime` is:
+        /// a filesystem's nanoseconds read back as whole microseconds
+        /// (issue #229), which is what a scan compares a subtitle's stat with.
+        #[tokio::test]
+        async fn an_mtime_reads_back_in_whole_microseconds() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let video = fixture.new_video_file(library).await;
+            let dir = Uuid::new_v4().to_string();
+            let written = ::chrono::DateTime::from_timestamp(1_790_000_341, 802_029_432)
+                .expect("valid instant");
+            let read_back = ::chrono::DateTime::from_timestamp(1_790_000_341, 802_029_000)
+                .expect("valid instant");
+
+            let upserted = repo
+                .upsert_by_path(UpsertSidecarSubtitle {
+                    mtime: Some(written),
+                    ..subtitle(library, video, &dir, "Movie.en.srt")
+                })
+                .await
+                .unwrap();
+            assert_eq!(upserted.mtime, Some(read_back));
+            let stored = repo.find_by_path(&upserted.path).await.unwrap().unwrap();
+            assert_eq!(stored.mtime, Some(read_back));
+        }
+
+        #[tokio::test]
+        async fn subtitles_are_listed_by_file_and_by_library_in_path_order() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let other_library = fixture.new_library().await;
+            let video = fixture.new_video_file(library).await;
+            let sibling = fixture.new_video_file(library).await;
+            let elsewhere = fixture.new_video_file(other_library).await;
+            let dir = Uuid::new_v4().to_string();
+            for upsert in [
+                subtitle(library, video, &dir, "Movie.fr.srt"),
+                subtitle(library, video, &dir, "Movie.en.srt"),
+                subtitle(library, sibling, &dir, "Other.en.srt"),
+                subtitle(other_library, elsewhere, &dir, "Elsewhere.en.srt"),
+            ] {
+                repo.upsert_by_path(upsert).await.unwrap();
+            }
+            let names = |rows: Vec<$crate::models::sidecar::SidecarSubtitle>| {
+                rows.into_iter()
+                    .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                names(repo.find_by_file_id(video).await.unwrap()),
+                vec!["Movie.en.srt", "Movie.fr.srt"]
+            );
+            assert_eq!(
+                names(repo.find_all_by_library(library).await.unwrap()),
+                vec!["Movie.en.srt", "Movie.fr.srt", "Other.en.srt"]
+            );
+            assert_eq!(
+                names(repo.find_all_by_library(other_library).await.unwrap()),
+                vec!["Elsewhere.en.srt"]
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_by_ids_removes_exactly_those_rows() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let video = fixture.new_video_file(library).await;
+            let dir = Uuid::new_v4().to_string();
+            let keep = repo
+                .upsert_by_path(subtitle(library, video, &dir, "Movie.en.srt"))
+                .await
+                .unwrap();
+            let gone = repo
+                .upsert_by_path(subtitle(library, video, &dir, "Movie.de.srt"))
+                .await
+                .unwrap();
+
+            assert_eq!(repo.delete_by_ids(Vec::new()).await.unwrap(), 0);
+            assert_eq!(
+                repo.delete_by_ids(vec![gone.id, Uuid::new_v4()])
+                    .await
+                    .unwrap(),
+                1,
+                "an unknown id deletes nothing"
+            );
+            assert_eq!(repo.find_by_path(&gone.path).await.unwrap(), None);
+            assert_eq!(
+                repo.find_by_file_id(video)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<_>>(),
+                vec![keep.id]
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unknown_path_finds_nothing() {
+            let fixture = $setup().await;
+            let path = PathBuf::from(format!("/videos/{}/None.srt", Uuid::new_v4()));
+            assert_eq!(fixture.repo().find_by_path(&path).await.unwrap(), None);
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::AppliedNfoRepository`]
+/// (issue #184): one record per NFO path, recorded in place, listed by
+/// library in path order, and deleted by id or by the directory above it.
+///
+/// `$setup` names an `async fn() -> impl AppliedNfoFixture`.
+#[macro_export]
+macro_rules! applied_nfo_repository_contract {
+    ($setup:path) => {
+        use ::std::path::PathBuf;
+        use ::uuid::Uuid;
+        use $crate::models::applied_nfo::{AppliedNfo, RecordAppliedNfo};
+        use $crate::repositories::contract::fixture::AppliedNfoFixture;
+
+        /// The NFO `name` in a folder of its own -- a fresh UUID keeps
+        /// concurrently running Postgres tests apart.
+        fn nfo(library_id: Uuid, dir: &str, name: &str) -> RecordAppliedNfo {
+            RecordAppliedNfo {
+                library_id,
+                path: PathBuf::from(format!("/videos/{dir}/{name}")),
+                size_bytes: 120,
+                content_hash: "0f1e2d3c4b5a69788796a5b4c3d2e1f0".to_string(),
+                change_stamp: Some("120:1700000000000000000:1700000000000000000".to_string()),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_record_inserts_once_then_updates_the_row_at_its_path_in_place() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let dir = Uuid::new_v4().to_string();
+            let first = nfo(library, &dir, "movie.nfo");
+
+            let inserted = repo.record_by_path(first.clone()).await.unwrap();
+            assert!(first.matches(&inserted), "{inserted:?}");
+            assert_eq!(
+                repo.find_by_path(&first.path).await.unwrap().map(|r| r.id),
+                Some(inserted.id)
+            );
+
+            let edited = RecordAppliedNfo {
+                size_bytes: 64,
+                content_hash: "ffeeddccbbaa99887766554433221100".to_string(),
+                change_stamp: None,
+                ..first.clone()
+            };
+            assert!(!edited.same_content(&inserted));
+            let updated = repo.record_by_path(edited.clone()).await.unwrap();
+            assert_eq!(updated.id, inserted.id, "one row per path, kept in place");
+            assert_eq!(updated.created_at, inserted.created_at);
+            let stored = repo.find_by_path(&first.path).await.unwrap().unwrap();
+            assert!(edited.matches(&stored), "{stored:?}");
+            assert!(!first.same_content(&stored), "the edit is what is recorded");
+        }
+
+        #[tokio::test]
+        async fn records_are_listed_by_library_in_path_order() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let other_library = fixture.new_library().await;
+            let dir = Uuid::new_v4().to_string();
+            for record in [
+                nfo(library, &dir, "tvshow.nfo"),
+                nfo(library, &dir, "movie.nfo"),
+                nfo(other_library, &dir, "Elsewhere.nfo"),
+            ] {
+                repo.record_by_path(record).await.unwrap();
+            }
+            let names = |rows: Vec<AppliedNfo>| {
+                rows.into_iter()
+                    .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                names(repo.find_all_by_library(library).await.unwrap()),
+                vec!["movie.nfo", "tvshow.nfo"]
+            );
+            assert_eq!(
+                names(repo.find_all_by_library(other_library).await.unwrap()),
+                vec!["Elsewhere.nfo"]
+            );
+        }
+
+        #[tokio::test]
+        async fn delete_by_ids_removes_exactly_those_rows() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let dir = Uuid::new_v4().to_string();
+            let keep = repo
+                .record_by_path(nfo(library, &dir, "movie.nfo"))
+                .await
+                .unwrap();
+            let gone = repo
+                .record_by_path(nfo(library, &dir, "tvshow.nfo"))
+                .await
+                .unwrap();
+
+            assert_eq!(repo.delete_by_ids(Vec::new()).await.unwrap(), 0);
+            assert_eq!(
+                repo.delete_by_ids(vec![gone.id, Uuid::new_v4()])
+                    .await
+                    .unwrap(),
+                1,
+                "an unknown id deletes nothing"
+            );
+            assert_eq!(repo.find_by_path(&gone.path).await.unwrap(), None);
+            assert_eq!(
+                repo.find_all_by_library(library)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<_>>(),
+                vec![keep.id]
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unknown_path_finds_nothing() {
+            let fixture = $setup().await;
+            let path = PathBuf::from(format!("/videos/{}/movie.nfo", Uuid::new_v4()));
+            assert_eq!(fixture.repo().find_by_path(&path).await.unwrap(), None);
+        }
+
+        /// The records beneath a directory are those whose path continues it
+        /// by whole components, at any depth -- another library's never. A
+        /// `_` or `%` in the directory's name is itself, not a wildcard.
+        #[tokio::test]
+        async fn delete_beneath_removes_the_records_beneath_a_directory_by_whole_components() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let other = fixture.new_library().await;
+            let base = Uuid::new_v4().to_string();
+            let dir = format!("{base}/Show_%1");
+            for gone in [
+                nfo(library, &dir, "tvshow.nfo"),
+                nfo(library, &format!("{dir}/Season 01"), "S01E01.nfo"),
+            ] {
+                repo.record_by_path(gone).await.unwrap();
+            }
+            // Longer by a character, what the wildcards would match, a
+            // sibling file named like the directory, and another library.
+            let kept = [
+                nfo(library, &format!("{base}/Show_%10"), "tvshow.nfo"),
+                nfo(library, &format!("{base}/ShowAB1"), "tvshow.nfo"),
+                nfo(library, &base, "Show_%1.nfo"),
+                nfo(other, &format!("{dir}/Season 02"), "S02E01.nfo"),
+            ];
+            for record in kept.clone() {
+                repo.record_by_path(record).await.unwrap();
+            }
+
+            let dir_path = PathBuf::from(format!("/videos/{dir}"));
+            assert_eq!(repo.delete_beneath(library, &dir_path).await.unwrap(), 2);
+
+            let mut left: Vec<PathBuf> = repo
+                .find_all_by_library(library)
+                .await
+                .unwrap()
+                .into_iter()
+                .chain(repo.find_all_by_library(other).await.unwrap())
+                .map(|r| r.path)
+                .collect();
+            left.sort();
+            let mut expected: Vec<PathBuf> = kept.into_iter().map(|r| r.path).collect();
+            expected.sort();
+            assert_eq!(left, expected);
+            assert_eq!(
+                repo.delete_beneath(library, &dir_path).await.unwrap(),
+                0,
+                "nothing is left beneath it"
+            );
+        }
+    };
+}
+
 /// Behavioural contract for [`crate::repositories::CatalogRepository`]: one
 /// listing of movies and shows together, filtered, ordered by every sort field
 /// in both directions with missing values last, paged from a position either
@@ -3957,6 +4928,7 @@ macro_rules! catalog_repository_contract {
                     content: Some(content),
                     status: FileStatus::Known,
                     classifier_version: 0,
+                    container_tags: None,
                 })
                 .await
                 .expect("create a file")

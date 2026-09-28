@@ -52,6 +52,7 @@ fn candidate(id: u128, path: &str, missing_since: Option<DateTime<Utc>>) -> Medi
         content: None,
         status: FileStatus::Unknown,
         classifier_version: 0,
+        container_tags: None,
         scanned_at: instant(0),
         updated_at: instant(0),
         missing_since,

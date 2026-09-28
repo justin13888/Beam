@@ -1,0 +1,136 @@
+use sea_orm_migration::prelude::*;
+
+/// What reading the metadata beside the media stores (issue #184).
+///
+/// - `movies.pinned_ref` and `shows.pinned_ref`: the provider id an NFO pins
+///   the title to, as `"provider:id"` (`tmdb:603`). Enrichment fetches a
+///   pinned title by that id rather than searching for it, and a file whose
+///   NFO names the same id joins the same title. Unique, so one id pins one
+///   title; nullable, and Postgres lets any number of `NULL`s share a unique
+///   index.
+/// - `movies.pin_source` and `shows.pin_source`: who set the pin, `nfo` or
+///   `admin` -- `NULL` exactly when `pinned_ref` is. An NFO re-read never
+///   replaces an administrator's pin (FR-312).
+/// - `sidecar_subtitles`: a text subtitle file beside a video, recorded as a
+///   subtitle of that video (decision D184-1: its own table, not a
+///   `media_streams` row, whose `stream_index` is the container's and whose
+///   rows are replaced wholesale when the file is re-probed). A row goes with
+///   its video file (`ON DELETE CASCADE`), and with its library. `path` is
+///   unique so a scan upserts by it. `format` is one of the text formats
+///   Beam indexes (decision D184-4); `language` is ISO 639-2/B.
+/// - `applied_nfos`: what each NFO held -- its size and a hash of its content
+///   -- when the indexer last applied it, and the stat stamp that lets a scan
+///   skip re-reading an NFO that was not written since. An NFO is re-applied
+///   exactly when its content differs from its record, whatever its
+///   modification time says. `path` is unique; a row goes with its library.
+/// - `files.container_tags`: the file-level container tags classification
+///   reads, as the last successful probe read them -- a JSON object, `NULL`
+///   while the file has no successful probe (or had it before this column
+///   existed). A reclassification at a classifier-version bump reads them
+///   instead of probing every file again, so a file placed by its tags keeps
+///   its place.
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let db = manager.get_connection();
+
+        for table in ["movies", "shows"] {
+            db.execute_unprepared(&format!("ALTER TABLE {table} ADD COLUMN pinned_ref TEXT"))
+                .await?;
+            db.execute_unprepared(&format!(
+                "CREATE UNIQUE INDEX idx_{table}_pinned_ref ON {table} (pinned_ref)"
+            ))
+            .await?;
+            db.execute_unprepared(&format!(
+                "ALTER TABLE {table} ADD COLUMN pin_source TEXT \
+                     CONSTRAINT {table}_pin_source CHECK (pin_source IN ('nfo', 'admin')), \
+                 ADD CONSTRAINT {table}_pin_has_source \
+                     CHECK ((pinned_ref IS NULL) = (pin_source IS NULL))"
+            ))
+            .await?;
+        }
+
+        db.execute_unprepared(
+            "CREATE TABLE sidecar_subtitles ( \
+                 id UUID PRIMARY KEY, \
+                 file_id UUID NOT NULL REFERENCES files (id) ON DELETE CASCADE, \
+                 library_id UUID NOT NULL REFERENCES libraries (id) ON DELETE CASCADE, \
+                 path TEXT NOT NULL, \
+                 format TEXT NOT NULL \
+                     CONSTRAINT sidecar_subtitles_format \
+                     CHECK (format IN ('srt', 'vtt', 'ass', 'ssa')), \
+                 language TEXT, \
+                 title TEXT, \
+                 is_forced BOOLEAN NOT NULL DEFAULT false, \
+                 is_sdh BOOLEAN NOT NULL DEFAULT false, \
+                 is_default BOOLEAN NOT NULL DEFAULT false, \
+                 size_bytes BIGINT NOT NULL \
+                     CONSTRAINT sidecar_subtitles_size CHECK (size_bytes >= 0), \
+                 mtime TIMESTAMPTZ, \
+                 created_at TIMESTAMPTZ NOT NULL, \
+                 updated_at TIMESTAMPTZ NOT NULL, \
+                 CONSTRAINT sidecar_subtitles_path_unique UNIQUE (path) \
+             )",
+        )
+        .await?;
+        db.execute_unprepared(
+            "CREATE INDEX idx_sidecar_subtitles_file_id ON sidecar_subtitles (file_id)",
+        )
+        .await?;
+        db.execute_unprepared(
+            "CREATE INDEX idx_sidecar_subtitles_library_id ON sidecar_subtitles (library_id)",
+        )
+        .await?;
+
+        db.execute_unprepared(
+            "CREATE TABLE applied_nfos ( \
+                 id UUID PRIMARY KEY, \
+                 library_id UUID NOT NULL REFERENCES libraries (id) ON DELETE CASCADE, \
+                 path TEXT NOT NULL, \
+                 size_bytes BIGINT NOT NULL \
+                     CONSTRAINT applied_nfos_size CHECK (size_bytes >= 0), \
+                 content_hash TEXT NOT NULL, \
+                 change_stamp TEXT, \
+                 created_at TIMESTAMPTZ NOT NULL, \
+                 updated_at TIMESTAMPTZ NOT NULL, \
+                 CONSTRAINT applied_nfos_path_unique UNIQUE (path) \
+             )",
+        )
+        .await?;
+        db.execute_unprepared(
+            "CREATE INDEX idx_applied_nfos_library_id ON applied_nfos (library_id)",
+        )
+        .await?;
+
+        db.execute_unprepared(
+            "ALTER TABLE files ADD COLUMN container_tags JSONB \
+                 CONSTRAINT files_container_tags_object \
+                 CHECK (jsonb_typeof(container_tags) = 'object')",
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let db = manager.get_connection();
+
+        db.execute_unprepared("ALTER TABLE files DROP COLUMN container_tags")
+            .await?;
+        db.execute_unprepared("DROP TABLE applied_nfos").await?;
+        db.execute_unprepared("DROP TABLE sidecar_subtitles")
+            .await?;
+        // Dropping a column drops the index and the constraints on it.
+        for table in ["shows", "movies"] {
+            db.execute_unprepared(&format!(
+                "ALTER TABLE {table} DROP COLUMN pin_source, DROP COLUMN pinned_ref"
+            ))
+            .await?;
+        }
+
+        Ok(())
+    }
+}

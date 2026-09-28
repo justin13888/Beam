@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use beam_domain::models::catalog::ShowChildCounts;
 use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show};
+use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 use beam_domain::repositories::ShowRepository;
 
@@ -260,6 +261,79 @@ impl ShowRepository for SqlShowRepository {
             ));
         }
         match update.exec(self.db.as_ref()).await {
+            Ok(result) => Ok(result.rows_affected == 1),
+            Err(err) if super::movie::is_unique_violation(&err) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Show>, DbErr> {
+        use beam_entity::show;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+        let pinned = show::Entity::find()
+            .filter(show::Column::PinnedRef.eq(pin.to_ref_string()))
+            .one(self.db.as_ref())
+            .await?;
+        if let Some(pinned) = pinned {
+            return Ok(Some(Show::from(pinned)));
+        }
+        let matched = match pin {
+            ProviderPin::Tmdb(id) => show::Column::TmdbId.eq(*id as i32),
+            ProviderPin::Imdb(id) => show::Column::ImdbId.eq(id.as_str()),
+            ProviderPin::Tvdb(id) => show::Column::TvdbId.eq(*id as i32),
+            ProviderPin::Anilist(id) => show::Column::AnilistId.eq(*id as i32),
+        };
+        let model = show::Entity::find()
+            .filter(matched)
+            .order_by_asc(show::Column::CreatedAt)
+            .order_by_asc(show::Column::Id)
+            .one(self.db.as_ref())
+            .await?;
+        Ok(model.map(Show::from))
+    }
+
+    async fn set_pinned_ref(
+        &self,
+        show_id: Uuid,
+        pin: &ProviderPin,
+        source: PinSource,
+    ) -> Result<bool, DbErr> {
+        use beam_entity::show;
+        use sea_orm::sea_query::{Alias, Expr, ExprTrait, Query};
+        use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
+
+        let stored = pin.to_ref_string();
+        let other = Alias::new("other");
+        // As in `rekey`: `NOT EXISTS` answers the ordinary clash, the unique
+        // index a concurrent one.
+        let mut update = show::Entity::update_many()
+            .col_expr(show::Column::PinnedRef, Expr::value(Some(stored.clone())))
+            .col_expr(
+                show::Column::PinSource,
+                Expr::value(Some(source.as_str().to_string())),
+            )
+            .filter(show::Column::Id.eq(show_id));
+        if source == PinSource::Nfo {
+            // An NFO never replaces an administrator's pin (FR-312).
+            update = update.filter(
+                Condition::any()
+                    .add(show::Column::PinSource.is_null())
+                    .add(show::Column::PinSource.ne(PinSource::Admin.as_str())),
+            );
+        }
+        let result = update
+            .filter(Expr::not_exists(
+                Query::select()
+                    .expr(Expr::val(1))
+                    .from_as(show::Entity, other.clone())
+                    .and_where(Expr::col((other.clone(), show::Column::PinnedRef)).eq(stored))
+                    .and_where(Expr::col((other, show::Column::Id)).ne(show_id))
+                    .to_owned(),
+            ))
+            .exec(self.db.as_ref())
+            .await;
+        match result {
             Ok(result) => Ok(result.rows_affected == 1),
             Err(err) if super::movie::is_unique_violation(&err) => Ok(false),
             Err(err) => Err(err),
