@@ -886,6 +886,69 @@ mod tests {
         );
     }
 
+    /// A folder's parts are one source only as the whole run 1..n (C2 of
+    /// the #233 review): parts 2 and 3 with no part 1, or 1 and 3 with no
+    /// part 2, are missing a part -- or are two films whose names end alike
+    /// -- so each file is a source of its own, never one that starts past
+    /// the beginning or skips a part.
+    #[tokio::test]
+    async fn parts_that_do_not_run_from_one_are_not_one_source() {
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie = make_movie("Movie", Some(2019));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let file = |path: &str, part_number: u32, size_bytes: u64| {
+            let id = file_of(
+                &file_repo,
+                MediaFileContent::Movie {
+                    movie_entry_id: theatrical,
+                    part_number: Some(part_number),
+                },
+                size_bytes,
+                1000,
+            );
+            file_repo.files.lock().unwrap().get_mut(&id).unwrap().path = path.into();
+            id
+        };
+        // Distinct sizes, so the rank order is known: the largest first.
+        let late_two = file("/m/Late/Movie (2019) - CD2.avi", 2, 400);
+        let late_three = file("/m/Late/Movie (2019) - CD3.avi", 3, 300);
+        let gap_one = file("/m/Gap/Movie (2019) - CD1.avi", 1, 200);
+        let gap_three = file("/m/Gap/Movie (2019) - CD3.avi", 3, 100);
+
+        let service = service(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+
+        let shape: Vec<(Uuid, Vec<(Uuid, Option<u32>)>)> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.file_id,
+                    s.parts.iter().map(|p| (p.file_id, p.part_number)).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (late_two, vec![(late_two, Some(2))]),
+                (late_three, vec![(late_three, Some(3))]),
+                (gap_one, vec![(gap_one, Some(1))]),
+                (gap_three, vec![(gap_three, Some(3))]),
+            ]
+        );
+    }
+
     /// Every track is addressed by its stream index and names its codec as
     /// FFmpeg does, whatever the codec: E-AC-3 and TrueHD are no longer
     /// `Unknown`, a PGS subtitle is not `WebVTT`. A value the file does not

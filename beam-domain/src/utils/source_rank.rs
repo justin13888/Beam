@@ -63,9 +63,12 @@ pub fn rank_sources<T>(sources: &mut [T], key: impl Fn(&T) -> SourceRankKey) {
 /// movie, in part order. Every other file is a source of its own.
 ///
 /// `part_of` names a file's stack and its part number, or `None` for a whole
-/// file. The parts of one stack are one source when their numbers are
-/// distinct; a stack in which two files claim one number cannot say which
-/// plays, so each of its files is a source of its own instead. Sources come
+/// file. The parts of one stack are one source when their numbers run from 1
+/// with no gap and no repeat. Any other stack is not one film told whole: two
+/// files claiming one number cannot say which plays, and a stack that starts
+/// past 1 or skips a number is missing a part -- or is two films whose names
+/// merely end alike -- so each of its files is a source of its own instead.
+/// Sources come
 /// out whole files first, in the order given, then stacks in stack order;
 /// [`rank_sources`] decides the order that matters.
 pub fn stack_parts<T, S: Ord>(
@@ -83,8 +86,11 @@ pub fn stack_parts<T, S: Ord>(
     }
     for (_, mut parts) in stacks {
         parts.sort_by_key(|(part, _)| *part);
-        let distinct = parts.windows(2).all(|pair| pair[0].0 != pair[1].0);
-        if distinct {
+        let whole_run = parts
+            .iter()
+            .zip(1_u32..)
+            .all(|((part, _), expected)| *part == expected);
+        if whole_run {
             sources.push(parts.into_iter().map(|(_, file)| file).collect());
         } else {
             sources.extend(parts.into_iter().map(|(_, file)| vec![file]));
@@ -196,6 +202,30 @@ mod tests {
         );
     }
 
+    /// A stack that does not start at part 1, or skips a number, is missing
+    /// a part or is not one film: every file of it is a source of its own,
+    /// and other stacks are untouched.
+    #[test]
+    fn a_stack_missing_a_part_is_not_stacked() {
+        assert_eq!(
+            stacked(vec![
+                ("a cd2", Some(("a", 2))),
+                ("a cd3", Some(("a", 3))),
+                ("b cd1", Some(("b", 1))),
+                ("b cd3", Some(("b", 3))),
+                ("c cd1", Some(("c", 1))),
+                ("c cd2", Some(("c", 2))),
+            ]),
+            vec![
+                vec!["a cd2"],
+                vec!["a cd3"],
+                vec!["b cd1"],
+                vec!["b cd3"],
+                vec!["c cd1", "c cd2"]
+            ]
+        );
+    }
+
     fn any_key() -> impl Strategy<Value = SourceRankKey> {
         (any::<bool>(), 0_u32..4, 0_u64..4, 0_u64..4, any::<u128>()).prop_map(
             |(default, height, rate, size, id)| key(default, height * 720, rate, size, id),
@@ -232,8 +262,8 @@ mod tests {
         }
 
         /// Stacking loses and duplicates no file, never mixes two stacks or
-        /// a whole file into one source, and plays every source in part
-        /// order.
+        /// a whole file into one source, and plays every source as the run
+        /// of parts 1, 2, ... n.
         #[test]
         fn stacking_partitions_the_files(
             files in prop::collection::vec(prop::option::of((0_u8..3, 1_u32..4)), 0..10),
@@ -252,9 +282,10 @@ mod tests {
                         source.iter().filter_map(|(_, part)| part.map(|(s, _)| s)).collect();
                     prop_assert_eq!(stacks.len(), 1, "{:?}", source);
                     prop_assert!(source.iter().all(|(_, part)| part.is_some()), "{:?}", source);
-                    for pair in source.windows(2) {
-                        prop_assert!(pair[0].1.unwrap().1 < pair[1].1.unwrap().1, "{:?}", source);
-                    }
+                    let numbers: Vec<u32> =
+                        source.iter().filter_map(|(_, part)| part.map(|(_, n)| n)).collect();
+                    let run: Vec<u32> = (1..=numbers.len() as u32).collect();
+                    prop_assert_eq!(numbers, run, "{:?}", source);
                 }
             }
         }
