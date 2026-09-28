@@ -1,4 +1,5 @@
 pub mod admin_log;
+pub mod catalog;
 pub mod enrichment;
 pub mod file;
 pub mod genre;
@@ -12,6 +13,7 @@ pub mod stream;
 
 // SQL implementations
 pub use admin_log::SqlAdminLogRepository;
+pub use catalog::SqlCatalogRepository;
 pub use enrichment::SqlEnrichmentStateRepository;
 pub use file::SqlFileRepository;
 pub use genre::SqlGenreRepository;

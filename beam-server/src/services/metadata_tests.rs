@@ -10,12 +10,14 @@ mod tests {
     use uuid::Uuid;
 
     use crate::services::metadata::{
-        DbMetadataService, MediaFilter, MediaSearchFilters, MediaSortField, MetadataService,
-        SortOrder,
+        BrowseRequest, DbMetadataService, MediaFilter, MediaSearchFilters, MediaSortField,
+        MetadataRepositories, MetadataService, SortOrder,
     };
     use beam_domain::models::movie::Movie;
     use beam_domain::models::{Episode, MediaFile, MediaFileContent, MovieEntry, Season, Show};
+    use beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+    use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
     use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
@@ -68,8 +70,40 @@ mod tests {
         }
     }
 
+    /// The real service over the given doubles, with a catalogue and a genre
+    /// store reading the same title doubles.
+    fn service(
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
+        files: Arc<InMemoryFileRepository>,
+        streams: Arc<InMemoryMediaStreamRepository>,
+    ) -> DbMetadataService {
+        service_with_genres(movies, shows, files, streams, Arc::default())
+    }
+
+    fn service_with_genres(
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
+        files: Arc<InMemoryFileRepository>,
+        streams: Arc<InMemoryMediaStreamRepository>,
+        genres: Arc<InMemoryGenreRepository>,
+    ) -> DbMetadataService {
+        DbMetadataService::new(MetadataRepositories {
+            catalog: Arc::new(InMemoryCatalogRepository::new(
+                movies.clone(),
+                shows.clone(),
+                genres.clone(),
+            )),
+            movies,
+            shows,
+            files,
+            streams,
+            genres,
+        })
+    }
+
     fn make_service() -> DbMetadataService {
-        DbMetadataService::new(
+        service(
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
@@ -84,17 +118,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_media_metadata_unknown_id_returns_none() {
         let service = make_service();
-        let result = service
-            .get_media_metadata(&Uuid::new_v4().to_string())
-            .await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_get_media_metadata_invalid_id_returns_none() {
-        let service = make_service();
-        let result = service.get_media_metadata("not-a-uuid").await;
-        assert!(result.is_none());
+        let result = service.get_media_metadata(Uuid::new_v4()).await;
+        assert!(matches!(result, Ok(None)), "{result:?}");
     }
 
     #[tokio::test]
@@ -130,18 +155,20 @@ mod tests {
         );
         file_repo.files.lock().unwrap().insert(file.id, file);
 
-        let service = DbMetadataService::new(
+        let service = service(
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             file_repo,
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let result = service.get_media_metadata(&movie_id.to_string()).await;
-        assert!(result.is_some());
-        match result.unwrap() {
+        let result = service
+            .get_media_metadata(movie_id)
+            .await
+            .expect("the lookup succeeds");
+        match result.expect("the title resolves") {
             MediaMetadata::Movie(m) => {
-                assert_eq!(m.id, movie_id.to_string());
+                assert_eq!(m.id, movie_id);
                 assert_eq!(m.title.original, "Test Movie");
                 assert_eq!(m.year, Some(2023));
                 assert!(m.duration.is_some());
@@ -171,6 +198,7 @@ mod tests {
             imdb_id: None,
             tvdb_id: None,
             anilist_id: None,
+            rating_tmdb: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -203,24 +231,26 @@ mod tests {
         let episode_id = ep.id;
         show_repo.episodes.lock().unwrap().insert(ep.id, ep);
 
-        let service = DbMetadataService::new(
+        let service = service(
             Arc::new(InMemoryMovieRepository::default()),
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let result = service.get_media_metadata(&show_id.to_string()).await;
-        assert!(result.is_some());
-        match result.unwrap() {
+        let result = service
+            .get_media_metadata(show_id)
+            .await
+            .expect("the lookup succeeds");
+        match result.expect("the title resolves") {
             MediaMetadata::Show(s) => {
-                assert_eq!(s.id, show_id.to_string());
+                assert_eq!(s.id, show_id);
                 assert_eq!(s.title.original, "Test Show");
                 assert_eq!(s.year, Some(2022));
                 assert_eq!(s.seasons.len(), 1);
                 assert_eq!(s.seasons[0].episodes.len(), 1);
                 let episode = &s.seasons[0].episodes[0];
-                assert_eq!(episode.id, episode_id.to_string());
+                assert_eq!(episode.id, episode_id);
                 assert_eq!(episode.title, "Pilot");
                 assert!(
                     episode.file_id.is_none(),
@@ -232,350 +262,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_media_no_filter_returns_movies_and_shows() {
-        let movie_repo = Arc::new(InMemoryMovieRepository::default());
-        let show_repo = Arc::new(InMemoryShowRepository::default());
-
-        let m1 = make_movie("Alpha Movie", Some(2020));
-        movie_repo.movies.lock().unwrap().insert(m1.id, m1);
-
-        let s1 = Show {
-            id: Uuid::new_v4(),
-            title: "Beta Show".to_string(),
-            identity_key: None,
-            title_localized: None,
-            description: None,
-            year: None,
-            poster_url: None,
-            backdrop_url: None,
-            tmdb_id: None,
-            imdb_id: None,
-            tvdb_id: None,
-            anilist_id: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        show_repo.shows.lock().unwrap().insert(s1.id, s1);
-
-        let service = DbMetadataService::new(
-            movie_repo,
-            show_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-        );
-
-        let conn = service
-            .search_media(
-                Some(10),
-                None,
-                None,
-                None,
-                MediaSortField::Title,
-                SortOrder::Asc,
-                MediaSearchFilters {
-                    media_type: None,
-                    genre: None,
-                    year: None,
-                    year_from: None,
-                    year_to: None,
-                    query: None,
-                    min_rating: None,
-                },
-            )
-            .await;
-
-        assert_eq!(conn.edges.len(), 2);
-        assert!(!conn.page_info.has_next_page);
-        // Sorted by title: Alpha Movie, Beta Show
-        assert_eq!(conn.edges[0].node.title().original, "Alpha Movie");
-        assert_eq!(conn.edges[1].node.title().original, "Beta Show");
-    }
-
-    #[tokio::test]
-    async fn test_search_media_type_movie_filter() {
-        use crate::services::metadata::MediaTypeFilter;
-
-        let movie_repo = Arc::new(InMemoryMovieRepository::default());
-        let show_repo = Arc::new(InMemoryShowRepository::default());
-
-        let m1 = make_movie("Movie One", None);
-        movie_repo.movies.lock().unwrap().insert(m1.id, m1);
-
-        let s1 = Show {
-            id: Uuid::new_v4(),
-            title: "Show One".to_string(),
-            identity_key: None,
-            title_localized: None,
-            description: None,
-            year: None,
-            poster_url: None,
-            backdrop_url: None,
-            tmdb_id: None,
-            imdb_id: None,
-            tvdb_id: None,
-            anilist_id: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        show_repo.shows.lock().unwrap().insert(s1.id, s1);
-
-        let service = DbMetadataService::new(
-            movie_repo,
-            show_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-        );
-
-        let conn = service
-            .search_media(
-                Some(10),
-                None,
-                None,
-                None,
-                MediaSortField::Title,
-                SortOrder::Asc,
-                MediaSearchFilters {
-                    media_type: Some(MediaTypeFilter::Movie),
-                    genre: None,
-                    year: None,
-                    year_from: None,
-                    year_to: None,
-                    query: None,
-                    min_rating: None,
-                },
-            )
-            .await;
-
-        assert_eq!(conn.edges.len(), 1);
-        assert_eq!(conn.edges[0].node.title().original, "Movie One");
-    }
-
-    #[tokio::test]
-    async fn test_search_media_query_filter() {
-        let movie_repo = Arc::new(InMemoryMovieRepository::default());
-
-        let m1 = make_movie("Blade Runner", None);
-        let m2 = make_movie("The Matrix", None);
-        movie_repo.movies.lock().unwrap().insert(m1.id, m1);
-        movie_repo.movies.lock().unwrap().insert(m2.id, m2);
-
-        let service = DbMetadataService::new(
-            movie_repo,
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-        );
-
-        let conn = service
-            .search_media(
-                Some(10),
-                None,
-                None,
-                None,
-                MediaSortField::Title,
-                SortOrder::Asc,
-                MediaSearchFilters {
-                    media_type: None,
-                    genre: None,
-                    year: None,
-                    year_from: None,
-                    year_to: None,
-                    query: Some("blade".to_string()),
-                    min_rating: None,
-                },
-            )
-            .await;
-
-        assert_eq!(conn.edges.len(), 1);
-        assert_eq!(conn.edges[0].node.title().original, "Blade Runner");
-    }
-
-    #[tokio::test]
-    async fn test_search_media_year_filter() {
-        let movie_repo = Arc::new(InMemoryMovieRepository::default());
-
-        let m1 = make_movie("Movie 2020", Some(2020));
-        let m2 = make_movie("Movie 2021", Some(2021));
-        let m3 = make_movie("Movie 2022", Some(2022));
-        movie_repo.movies.lock().unwrap().insert(m1.id, m1);
-        movie_repo.movies.lock().unwrap().insert(m2.id, m2);
-        movie_repo.movies.lock().unwrap().insert(m3.id, m3);
-
-        let service = DbMetadataService::new(
-            movie_repo,
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-        );
-
-        let conn = service
-            .search_media(
-                Some(10),
-                None,
-                None,
-                None,
-                MediaSortField::Year,
-                SortOrder::Asc,
-                MediaSearchFilters {
-                    media_type: None,
-                    genre: None,
-                    year: None,
-                    year_from: Some(2021),
-                    year_to: Some(2021),
-                    query: None,
-                    min_rating: None,
-                },
-            )
-            .await;
-
-        assert_eq!(conn.edges.len(), 1);
-        assert_eq!(conn.edges[0].node.title().original, "Movie 2021");
-    }
-
-    #[tokio::test]
-    async fn test_search_media_pagination() {
-        let movie_repo = Arc::new(InMemoryMovieRepository::default());
-
-        // Insert 3 movies in alphabetical order
-        for title in &["Alpha", "Beta", "Gamma"] {
-            let m = make_movie(title, None);
-            movie_repo.movies.lock().unwrap().insert(m.id, m);
-        }
-
-        let service = DbMetadataService::new(
-            movie_repo,
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-        );
-
-        // First page of 2
-        let page1 = service
-            .search_media(
-                Some(2),
-                None,
-                None,
-                None,
-                MediaSortField::Title,
-                SortOrder::Asc,
-                MediaSearchFilters {
-                    media_type: None,
-                    genre: None,
-                    year: None,
-                    year_from: None,
-                    year_to: None,
-                    query: None,
-                    min_rating: None,
-                },
-            )
-            .await;
-
-        assert_eq!(page1.edges.len(), 2);
-        assert!(page1.page_info.has_next_page);
-        assert!(!page1.page_info.has_previous_page);
-        let cursor = page1.page_info.end_cursor.unwrap();
-
-        // Second page after cursor
-        let page2 = service
-            .search_media(
-                Some(2),
-                Some(cursor),
-                None,
-                None,
-                MediaSortField::Title,
-                SortOrder::Asc,
-                MediaSearchFilters {
-                    media_type: None,
-                    genre: None,
-                    year: None,
-                    year_from: None,
-                    year_to: None,
-                    query: None,
-                    min_rating: None,
-                },
-            )
-            .await;
-
-        assert_eq!(page2.edges.len(), 1);
-        assert!(!page2.page_info.has_next_page);
-        assert!(page2.page_info.has_previous_page);
-        assert_eq!(page2.edges[0].node.title().original, "Gamma");
-    }
-
-    #[tokio::test]
-    async fn test_search_media_sort_desc() {
-        let movie_repo = Arc::new(InMemoryMovieRepository::default());
-
-        for title in &["Alpha", "Beta", "Gamma"] {
-            let m = make_movie(title, None);
-            movie_repo.movies.lock().unwrap().insert(m.id, m);
-        }
-
-        let service = DbMetadataService::new(
-            movie_repo,
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-        );
-
-        let conn = service
-            .search_media(
-                Some(10),
-                None,
-                None,
-                None,
-                MediaSortField::Title,
-                SortOrder::Desc,
-                MediaSearchFilters {
-                    media_type: None,
-                    genre: None,
-                    year: None,
-                    year_from: None,
-                    year_to: None,
-                    query: None,
-                    min_rating: None,
-                },
-            )
-            .await;
-
-        assert_eq!(conn.edges.len(), 3);
-        assert_eq!(conn.edges[0].node.title().original, "Gamma");
-        assert_eq!(conn.edges[2].node.title().original, "Alpha");
-    }
-
-    #[tokio::test]
     async fn test_refresh_metadata_is_ok() {
         let service = make_service();
         let result = service.refresh_metadata(MediaFilter::All).await;
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_search_empty_db_returns_empty() {
-        let service = make_service();
-        let conn = service
-            .search_media(
-                Some(10),
-                None,
-                None,
-                None,
-                MediaSortField::Title,
-                SortOrder::Asc,
-                MediaSearchFilters {
-                    media_type: None,
-                    genre: None,
-                    year: None,
-                    year_from: None,
-                    year_to: None,
-                    query: None,
-                    min_rating: None,
-                },
-            )
-            .await;
-
-        assert_eq!(conn.edges.len(), 0);
-        assert!(!conn.page_info.has_next_page);
-        assert!(!conn.page_info.has_previous_page);
     }
 
     #[tokio::test]
@@ -623,7 +313,7 @@ mod tests {
 
         use crate::services::metadata::{MediaFilter, MetadataError};
 
-        let service = DbMetadataService::new(
+        let service = service(
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
@@ -659,13 +349,14 @@ mod tests {
             imdb_id: None,
             tvdb_id: None,
             anilist_id: None,
+            rating_tmdb: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
         let show_id = show.id;
         show_repo.shows.lock().unwrap().insert(show.id, show);
 
-        let service = DbMetadataService::new(
+        let service = service(
             Arc::new(InMemoryMovieRepository::default()),
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
@@ -707,7 +398,7 @@ mod tests {
         let file_id = file.id;
         file_repo.files.lock().unwrap().insert(file.id, file);
 
-        let service = DbMetadataService::new(
+        let service = service(
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             file_repo,
@@ -765,7 +456,7 @@ mod tests {
             .await
             .unwrap();
 
-        let service = DbMetadataService::new(
+        let service = service(
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             file_repo,
@@ -796,6 +487,7 @@ mod tests {
             imdb_id: None,
             tvdb_id: None,
             anilist_id: None,
+            rating_tmdb: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -845,7 +537,7 @@ mod tests {
         file_repo.files.lock().unwrap().insert(file_a.id, file_a);
         file_repo.files.lock().unwrap().insert(file_b.id, file_b);
 
-        let service = DbMetadataService::new(
+        let service = service(
             Arc::new(InMemoryMovieRepository::default()),
             show_repo,
             file_repo,
@@ -876,7 +568,7 @@ mod tests {
         let show_repo = Arc::new(InMemoryShowRepository::default());
         let episode_id = seed_episode(&show_repo);
 
-        let service = DbMetadataService::new(
+        let service = service(
             Arc::new(InMemoryMovieRepository::default()),
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
@@ -967,15 +659,17 @@ mod tests {
         let movie_id = movie.id;
         movie_repo.movies.lock().unwrap().insert(movie.id, movie);
 
-        let service = DbMetadataService::new(
+        let service = service(
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let Some(MediaMetadata::Movie(movie)) =
-            service.get_media_metadata(&movie_id.to_string()).await
+        let Some(MediaMetadata::Movie(movie)) = service
+            .get_media_metadata(movie_id)
+            .await
+            .expect("the lookup succeeds")
         else {
             panic!("the movie resolves");
         };
@@ -1007,15 +701,17 @@ mod tests {
         let movie_id = movie.id;
         movie_repo.movies.lock().unwrap().insert(movie.id, movie);
 
-        let service = DbMetadataService::new(
+        let service = service(
             movie_repo,
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryFileRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let Some(MediaMetadata::Movie(movie)) =
-            service.get_media_metadata(&movie_id.to_string()).await
+        let Some(MediaMetadata::Movie(movie)) = service
+            .get_media_metadata(movie_id)
+            .await
+            .expect("the lookup succeeds")
         else {
             panic!("the movie resolves");
         };
@@ -1045,6 +741,7 @@ mod tests {
             imdb_id: None,
             tvdb_id: None,
             anilist_id: None,
+            rating_tmdb: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1080,21 +777,23 @@ mod tests {
             .unwrap()
             .insert(episode.id, episode);
 
-        let service = DbMetadataService::new(
+        let service = service(
             Arc::new(InMemoryMovieRepository::default()),
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let Some(MediaMetadata::Show(show)) =
-            service.get_media_metadata(&show_id.to_string()).await
+        let Some(MediaMetadata::Show(show)) = service
+            .get_media_metadata(show_id)
+            .await
+            .expect("the lookup succeeds")
         else {
             panic!("the show resolves");
         };
         let season = show.seasons.first().expect("one season");
 
-        assert_eq!(season.id, season_id.to_string());
+        assert_eq!(season.id, season_id);
         assert_eq!(
             season.poster_url.as_deref(),
             Some(format!("/v1/artwork/season/{season_id}/poster").as_str()),
@@ -1159,26 +858,29 @@ mod tests {
     ) -> (crate::models::ShowMetadata, crate::models::ShowMetadata) {
         use crate::models::MediaMetadata;
 
-        let Some(MediaMetadata::Show(detail)) =
-            service.get_media_metadata(&show_id.to_string()).await
+        let Some(MediaMetadata::Show(detail)) = service
+            .get_media_metadata(show_id)
+            .await
+            .expect("the lookup succeeds")
         else {
             panic!("the show resolves");
         };
         let conn = service
-            .search_media(
-                Some(10),
-                None,
-                None,
-                None,
-                MediaSortField::Title,
-                SortOrder::Asc,
-                only_shows(),
-            )
-            .await;
-        let [edge] = conn.edges.as_slice() else {
+            .search_media(BrowseRequest {
+                first: Some(10),
+                after: None,
+                last: None,
+                before: None,
+                sort_by: MediaSortField::Title,
+                sort_order: SortOrder::Asc,
+                filters: only_shows(),
+            })
+            .await
+            .expect("browse succeeds");
+        let [item] = conn.items.as_slice() else {
             panic!("exactly the one seeded show is browsed");
         };
-        let MediaMetadata::Show(browsed) = &edge.node else {
+        let MediaMetadata::Show(browsed) = item else {
             panic!("the browsed item is a show");
         };
         (detail, browsed.clone())
@@ -1196,7 +898,7 @@ mod tests {
             Some("https://image.tmdb.org/t/p/w1280/show-backdrop.jpg"),
         )
         .await;
-        let service = DbMetadataService::new(
+        let service = service(
             Arc::new(InMemoryMovieRepository::default()),
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
@@ -1228,7 +930,7 @@ mod tests {
     async fn a_show_with_no_artwork_is_given_no_artwork_url() {
         let show_repo = Arc::new(InMemoryShowRepository::default());
         let show_id = seed_enriched_show(&show_repo, None, None).await;
-        let service = DbMetadataService::new(
+        let service = service(
             Arc::new(InMemoryMovieRepository::default()),
             show_repo,
             Arc::new(InMemoryFileRepository::default()),
@@ -1240,6 +942,635 @@ mod tests {
         for (view, show) in [("detail", &detail), ("browse", &browsed)] {
             assert_eq!(show.poster_url, None, "{view} poster");
             assert_eq!(show.backdrop_url, None, "{view} backdrop");
+        }
+    }
+}
+
+/// Browse and search through the service (issue #187): the page request rules,
+/// cursors, hydration of genres, ratings and counts, and that a failing store
+/// is an error rather than an empty page or a miss.
+#[cfg(test)]
+mod browse {
+    use std::sync::Arc;
+
+    use beam_domain::models::catalog::{CatalogPosition, SortKey, TitleKind};
+    use beam_domain::models::{CreateEpisode, CreateMovie, CreateShow};
+    use beam_domain::providers::enrichment::ShowEnrichment;
+    use beam_domain::repositories::catalog::MockCatalogRepository;
+    use beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository;
+    use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+    use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
+    use beam_domain::repositories::movie::MockMovieRepository;
+    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+    use beam_domain::repositories::{
+        CatalogRepository, GenreRepository, MovieRepository, ShowRepository,
+    };
+    use proptest::prelude::*;
+    use sea_orm::DbErr;
+    use uuid::Uuid;
+
+    use crate::models::MediaMetadata;
+    use crate::services::cursor;
+    use crate::services::metadata::{
+        BrowseRequest, DEFAULT_PAGE_SIZE, DbMetadataService, MAX_PAGE_SIZE, MediaConnection,
+        MediaFilter, MediaSearchFilters, MediaSortField, MediaTypeFilter, MetadataError,
+        MetadataRepositories, MetadataService, PageDirection, PageRequest, SortOrder,
+    };
+
+    /// Every double, with the catalogue and genre store reading the title
+    /// doubles, so a test writes through one trait and reads through another.
+    struct Library {
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
+        genres: Arc<InMemoryGenreRepository>,
+    }
+
+    impl Library {
+        fn new() -> Self {
+            Self {
+                movies: Arc::default(),
+                shows: Arc::default(),
+                genres: Arc::default(),
+            }
+        }
+
+        fn service(&self) -> DbMetadataService {
+            self.service_over(Arc::new(InMemoryCatalogRepository::new(
+                self.movies.clone(),
+                self.shows.clone(),
+                self.genres.clone(),
+            )))
+        }
+
+        fn service_over(&self, catalog: Arc<dyn CatalogRepository>) -> DbMetadataService {
+            DbMetadataService::new(MetadataRepositories {
+                movies: self.movies.clone(),
+                shows: self.shows.clone(),
+                files: Arc::new(InMemoryFileRepository::default()),
+                streams: Arc::new(InMemoryMediaStreamRepository::default()),
+                catalog,
+                genres: self.genres.clone(),
+            })
+        }
+
+        async fn movie(&self, title: &str) -> Uuid {
+            self.movies
+                .find_or_create_by_identity(CreateMovie::new(title, None, None))
+                .await
+                .unwrap()
+                .id
+        }
+
+        /// A rated, identified show with genres, two seasons and three
+        /// episodes.
+        async fn full_show(&self, title: &str) -> Uuid {
+            let show = self
+                .shows
+                .find_or_create_by_identity(CreateShow::new(title, Some(2022)))
+                .await
+                .unwrap();
+            self.shows
+                .apply_enrichment(
+                    show.id,
+                    &ShowEnrichment {
+                        title: title.to_string(),
+                        year: Some(2022),
+                        tmdb_id: Some(95396),
+                        imdb_id: Some("tt11280740".to_string()),
+                        rating: Some(8.4),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            for (season_number, episodes) in [(1, 2), (2, 1)] {
+                let season = self
+                    .shows
+                    .find_or_create_season(show.id, season_number)
+                    .await
+                    .unwrap();
+                for episode_number in 1..=episodes {
+                    self.shows
+                        .find_or_create_episode(CreateEpisode {
+                            season_id: season.id,
+                            episode_number,
+                            title: format!("Episode {episode_number}"),
+                            runtime: None,
+                            air_date: None,
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+            self.genres
+                .set_show_genres(show.id, &["Thriller".to_string(), "drama".to_string()])
+                .await
+                .unwrap();
+            show.id
+        }
+    }
+
+    fn request(first: Option<u32>, after: Option<String>) -> BrowseRequest {
+        BrowseRequest {
+            first,
+            after,
+            last: None,
+            before: None,
+            sort_by: MediaSortField::Title,
+            sort_order: SortOrder::Asc,
+            filters: MediaSearchFilters::default(),
+        }
+    }
+
+    fn backward(last: Option<u32>, before: Option<String>) -> BrowseRequest {
+        BrowseRequest {
+            first: None,
+            after: None,
+            last,
+            before,
+            ..request(None, None)
+        }
+    }
+
+    fn titles(connection: &MediaConnection) -> Vec<String> {
+        connection
+            .items
+            .iter()
+            .map(|item| item.title().original.clone())
+            .collect()
+    }
+
+    #[test]
+    fn page_requests_page_one_way_within_the_size_bounds() {
+        let c = || Some("c".to_string());
+        let ok = |direction, size: u32, cursor: Option<String>| {
+            Ok::<_, ()>(PageRequest {
+                direction,
+                size: std::num::NonZeroU32::new(size).unwrap(),
+                cursor,
+            })
+        };
+        let cases: Vec<(
+            Option<u32>,
+            Option<String>,
+            Option<u32>,
+            Option<String>,
+            Result<PageRequest, ()>,
+        )> = vec![
+            (
+                None,
+                None,
+                None,
+                None,
+                ok(PageDirection::Forward, DEFAULT_PAGE_SIZE, None),
+            ),
+            (Some(5), c(), None, None, ok(PageDirection::Forward, 5, c())),
+            (
+                None,
+                c(),
+                None,
+                None,
+                ok(PageDirection::Forward, DEFAULT_PAGE_SIZE, c()),
+            ),
+            (
+                None,
+                None,
+                Some(3),
+                None,
+                ok(PageDirection::Backward, 3, None),
+            ),
+            (
+                None,
+                None,
+                None,
+                c(),
+                ok(PageDirection::Backward, DEFAULT_PAGE_SIZE, c()),
+            ),
+            (
+                None,
+                None,
+                Some(1),
+                c(),
+                ok(PageDirection::Backward, 1, c()),
+            ),
+            (
+                Some(MAX_PAGE_SIZE),
+                None,
+                None,
+                None,
+                ok(PageDirection::Forward, MAX_PAGE_SIZE, None),
+            ),
+            (Some(MAX_PAGE_SIZE + 1), None, None, None, Err(())),
+            (None, None, Some(MAX_PAGE_SIZE + 1), None, Err(())),
+            (Some(0), None, None, None, Err(())),
+            (None, None, Some(0), None, Err(())),
+            (Some(5), None, Some(5), None, Err(())),
+            (None, c(), None, c(), Err(())),
+            (Some(5), None, None, c(), Err(())),
+            (None, c(), Some(5), None, Err(())),
+        ];
+        for (first, after, last, before, expected) in cases {
+            let got = PageRequest::from_relay(first, after.clone(), last, before.clone());
+            match (&got, &expected) {
+                (Ok(got), Ok(expected)) => assert_eq!(got, expected),
+                (Err(MetadataError::InvalidPagination(_)), Err(())) => {}
+                _ => panic!(
+                    "{first:?} {after:?} {last:?} {before:?}: got {got:?}, want {expected:?}"
+                ),
+            }
+        }
+    }
+
+    proptest! {
+        /// Any accepted request pages the way its parameters name, at a size
+        /// the server bounds; nothing panics.
+        #[test]
+        fn an_accepted_page_request_is_bounded_and_one_directional(
+            first in proptest::option::of(any::<u32>()),
+            after in proptest::option::of(".{0,4}"),
+            last in proptest::option::of(any::<u32>()),
+            before in proptest::option::of(".{0,4}"),
+        ) {
+            if let Ok(page) = PageRequest::from_relay(first, after.clone(), last, before.clone()) {
+                prop_assert!(page.size.get() <= MAX_PAGE_SIZE);
+                match page.direction {
+                    PageDirection::Forward => {
+                        prop_assert!(last.is_none() && before.is_none());
+                        prop_assert_eq!(page.cursor, after);
+                    }
+                    PageDirection::Backward => {
+                        prop_assert!(first.is_none() && after.is_none());
+                        prop_assert_eq!(page.cursor, before);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pages_forward_and_back_carry_their_neighbours_and_their_cursors() {
+        let library = Library::new();
+        for title in ["Alpha", "Bravo", "Charlie", "Delta", "Echo"] {
+            library.movie(title).await;
+        }
+        let service = library.service();
+
+        let one = service.search_media(request(Some(2), None)).await.unwrap();
+        assert_eq!(titles(&one), ["Alpha", "Bravo"]);
+        assert!(one.page_info.has_next_page && !one.page_info.has_previous_page);
+
+        let two = service
+            .search_media(request(Some(2), one.page_info.end_cursor.clone()))
+            .await
+            .unwrap();
+        assert_eq!(titles(&two), ["Charlie", "Delta"]);
+        assert!(two.page_info.has_next_page && two.page_info.has_previous_page);
+
+        let three = service
+            .search_media(request(Some(2), two.page_info.end_cursor.clone()))
+            .await
+            .unwrap();
+        assert_eq!(titles(&three), ["Echo"]);
+        assert!(!three.page_info.has_next_page && three.page_info.has_previous_page);
+
+        let back = service
+            .search_media(backward(Some(2), three.page_info.start_cursor.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            titles(&back),
+            ["Charlie", "Delta"],
+            "a backward page is in display order"
+        );
+        assert!(back.page_info.has_next_page && back.page_info.has_previous_page);
+        let front = service
+            .search_media(backward(Some(2), back.page_info.start_cursor.clone()))
+            .await
+            .unwrap();
+        assert_eq!(titles(&front), ["Alpha", "Bravo"]);
+        assert!(front.page_info.has_next_page && !front.page_info.has_previous_page);
+
+        let last_two = service.search_media(backward(Some(2), None)).await.unwrap();
+        assert_eq!(titles(&last_two), ["Delta", "Echo"]);
+        assert!(!last_two.page_info.has_next_page && last_two.page_info.has_previous_page);
+    }
+
+    #[tokio::test]
+    async fn an_empty_listing_is_an_empty_page_with_no_cursors() {
+        let page = Library::new()
+            .service()
+            .search_media(request(None, None))
+            .await
+            .unwrap();
+        assert!(page.items.is_empty());
+        assert!(!page.page_info.has_next_page && !page.page_info.has_previous_page);
+        assert_eq!(page.page_info.start_cursor, None);
+        assert_eq!(page.page_info.end_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn a_cursor_not_issued_for_this_sort_is_an_invalid_cursor() {
+        let library = Library::new();
+        library.movie("Alpha").await;
+        library.movie("Bravo").await;
+        let service = library.service();
+        let page = service.search_media(request(Some(1), None)).await.unwrap();
+        let cursor = page.page_info.end_cursor.expect("a cursor");
+
+        let garbage = service
+            .search_media(request(Some(1), Some("not-a-cursor".to_string())))
+            .await;
+        assert!(
+            matches!(garbage, Err(MetadataError::InvalidCursor(_))),
+            "{garbage:?}"
+        );
+
+        let resorted = service
+            .search_media(BrowseRequest {
+                sort_by: MediaSortField::Year,
+                ..request(Some(1), Some(cursor))
+            })
+            .await;
+        assert!(
+            matches!(resorted, Err(MetadataError::InvalidCursor(_))),
+            "{resorted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_request_the_server_does_not_answer_is_invalid_pagination() {
+        let service = Library::new().service();
+        let mixed = service
+            .search_media(BrowseRequest {
+                last: Some(2),
+                ..request(Some(2), None)
+            })
+            .await;
+        assert!(
+            matches!(mixed, Err(MetadataError::InvalidPagination(_))),
+            "{mixed:?}"
+        );
+        let oversized = service
+            .search_media(request(Some(MAX_PAGE_SIZE + 1), None))
+            .await;
+        assert!(
+            matches!(oversized, Err(MetadataError::InvalidPagination(_))),
+            "{oversized:?}"
+        );
+    }
+
+    /// NFR-205: a database failure while browsing is an error the route turns
+    /// into a 500 -- it used to become an empty page, which says the library
+    /// has nothing.
+    #[tokio::test]
+    async fn a_failing_catalogue_is_an_internal_error_not_an_empty_page() {
+        let mut catalog = MockCatalogRepository::new();
+        catalog
+            .expect_browse()
+            .returning(|_| Err(DbErr::Custom("connection reset".to_string())));
+        let result = Library::new()
+            .service_over(Arc::new(catalog))
+            .search_media(request(None, None))
+            .await;
+        assert!(
+            matches!(result, Err(MetadataError::InternalError(_))),
+            "{result:?}"
+        );
+    }
+
+    /// NFR-205: a failing title read is an error, never "no such title" --
+    /// that is what turned a database failure on the detail route into a 404.
+    #[tokio::test]
+    async fn a_failing_title_read_is_an_internal_error_not_a_miss() {
+        let failing = || {
+            let mut movies = MockMovieRepository::new();
+            movies
+                .expect_find_by_id()
+                .returning(|_| Err(DbErr::Custom("connection reset".to_string())));
+            movies
+        };
+        let service = |movies: MockMovieRepository| {
+            let library = Library::new();
+            DbMetadataService::new(MetadataRepositories {
+                movies: Arc::new(movies),
+                shows: library.shows.clone(),
+                files: Arc::new(InMemoryFileRepository::default()),
+                streams: Arc::new(InMemoryMediaStreamRepository::default()),
+                catalog: Arc::new(MockCatalogRepository::new()),
+                genres: library.genres.clone(),
+            })
+            .with_enrichment_repo(Arc::new(
+                beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
+            ))
+        };
+        let id = Uuid::new_v4();
+
+        let detail = service(failing()).get_media_metadata(id).await;
+        assert!(
+            matches!(detail, Err(MetadataError::InternalError(_))),
+            "{detail:?}"
+        );
+        let sources = service(failing()).get_media_sources(&id.to_string()).await;
+        assert!(
+            matches!(sources, Err(MetadataError::InternalError(_))),
+            "{sources:?}"
+        );
+        let refresh = service(failing())
+            .refresh_metadata(MediaFilter::ByMediaId(id.to_string()))
+            .await;
+        assert!(
+            matches!(refresh, Err(MetadataError::InternalError(_))),
+            "{refresh:?}"
+        );
+    }
+
+    /// A title the page named but that has gone by the time it is read is
+    /// left out; the page's cursors still mark where the page ended, so the
+    /// next page starts after it.
+    #[tokio::test]
+    async fn a_title_gone_between_the_page_and_its_read_is_skipped() {
+        let library = Library::new();
+        let kept = library.movie("Kept").await;
+        let gone = Uuid::new_v4();
+        let positions = vec![
+            CatalogPosition {
+                kind: TitleKind::Movie,
+                id: kept,
+                key: SortKey::Title("kept".to_string()),
+            },
+            CatalogPosition {
+                kind: TitleKind::Movie,
+                id: gone,
+                key: SortKey::Title("zz".to_string()),
+            },
+        ];
+        let mut catalog = MockCatalogRepository::new();
+        let returned = positions.clone();
+        catalog
+            .expect_browse()
+            .returning(move |_| Ok(returned.clone()));
+
+        let page = library
+            .service_over(Arc::new(catalog))
+            .search_media(request(None, None))
+            .await
+            .unwrap();
+
+        assert_eq!(titles(&page), ["Kept"]);
+        assert_eq!(
+            page.page_info.end_cursor,
+            Some(cursor::encode(
+                MediaSortField::Title,
+                SortOrder::Asc,
+                &positions[1]
+            ))
+        );
+    }
+
+    /// Issue #187: a browsed show carried no genres, ratings or identifiers,
+    /// and zero seasons and episodes. It carries all of them now, and agrees
+    /// with its own detail.
+    #[tokio::test]
+    async fn a_browsed_show_carries_genres_ratings_identifiers_and_counts() {
+        let library = Library::new();
+        let id = library.full_show("Severance").await;
+        let service = library.service();
+
+        let page = service
+            .search_media(BrowseRequest {
+                filters: MediaSearchFilters {
+                    media_type: Some(MediaTypeFilter::Show),
+                    ..Default::default()
+                },
+                ..request(None, None)
+            })
+            .await
+            .unwrap();
+        let [MediaMetadata::Show(browsed)] = page.items.as_slice() else {
+            panic!("one show: {page:?}");
+        };
+        let Some(MediaMetadata::Show(detail)) = service.get_media_metadata(id).await.unwrap()
+        else {
+            panic!("the show resolves");
+        };
+
+        for (view, show) in [("browse", browsed), ("detail", &detail)] {
+            assert_eq!(show.genres, ["drama", "Thriller"], "{view}");
+            assert_eq!(
+                show.ratings.as_ref().and_then(|r| r.tmdb),
+                Some(84),
+                "{view}"
+            );
+            let identifiers = show.identifiers.as_ref().expect("identified");
+            assert_eq!(identifiers.tmdb_id, Some(95396), "{view}");
+            assert_eq!(identifiers.imdb_id.as_deref(), Some("tt11280740"), "{view}");
+            assert_eq!((show.season_count, show.episode_count), (2, 3), "{view}");
+        }
+        assert!(
+            browsed.seasons.is_empty(),
+            "browse carries counts, not seasons"
+        );
+        assert_eq!(detail.seasons.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_movie_carries_its_genres_and_the_genre_filter_takes_a_name_or_a_slug() {
+        let library = Library::new();
+        let tagged = library.movie("Arrival").await;
+        library.movie("Clue").await;
+        library
+            .genres
+            .set_movie_genres(
+                tagged,
+                &["Science Fiction".to_string(), "Drama".to_string()],
+            )
+            .await
+            .unwrap();
+        let service = library.service();
+
+        for genre in ["Science Fiction", "science fiction", "science-fiction"] {
+            let page = service
+                .search_media(BrowseRequest {
+                    filters: MediaSearchFilters {
+                        genre: Some(genre.to_string()),
+                        ..Default::default()
+                    },
+                    ..request(None, None)
+                })
+                .await
+                .unwrap();
+            assert_eq!(titles(&page), ["Arrival"], "genre={genre}");
+            let MediaMetadata::Movie(movie) = &page.items[0] else {
+                panic!("a movie");
+            };
+            assert_eq!(movie.genres, ["Drama", "Science Fiction"]);
+        }
+        let Some(MediaMetadata::Movie(detail)) = service.get_media_metadata(tagged).await.unwrap()
+        else {
+            panic!("the movie resolves");
+        };
+        assert_eq!(detail.genres, ["Drama", "Science Fiction"]);
+    }
+
+    /// Every sort key reaches the store: sorting by rating orders by rating,
+    /// by runtime by runtime -- not silently by title, as three of the five
+    /// keys used to.
+    #[tokio::test]
+    async fn every_sort_key_orders_the_page_by_that_key() {
+        use beam_domain::providers::enrichment::MovieEnrichment;
+
+        let library = Library::new();
+        for (title, year, runtime_mins, rating) in [
+            ("Alpha", 2010, 100, 5.0),
+            ("Bravo", 1990, 80, 9.0),
+            ("Charlie", 2000, 120, 7.0),
+        ] {
+            let id = library.movie(title).await;
+            library
+                .movies
+                .apply_enrichment(
+                    id,
+                    &MovieEnrichment {
+                        title: title.to_string(),
+                        year: Some(year),
+                        runtime_mins: Some(runtime_mins),
+                        rating: Some(rating),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let service = library.service();
+
+        for (sort_by, ascending) in [
+            (MediaSortField::Title, ["Alpha", "Bravo", "Charlie"]),
+            (MediaSortField::Year, ["Bravo", "Charlie", "Alpha"]),
+            (MediaSortField::Rating, ["Alpha", "Charlie", "Bravo"]),
+            (MediaSortField::DateAdded, ["Alpha", "Bravo", "Charlie"]),
+            (MediaSortField::Runtime, ["Bravo", "Alpha", "Charlie"]),
+        ] {
+            let asc = service
+                .search_media(BrowseRequest {
+                    sort_by,
+                    ..request(None, None)
+                })
+                .await
+                .unwrap();
+            assert_eq!(titles(&asc), ascending, "{sort_by} asc");
+            let desc = service
+                .search_media(BrowseRequest {
+                    sort_by,
+                    sort_order: SortOrder::Desc,
+                    ..request(None, None)
+                })
+                .await
+                .unwrap();
+            let mut descending = ascending;
+            descending.reverse();
+            assert_eq!(titles(&desc), descending, "{sort_by} desc");
         }
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use sea_orm::DbErr;
 use uuid::Uuid;
@@ -14,6 +16,29 @@ pub trait GenreRepository: Send + Sync + std::fmt::Debug {
     /// Same as `set_movie_genres`, for shows.
     async fn set_show_genres(&self, show_id: Uuid, names: &[String]) -> Result<(), DbErr>;
     async fn find_all(&self) -> Result<Vec<Genre>, DbErr>;
+    /// The genre names of each of `movie_ids`, each list in
+    /// [`sort_genre_names`] order. A movie with no genre is absent from the
+    /// map. One statement however many ids, and none for an empty slice.
+    async fn movie_genre_names(
+        &self,
+        movie_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<String>>, DbErr>;
+    /// Same as `movie_genre_names`, for shows.
+    async fn show_genre_names(
+        &self,
+        show_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<String>>, DbErr>;
+}
+
+/// The order a title's genres are listed in: case-insensitively by name, then
+/// by the name itself so the order is total. Done here rather than by a SQL
+/// `ORDER BY`, whose result depends on the database's collation.
+pub fn sort_genre_names(names: &mut [String]) {
+    names.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
 }
 
 /// Normalizes a genre name into a URL-safe slug (lowercase, non-alphanumeric
@@ -113,7 +138,76 @@ pub mod in_memory {
         async fn find_all(&self) -> Result<Vec<Genre>, DbErr> {
             Ok(self.genres.read().values().cloned().collect())
         }
+
+        async fn movie_genre_names(
+            &self,
+            movie_ids: &[Uuid],
+        ) -> Result<HashMap<Uuid, Vec<String>>, DbErr> {
+            Ok(names_of(movie_ids, |id| self.genres_for_movie(id)))
+        }
+
+        async fn show_genre_names(
+            &self,
+            show_ids: &[Uuid],
+        ) -> Result<HashMap<Uuid, Vec<String>>, DbErr> {
+            Ok(names_of(show_ids, |id| self.genres_for_show(id)))
+        }
     }
+
+    fn names_of(
+        ids: &[Uuid],
+        genres_of: impl Fn(Uuid) -> Vec<Genre>,
+    ) -> HashMap<Uuid, Vec<String>> {
+        ids.iter()
+            .filter_map(|id| {
+                let mut names: Vec<String> = genres_of(*id).into_iter().map(|g| g.name).collect();
+                sort_genre_names(&mut names);
+                (!names.is_empty()).then_some((*id, names))
+            })
+            .collect()
+    }
+}
+
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory_fixture {
+    use super::GenreRepository;
+    use super::in_memory::InMemoryGenreRepository;
+    use crate::repositories::contract::fixture::GenreRepositoryFixture;
+    use crate::repositories::movie::in_memory::InMemoryMovieRepository;
+    use crate::repositories::show::in_memory::InMemoryShowRepository;
+    use crate::repositories::{MovieRepository, ShowRepository};
+
+    /// The hermetic instantiation of the genre contract.
+    #[derive(Debug, Default)]
+    pub struct InMemoryFixture {
+        repo: InMemoryGenreRepository,
+        movies: InMemoryMovieRepository,
+        shows: InMemoryShowRepository,
+    }
+
+    impl GenreRepositoryFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn GenreRepository {
+            &self.repo
+        }
+
+        fn movies(&self) -> &dyn MovieRepository {
+            &self.movies
+        }
+
+        fn shows(&self) -> &dyn ShowRepository {
+            &self.shows
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    async fn setup() -> super::in_memory_fixture::InMemoryFixture {
+        super::in_memory_fixture::InMemoryFixture::default()
+    }
+
+    crate::genre_repository_contract!(setup);
 }
 
 #[cfg(test)]

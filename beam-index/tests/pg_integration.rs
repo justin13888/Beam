@@ -15,8 +15,12 @@
 //! the migrations declare are really there, and that the migrations reverse.
 #![cfg(feature = "pg-integration")]
 
+#[path = "pg_integration/catalog_repository.rs"]
+mod catalog_repository;
 #[path = "pg_integration/file_repository.rs"]
 mod file_repository;
+#[path = "pg_integration/genre_repository.rs"]
+mod genre_repository;
 #[path = "pg_integration/library_shape.rs"]
 mod library_shape;
 #[path = "pg_integration/movie_repository.rs"]

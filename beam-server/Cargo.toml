@@ -18,6 +18,8 @@ cameo = { version = "0.2.0", default-features = false, features = ["tmdb", "anil
 http = { workspace = true }
 async-stream = "0.3"
 async-trait = { workspace = true }
+# The browse cursor is base64url JSON (services/cursor.rs).
+base64 = "0.23.1"
 bytes = "1"
 chrono = { workspace = true, features = ["serde"] }
 color-eyre = "0.6.5"

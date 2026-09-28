@@ -31,7 +31,7 @@ use crate::{
         hash::{HashConfig, HashService, LocalHashService},
         health::DependencyProbe,
         library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
-        metadata::{DbMetadataService, MetadataService},
+        metadata::{DbMetadataService, MetadataRepositories, MetadataService},
         notification::{LocalNotificationService, NotificationService},
         playback::{DbPlaybackService, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
@@ -424,12 +424,16 @@ impl AppServices {
                 library_watches.clone(),
             )),
             metadata: Arc::new(
-                DbMetadataService::new(
-                    movie_repo.clone(),
-                    show_repo.clone(),
-                    file_repo.clone(),
-                    stream_repo,
-                )
+                DbMetadataService::new(MetadataRepositories {
+                    movies: movie_repo.clone(),
+                    shows: show_repo.clone(),
+                    files: file_repo.clone(),
+                    streams: stream_repo,
+                    catalog: Arc::new(beam_index::repositories::SqlCatalogRepository::new(
+                        db.clone(),
+                    )),
+                    genres: genre_repo.clone(),
+                })
                 .with_enrichment_repo(enrichment_repo.clone()),
             ),
             notification: notification_service,

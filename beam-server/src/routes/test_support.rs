@@ -27,8 +27,7 @@ use crate::services::hash::HashService;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::services::library::LibraryError;
 use crate::services::metadata::{
-    MediaConnection, MediaFilter, MediaSearchFilters, MediaSortField, MetadataError,
-    MetadataService, PageInfo, SortOrder,
+    MediaConnection, MediaFilter, MetadataError, MetadataService, PageInfo,
 };
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::playback::DbPlaybackService;
@@ -107,28 +106,25 @@ struct StubMetadataService;
 
 #[async_trait::async_trait]
 impl MetadataService for StubMetadataService {
-    async fn get_media_metadata(&self, _media_id: &str) -> Option<crate::models::MediaMetadata> {
-        None
+    async fn get_media_metadata(
+        &self,
+        _media_id: uuid::Uuid,
+    ) -> Result<Option<crate::models::MediaMetadata>, MetadataError> {
+        Ok(None)
     }
     async fn search_media(
         &self,
-        _first: Option<u32>,
-        _after: Option<String>,
-        _last: Option<u32>,
-        _before: Option<String>,
-        _sort_by: MediaSortField,
-        _sort_order: SortOrder,
-        _filters: MediaSearchFilters,
-    ) -> MediaConnection {
-        MediaConnection {
-            edges: vec![],
+        _request: crate::services::metadata::BrowseRequest,
+    ) -> Result<MediaConnection, MetadataError> {
+        Ok(MediaConnection {
+            items: vec![],
             page_info: PageInfo {
                 has_next_page: false,
                 has_previous_page: false,
                 start_cursor: None,
                 end_cursor: None,
             },
-        }
+        })
     }
     async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
         Ok(())

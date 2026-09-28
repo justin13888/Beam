@@ -18,8 +18,8 @@ use crate::models::{MediaMetadata, MediaSource, MovieMetadata, Title};
 use crate::routes::media::{browse_media, get_media_detail, get_media_sources};
 use crate::routes::test_support::make_app_state;
 use crate::services::metadata::{
-    MediaConnection, MediaFilter, MediaSearchFilters, MediaSortField, MetadataError,
-    MetadataService, PageInfo, SortOrder,
+    BrowseRequest, DbMetadataService, MediaConnection, MediaFilter, MetadataError,
+    MetadataRepositories, MetadataService, PageInfo,
 };
 use crate::state::{AppServices, AppState};
 
@@ -41,29 +41,26 @@ struct StubMetadataService {
 
 #[async_trait::async_trait]
 impl MetadataService for StubMetadataService {
-    async fn get_media_metadata(&self, media_id: &str) -> Option<MediaMetadata> {
-        self.metadata.get(media_id).cloned()
+    async fn get_media_metadata(
+        &self,
+        media_id: uuid::Uuid,
+    ) -> Result<Option<MediaMetadata>, MetadataError> {
+        Ok(self.metadata.get(&media_id.to_string()).cloned())
     }
 
     async fn search_media(
         &self,
-        _first: Option<u32>,
-        _after: Option<String>,
-        _last: Option<u32>,
-        _before: Option<String>,
-        _sort_by: MediaSortField,
-        _sort_order: SortOrder,
-        _filters: MediaSearchFilters,
-    ) -> MediaConnection {
-        MediaConnection {
-            edges: vec![],
+        _request: BrowseRequest,
+    ) -> Result<MediaConnection, MetadataError> {
+        Ok(MediaConnection {
+            items: vec![],
             page_info: PageInfo {
                 has_next_page: false,
                 has_previous_page: false,
                 start_cursor: None,
                 end_cursor: None,
             },
-        }
+        })
     }
 
     async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
@@ -168,7 +165,7 @@ async fn signed_in(metadata: StubMetadataService) -> (TestClient<AppState>, Stri
 
 fn movie_metadata(id: &str, title: &str) -> MediaMetadata {
     MediaMetadata::Movie(MovieMetadata {
-        id: id.to_owned(),
+        id: uuid::Uuid::parse_str(id).expect("a UUID"),
         title: Title {
             original: title.to_owned(),
             localized: None,
@@ -299,7 +296,7 @@ async fn browsing_yields_a_connection_and_accepts_the_sort_parameters() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body: MediaConnection = response.json();
-    assert!(body.edges.is_empty());
+    assert!(body.items.is_empty());
     assert!(!body.page_info.has_next_page);
 }
 
@@ -362,9 +359,6 @@ async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_re
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
-
-    use crate::services::metadata::DbMetadataService;
 
     let files = Arc::new(InMemoryFileRepository::default());
     let movies = Arc::new(InMemoryMovieRepository::with_files(files.clone()));
@@ -375,12 +369,12 @@ async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_re
         .await
         .unwrap();
 
-    let state = state_with_service(Arc::new(DbMetadataService::new(
-        movies.clone(),
-        Arc::new(InMemoryShowRepository::with_files(files.clone())),
-        files.clone(),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-    )));
+    let state = state_with_service(real_service(Library {
+        movies: movies.clone(),
+        shows: Arc::new(InMemoryShowRepository::with_files(files.clone())),
+        genres: Arc::default(),
+        files: files.clone(),
+    }));
     let token = seed_session(&state).await;
     let client = client(state);
 
@@ -391,15 +385,8 @@ async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_re
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: MediaConnection = response.json();
-    let listed: Vec<String> = body
-        .edges
-        .iter()
-        .map(|edge| match &edge.node {
-            MediaMetadata::Movie(movie) => movie.id.clone(),
-            MediaMetadata::Show(show) => show.id.clone(),
-        })
-        .collect();
-    assert_eq!(listed, vec![present.to_string()]);
+    let listed: Vec<uuid::Uuid> = body.items.iter().map(item_id).collect();
+    assert_eq!(listed, vec![present]);
 
     let detail = client
         .get(&format!("/v1/media/{away}"))
@@ -420,7 +407,287 @@ async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_re
         .send()
         .await
         .json();
-    assert_eq!(again.edges.len(), 2);
+    assert_eq!(again.items.len(), 2);
+}
+
+/// The doubles a real metadata service reads, linked to one file store so
+/// liveness is what the files say.
+struct Library {
+    files: Arc<beam_domain::repositories::file::in_memory::InMemoryFileRepository>,
+    movies: Arc<beam_domain::repositories::movie::in_memory::InMemoryMovieRepository>,
+    shows: Arc<beam_domain::repositories::show::in_memory::InMemoryShowRepository>,
+    genres: Arc<beam_domain::repositories::genre::in_memory::InMemoryGenreRepository>,
+}
+
+impl Library {
+    fn new() -> Self {
+        let files =
+            Arc::new(beam_domain::repositories::file::in_memory::InMemoryFileRepository::default());
+        Self {
+            movies: Arc::new(
+                beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::with_files(
+                    files.clone(),
+                ),
+            ),
+            shows: Arc::new(
+                beam_domain::repositories::show::in_memory::InMemoryShowRepository::with_files(
+                    files.clone(),
+                ),
+            ),
+            genres: Arc::default(),
+            files,
+        }
+    }
+
+    /// A show titled `title` with one episode file, enriched with a rating
+    /// and identifiers, and tagged with genres.
+    async fn indexed_show(&self, title: &str) -> uuid::Uuid {
+        use beam_domain::models::{
+            CreateEpisode, CreateMediaFile, CreateShow, FileStatus, MediaFileContent,
+        };
+        use beam_domain::providers::enrichment::ShowEnrichment;
+        use beam_domain::repositories::{FileRepository, GenreRepository, ShowRepository};
+
+        let show = self
+            .shows
+            .find_or_create_by_identity(CreateShow::new(title, Some(2022)))
+            .await
+            .unwrap();
+        self.shows
+            .apply_enrichment(
+                show.id,
+                &ShowEnrichment {
+                    title: title.to_string(),
+                    year: Some(2022),
+                    tmdb_id: Some(95396),
+                    rating: Some(8.4),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let season = self.shows.find_or_create_season(show.id, 1).await.unwrap();
+        let episode = self
+            .shows
+            .find_or_create_episode(CreateEpisode {
+                season_id: season.id,
+                episode_number: 1,
+                title: "Pilot".to_string(),
+                runtime: None,
+                air_date: None,
+            })
+            .await
+            .unwrap();
+        self.files
+            .create(CreateMediaFile {
+                library_id: uuid::Uuid::new_v4(),
+                path: std::path::PathBuf::from(format!("/videos/{title}/S01E01.mkv")),
+                hash: show.id.as_u128() as u64,
+                size_bytes: 1024,
+                mtime: None,
+                mime_type: None,
+                duration: None,
+                container_format: None,
+                content: Some(MediaFileContent::episode(episode.id)),
+                status: FileStatus::Known,
+                classifier_version: 0,
+            })
+            .await
+            .unwrap();
+        self.genres
+            .set_show_genres(show.id, &["Thriller".to_string()])
+            .await
+            .unwrap();
+        show.id
+    }
+}
+
+/// The real metadata service over `library`, its catalogue reading the same
+/// doubles.
+fn real_service(library: Library) -> Arc<dyn MetadataService> {
+    real_service_over(
+        &library,
+        Arc::new(
+            beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository::new(
+                library.movies.clone(),
+                library.shows.clone(),
+                library.genres.clone(),
+            ),
+        ),
+        library.movies.clone(),
+    )
+}
+
+fn real_service_over(
+    library: &Library,
+    catalog: Arc<dyn beam_domain::repositories::CatalogRepository>,
+    movies: Arc<dyn beam_domain::repositories::MovieRepository>,
+) -> Arc<dyn MetadataService> {
+    Arc::new(DbMetadataService::new(MetadataRepositories {
+        movies,
+        shows: library.shows.clone(),
+        files: library.files.clone(),
+        streams: Arc::new(
+            beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository::default(),
+        ),
+        catalog,
+        genres: library.genres.clone(),
+    }))
+}
+
+fn item_id(item: &MediaMetadata) -> uuid::Uuid {
+    match item {
+        MediaMetadata::Movie(movie) => movie.id,
+        MediaMetadata::Show(show) => show.id,
+    }
+}
+
+async fn signed_in_to(service: Arc<dyn MetadataService>) -> (TestClient<AppState>, String) {
+    let state = state_with_service(service);
+    let token = seed_session(&state).await;
+    (client(state), token)
+}
+
+/// Following `end_cursor` from the first page visits every title once, in
+/// order, and the last page says there is nothing after it.
+#[tokio::test]
+async fn following_end_cursor_visits_every_title_once_in_order() {
+    let library = Library::new();
+    let mut expected = Vec::new();
+    for title in ["Arrival", "Blade", "Contact"] {
+        expected.push(
+            indexed_movie(&library.movies, &library.files, title)
+                .await
+                .0,
+        );
+    }
+    expected.push(library.indexed_show("Dark").await);
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let url = match &after {
+            Some(cursor) => format!("/v1/media?first=3&after={cursor}"),
+            None => "/v1/media?first=3".to_string(),
+        };
+        let response = client.get(&url).cookie("beam_session", &token).send().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: MediaConnection = response.json();
+        assert_eq!(page.page_info.has_previous_page, after.is_some());
+        seen.extend(page.items.iter().map(item_id));
+        if !page.page_info.has_next_page {
+            break;
+        }
+        after = page.page_info.end_cursor;
+    }
+    assert_eq!(seen, expected);
+}
+
+#[tokio::test]
+async fn a_cursor_the_server_did_not_issue_is_a_400_invalid_cursor() {
+    let (client, token) = signed_in_to(real_service(Library::new())).await;
+
+    client
+        .get("/v1/media?after=bm90LWEtY3Vyc29y")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
+}
+
+#[tokio::test]
+async fn a_page_the_server_does_not_answer_is_a_400_invalid_pagination() {
+    let (client, token) = signed_in_to(real_service(Library::new())).await;
+
+    for query in [
+        "first=101",
+        "first=0",
+        "last=101",
+        "first=2&last=2",
+        "after=a&before=b",
+    ] {
+        client
+            .get(&format!("/v1/media?{query}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+            );
+    }
+}
+
+/// NFR-205: a database failure while browsing answered 200 with an empty
+/// page, which a client renders as "your library is empty".
+#[tokio::test]
+async fn a_database_failure_while_browsing_is_a_500_not_an_empty_page() {
+    let library = Library::new();
+    let mut catalog = beam_domain::repositories::catalog::MockCatalogRepository::new();
+    catalog
+        .expect_browse()
+        .returning(|_| Err(sea_orm::DbErr::Custom("connection reset".to_string())));
+    let movies = library.movies.clone();
+    let (client, token) =
+        signed_in_to(real_service_over(&library, Arc::new(catalog), movies)).await;
+
+    client
+        .get("/v1/media")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+}
+
+/// NFR-205: a database failure reading a title answered 404, telling the
+/// client the title was gone when the server had only failed to read it.
+#[tokio::test]
+async fn a_database_failure_reading_a_title_is_a_500_not_a_404() {
+    let library = Library::new();
+    let mut movies = beam_domain::repositories::movie::MockMovieRepository::new();
+    movies
+        .expect_find_by_id()
+        .returning(|_| Err(sea_orm::DbErr::Custom("connection reset".to_string())));
+    let catalog = Arc::new(beam_domain::repositories::catalog::MockCatalogRepository::new());
+    let (client, token) =
+        signed_in_to(real_service_over(&library, catalog, Arc::new(movies))).await;
+
+    client
+        .get(&format!("/v1/media/{MOVIE_ID}"))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+}
+
+/// What a browse tile needs of a show is on the wire: genres, rating,
+/// identifiers and counts -- read from the JSON itself, so a field the server
+/// computes but never serializes still fails.
+#[tokio::test]
+async fn a_browsed_show_carries_its_genres_rating_identifiers_and_counts_on_the_wire() {
+    let library = Library::new();
+    let id = library.indexed_show("Severance").await;
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    let response = client
+        .get("/v1/media?media_type=show&genre=thriller")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json();
+    let show = &body["items"][0]["Show"];
+    assert_eq!(show["id"], id.to_string());
+    assert_eq!(show["genres"], serde_json::json!(["Thriller"]));
+    assert_eq!(show["ratings"]["tmdb"], 84);
+    assert_eq!(show["identifiers"]["tmdb_id"], 95396);
+    assert_eq!(show["season_count"], 1);
+    assert_eq!(show["episode_count"], 1);
+    assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
 }
 
 // ── GET /v1/media/{id}/sources ───────────────────────────────────────────────

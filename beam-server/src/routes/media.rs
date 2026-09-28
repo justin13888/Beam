@@ -1,7 +1,7 @@
 //! `/v1/media` -- browse, detail, and sources endpoints. Domain REST API
 //! conventions established here (RFC 9457 problem bodies, cookie-session auth
-//! via `SessionAuth`, cursor pagination reused from the existing Relay-style
-//! `search_media`) are meant to be followed by every subsequent `/v1` route.
+//! via `SessionAuth`, cursor pagination over an `{items, page_info}`
+//! connection) are meant to be followed by every subsequent `/v1` route.
 
 use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -9,9 +9,11 @@ use uuid::Uuid;
 
 use crate::models::search::{MediaConnection, MediaSortField, MediaTypeFilter, SortOrder};
 use crate::models::{MediaMetadata, MediaSource};
-use crate::routes::api_error::{MediaLookupError, MediaSourcesError, SessionAuth};
+use crate::routes::api_error::{
+    MediaBrowseError, MediaLookupError, MediaSourcesError, SessionAuth,
+};
 use crate::routes::tags::Media;
-use crate::services::metadata::{MediaSearchFilters, MetadataError};
+use crate::services::metadata::{BrowseRequest, MediaSearchFilters, MetadataError};
 use crate::state::AppState;
 
 /// Everything `GET /v1/media` accepts.
@@ -22,21 +24,33 @@ use crate::state::AppState;
 /// parameter and the type *is* the schema.
 #[derive(Debug, Default, Serialize, Deserialize, Schema, QueryParams)]
 pub struct BrowseQuery {
-    /// Number of items to return from the start.
+    /// Page forwards: this many items (1-100, default 20), after `after` or
+    /// from the start. Not combined with `last` or `before`.
+    //
+    // Kynos 0.3.0 neither documents nor enforces `#[schema]` bounds on an
+    // `Option` field of a `QueryParams` struct (`HistoryQuery::limit` shows
+    // the same), an upstream gap not yet filed. The service enforces 1-100
+    // either way -- `#invalid-pagination` -- and the prose states it; the
+    // bounds below reach the document once Kynos honours them.
+    #[schema(minimum = 1, maximum = 100)]
     pub first: Option<u32>,
-    /// Cursor to start after.
+    /// An opaque cursor -- a page's `end_cursor` -- to page forwards from.
     pub after: Option<String>,
-    /// Number of items to return from the end.
+    /// Page backwards: this many items (1-100), before `before` or from the
+    /// end. Not combined with `first` or `after`.
+    #[schema(minimum = 1, maximum = 100)]
     pub last: Option<u32>,
-    /// Cursor to start before.
+    /// An opaque cursor -- a page's `start_cursor` -- to page backwards from.
     pub before: Option<String>,
-    /// Sort field.
+    /// Sort field (default `title`). Titles with no value for the field sort
+    /// last in either order; ties fall back to a stable per-title order.
     pub sort_by: Option<MediaSortField>,
-    /// Sort order.
+    /// Sort order (default `asc`).
     pub sort_order: Option<SortOrder>,
     /// Filter by media type.
     pub media_type: Option<MediaTypeFilter>,
-    /// Filter by genre.
+    /// Filter by genre, by name or slug: `Science Fiction` and
+    /// `science-fiction` name the same genre.
     pub genre: Option<String>,
     /// Filter by year (exact match).
     pub year: Option<u32>,
@@ -44,7 +58,8 @@ pub struct BrowseQuery {
     pub year_from: Option<u32>,
     /// Filter by year range (end).
     pub year_to: Option<u32>,
-    /// Search query for title.
+    /// Search the titles: those resembling this text or containing it,
+    /// ignoring case. Results keep the requested sort.
     pub query: Option<String>,
     /// Filter by minimum rating (0-100).
     #[schema(maximum = 100)]
@@ -60,12 +75,14 @@ pub struct MediaPath {
 
 /// Browse/search the media library with cursor-based pagination, sorting, and
 /// filtering.
+///
+/// Only titles with at least one present file are listed.
 #[kynos::get("/media", tag = Media, operation_id = "browseMedia")]
 pub async fn browse_media(
     _auth: SessionAuth,
     Query(params): Query<BrowseQuery>,
     Inject(state): Inject<AppState>,
-) -> Json<MediaConnection> {
+) -> Result<Json<MediaConnection>, MediaBrowseError> {
     let BrowseQuery {
         first,
         after,
@@ -95,18 +112,30 @@ pub async fn browse_media(
     let result = state
         .services
         .metadata
-        .search_media(
+        .search_media(BrowseRequest {
             first,
             after,
             last,
             before,
-            sort_by.unwrap_or_default(),
-            sort_order.unwrap_or_default(),
+            sort_by: sort_by.unwrap_or_default(),
+            sort_order: sort_order.unwrap_or_default(),
             filters,
-        )
+        })
         .await;
 
-    Json(result)
+    match result {
+        Ok(connection) => Ok(Json(connection)),
+        Err(MetadataError::InvalidCursor(detail)) => Err(MediaBrowseError::InvalidCursor(detail)),
+        Err(MetadataError::InvalidPagination(detail)) => {
+            Err(MediaBrowseError::InvalidPagination(detail))
+        }
+        Err(
+            err @ (MetadataError::InternalError(_)
+            | MetadataError::InvalidId
+            | MetadataError::MediaNotFound
+            | MetadataError::Unsupported(_)),
+        ) => Err(MediaBrowseError::Internal(err.to_string())),
+    }
 }
 
 /// Fetch a single media item's full metadata by id.
@@ -116,24 +145,24 @@ pub async fn get_media_detail(
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaMetadata>, MediaLookupError> {
-    // Parsed here rather than inside the lookup: `get_media_metadata` returns
-    // `Option`, so a malformed id and a well-formed miss arrive
-    // indistinguishable and both used to answer 404 -- while `/sources` and the
-    // refresh route, sharing this same path parameter, answered 400. Doing it
-    // before the call is what lets the two be told apart at all.
-    if Uuid::parse_str(&path.id).is_err() {
+    // Parsed here, so a malformed id is the 400 `/sources` and the refresh
+    // route answer for the same path parameter, not a lookup miss.
+    let Ok(id) = Uuid::parse_str(&path.id) else {
         return Err(MediaLookupError::InvalidMediaId(format!(
             "{} is not a valid media id",
             path.id
         )));
-    }
+    };
 
-    match state.services.metadata.get_media_metadata(&path.id).await {
-        Some(metadata) => Ok(Json(metadata)),
-        None => Err(MediaLookupError::MediaNotFound(format!(
+    // A failed lookup is a 500: answering 404 would tell the client the
+    // title is gone when the server only failed to read it.
+    match state.services.metadata.get_media_metadata(id).await {
+        Ok(Some(metadata)) => Ok(Json(metadata)),
+        Ok(None) => Err(MediaLookupError::MediaNotFound(format!(
             "media {} not found",
             path.id
         ))),
+        Err(err) => Err(MediaLookupError::Internal(err.to_string())),
     }
 }
 
@@ -162,7 +191,12 @@ pub async fn get_media_sources(
         Err(MetadataError::Unsupported(msg)) => {
             Err(MediaSourcesError::SourcesNotAvailableForShow(msg))
         }
-        Err(MetadataError::InternalError(msg)) => Err(MediaSourcesError::Internal(msg)),
+        // Sources are not paged: a cursor or page error cannot arise here.
+        Err(
+            MetadataError::InternalError(msg)
+            | MetadataError::InvalidCursor(msg)
+            | MetadataError::InvalidPagination(msg),
+        ) => Err(MediaSourcesError::Internal(msg)),
     }
 }
 

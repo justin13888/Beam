@@ -1,5 +1,5 @@
 //! Wire DTOs for media discovery: the typed sort/filter parameters and the
-//! Relay-style connection `GET /v1/media` returns.
+//! connection `GET /v1/media` returns.
 //!
 //! These lived in `services::metadata` while `salvo::oapi::ToSchema` was the
 //! derive. ADR-0010 requires the service layer to stay transport-independent,
@@ -49,34 +49,29 @@ pub enum MediaTypeFilter {
     Show,
 }
 
-/// Relay-style connection for media search results.
+/// One page of browse or search results.
+///
+/// `items` are in the requested order. `page_info`'s cursors are opaque: pass
+/// `end_cursor` as `after` for the next page, `start_cursor` as `before` for
+/// the previous one, with the same `sort_by` and `sort_order`.
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct MediaConnection {
-    /// List of edges containing media items and cursors
-    pub edges: Vec<MediaEdge>,
-    /// Pagination information
+    /// The titles on this page.
+    pub items: Vec<MediaMetadata>,
+    /// Where this page sits in the whole listing.
     pub page_info: PageInfo,
 }
 
-/// Relay-style edge for media.
-#[derive(Clone, Debug, Serialize, Deserialize, Schema)]
-pub struct MediaEdge {
-    /// Cursor for this edge
-    pub cursor: String,
-    /// The media item
-    pub node: MediaMetadata,
-}
-
-/// Relay-style page info.
+/// Where a page sits in the whole listing.
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct PageInfo {
-    /// Whether there is a next page
+    /// Whether a page follows this one.
     pub has_next_page: bool,
-    /// Whether there is a previous page
+    /// Whether a page precedes this one.
     pub has_previous_page: bool,
-    /// Cursor of the first edge
+    /// Cursor of the first item; absent on an empty page.
     pub start_cursor: Option<String>,
-    /// Cursor of the last edge
+    /// Cursor of the last item; absent on an empty page.
     pub end_cursor: Option<String>,
 }
 

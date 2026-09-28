@@ -32,6 +32,9 @@ pub struct Model {
     pub tvdb_id: Option<i32>,
     pub anilist_id: Option<i32>,
 
+    /// The provider's rating on its own 0-10 scale, as `movies.rating_tmdb`.
+    pub rating_tmdb: Option<f32>,
+
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

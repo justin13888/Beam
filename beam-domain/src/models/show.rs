@@ -24,6 +24,8 @@ pub struct Show {
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<u32>,
     pub anilist_id: Option<u32>,
+    /// The provider's rating on its 0-10 scale, as `Movie::rating_tmdb`.
+    pub rating_tmdb: Option<f32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -79,16 +81,6 @@ impl CreateShow {
     }
 }
 
-/// Server-side search/filter parameters for shows. See
-/// [`crate::models::movie::MovieSearchQuery`] for the movie-side equivalent.
-#[derive(Debug, Clone, Default)]
-pub struct ShowSearchQuery {
-    pub query: Option<String>,
-    pub year: Option<u32>,
-    pub year_from: Option<u32>,
-    pub year_to: Option<u32>,
-}
-
 /// Parameters for creating an episode
 #[derive(Debug, Clone)]
 pub struct CreateEpisode {
@@ -116,6 +108,7 @@ impl From<beam_entity::show::Model> for Show {
             imdb_id: model.imdb_id,
             tvdb_id: model.tvdb_id.map(|id| id as u32),
             anilist_id: model.anilist_id.map(|id| id as u32),
+            rating_tmdb: model.rating_tmdb,
             created_at: model.created_at.with_timezone(&Utc),
             updated_at: model.updated_at.with_timezone(&Utc),
         }

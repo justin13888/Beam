@@ -1,4 +1,5 @@
 pub mod admin_log;
+pub mod catalog;
 // Shared behavioural contracts, instantiated over the in-memory doubles here and
 // over the SeaORM implementations in `beam-index` under `pg-integration`.
 // Not `cfg`-gated: the module contains only `macro_rules!` definitions, which
@@ -17,6 +18,7 @@ pub mod show;
 pub mod stream;
 
 pub use admin_log::AdminLogRepository;
+pub use catalog::CatalogRepository;
 pub use enrichment::EnrichmentStateRepository;
 pub use file::FileRepository;
 pub use genre::GenreRepository;
