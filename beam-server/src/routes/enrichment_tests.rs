@@ -123,6 +123,14 @@ impl Fixture {
         .unwrap();
     }
 
+    async fn mark_enriched(&self, target: EnrichmentTargetId, matched_ref: &str) {
+        let repo = &self.state.services.enrichment_repo;
+        let row = repo.find_by_target(target).await.unwrap().unwrap();
+        repo.mark_enriched(row.id, matched_ref, 0.9, Utc::now())
+            .await
+            .unwrap();
+    }
+
     async fn row(&self, target: EnrichmentTargetId) -> beam_domain::models::EnrichmentState {
         self.state
             .services
@@ -411,16 +419,55 @@ async fn fixing_a_match_pins_the_title_as_the_administrators_and_queues_it() {
     assert_eq!(row.status, EnrichmentStatus::Pending);
     assert!(row.force_refresh);
 
-    // Cleared: back to no pin (this fixture's titles have no NFO).
-    let cleared: MediaEnrichment = f
-        .client
+    // Cleared: back to no pin (this fixture's titles have no NFO), queued to
+    // be matched afresh.
+    f.client
         .delete(&format!("/v1/admin/media/{id}/match"))
         .cookie("beam_session", &f.admin)
         .send()
         .await
-        .assert_status(StatusCode::ACCEPTED)
-        .json();
-    assert_eq!((cleared.pinned_ref, cleared.pin_source), (None, None));
+        .assert_status(StatusCode::NO_CONTENT);
+    let movie = f
+        .state
+        .services
+        .movie_repo
+        .find_by_id(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((movie.pinned_ref, movie.pin_source), (None, None));
+    let row = f.row(target).await;
+    assert_eq!(row.status, EnrichmentStatus::Pending);
+    assert_eq!(row.matched_ref, None);
+}
+
+/// `DELETE .../match` on a title no administrator pinned is a no-op: its
+/// match is kept and it is not queued. Rematching any title is a refresh
+/// with `rematch=true`.
+#[tokio::test]
+async fn clearing_the_match_of_a_title_no_administrator_pinned_keeps_it() {
+    let f = fixture(InMemoryEnrichmentProvider::new(&["tmdb"])).await;
+    let id = f.movie("Heat", Some(1995)).await;
+    let target = EnrichmentTargetId::Movie(id);
+    f.mark_enriched(target, "tmdb:949").await;
+
+    f.client
+        .delete(&format!("/v1/admin/media/{id}/match"))
+        .cookie("beam_session", &f.admin)
+        .send()
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let row = f.row(target).await;
+    assert_eq!(row.status, EnrichmentStatus::Enriched, "not queued");
+    assert_eq!(row.matched_ref.as_deref(), Some("tmdb:949"), "kept");
+
+    f.client
+        .delete(&format!("/v1/admin/media/{}/match", Uuid::new_v4()))
+        .cookie("beam_session", &f.admin)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -615,4 +662,71 @@ async fn refreshes_queue_everything_or_one_librarys_titles() {
         f.row(EnrichmentTargetId::Movie(outside)).await.status,
         EnrichmentStatus::Pending
     );
+}
+
+/// Every refresh -- of a title, a library, everything -- keeps each match
+/// by default and, with `rematch=true`, discards it to be matched afresh
+/// (FR-308, issue #185).
+#[tokio::test]
+async fn every_refresh_keeps_the_match_unless_asked_to_rematch() {
+    let f = fixture(InMemoryEnrichmentProvider::new(&["tmdb"])).await;
+    let library = f
+        .state
+        .services
+        .library_repo
+        .create(CreateLibrary {
+            name: "Films".to_string(),
+            root_path: "/films".into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let id = f.movie("Heat", Some(1995)).await;
+    let target = EnrichmentTargetId::Movie(id);
+    f.state
+        .services
+        .movie_repo
+        .ensure_library_association(library.id, id)
+        .await
+        .unwrap();
+    let routes = [
+        (
+            format!("/v1/admin/media/{id}/refresh"),
+            StatusCode::NO_CONTENT,
+        ),
+        (
+            format!("/v1/admin/libraries/{}/refresh", library.id),
+            StatusCode::ACCEPTED,
+        ),
+        ("/v1/admin/media/refresh".to_string(), StatusCode::ACCEPTED),
+    ];
+
+    for (route, status) in &routes {
+        for (query, rematched) in [
+            ("", false),
+            ("?rematch=false", false),
+            ("?rematch=true", true),
+        ] {
+            f.mark_enriched(target, "tmdb:949").await;
+
+            f.client
+                .post(&format!("{route}{query}"))
+                .cookie("beam_session", &f.admin)
+                .send()
+                .await
+                .assert_status(*status);
+
+            let row = f.row(target).await;
+            assert_eq!(row.status, EnrichmentStatus::Pending, "{route}{query}");
+            assert!(row.force_refresh, "{route}{query}");
+            let expected = if rematched { None } else { Some("tmdb:949") };
+            assert_eq!(row.matched_ref.as_deref(), expected, "{route}{query}");
+        }
+        f.client
+            .post(&format!("{route}?rematch=maybe"))
+            .cookie("beam_session", &f.admin)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+    }
 }

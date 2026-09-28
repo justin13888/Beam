@@ -339,7 +339,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   admin-visible enrichment status: the admin status reports each provider as configured, not
   configured, or configured but unavailable.
 - **FR-308**: The server MUST expose an admin-triggerable "re-enrich" action, scoped to a single title,
-  to one library's titles, or to all titles, that re-runs enrichment regardless of current status.
+  to one library's titles, or to all titles, that re-runs enrichment regardless of current status,
+  keeping each title's match unless the administrator asks for a rematch.
   Operator-facing enrichment tuning knobs (batch size, minimum confidence, metadata language) are
   deferred — tracked in [#71](https://github.com/justin13888/beam/issues/71).
 - **FR-309**: The server MUST emit enrichment progress/status-change events over SSE, in the same
@@ -371,7 +372,7 @@ strength. Each requirement is independently testable. See `product.md` for narra
   library ([#185](https://github.com/justin13888/beam/issues/185)): search the configured providers
   for candidates; fix the match to a chosen id, which sets an administrator's pin (FR-312) and
   queues the title with its old match cleared -- and clear that pin again, returning the title to
-  its NFO's pin or to a search; and lock individual fields (title, original title, description,
+  its NFO's pin or to a search (clearing a title no administrator pinned changes nothing); and lock individual fields (title, original title, description,
   year, release date, runtime, poster, backdrop, rating, genres), which enrichment MUST then leave
   as they are. A fetch by an id the provider answers it has no title for MUST be retried with
   backoff (FR-304), naming the id, for a title a pin holds -- an NFO's or an administrator's --

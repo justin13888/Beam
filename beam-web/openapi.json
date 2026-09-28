@@ -4963,7 +4963,7 @@
         "tags": [
           "admin"
         ],
-        "summary": "Queue a specific movie/show for another enrichment pass, whatever its status (FR-308, FR-603). It keeps its match, re-fetched fresh; to match it to a different title, fix the match (`POST /v1/admin/media/{id}/match`).",
+        "summary": "Queue a specific movie/show for another enrichment pass, whatever its status (FR-308, FR-603). It keeps its match, re-fetched fresh, unless `rematch`, which discards it to be searched for again (by its pin, if it has one); to match it to a title of your choosing, fix the match (`POST /v1/admin/media/{id}/match`).",
         "operationId": "refreshMediaMetadata",
         "parameters": [
           {
@@ -4973,6 +4973,18 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "rematch",
+            "in": "query",
+            "description": "Discard each title's match and search for it again, by its pin if it\nhas one, else by its name; `false` (the default) keeps each match and\nfetches it afresh.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
             }
           },
           {
@@ -8421,7 +8433,7 @@
           "admin"
         ],
         "summary": "Clear an administrator's fixed match.",
-        "description": "The administrator's pin goes; the title goes back to its NFO's pin, if an\nNFO beside its files names one, or to being searched for by its name, and\nis queued to be matched afresh. A title an administrator never pinned is\nonly queued: an NFO's pin is the NFO's to change. Answers at once with the\ntitle as queued.",
+        "description": "The administrator's pin goes; the title goes back to its NFO's pin, if an\nNFO beside its files names one, or to being searched for by its name, and\nis queued to be matched afresh. On a title no administrator pinned this\nchanges nothing -- its match is kept and it is not queued -- since an\nNFO's pin is the NFO's to change; to match any title afresh, refresh it\nwith `rematch=true`. Either way the title is left with no administrator's\npin.",
         "operationId": "clearMediaMatch",
         "parameters": [
           {
@@ -8575,15 +8587,8 @@
               }
             }
           },
-          "202": {
-            "description": "the request was accepted, and the processing it asked for has not completed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MediaEnrichment"
-                }
-              }
-            }
+          "204": {
+            "description": "the request succeeded and there is no content to send"
           },
           "404": {
             "description": "Media not found",
@@ -8940,9 +8945,21 @@
         "tags": [
           "admin"
         ],
-        "summary": "Queue every title for another enrichment pass, whatever its status (FR-308). Each keeps its match; one that has none is searched for.",
+        "summary": "Queue every title for another enrichment pass, whatever its status (FR-308). Each keeps its match, fetched afresh, unless `rematch`; one that has none is searched for.",
         "operationId": "refreshAllMediaMetadata",
         "parameters": [
+          {
+            "name": "rematch",
+            "in": "query",
+            "description": "Discard each title's match and search for it again, by its pin if it\nhas one, else by its name; `false` (the default) keeps each match and\nfetches it afresh.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
           {
             "name": "Origin",
             "in": "header",
@@ -9062,6 +9079,28 @@
               }
             }
           },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "202": {
             "description": "the request was accepted, and the processing it asked for has not completed",
             "content": {
@@ -9109,7 +9148,7 @@
         "tags": [
           "admin"
         ],
-        "summary": "Queue every title in one library for another enrichment pass, whatever its status (FR-308).",
+        "summary": "Queue every title in one library for another enrichment pass, whatever its status (FR-308): each keeps its match unless `rematch`.",
         "operationId": "refreshLibraryMetadata",
         "parameters": [
           {
@@ -9120,6 +9159,18 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "rematch",
+            "in": "query",
+            "description": "Discard each title's match and search for it again, by its pin if it\nhas one, else by its name; `false` (the default) keeps each match and\nfetches it afresh.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
             }
           },
           {

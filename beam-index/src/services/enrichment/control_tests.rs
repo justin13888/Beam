@@ -25,18 +25,32 @@ use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::services::TestClock;
 
-/// Records which titles the control asked to re-pin by their NFOs; the
-/// re-pin itself is the indexer's, tested with it.
-#[derive(Debug, Default)]
+/// Records which titles the control asked to release, and releases each as
+/// a title with no NFO is released: its administrator's pin cleared. The
+/// release itself -- re-pinning by NFOs -- is the indexer's, tested with it.
+#[derive(Debug)]
 struct RecordingNfoPins {
+    movies: Arc<InMemoryMovieRepository>,
+    shows: Arc<InMemoryShowRepository>,
     asked: Mutex<Vec<EnrichmentTargetId>>,
+    /// A match a pass stores for the title while it is being released, as a
+    /// sweep running at that moment would.
+    matched_meanwhile: Mutex<Option<(Arc<InMemoryEnrichmentStateRepository>, &'static str)>>,
 }
 
 #[async_trait]
 impl TitleNfoPins for RecordingNfoPins {
-    async fn repin_from_nfos(&self, target: EnrichmentTargetId) -> Result<(), IndexError> {
+    async fn release_admin_pin(&self, target: EnrichmentTargetId) -> Result<bool, IndexError> {
         self.asked.lock().unwrap().push(target);
-        Ok(())
+        let meanwhile = self.matched_meanwhile.lock().unwrap().take();
+        if let Some((states, matched)) = meanwhile {
+            let row = states.find_by_target(target).await?.unwrap().id;
+            states.mark_enriched(row, matched, 1.0, Utc::now()).await?;
+        }
+        Ok(match target {
+            EnrichmentTargetId::Movie(id) => self.movies.clear_admin_pin(id).await?,
+            EnrichmentTargetId::Show(id) => self.shows.clear_admin_pin(id).await?,
+        })
     }
 }
 
@@ -64,7 +78,12 @@ impl Harness {
         ));
         let libraries = Arc::new(InMemoryLibraryRepository::default());
         let admin_log = Arc::new(InMemoryAdminLogRepository::default());
-        let nfo_pins = Arc::new(RecordingNfoPins::default());
+        let nfo_pins = Arc::new(RecordingNfoPins {
+            movies: movies.clone(),
+            shows: shows.clone(),
+            asked: Mutex::default(),
+            matched_meanwhile: Mutex::default(),
+        });
         let worker = Arc::new(Notify::new());
         let provider = Arc::new(provider);
         let control = EnrichmentControl::new(EnrichmentControlDeps {
@@ -171,11 +190,7 @@ async fn fixing_a_match_pins_the_title_by_the_administrator_and_queues_it() {
         .await
         .unwrap();
 
-    let detail = h
-        .control
-        .fix_match(id, Some("tmdb:949"), ADMIN)
-        .await
-        .unwrap();
+    let detail = h.control.fix_match(id, "tmdb:949", ADMIN).await.unwrap();
 
     assert_eq!(detail.pinned_ref.as_deref(), Some("tmdb:949"));
     assert_eq!(detail.pin_source, Some(PinSource::Admin));
@@ -208,10 +223,7 @@ async fn the_sweep_fetches_a_fixed_title_by_the_chosen_id_at_full_confidence() {
         });
     let h = Harness::new(provider);
     let id = h.movie("Heat", Some(1995)).await;
-    h.control
-        .fix_match(id, Some("tmdb:949"), ADMIN)
-        .await
-        .unwrap();
+    h.control.fix_match(id, "tmdb:949", ADMIN).await.unwrap();
 
     let report = h.sweep().sweep_once().await;
 
@@ -240,10 +252,7 @@ async fn a_fixed_id_the_provider_does_not_have_is_retried_and_never_searched() {
         });
     let h = Harness::new(provider);
     let id = h.movie("Heat", Some(1995)).await;
-    h.control
-        .fix_match(id, Some("tmdb:999999"), ADMIN)
-        .await
-        .unwrap();
+    h.control.fix_match(id, "tmdb:999999", ADMIN).await.unwrap();
 
     let report = h.sweep().sweep_once().await;
 
@@ -265,7 +274,7 @@ async fn a_fix_match_is_refused_for_what_cannot_be_pinned() {
     let id = h.movie("Heat", Some(1995)).await;
     let other = h.movie("Other", None).await;
     h.control
-        .fix_match(other, Some("anilist:5"), ADMIN)
+        .fix_match(other, "anilist:5", ADMIN)
         .await
         .unwrap();
     let _ = h.worker_poked();
@@ -277,23 +286,23 @@ async fn a_fix_match_is_refused_for_what_cannot_be_pinned() {
     ] {
         assert!(
             matches!(
-                h.control.fix_match(id, Some(external_ref), ADMIN).await,
+                h.control.fix_match(id, external_ref, ADMIN).await,
                 Err(ControlError::InvalidExternalRef(_))
             ),
             "{refused}"
         );
     }
     assert!(matches!(
-        h.control.fix_match(id, Some("tmdb:603"), ADMIN).await,
+        h.control.fix_match(id, "tmdb:603", ADMIN).await,
         Err(ControlError::ProviderNotConfigured(_))
     ));
     assert!(matches!(
-        h.control.fix_match(id, Some("anilist:5"), ADMIN).await,
+        h.control.fix_match(id, "anilist:5", ADMIN).await,
         Err(ControlError::ExternalRefTaken(_))
     ));
     assert!(matches!(
         h.control
-            .fix_match(Uuid::new_v4(), Some("anilist:6"), ADMIN)
+            .fix_match(Uuid::new_v4(), "anilist:6", ADMIN)
             .await,
         Err(ControlError::MediaNotFound(_))
     ));
@@ -309,43 +318,82 @@ async fn clearing_a_match_drops_the_administrators_pin_and_asks_the_nfo_again() 
     let h = Harness::new(InMemoryEnrichmentProvider::new(&["tmdb"]));
     let id = h.show("The Office").await;
     let target = EnrichmentTargetId::Show(id);
-    h.control
-        .fix_match(id, Some("tmdb:2316"), ADMIN)
-        .await
-        .unwrap();
+    h.control.fix_match(id, "tmdb:2316", ADMIN).await.unwrap();
+    let _ = h.worker_poked();
 
-    let detail = h.control.fix_match(id, None, ADMIN).await.unwrap();
+    let detail = h.control.clear_match(id, ADMIN).await.unwrap();
 
     assert_eq!((detail.pinned_ref, detail.pin_source), (None, None));
     assert_eq!(detail.status, EnrichmentStatus::Pending);
     assert_eq!(detail.matched_ref, None, "matched afresh");
     assert_eq!(*h.nfo_pins.asked.lock().unwrap(), vec![target]);
     assert!(h.worker_poked());
+    let audit = h.audit().await;
+    assert!(
+        audit[0].message.starts_with("Cleared"),
+        "{}",
+        audit[0].message
+    );
 }
 
+/// A pass that runs while the pin is being cleared fetches the title by the
+/// pin that is going; the title is queued again after, so it is matched
+/// afresh rather than left with the administrator's old match.
 #[tokio::test]
-async fn clearing_leaves_an_nfos_pin_to_the_nfo() {
+async fn a_match_made_while_the_pin_is_cleared_is_matched_again() {
     let h = Harness::new(InMemoryEnrichmentProvider::new(&["tmdb"]));
     let id = h.movie("Heat", Some(1995)).await;
+    h.control.fix_match(id, "tmdb:949", ADMIN).await.unwrap();
+    *h.nfo_pins.matched_meanwhile.lock().unwrap() = Some((h.states.clone(), "tmdb:949"));
+
+    let detail = h.control.clear_match(id, ADMIN).await.unwrap();
+
+    assert_eq!(detail.pinned_ref, None);
+    assert_eq!(detail.status, EnrichmentStatus::Pending);
+    assert_eq!(detail.matched_ref, None, "the pin's match is not kept");
+}
+
+/// Clearing a title no administrator pinned changes nothing -- an NFO's pin
+/// and a searched match alike are left, and nothing is queued -- and the
+/// audit log says so (FR-313).
+#[tokio::test]
+async fn clearing_a_title_no_administrator_pinned_changes_nothing() {
+    let h = Harness::new(InMemoryEnrichmentProvider::new(&["tmdb"]));
+    let nfo_pinned = h.movie("Heat", Some(1995)).await;
     h.movies
-        .set_pinned_ref(id, &ProviderPin::Tmdb(949), PinSource::Nfo)
+        .set_pinned_ref(nfo_pinned, &ProviderPin::Tmdb(949), PinSource::Nfo)
         .await
         .unwrap();
+    let searched = h.movie("Alien", Some(1979)).await;
+    for id in [nfo_pinned, searched] {
+        let row = h.state(EnrichmentTargetId::Movie(id)).await.id;
+        h.states
+            .mark_enriched(row, "tmdb:348", 0.9, Utc::now())
+            .await
+            .unwrap();
+    }
 
-    let detail = h.control.fix_match(id, None, ADMIN).await.unwrap();
+    for id in [nfo_pinned, searched] {
+        let detail = h.control.clear_match(id, ADMIN).await.unwrap();
+        assert_eq!(detail.status, EnrichmentStatus::Enriched, "not queued");
+        assert_eq!(detail.matched_ref.as_deref(), Some("tmdb:348"), "kept");
+    }
 
+    let movie = h.movies.find_by_id(nfo_pinned).await.unwrap().unwrap();
     assert_eq!(
-        (detail.pinned_ref.as_deref(), detail.pin_source),
-        (Some("tmdb:949"), Some(PinSource::Nfo))
-    );
-    assert!(
-        h.nfo_pins.asked.lock().unwrap().is_empty(),
+        (movie.pinned_ref.as_deref(), movie.pin_source),
+        (Some("tmdb:949"), Some(PinSource::Nfo)),
         "the NFO's pin never went"
     );
-    assert_eq!(
-        h.state(EnrichmentTargetId::Movie(id)).await.status,
-        EnrichmentStatus::Pending,
-        "still queued to be matched again"
+    assert!(h.nfo_pins.asked.lock().unwrap().is_empty());
+    assert!(!h.worker_poked());
+    let audit = h.audit().await;
+    assert_eq!(audit.len(), 2);
+    assert!(
+        audit
+            .iter()
+            .all(|entry| entry.message.contains("no administrator's pin to clear")),
+        "{audit:?}"
     );
 }
 

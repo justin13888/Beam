@@ -89,6 +89,9 @@ When search keeps picking the wrong title, fix the match rather than the filenam
    retries run out.
 3. `DELETE /v1/admin/media/{id}/match` undoes it: your pin is cleared, the title goes back to
    what an NFO beside its files says or, with none, to being searched for by its name, and it is matched again.
+   An NFO that cannot be read at that moment — a share that is offline — is applied by the next
+   scan once it can be. On a title you never pinned, `DELETE` changes nothing; to have any title
+   matched afresh, refresh it with `?rematch=true`.
 
 The id must be from a provider you have configured, and one id pins one title: if another title
 already holds it, the two are probably the same title — fix the other one first.
@@ -109,7 +112,9 @@ for again by its name instead. You can also trigger a re-enrich for a title
 from the admin area — the right move after fixing a filename, or after adding a TMDB token to a
 library that was indexed without one. `POST /v1/admin/libraries/{id}/refresh` re-enriches one
 library, and `POST /v1/admin/media/refresh` everything; each answers with how many titles it
-queued. The outcome of every title arrives on the admin event stream as an `enrichment` event.
+queued. A refresh keeps each title's match and fetches it afresh; add `?rematch=true` (to any of
+the three) to discard the matches and have each title matched again — by its pin, if it has
+one, else by its name. The outcome of every title arrives on the admin event stream as an `enrichment` event.
 
 A show's rating is stored when the show is enriched. A show an older Beam enriched — before
 shows kept a rating — has none until it is enriched again, so it is left out of a minimum-rating filter and sorts with the unrated titles

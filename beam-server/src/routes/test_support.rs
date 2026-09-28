@@ -207,20 +207,27 @@ pub(crate) fn cold_artwork_cache() -> Arc<ArtworkCache> {
     ))
 }
 
-/// The indexer's re-pin of a title by its NFOs, for fixtures with no library
-/// on disk: there is no NFO to read, so it re-pins nothing -- a cleared title
-/// is left unpinned, as one with no NFO is. The re-pin itself is tested with
-/// the indexer, over real NFOs (`beam-index`).
-#[derive(Debug, Default)]
-pub(crate) struct NoNfoPins;
+/// The indexer's release of an administrator's pin, for fixtures with no
+/// library on disk: there is no NFO to read, so a cleared title is left
+/// unpinned, as one with no NFO is. The release itself is tested with the
+/// indexer, over real NFOs (`beam-index`).
+#[derive(Debug)]
+pub(crate) struct NoNfoPins {
+    movies: Arc<dyn MovieRepository>,
+    shows: Arc<dyn ShowRepository>,
+}
 
 #[async_trait::async_trait]
 impl TitleNfoPins for NoNfoPins {
-    async fn repin_from_nfos(
+    async fn release_admin_pin(
         &self,
-        _target: beam_domain::models::enrichment::EnrichmentTargetId,
-    ) -> Result<(), beam_index::services::index::IndexError> {
-        Ok(())
+        target: beam_domain::models::enrichment::EnrichmentTargetId,
+    ) -> Result<bool, beam_index::services::index::IndexError> {
+        use beam_domain::models::enrichment::EnrichmentTargetId;
+        Ok(match target {
+            EnrichmentTargetId::Movie(id) => self.movies.clear_admin_pin(id).await?,
+            EnrichmentTargetId::Show(id) => self.shows.clear_admin_pin(id).await?,
+        })
     }
 }
 
@@ -234,6 +241,10 @@ pub(crate) fn enrichment_control(
     provider: Arc<dyn EnrichmentProvider>,
     admin_log: Arc<dyn AdminLogService>,
 ) -> Arc<EnrichmentControl> {
+    let nfo_pins = Arc::new(NoNfoPins {
+        movies: movies.clone(),
+        shows: shows.clone(),
+    });
     Arc::new(EnrichmentControl::new(EnrichmentControlDeps {
         movies,
         shows,
@@ -241,7 +252,7 @@ pub(crate) fn enrichment_control(
         libraries,
         provider,
         admin_log,
-        nfo_pins: Arc::new(NoNfoPins),
+        nfo_pins,
         worker: Arc::new(tokio::sync::Notify::new()),
     }))
 }

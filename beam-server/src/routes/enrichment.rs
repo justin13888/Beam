@@ -3,7 +3,8 @@
 //! (`AdminAuth`).
 //!
 //! The mutations answer at once: a fix-match pins the title and queues it, a
-//! refresh queues titles, and the enrichment worker does the fetching. Their
+//! refresh queues titles -- keeping each match, or with `rematch=true`
+//! matching each afresh -- and the enrichment worker does the fetching. Their
 //! outcome arrives on the admin event stream as `enrichment` events (FR-309),
 //! and in the list here.
 
@@ -59,6 +60,15 @@ pub struct EnrichmentListQuery {
     pub first: Option<u32>,
     /// An opaque cursor -- a page's `end_cursor` -- to page on from.
     pub after: Option<String>,
+}
+
+/// How a refresh treats each title's match.
+#[derive(Debug, Default, Serialize, Deserialize, Schema, QueryParams)]
+pub struct RefreshQuery {
+    /// Discard each title's match and search for it again, by its pin if it
+    /// has one, else by its name; `false` (the default) keeps each match and
+    /// fetches it afresh.
+    pub rematch: Option<bool>,
 }
 
 /// What to search a title's candidates by.
@@ -212,7 +222,7 @@ pub async fn fix_media_match(
     let detail = state
         .services
         .enrichment_control
-        .fix_match(path.id, Some(&external_ref), &auth.0.user_id)
+        .fix_match(path.id, &external_ref, &auth.0.user_id)
         .await
         .map_err(|err| match err {
             ControlError::MediaNotFound(_) => FixMatchError::MediaNotFound(err.to_string()),
@@ -235,9 +245,11 @@ pub async fn fix_media_match(
 ///
 /// The administrator's pin goes; the title goes back to its NFO's pin, if an
 /// NFO beside its files names one, or to being searched for by its name, and
-/// is queued to be matched afresh. A title an administrator never pinned is
-/// only queued: an NFO's pin is the NFO's to change. Answers at once with the
-/// title as queued.
+/// is queued to be matched afresh. On a title no administrator pinned this
+/// changes nothing -- its match is kept and it is not queued -- since an
+/// NFO's pin is the NFO's to change; to match any title afresh, refresh it
+/// with `rematch=true`. Either way the title is left with no administrator's
+/// pin.
 #[kynos::delete(
     "/admin/media/{id}/match",
     tag = Admin,
@@ -247,17 +259,17 @@ pub async fn clear_media_match(
     auth: AdminAuth,
     Path(path): Path<MediaIdPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Accepted<Json<MediaEnrichment>>, MediaEnrichmentError> {
-    let detail = state
+) -> Result<NoContent, MediaEnrichmentError> {
+    state
         .services
         .enrichment_control
-        .fix_match(path.id, None, &auth.0.user_id)
+        .clear_match(path.id, &auth.0.user_id)
         .await
         .map_err(|err| match err {
             ControlError::MediaNotFound(_) => MediaEnrichmentError::MediaNotFound(err.to_string()),
             _ => MediaEnrichmentError::Internal(err.to_string()),
         })?;
-    Ok(Accepted::new(Json(MediaEnrichment::from(detail))))
+    Ok(NoContent)
 }
 
 /// Lock exactly these fields of a title, so enrichment leaves them as they
@@ -298,7 +310,8 @@ pub async fn set_media_field_locks(
 }
 
 /// Queue every title for another enrichment pass, whatever its status
-/// (FR-308). Each keeps its match; one that has none is searched for.
+/// (FR-308). Each keeps its match, fetched afresh, unless `rematch`; one
+/// that has none is searched for.
 #[kynos::post(
     "/admin/media/refresh",
     tag = Admin,
@@ -306,19 +319,21 @@ pub async fn set_media_field_locks(
 )]
 pub async fn refresh_all_media_metadata(
     auth: AdminAuth,
+    Query(query): Query<RefreshQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Accepted<Json<RefreshQueued>>, InternalError> {
+    let RefreshQuery { rematch } = query;
     let queued_count = state
         .services
         .enrichment_control
-        .refresh(RefreshScope::All, false, &auth.0.user_id)
+        .refresh(RefreshScope::All, rematch.unwrap_or(false), &auth.0.user_id)
         .await
         .map_err(|err| InternalError::Internal(err.to_string()))?;
     Ok(Accepted::new(Json(RefreshQueued { queued_count })))
 }
 
 /// Queue every title in one library for another enrichment pass, whatever
-/// its status (FR-308).
+/// its status (FR-308): each keeps its match unless `rematch`.
 #[kynos::post(
     "/admin/libraries/{id}/refresh",
     tag = Admin,
@@ -327,12 +342,18 @@ pub async fn refresh_all_media_metadata(
 pub async fn refresh_library_metadata(
     auth: AdminAuth,
     Path(path): Path<LibraryIdPath>,
+    Query(query): Query<RefreshQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Accepted<Json<RefreshQueued>>, LibraryRefreshError> {
+    let RefreshQuery { rematch } = query;
     let queued_count = state
         .services
         .enrichment_control
-        .refresh(RefreshScope::Library(path.id), false, &auth.0.user_id)
+        .refresh(
+            RefreshScope::Library(path.id),
+            rematch.unwrap_or(false),
+            &auth.0.user_id,
+        )
         .await
         .map_err(|err| match err {
             ControlError::LibraryNotFound(_) => {

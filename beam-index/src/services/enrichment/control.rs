@@ -36,18 +36,21 @@ use crate::services::index::{IndexError, LocalIndexService};
 /// How many candidates a search offers an administrator.
 pub const MAX_CANDIDATES: usize = 10;
 
-/// Pins a title by its NFO again, as classification would now: the step
-/// after an administrator's pin is cleared. The seam over the indexer, which
-/// reads NFOs from the library; [`LocalIndexService`] is the implementation.
+/// Clears an administrator's pin and pins the title by its NFO again, as
+/// classification would now. The seam over the indexer, which reads NFOs
+/// from the library and records which it applied; [`LocalIndexService`] is
+/// the implementation ([`LocalIndexService::release_admin_pin`]).
 #[async_trait]
 pub trait TitleNfoPins: Send + Sync + std::fmt::Debug {
-    async fn repin_from_nfos(&self, target: EnrichmentTargetId) -> Result<(), IndexError>;
+    /// Clear `target`'s administrator's pin and pin it by its NFO, or by
+    /// nothing; whether it had an administrator's pin to clear.
+    async fn release_admin_pin(&self, target: EnrichmentTargetId) -> Result<bool, IndexError>;
 }
 
 #[async_trait]
 impl TitleNfoPins for LocalIndexService {
-    async fn repin_from_nfos(&self, target: EnrichmentTargetId) -> Result<(), IndexError> {
-        self.repin_title_from_nfos(target).await
+    async fn release_admin_pin(&self, target: EnrichmentTargetId) -> Result<bool, IndexError> {
+        LocalIndexService::release_admin_pin(self, target).await
     }
 }
 
@@ -428,76 +431,55 @@ impl EnrichmentControl {
     /// configured provider resolves: the title is pinned to it by
     /// `admin_user_id` -- an administrator's pin, which outranks and is never
     /// replaced by an NFO's (FR-312) -- and queued, its old match cleared, so
-    /// the next pass fetches it by that id. `None` clears an administrator's
-    /// pin instead: the title is pinned by its NFO again, or by nothing, and
-    /// queued to be matched afresh.
+    /// the next pass fetches it by that id.
     pub async fn fix_match(
         &self,
         id: Uuid,
-        external_ref: Option<&str>,
+        external_ref: &str,
         admin_user_id: &str,
     ) -> Result<TitleEnrichment, ControlError> {
         let title = self.resolve(id).await?;
         let target = title.target;
-        let message = match external_ref {
-            Some(external_ref) => {
-                let pin = ProviderPin::parse(external_ref).ok_or_else(|| {
-                    ControlError::InvalidExternalRef(format!(
-                        "{external_ref:?} is not a provider id; expected \"provider:id\", \
-                         such as \"tmdb:603\""
-                    ))
-                })?;
-                if !self
-                    .deps
-                    .provider
-                    .available_providers()
-                    .iter()
-                    .any(|provider| provider == pin.provider())
-                {
-                    return Err(ControlError::ProviderNotConfigured(format!(
-                        "no configured metadata provider resolves {} ids",
-                        pin.provider()
-                    )));
-                }
-                let pinned = match target {
-                    EnrichmentTargetId::Movie(id) => {
-                        self.deps
-                            .movies
-                            .set_pinned_ref(id, &pin, PinSource::Admin)
-                            .await?
-                    }
-                    EnrichmentTargetId::Show(id) => {
-                        self.deps
-                            .shows
-                            .set_pinned_ref(id, &pin, PinSource::Admin)
-                            .await?
-                    }
-                };
-                if !pinned {
-                    return Err(ControlError::ExternalRefTaken(format!(
-                        "another title is already pinned to {pin}"
-                    )));
-                }
-                format!("Fixed the match of \"{}\" to {pin}", title.title)
+        let pin = ProviderPin::parse(external_ref).ok_or_else(|| {
+            ControlError::InvalidExternalRef(format!(
+                "{external_ref:?} is not a provider id; expected \"provider:id\", \
+                 such as \"tmdb:603\""
+            ))
+        })?;
+        if !self
+            .deps
+            .provider
+            .available_providers()
+            .iter()
+            .any(|provider| provider == pin.provider())
+        {
+            return Err(ControlError::ProviderNotConfigured(format!(
+                "no configured metadata provider resolves {} ids",
+                pin.provider()
+            )));
+        }
+        let pinned = match target {
+            EnrichmentTargetId::Movie(id) => {
+                self.deps
+                    .movies
+                    .set_pinned_ref(id, &pin, PinSource::Admin)
+                    .await?
             }
-            None => {
-                let cleared = match target {
-                    EnrichmentTargetId::Movie(id) => self.deps.movies.clear_admin_pin(id).await?,
-                    EnrichmentTargetId::Show(id) => self.deps.shows.clear_admin_pin(id).await?,
-                };
-                if cleared {
-                    self.deps.nfo_pins.repin_from_nfos(target).await?;
-                }
-                format!(
-                    "Cleared the match of \"{}\" to be matched again",
-                    title.title
-                )
+            EnrichmentTargetId::Show(id) => {
+                self.deps
+                    .shows
+                    .set_pinned_ref(id, &pin, PinSource::Admin)
+                    .await?
             }
         };
-        self.deps.states.ensure_pending(target).await?;
-        self.deps.states.request_refresh(target, true).await?;
+        if !pinned {
+            return Err(ControlError::ExternalRefTaken(format!(
+                "another title is already pinned to {pin}"
+            )));
+        }
+        self.queue_rematch(target).await?;
         self.audit(
-            message,
+            format!("Fixed the match of \"{}\" to {pin}", title.title),
             admin_user_id,
             serde_json::json!({
                 "media_id": target.id(),
@@ -508,6 +490,63 @@ impl EnrichmentControl {
         .await;
         self.deps.worker.notify_one();
         self.detail(id).await
+    }
+
+    /// Clear the administrator's pin on the title `id`: it is pinned by its
+    /// NFO again, or by nothing, and queued to be matched afresh. A title no
+    /// administrator pinned is left exactly as it is -- its match kept, not
+    /// queued -- since an NFO's pin is the NFO's to change; the audit log
+    /// says which happened.
+    pub async fn clear_match(
+        &self,
+        id: Uuid,
+        admin_user_id: &str,
+    ) -> Result<TitleEnrichment, ControlError> {
+        let title = self.resolve(id).await?;
+        let target = title.target;
+        let details = serde_json::json!({
+            "media_id": target.id(),
+            "kind": target.kind().as_str(),
+            "external_ref": serde_json::Value::Null,
+        });
+        if title.pin_source != Some(PinSource::Admin) {
+            self.audit(
+                format!(
+                    "\"{}\" has no administrator's pin to clear; its match is left as it is",
+                    title.title
+                ),
+                admin_user_id,
+                details,
+            )
+            .await;
+            return self.detail(id).await;
+        }
+        // Queued before the pin goes, so a failure from here on leaves the
+        // title queued under the administrator's pin -- fetched by it again,
+        // and cleared by a retry -- never unpinned and stale. Queued again
+        // after, for a pass that ran in between fetched it by the pin just
+        // cleared.
+        self.queue_rematch(target).await?;
+        self.deps.nfo_pins.release_admin_pin(target).await?;
+        self.queue_rematch(target).await?;
+        self.audit(
+            format!(
+                "Cleared the administrator's pin of \"{}\" to be matched again",
+                title.title
+            ),
+            admin_user_id,
+            details,
+        )
+        .await;
+        self.deps.worker.notify_one();
+        self.detail(id).await
+    }
+
+    /// Queue `target` for another pass with its match cleared.
+    async fn queue_rematch(&self, target: EnrichmentTargetId) -> Result<(), ControlError> {
+        self.deps.states.ensure_pending(target).await?;
+        self.deps.states.request_refresh(target, true).await?;
+        Ok(())
     }
 
     /// Lock exactly `fields` on the title `id`, replacing what it had locked.

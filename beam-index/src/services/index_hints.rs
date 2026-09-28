@@ -255,18 +255,24 @@ fn below_root(root: &Path, folder: &Path) -> bool {
     folder != root && folder.starts_with(root)
 }
 
-/// The NFO describing the video at `path` itself: `<stem>.nfo` beside it,
-/// else `movie.nfo` in its folder.
-pub(super) fn locate_file_nfo(root: &Path, path: &Path) -> Option<LocatedNfo> {
-    let dir = path.parent()?;
+/// Where an NFO describing the video at `path` itself may be, in the order
+/// classification reads them: `<stem>.nfo` beside it, then `movie.nfo` in
+/// its folder.
+fn file_nfo_paths(root: &Path, path: &Path) -> Vec<PathBuf> {
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
     path.file_stem()
         .map(|stem| dir.join(format!("{}.nfo", stem.to_string_lossy())))
-        .and_then(located)
-        .or_else(|| {
-            below_root(root, dir)
-                .then(|| located(dir.join(MOVIE_NFO)))
-                .flatten()
-        })
+        .into_iter()
+        .chain(below_root(root, dir).then(|| dir.join(MOVIE_NFO)))
+        .collect()
+}
+
+/// The NFO describing the video at `path` itself: the first of
+/// [`file_nfo_paths`] Beam can read.
+pub(super) fn locate_file_nfo(root: &Path, path: &Path) -> Option<LocatedNfo> {
+    file_nfo_paths(root, path).into_iter().find_map(located)
 }
 
 /// Whether the folder at `dir` is a season folder (`Season 01`, `Specials`),
@@ -278,16 +284,24 @@ fn is_season_folder(dir: &Path) -> bool {
         .is_some()
 }
 
-/// The `tvshow.nfo` describing the episodes in `dir`: in `dir`, else -- only
-/// when `dir` is a season folder -- in the series folder above. The folder
-/// above a flat show's folder is a category folder (`TV/`), whose NFO would
-/// otherwise describe every show beneath it.
-pub(super) fn locate_show_nfo(root: &Path, dir: &Path) -> Option<LocatedNfo> {
+/// Where the `tvshow.nfo` describing the episodes in `dir` may be, in the
+/// order classification reads them: in `dir`, then -- only when `dir` is a
+/// season folder -- in the series folder above. The folder above a flat
+/// show's folder is a category folder (`TV/`), whose NFO would otherwise
+/// describe every show beneath it.
+fn show_nfo_paths(root: &Path, dir: &Path) -> Vec<PathBuf> {
     [Some(dir), dir.parent().filter(|_| is_season_folder(dir))]
         .into_iter()
         .flatten()
         .filter(|folder| below_root(root, folder))
-        .find_map(|folder| located(folder.join(TVSHOW_NFO)))
+        .map(|folder| folder.join(TVSHOW_NFO))
+        .collect()
+}
+
+/// The `tvshow.nfo` describing the episodes in `dir`: the first of
+/// [`show_nfo_paths`] Beam can read.
+pub(super) fn locate_show_nfo(root: &Path, dir: &Path) -> Option<LocatedNfo> {
+    show_nfo_paths(root, dir).into_iter().find_map(located)
 }
 
 /// Find and read the NFOs describing the video at `path`.
@@ -986,18 +1000,22 @@ impl LocalIndexService {
         Ok(())
     }
 
-    /// Pin the title `target` by its NFO again, as classification would pin
-    /// it now: once an administrator's pin is cleared (issue #185), the title
-    /// goes back to what the NFO beside its files says -- or, with none that
-    /// pins it, to being found by its path. The NFOs are those classification
-    /// locates for the title's files (a movie's own, an episode's show's),
-    /// read afresh, in path order; the first that pins the title settles it,
-    /// and one that cannot be read or pins nothing is passed over. Changes no
-    /// record of what an NFO held: the NFOs are unchanged, only re-read.
-    pub async fn repin_title_from_nfos(
-        &self,
-        target: EnrichmentTargetId,
-    ) -> Result<(), IndexError> {
+    /// Clear the administrator's pin on the title `target` (issue #185) and
+    /// pin it by its NFO again, as classification would pin it now -- or,
+    /// with none that pins it, leave it to be found by its path. Returns
+    /// whether there was an administrator's pin to clear.
+    ///
+    /// The NFOs are those classification locates for the title's files (a
+    /// movie's own, an episode's show's), read afresh, in path order; the
+    /// first that pins the title settles it. The steps are ordered so that no
+    /// failure strands the title: every NFO the title's files could have is
+    /// first forgotten as applied, then the pin is cleared, then the NFOs
+    /// read are applied and recorded again. So an NFO that cannot be read
+    /// now -- a share offline -- or whose id another title holds stays
+    /// forgotten, and the next scan or watcher event applies it afresh; and
+    /// should a step fail, the administrator's pin is still in place (which
+    /// no NFO replaces) or the NFOs are left for that scan to apply.
+    pub async fn release_admin_pin(&self, target: EnrichmentTargetId) -> Result<bool, IndexError> {
         let mut files: Vec<MediaFile> = Vec::new();
         match target {
             EnrichmentTargetId::Movie(id) => {
@@ -1014,10 +1032,12 @@ impl LocalIndexService {
             }
         }
 
-        // Every NFO the title's files locate, by path, with the library and
-        // the files locating it.
+        // Every path an NFO describing the title's files may be at, and the
+        // NFOs Beam reads there now, by path, with the library and the files
+        // locating each.
         let mut libraries: HashMap<Uuid, Option<Library>> = HashMap::new();
-        let mut nfos: std::collections::BTreeMap<PathBuf, (Library, Nfo, Vec<&MediaFile>)> =
+        let mut paths: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        let mut nfos: std::collections::BTreeMap<PathBuf, (Library, LocatedNfo, Vec<&MediaFile>)> =
             std::collections::BTreeMap::new();
         for file in &files {
             if let std::collections::hash_map::Entry::Vacant(slot) =
@@ -1029,35 +1049,70 @@ impl LocalIndexService {
                 continue;
             };
             let root = library.root_path.as_path();
-            let located = match target {
-                EnrichmentTargetId::Movie(_) => locate_file_nfo(root, &file.path),
+            let candidates = match target {
+                EnrichmentTargetId::Movie(_) => file_nfo_paths(root, &file.path),
                 EnrichmentTargetId::Show(_) => file
                     .path
                     .parent()
-                    .and_then(|dir| locate_show_nfo(root, dir)),
+                    .map(|dir| show_nfo_paths(root, dir))
+                    .unwrap_or_default(),
             };
-            let Some(LocatedNfo { path, nfo, .. }) = located else {
+            paths.extend(candidates.iter().cloned());
+            let Some(read) = candidates.into_iter().find_map(located) else {
                 continue;
             };
-            nfos.entry(path)
-                .or_insert_with(|| (library.clone(), nfo, Vec::new()))
+            nfos.entry(read.path.clone())
+                .or_insert_with(|| (library.clone(), read, Vec::new()))
                 .2
                 .push(file);
         }
 
-        for (path, (library, nfo, located_by)) in &nfos {
-            if nfo.ids.pin().is_none() {
-                continue;
+        // Forgotten first: whatever happens next, the next scan or watcher
+        // event applies each afresh.
+        if let Some(repo) = &self.applied_nfo_repo {
+            let mut forgotten = Vec::new();
+            for path in &paths {
+                if let Some(record) = repo.find_by_path(path).await? {
+                    forgotten.push(record.id);
+                }
             }
-            // `Keep`: the title has no pin now, so the NFO's is set; should a
-            // concurrent writer have pinned it meanwhile, that pin stands.
-            let outcome = self
-                .repin_from_nfo(library, path, nfo, located_by, PinConflict::Keep)
-                .await?;
-            if outcome == PinOutcome::Settled {
-                break;
+            repo.delete_by_ids(forgotten).await?;
+        }
+
+        let cleared = match target {
+            EnrichmentTargetId::Movie(id) => self.movie_repo.clear_admin_pin(id).await?,
+            EnrichmentTargetId::Show(id) => self.show_repo.clear_admin_pin(id).await?,
+        };
+        if !cleared {
+            return Ok(false);
+        }
+
+        let mut settled = false;
+        for (path, (library, read, located_by)) in &nfos {
+            let LocatedNfo {
+                path: _,
+                nfo,
+                content,
+            } = read;
+            if !settled && nfo.ids.pin().is_some() {
+                // `Keep`: the title has no pin now, so the NFO's is set;
+                // should a concurrent writer have pinned it meanwhile, that
+                // pin stands.
+                match self
+                    .repin_from_nfo(library, path, nfo, located_by, PinConflict::Keep)
+                    .await?
+                {
+                    PinOutcome::Settled => settled = true,
+                    // Another title holds the id: left forgotten, so it is
+                    // tried again.
+                    PinOutcome::Refused => continue,
+                }
+            }
+            if let Some(repo) = &self.applied_nfo_repo {
+                repo.record_by_path(content.record(library.id, path, self.clock.now()))
+                    .await?;
             }
         }
-        Ok(())
+        Ok(true)
     }
 }

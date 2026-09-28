@@ -312,8 +312,10 @@ pub async fn get_library_scan(
 }
 
 /// Queue a specific movie/show for another enrichment pass, whatever its
-/// status (FR-308, FR-603). It keeps its match, re-fetched fresh; to match it
-/// to a different title, fix the match (`POST /v1/admin/media/{id}/match`).
+/// status (FR-308, FR-603). It keeps its match, re-fetched fresh, unless
+/// `rematch`, which discards it to be searched for again (by its pin, if it
+/// has one); to match it to a title of your choosing, fix the match
+/// (`POST /v1/admin/media/{id}/match`).
 #[kynos::post(
     "/admin/media/{id}/refresh",
     tag = Admin,
@@ -322,14 +324,20 @@ pub async fn get_library_scan(
 pub async fn refresh_media_metadata(
     auth: AdminAuth,
     Path(path): Path<MediaPath>,
+    Query(query): Query<crate::routes::enrichment::RefreshQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, MediaRefreshError> {
+    let crate::routes::enrichment::RefreshQuery { rematch } = query;
     let id = uuid::Uuid::parse_str(&path.id)
         .map_err(|_| MediaRefreshError::InvalidMediaId("invalid media id".to_owned()))?;
     state
         .services
         .enrichment_control
-        .refresh(RefreshScope::Title(id), false, &auth.0.user_id)
+        .refresh(
+            RefreshScope::Title(id),
+            rematch.unwrap_or(false),
+            &auth.0.user_id,
+        )
         .await?;
     Ok(NoContent)
 }
