@@ -65,6 +65,14 @@ fn stored_content_type(format: SubtitleFormat) -> &'static str {
 /// What a rendition is served as: UTF-8 whatever the file was saved in.
 const WEBVTT_CONTENT_TYPE: &str = "text/vtt; charset=utf-8";
 
+/// The revision of the SubRip-to-WebVTT conversion, part of every
+/// rendition's validator. A rendition is a function of the file *and* the
+/// converter, so a strong validator (RFC 9110 8.8.1) must change when either
+/// does: bump this with any change to `beam_domain::utils::subtitle` that
+/// changes the bytes a file renders to, or a client holding the old
+/// rendition is told `304` and keeps it.
+const WEBVTT_CONVERTER_VERSION: u32 = 1;
+
 impl From<SubtitleError> for SubtitleDeliveryError {
     fn from(err: SubtitleError) -> Self {
         match err {
@@ -156,9 +164,12 @@ pub async fn get_subtitle_webvtt(
         .webvtt(path.file_id, path.subtitle_id)
         .await?;
 
-    // Derived from the file it was rendered from, and marked so it never
-    // matches the file's own validator.
-    let etag = ETag::strong(format!("{}-vtt", validator_tag(modified, source_length)));
+    // Derived from the file it was rendered from and from the converter that
+    // rendered it, and marked so it never matches the file's own validator.
+    let etag = ETag::strong(format!(
+        "{}-vtt{WEBVTT_CONVERTER_VERSION}",
+        validator_tag(modified, source_length)
+    ));
     let delivery = match Served::<_, AnyMedia>::new(InMemory::new(Bytes::from(text)))
         .etag(etag)
         .last_modified(modified)
