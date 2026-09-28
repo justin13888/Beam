@@ -275,7 +275,7 @@ pub mod in_memory {
                 .values()
                 .filter(|f| {
                     f.missing_since.is_none()
-                        && matches!(&f.content, Some(MediaFileContent::Movie { movie_entry_id: id }) if *id == movie_entry_id)
+                        && matches!(&f.content, Some(MediaFileContent::Movie { movie_entry_id: id, .. }) if *id == movie_entry_id)
                 })
                 .cloned()
                 .collect())

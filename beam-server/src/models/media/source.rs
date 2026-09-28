@@ -12,8 +12,17 @@ use crate::models::search::PageInfo;
 /// The one track model Beam has (issue #189): every video, audio and
 /// subtitle track here is tied to this file, addressed by its stream index,
 /// and names its codec as FFmpeg does (`h264`, `eac3`, `subrip`).
+///
+/// A movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`) is one
+/// source whose `parts` play in sequence (issue #233): a client is expected
+/// to play each part's `stream_url` in turn -- a concatenated playlist -- and
+/// Beam never joins them (ADR-0004). A whole file is a source of one part. The fields
+/// that name one file -- `file_id`, the tracks, `stream_url`,
+/// `download_url`, `mime_type` and `container_format` -- are the first
+/// part's; `size_bytes` and `duration_secs` are the whole source's.
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct MediaSource {
+    /// The file this source starts with: its only file, or its first part.
     pub file_id: Uuid,
     /// Whether this is the source a client plays when the viewer has not
     /// chosen. Exactly one source of a title is primary, and it is listed
@@ -26,9 +35,14 @@ pub struct MediaSource {
     /// Present when this file holds a run of episodes (`S01E01-E03`): its
     /// duration is then the whole run's, not one episode's.
     pub episode_span: Option<EpisodeSpan>,
+    /// The files this source plays, in order: one for a whole file, each
+    /// part of a multi-part movie otherwise. Never empty.
+    pub parts: Vec<SourcePart>,
+    /// Every part's size, together.
     pub size_bytes: u64,
     pub mime_type: Option<String>,
     pub container_format: Option<String>,
+    /// Every part's duration, together; absent while any part's is unknown.
     pub duration_secs: Option<f64>,
     /// Video tracks, by stream index.
     pub video_tracks: Vec<VideoTrack>,
@@ -71,6 +85,25 @@ impl MediaSourceConnection {
             },
         }
     }
+}
+
+/// One file of a source, played in the order the source's `parts` lists it.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+pub struct SourcePart {
+    pub file_id: Uuid,
+    /// The part the filename names (`CD2` is `2`), from 1; absent for a
+    /// whole file.
+    #[schema(minimum = 1)]
+    pub part_number: Option<u32>,
+    pub size_bytes: u64,
+    pub duration_secs: Option<f64>,
+    /// This file's subtitle tracks, as the source's `subtitle_tracks` lists
+    /// the first part's: a subtitle file beside a part times that part.
+    pub subtitle_tracks: Vec<SubtitleTrack>,
+    /// Direct-play stream URL for this file.
+    pub stream_url: String,
+    /// Download URL for this file.
+    pub download_url: String,
 }
 
 /// The episodes one file holds, first and last inclusive.

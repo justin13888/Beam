@@ -337,7 +337,7 @@ impl Harness {
     }
 
     fn movie_of(&self, rel: &str) -> Movie {
-        let Some(MediaFileContent::Movie { movie_entry_id }) = self.file(rel).content else {
+        let Some(MediaFileContent::Movie { movie_entry_id, .. }) = self.file(rel).content else {
             panic!("{rel} is not a movie file");
         };
         let movie_id = self.movie_repo.entries.lock().unwrap()[&movie_entry_id].movie_id;

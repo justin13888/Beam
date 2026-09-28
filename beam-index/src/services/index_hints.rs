@@ -649,7 +649,7 @@ impl LocalIndexService {
             return Ok(outcome);
         }
         for file in files {
-            let Some(MediaFileContent::Movie { movie_entry_id }) = file.content else {
+            let Some(MediaFileContent::Movie { movie_entry_id, .. }) = file.content else {
                 continue;
             };
             if !is_this(locate_file_nfo(root, &file.path)) {

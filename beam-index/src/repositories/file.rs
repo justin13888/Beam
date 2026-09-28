@@ -13,21 +13,37 @@ use beam_domain::models::{
     UpdateMediaFile, displaced_path,
 };
 
-/// The `files` columns a file's content is stored in: `(movie_entry_id,
-/// episode_id, last_episode_number)`. Exactly one of the first two is set for
-/// classified content, neither for none.
-fn content_columns(content: Option<MediaFileContent>) -> (Option<Uuid>, Option<Uuid>, Option<i32>) {
+/// The `files` columns a file's content is stored in.
+#[derive(Debug, Default)]
+struct ContentColumns {
+    movie_entry_id: Option<Uuid>,
+    episode_id: Option<Uuid>,
+    last_episode_number: Option<i32>,
+    part_number: Option<i32>,
+}
+
+/// The columns `content` is stored in. Exactly one of `movie_entry_id` and
+/// `episode_id` is set for classified content, neither for none; a movie
+/// file's part and an episode file's range sit beside their own id only.
+fn content_columns(content: Option<MediaFileContent>) -> ContentColumns {
     match content {
-        Some(MediaFileContent::Movie { movie_entry_id }) => (Some(movie_entry_id), None, None),
+        Some(MediaFileContent::Movie {
+            movie_entry_id,
+            part_number,
+        }) => ContentColumns {
+            movie_entry_id: Some(movie_entry_id),
+            part_number: part_number.map(|n| n as i32),
+            ..ContentColumns::default()
+        },
         Some(MediaFileContent::Episode {
             episode_id,
             last_episode_number,
-        }) => (
-            None,
-            Some(episode_id),
-            last_episode_number.map(|n| n as i32),
-        ),
-        None => (None, None, None),
+        }) => ContentColumns {
+            episode_id: Some(episode_id),
+            last_episode_number: last_episode_number.map(|n| n as i32),
+            ..ContentColumns::default()
+        },
+        None => ContentColumns::default(),
     }
 }
 
@@ -211,7 +227,12 @@ impl FileRepository for SqlFileRepository {
         use sea_orm::{ActiveModelTrait, Set};
 
         let now = Utc::now();
-        let (movie_entry_id, episode_id, last_episode_number) = content_columns(create.content);
+        let ContentColumns {
+            movie_entry_id,
+            episode_id,
+            last_episode_number,
+            part_number,
+        } = content_columns(create.content);
 
         let new_file = files::ActiveModel {
             id: Set(uuid::Uuid::new_v4()),
@@ -235,6 +256,7 @@ impl FileRepository for SqlFileRepository {
             ctime: Set(create.identity.map(|identity| identity.ctime.into())),
             missing_since: Set(None),
             last_episode_number: Set(last_episode_number),
+            part_number: Set(part_number),
             classifier_version: Set(create.classifier_version as i16),
             container_tags: Set(create.container_tags.as_ref().map(container_tags_json)),
         };
@@ -290,10 +312,16 @@ impl FileRepository for SqlFileRepository {
         }
 
         if let Some(content) = update.content {
-            let (movie_entry_id, episode_id, last_episode_number) = content_columns(Some(content));
+            let ContentColumns {
+                movie_entry_id,
+                episode_id,
+                last_episode_number,
+                part_number,
+            } = content_columns(Some(content));
             active_model.movie_entry_id = Set(movie_entry_id);
             active_model.episode_id = Set(episode_id);
             active_model.last_episode_number = Set(last_episode_number);
+            active_model.part_number = Set(part_number);
         }
 
         active_model.updated_at = Set(chrono::Utc::now().into());
@@ -315,12 +343,18 @@ impl FileRepository for SqlFileRepository {
             status,
             classifier_version,
         } = classification;
-        let (movie_entry_id, episode_id, last_episode_number) = content_columns(content);
+        let ContentColumns {
+            movie_entry_id,
+            episode_id,
+            last_episode_number,
+            part_number,
+        } = content_columns(content);
         let result = files::ActiveModel {
             id: Set(id),
             movie_entry_id: Set(movie_entry_id),
             episode_id: Set(episode_id),
             last_episode_number: Set(last_episode_number),
+            part_number: Set(part_number),
             file_status: Set(status.into()),
             classifier_version: Set(classifier_version as i16),
             updated_at: Set(chrono::Utc::now().into()),

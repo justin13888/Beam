@@ -34,7 +34,7 @@ async fn video_file(db: &Arc<DatabaseConnection>, library_id: Uuid) -> Uuid {
             mime_type: None,
             duration: None,
             container_format: None,
-            content: Some(MediaFileContent::Movie { movie_entry_id }),
+            content: Some(MediaFileContent::movie(movie_entry_id)),
             status: FileStatus::Known,
             classifier_version: 0,
             container_tags: None,

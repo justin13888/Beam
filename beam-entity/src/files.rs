@@ -54,6 +54,10 @@ pub struct Model {
     /// first. Only ever set alongside `episode_id` (a `CHECK` enforces it).
     pub last_episode_number: Option<i32>,
 
+    /// Which part of a multi-part movie the file is, from 1 (issue #233).
+    /// Only ever set alongside `movie_entry_id` (a `CHECK` enforces it).
+    pub part_number: Option<i32>,
+
     /// The version of the classification rules that decided this row's
     /// content; `0` for rows classified before versions existed.
     pub classifier_version: i16,

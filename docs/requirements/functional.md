@@ -95,6 +95,15 @@ strength. Each requirement is independently testable. See `product.md` for narra
     only release noise (never the library root's); each edition (a `{edition-...}` tag, or edition
     words such as `Director's Cut` or `Extended` after the title or its parenthesised year) of it in
     a library MUST be one `movie_entries` row however many copies exist;
+  - one part of a movie split across files -- a trailing `cd`, `disc`, `disk`, `part` or `pt` and a
+    number, set off by a space, dot, dash or underscore (`Movie (2019) - CD1`, `- Part 2`, `.pt1`,
+    `disc1`) with nothing after it but release noise -- MUST key the movie its name spells without
+    the token and record the number as its part; `part` and `pt` MUST count only after a release
+    year in the name itself, never on the strength of the folder, since a title can end in them
+    (`Harry Potter and the Deathly Hallows Part 1 (2010)`, `The Hunger Games Mockingjay Pt 1`) and
+    one folder may hold two films of one year (`Che (2008)/Che Part 1.mkv`, `Che Part 2.mkv`) or
+    a sequel beside its predecessor (`The Godfather (1972)/The Godfather Part 2.mkv`), and a token
+    that opens the name or is followed by title words (`Part 2: The Sequel (2020)`) is the title's;
   - a file in a season folder with no episode number, a file in a range-only folder with no season
     and episode marker, a `<title> - <n>` name no folder names as a show, and a fractional
     `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title
@@ -457,6 +466,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
   naming its real codec as FFmpeg does, with language, title and default/forced flags — so the
   client can present a source-quality picker and choose tracks. A value the file does not state
   MUST be absent, never a substituted default. A file holding a run of episodes MUST say so. The
+  parts of a multi-part movie that share an edition and a folder MUST be one version listing every
+  part's file in part order, each with its own stream URL, so a client can play them in sequence
+  without the server joining them, when their numbers run 1..n with no gap or repeat (otherwise
+  each file MUST be a version of its own); its size and duration are all the parts'. The
   endpoint accepts a movie id or an episode id; a show id is rejected, since shows have no files of
   their own.
 - **FR-506**: Switching between file versions during the source-selection scenario MUST result in
@@ -494,7 +507,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-513**: Of a title's file versions, exactly one MUST be marked primary and listed first: the
   default edition before a named one, then the tallest picture, the highest video bit rate, the
   largest file, and the lowest file id. The choice MUST be computed from the files when read, and
-  the detail endpoint's `file_id` and duration MUST be the primary's.
+  the detail endpoint's `file_id` and duration MUST be the primary's. A multi-part version is ranked
+  by its first part's picture and all its parts' size, and its `file_id` is its first part's.
 
 ## FR-6xx — Administration
 

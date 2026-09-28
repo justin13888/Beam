@@ -91,7 +91,7 @@ pub mod in_memory {
             let mut total_bytes = 0u64;
             for file in &present {
                 match &file.content {
-                    Some(MediaFileContent::Movie { movie_entry_id }) => {
+                    Some(MediaFileContent::Movie { movie_entry_id, .. }) => {
                         files.movie += 1;
                         live_entries.insert(*movie_entry_id);
                     }

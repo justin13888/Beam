@@ -118,8 +118,14 @@ pub enum FileStatus {
 /// The content type of a media file
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaFileContent {
-    /// File is a movie
-    Movie { movie_entry_id: Uuid },
+    /// File is a movie -- or, when `part_number` is set, that part of a movie
+    /// split across files (`Movie (2019) - CD2`, issue #233). Every part of
+    /// one edition is a file of its one entry; the parts are told apart and
+    /// ordered by this number.
+    Movie {
+        movie_entry_id: Uuid,
+        part_number: Option<u32>,
+    },
     /// File is a TV episode -- or, when `last_episode_number` is set, the
     /// run of episodes from `episode_id`'s up to that number that one
     /// multi-episode file holds (`S01E01E02`). The file is attached to the
@@ -132,6 +138,14 @@ pub enum MediaFileContent {
 }
 
 impl MediaFileContent {
+    /// A whole-movie file of the entry `movie_entry_id`.
+    pub fn movie(movie_entry_id: Uuid) -> Self {
+        MediaFileContent::Movie {
+            movie_entry_id,
+            part_number: None,
+        }
+    }
+
     /// A single-episode file of `episode_id`.
     pub fn episode(episode_id: Uuid) -> Self {
         MediaFileContent::Episode {
@@ -288,7 +302,10 @@ impl From<beam_entity::files::Model> for MediaFile {
     fn from(model: beam_entity::files::Model) -> Self {
         let content = model
             .movie_entry_id
-            .map(|id| MediaFileContent::Movie { movie_entry_id: id })
+            .map(|id| MediaFileContent::Movie {
+                movie_entry_id: id,
+                part_number: model.part_number.map(|n| n as u32),
+            })
             .or_else(|| {
                 model.episode_id.map(|id| MediaFileContent::Episode {
                     episode_id: id,

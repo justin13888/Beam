@@ -719,7 +719,7 @@ macro_rules! file_repository_contract {
             file_in(
                 fixture,
                 library_id,
-                MediaFileContent::Movie { movie_entry_id },
+                MediaFileContent::movie(movie_entry_id),
             )
             .await
         }
@@ -770,7 +770,7 @@ macro_rules! file_repository_contract {
                         mime_type: None,
                         duration: None,
                         container_format: None,
-                        content: Some(MediaFileContent::Movie { movie_entry_id }),
+                        content: Some(MediaFileContent::movie(movie_entry_id)),
                         status: FileStatus::Known,
                         classifier_version: 0,
                         container_tags: None,
@@ -834,7 +834,7 @@ macro_rules! file_repository_contract {
                     mime_type: None,
                     duration: None,
                     container_format: None,
-                    content: Some(MediaFileContent::Movie { movie_entry_id }),
+                    content: Some(MediaFileContent::movie(movie_entry_id)),
                     status: FileStatus::Known,
                     classifier_version: 0,
                     container_tags: None,
@@ -895,7 +895,7 @@ macro_rules! file_repository_contract {
                         mime_type: None,
                         duration: None,
                         container_format: None,
-                        content: Some(MediaFileContent::Movie { movie_entry_id }),
+                        content: Some(MediaFileContent::movie(movie_entry_id)),
                         status: FileStatus::Known,
                         classifier_version: 0,
                         container_tags: None,
@@ -981,7 +981,7 @@ macro_rules! file_repository_contract {
                         mime_type: None,
                         duration: None,
                         container_format: None,
-                        content: Some(MediaFileContent::Movie { movie_entry_id }),
+                        content: Some(MediaFileContent::movie(movie_entry_id)),
                         status: FileStatus::Known,
                         classifier_version: 0,
                         container_tags: None,
@@ -1066,6 +1066,72 @@ macro_rules! file_repository_contract {
                 ),
                 "{:?}",
                 stored.content
+            );
+        }
+
+        /// A part of a multi-part movie (issue #233) is stored with its entry
+        /// and read back with its number; a reclassification replaces the
+        /// number, and one that makes the file an episode's drops it.
+        #[tokio::test]
+        async fn a_movie_part_is_stored_with_its_entry_and_replaced_with_it() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let movie_entry_id = fixture.new_movie_entry(library).await;
+            let part = |part_number| MediaFileContent::Movie {
+                movie_entry_id,
+                part_number: Some(part_number),
+            };
+            let file = file_in(&fixture, library, part(2)).await;
+
+            let stored = repo.find_by_id(file.id).await.unwrap().expect("present");
+            assert_eq!(stored.content, Some(part(2)));
+            let listed = repo.find_by_movie_entry_id(movie_entry_id).await.unwrap();
+            assert_eq!(
+                listed.iter().map(|f| f.content.clone()).collect::<Vec<_>>(),
+                vec![Some(part(2))],
+                "the entry lists the part with its number"
+            );
+
+            let renumbered = repo
+                .set_classification(
+                    file.id,
+                    FileClassification {
+                        content: Some(part(1)),
+                        status: FileStatus::Known,
+                        classifier_version: 3,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(renumbered.content, Some(part(1)));
+
+            let episode_id = fixture.new_episode(library).await;
+            repo.set_classification(
+                file.id,
+                FileClassification {
+                    content: Some(MediaFileContent::episode(episode_id)),
+                    status: FileStatus::Known,
+                    classifier_version: 3,
+                },
+            )
+            .await
+            .expect("a part may become an episode's file");
+            repo.set_classification(
+                file.id,
+                FileClassification {
+                    content: Some(MediaFileContent::movie(movie_entry_id)),
+                    status: FileStatus::Known,
+                    classifier_version: 3,
+                },
+            )
+            .await
+            .unwrap();
+            let stored = repo.find_by_id(file.id).await.unwrap().expect("present");
+            assert_eq!(
+                stored.content,
+                Some(MediaFileContent::movie(movie_entry_id)),
+                "no part survives the episode in between"
             );
         }
 
@@ -1313,7 +1379,7 @@ macro_rules! file_repository_contract {
             let movie = file_in(
                 &fixture,
                 library,
-                MediaFileContent::Movie { movie_entry_id },
+                MediaFileContent::movie(movie_entry_id),
             )
             .await;
             let episode =
@@ -1529,7 +1595,7 @@ macro_rules! file_repository_contract {
                     mime_type: None,
                     duration: None,
                     container_format: None,
-                    content: Some(MediaFileContent::Movie { movie_entry_id }),
+                    content: Some(MediaFileContent::movie(movie_entry_id)),
                     status: FileStatus::Known,
                     classifier_version: 0,
                     container_tags: None,
@@ -1817,7 +1883,7 @@ macro_rules! file_repository_contract {
                     mime_type: None,
                     duration: None,
                     container_format: None,
-                    content: Some(MediaFileContent::Movie { movie_entry_id }),
+                    content: Some(MediaFileContent::movie(movie_entry_id)),
                     status: FileStatus::Known,
                     classifier_version: 0,
                     container_tags: None,
@@ -3060,9 +3126,7 @@ macro_rules! movie_repository_contract {
                         mime_type: Some("video/x-matroska".to_string()),
                         duration: None,
                         container_format: Some("matroska".to_string()),
-                        content: Some(MediaFileContent::Movie {
-                            movie_entry_id: entry.id,
-                        }),
+                        content: Some(MediaFileContent::movie(entry.id)),
                         status: FileStatus::Known,
                         classifier_version: 0,
                         container_tags: None,
@@ -3653,6 +3717,59 @@ macro_rules! movie_repository_contract {
             );
         }
 
+        /// A retitle replaces the title only while it is the one expected,
+        /// and nothing else about the movie.
+        #[tokio::test]
+        async fn retitling_a_movie_replaces_only_the_title_it_expects() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = repo
+                .find_or_create_by_identity(new_movie("Movie - CD1"))
+                .await
+                .unwrap();
+
+            assert!(
+                !repo
+                    .retitle_from(movie.id, "Another Title", "Movie")
+                    .await
+                    .unwrap(),
+                "a title set since it was read is kept"
+            );
+            assert_eq!(
+                repo.find_by_id(movie.id).await.unwrap().unwrap().title,
+                movie.title
+            );
+
+            assert!(
+                repo.retitle_from(movie.id, &movie.title, "Movie")
+                    .await
+                    .unwrap()
+            );
+            let stored = repo.find_by_id(movie.id).await.unwrap().unwrap();
+            assert_eq!(stored.title, "Movie");
+            assert_eq!(
+                (stored.identity_key, stored.year),
+                (movie.identity_key.clone(), movie.year),
+                "only the title changes"
+            );
+            assert_eq!(
+                repo.find_by_identity_key(movie.identity_key.as_deref().unwrap())
+                    .await
+                    .unwrap()
+                    .map(|found| found.id),
+                Some(movie.id),
+                "the movie is still found by its key"
+            );
+
+            assert!(
+                !repo
+                    .retitle_from(Uuid::new_v4(), "Movie", "Other")
+                    .await
+                    .unwrap(),
+                "an unknown movie is not retitled"
+            );
+        }
+
         #[tokio::test]
         async fn a_pin_finds_the_movie_pinned_to_it_before_one_matched_to_its_id() {
             use $crate::models::pin::{PinSource, ProviderPin};
@@ -4130,7 +4247,7 @@ macro_rules! library_shape_repository_contract {
         }
 
         fn movie(movie_entry_id: Uuid) -> Option<MediaFileContent> {
-            Some(MediaFileContent::Movie { movie_entry_id })
+            Some(MediaFileContent::movie(movie_entry_id))
         }
 
         fn episode(episode_id: Uuid) -> Option<MediaFileContent> {
@@ -5366,9 +5483,7 @@ macro_rules! catalog_repository_contract {
                     present_file(
                         fixture,
                         library_id,
-                        MediaFileContent::Movie {
-                            movie_entry_id: entry.id,
-                        },
+                        MediaFileContent::movie(entry.id),
                     )
                     .await,
                 )

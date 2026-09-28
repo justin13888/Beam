@@ -184,9 +184,7 @@ fn make_movie() -> Movie {
 /// Seeds a file whose content resolves to nothing, which is all a progress
 /// report itself needs.
 fn seed_bare_file(fixture: &Fixture) -> uuid::Uuid {
-    let file = make_media_file(MediaFileContent::Movie {
-        movie_entry_id: uuid::Uuid::new_v4(),
-    });
+    let file = make_media_file(MediaFileContent::movie(uuid::Uuid::new_v4()));
     let file_id = file.id;
     fixture
         .file_repo
@@ -223,9 +221,7 @@ fn seed_movie_file(fixture: &Fixture) -> (uuid::Uuid, uuid::Uuid) {
         .unwrap()
         .insert(entry_id, entry);
 
-    let file = make_media_file(MediaFileContent::Movie {
-        movie_entry_id: entry_id,
-    });
+    let file = make_media_file(MediaFileContent::movie(entry_id));
     let file_id = file.id;
     fixture
         .file_repo
