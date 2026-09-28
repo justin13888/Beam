@@ -87,6 +87,39 @@ fn queue_update(rematch: bool) -> sea_orm::UpdateMany<metadata_enrichment::Entit
     update
 }
 
+/// The statement behind `request_refresh_library`: every title linked to the
+/// library `$1` is queued -- given a row if it has none, queued as
+/// `request_refresh` queues it if it has one -- and both are counted. The
+/// `UPDATE` does not see the rows the `INSERT` makes (one snapshot), so the
+/// two counts are of different titles.
+fn request_refresh_library_sql(rematch: bool) -> String {
+    let rematch = if rematch { ", matched_ref = NULL" } else { "" };
+    format!(
+        "WITH titles AS ( \
+             SELECT movie_id, NULL::uuid AS show_id FROM library_movies WHERE library_id = $1 \
+             UNION \
+             SELECT NULL::uuid, show_id FROM library_shows WHERE library_id = $1 \
+         ), created AS ( \
+             INSERT INTO metadata_enrichment \
+                 (id, movie_id, show_id, status, attempts, force_refresh, created_at, updated_at) \
+             SELECT gen_random_uuid(), t.movie_id, t.show_id, 'pending', 0, true, now(), now() \
+               FROM titles t \
+              WHERE NOT EXISTS (SELECT 1 FROM metadata_enrichment e \
+                                 WHERE e.movie_id = t.movie_id OR e.show_id = t.show_id) \
+             ON CONFLICT DO NOTHING \
+             RETURNING 1 \
+         ), queued AS ( \
+             UPDATE metadata_enrichment \
+                SET status = 'pending', force_refresh = true, attempts = 0, \
+                    next_attempt_at = NULL, updated_at = now(){rematch} \
+              WHERE movie_id IN (SELECT movie_id FROM titles) \
+                 OR show_id IN (SELECT show_id FROM titles) \
+             RETURNING 1 \
+         ) \
+         SELECT ((SELECT count(*) FROM created) + (SELECT count(*) FROM queued))::bigint AS queued"
+    )
+}
+
 #[async_trait]
 impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
     async fn ensure_pending(&self, target: EnrichmentTargetId) -> Result<(), DbErr> {
@@ -310,36 +343,22 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         Ok(true)
     }
 
-    async fn request_refresh_many(
-        &self,
-        targets: &[EnrichmentTargetId],
-        rematch: bool,
-    ) -> Result<u64, DbErr> {
-        use sea_orm::{ColumnTrait, Condition, QueryFilter};
-
-        if targets.is_empty() {
-            return Ok(0);
-        }
-        let mut movies = Vec::new();
-        let mut shows = Vec::new();
-        for target in targets {
-            match *target {
-                EnrichmentTargetId::Movie(id) => movies.push(id),
-                EnrichmentTargetId::Show(id) => shows.push(id),
-            }
-        }
-        let mut which = Condition::any();
-        if !movies.is_empty() {
-            which = which.add(metadata_enrichment::Column::MovieId.is_in(movies));
-        }
-        if !shows.is_empty() {
-            which = which.add(metadata_enrichment::Column::ShowId.is_in(shows));
-        }
-        let result = queue_update(rematch)
-            .filter(which)
-            .exec(self.db.as_ref())
-            .await?;
-        Ok(result.rows_affected)
+    async fn request_refresh_library(&self, library_id: Uuid, rematch: bool) -> Result<u64, DbErr> {
+        // One statement bound by the library's id alone: binding each title's
+        // id would overflow the protocol's 65,535 parameters for a library
+        // that large.
+        let stmt = Statement::from_sql_and_values(
+            self.db.get_database_backend(),
+            request_refresh_library_sql(rematch),
+            [library_id.into()],
+        );
+        let row = self
+            .db
+            .query_one_raw(stmt)
+            .await?
+            .ok_or_else(|| DbErr::RecordNotFound("a library refresh returned no row".into()))?;
+        let queued: i64 = row.try_get("", "queued")?;
+        Ok(u64::try_from(queued).unwrap_or(0))
     }
 
     async fn request_refresh_all(&self, rematch: bool) -> Result<u64, DbErr> {

@@ -372,7 +372,10 @@ fn make_app_state_with_services(
         beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
     );
     let enrichment_repo = Arc::new(
-        beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
+        beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::over_titles(
+            movie_repo.clone(),
+            show_repo.clone(),
+        ),
     );
     let enrichment_control = enrichment_control(
         movie_repo.clone(),

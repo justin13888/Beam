@@ -323,19 +323,6 @@ impl MovieRepository for SqlMovieRepository {
         Ok(result.rows_affected == 1)
     }
 
-    async fn find_ids_by_library(&self, library_id: Uuid) -> Result<Vec<Uuid>, DbErr> {
-        use beam_entity::library_movie;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-
-        library_movie::Entity::find()
-            .select_only()
-            .column(library_movie::Column::MovieId)
-            .filter(library_movie::Column::LibraryId.eq(library_id))
-            .into_tuple::<Uuid>()
-            .all(self.db.as_ref())
-            .await
-    }
-
     async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
 

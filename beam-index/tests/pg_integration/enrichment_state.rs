@@ -18,13 +18,15 @@ use beam_test_support::postgres::ScopedSchema;
 use sea_orm::ConnectionTrait;
 
 struct PgFixture {
-    // Held so the schema outlives the repositories that use it.
-    _schema: ScopedSchema,
+    // Held so the schema outlives the repositories that use it, and where
+    // a library is seeded.
+    schema: ScopedSchema,
     repo: SqlEnrichmentStateRepository,
     movies: SqlMovieRepository,
     shows: SqlShowRepository,
 }
 
+#[async_trait::async_trait]
 impl beam_domain::repositories::contract::fixture::EnrichmentStateFixture for PgFixture {
     fn repo(&self) -> &dyn EnrichmentStateRepository {
         &self.repo
@@ -36,6 +38,12 @@ impl beam_domain::repositories::contract::fixture::EnrichmentStateFixture for Pg
 
     fn shows(&self) -> &dyn ShowRepository {
         &self.shows
+    }
+
+    async fn new_library(&self) -> Uuid {
+        beam_test_support::seed::library(self.schema.db().as_ref())
+            .await
+            .expect("seed a library")
     }
 }
 
@@ -50,7 +58,7 @@ async fn setup() -> PgFixture {
         repo: SqlEnrichmentStateRepository::new(db.clone()),
         movies: SqlMovieRepository::new(db.clone()),
         shows: SqlShowRepository::new(db),
-        _schema: schema,
+        schema,
     }
 }
 
@@ -120,7 +128,7 @@ async fn the_locked_fields_column_refuses_a_name_no_field_has() {
     let target = EnrichmentTargetId::Movie(movie.id);
     fixture.repo.ensure_pending(target).await.unwrap();
 
-    let db = fixture._schema.db();
+    let db = fixture.schema.db();
     let refused = db
         .execute_unprepared(&format!(
             "UPDATE metadata_enrichment SET locked_fields = ARRAY['title', 'poster_url'] \

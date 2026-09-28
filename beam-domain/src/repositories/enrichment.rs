@@ -69,14 +69,14 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
         rematch: bool,
     ) -> Result<bool, DbErr>;
 
-    /// [`Self::request_refresh`] for each of `targets`, in one statement --
-    /// none for an empty slice. Returns how many rows it queued; a target
-    /// with no row is skipped.
-    async fn request_refresh_many(
-        &self,
-        targets: &[EnrichmentTargetId],
-        rematch: bool,
-    ) -> Result<u64, DbErr>;
+    /// [`Self::request_refresh`] for every title associated with the library
+    /// `library_id` (`MovieRepository::ensure_library_association`,
+    /// `ShowRepository::ensure_library_association`), live or not; a title
+    /// with no row yet gets a queued one, as [`Self::ensure_pending`] and
+    /// then [`Self::request_refresh`] would give it. One statement, bound by
+    /// the library's id alone, whatever the library's size. Returns how many
+    /// titles it queued: every title of the library.
+    async fn request_refresh_library(&self, library_id: Uuid, rematch: bool) -> Result<u64, DbErr>;
 
     /// Same as `request_refresh`, applied to every row, in one statement.
     /// Returns the count affected.
@@ -113,12 +113,40 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
 pub mod in_memory {
     use super::*;
     use crate::models::enrichment::EnrichmentStatus;
+    use crate::repositories::movie::in_memory::InMemoryMovieRepository;
+    use crate::repositories::show::in_memory::InMemoryShowRepository;
     use parking_lot::RwLock;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[derive(Debug, Default)]
     pub struct InMemoryEnrichmentStateRepository {
         rows: RwLock<HashMap<Uuid, EnrichmentState>>,
+        /// The title stores whose library associations a library refresh
+        /// reads; without them a library has no titles.
+        titles: Option<Titles>,
+    }
+
+    #[derive(Debug)]
+    struct Titles {
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
+    }
+
+    impl InMemoryEnrichmentStateRepository {
+        /// A repository over the titles `movies` and `shows` hold, so that
+        /// [`EnrichmentStateRepository::request_refresh_library`] finds a
+        /// library's titles as a real store's join would.
+        #[must_use]
+        pub fn over_titles(
+            movies: Arc<InMemoryMovieRepository>,
+            shows: Arc<InMemoryShowRepository>,
+        ) -> Self {
+            Self {
+                rows: RwLock::default(),
+                titles: Some(Titles { movies, shows }),
+            }
+        }
     }
 
     fn pending(target: EnrichmentTargetId) -> EnrichmentState {
@@ -279,18 +307,38 @@ pub mod in_memory {
             }
         }
 
-        async fn request_refresh_many(
+        async fn request_refresh_library(
             &self,
-            targets: &[EnrichmentTargetId],
+            library_id: Uuid,
             rematch: bool,
         ) -> Result<u64, DbErr> {
+            let Some(titles) = &self.titles else {
+                return Ok(0);
+            };
+            let targets: Vec<EnrichmentTargetId> = titles
+                .movies
+                .ids_in_library(library_id)
+                .into_iter()
+                .map(EnrichmentTargetId::Movie)
+                .chain(
+                    titles
+                        .shows
+                        .ids_in_library(library_id)
+                        .into_iter()
+                        .map(EnrichmentTargetId::Show),
+                )
+                .collect();
             let mut rows = self.rows.write();
-            let mut count = 0u64;
+            for &target in &targets {
+                if !rows.values().any(|r| r.target == target) {
+                    let row = pending(target);
+                    rows.insert(row.id, row);
+                }
+            }
             for row in rows.values_mut().filter(|r| targets.contains(&r.target)) {
                 queue(row, rematch);
-                count += 1;
             }
-            Ok(count)
+            Ok(targets.len() as u64)
         }
 
         async fn request_refresh_all(&self, rematch: bool) -> Result<u64, DbErr> {
@@ -371,26 +419,45 @@ pub mod in_memory_fixture {
     use crate::repositories::movie::in_memory::InMemoryMovieRepository;
     use crate::repositories::show::in_memory::InMemoryShowRepository;
     use crate::repositories::{MovieRepository, ShowRepository};
+    use std::sync::Arc;
+    use uuid::Uuid;
 
     /// The hermetic instantiation of the enrichment-state contract.
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     pub struct InMemoryFixture {
         repo: InMemoryEnrichmentStateRepository,
-        movies: InMemoryMovieRepository,
-        shows: InMemoryShowRepository,
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
     }
 
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            let movies = Arc::new(InMemoryMovieRepository::default());
+            let shows = Arc::new(InMemoryShowRepository::default());
+            Self {
+                repo: InMemoryEnrichmentStateRepository::over_titles(movies.clone(), shows.clone()),
+                movies,
+                shows,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
     impl EnrichmentStateFixture for InMemoryFixture {
         fn repo(&self) -> &dyn EnrichmentStateRepository {
             &self.repo
         }
 
         fn movies(&self) -> &dyn MovieRepository {
-            &self.movies
+            self.movies.as_ref()
         }
 
         fn shows(&self) -> &dyn ShowRepository {
-            &self.shows
+            self.shows.as_ref()
+        }
+
+        async fn new_library(&self) -> Uuid {
+            Uuid::new_v4()
         }
     }
 }

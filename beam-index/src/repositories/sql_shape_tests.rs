@@ -636,35 +636,42 @@ mod enrichment {
         assert_contains(&sql[0], "CAST(");
     }
 
-    /// A set of titles is queued by one `UPDATE` naming each by its own
-    /// column; an empty set issues nothing, and a plain refresh keeps the
-    /// match.
+    /// A library is queued by one statement bound by its id alone -- never a
+    /// parameter per title, which a library past 65,535 titles would
+    /// overflow -- reading its titles from both link tables, and a plain
+    /// refresh keeps the match.
     #[tokio::test]
-    async fn refreshing_many_is_one_update_naming_each_title_by_its_kind() {
-        use beam_domain::models::enrichment::EnrichmentTargetId;
-
-        let db = connection(empty_mock());
+    async fn refreshing_a_library_is_one_statement_bound_by_its_id_alone() {
+        let queued = row([("queued", Value::BigInt(Some(7)))]);
+        let db = connection(
+            MockDatabase::new(DbBackend::Postgres)
+                .append_query_results([vec![queued.clone()], vec![queued]]),
+        );
         let repo = SqlEnrichmentStateRepository::new(db.clone());
-        let _ = repo.request_refresh_many(&[], false).await;
-        let _ = repo
-            .request_refresh_many(
-                &[
-                    EnrichmentTargetId::Movie(Uuid::from_u128(61)),
-                    EnrichmentTargetId::Show(Uuid::from_u128(62)),
-                ],
-                false,
-            )
-            .await;
+        let library = Uuid::from_u128(61);
+        assert_eq!(
+            repo.request_refresh_library(library, false).await.unwrap(),
+            7
+        );
+        let _ = repo.request_refresh_library(library, true).await;
         drop(repo);
 
         let sql = statements(db);
-        assert_eq!(sql.len(), 1, "nothing for an empty set: {sql:?}");
-        assert_filters(&sql[0], "metadata_enrichment", "movie_id", "IN");
-        assert_filters(&sql[0], "metadata_enrichment", "show_id", "IN");
-        assert_contains(&sql[0], " OR ");
+        assert_eq!(sql.len(), 2, "one statement per refresh: {sql:?}");
+        for statement in &sql {
+            assert_eq!(
+                bound_values(statement).len(),
+                1,
+                "only the library is bound: {statement:?}"
+            );
+            assert_bound(statement, &library.to_string());
+            assert_contains(statement, "library_movies");
+            assert_contains(statement, "library_shows");
+            assert_contains(statement, "INSERT INTO metadata_enrichment");
+            assert_contains(statement, "UPDATE metadata_enrichment");
+        }
         assert!(!sql[0].sql.contains("matched_ref"), "{}", sql[0].sql);
-        assert_bound(&sql[0], &Uuid::from_u128(61).to_string());
-        assert_bound(&sql[0], &Uuid::from_u128(62).to_string());
+        assert_contains(&sql[1], "matched_ref = NULL");
     }
 
     /// Locking upserts on the title's own unique column and writes only the

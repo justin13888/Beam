@@ -221,11 +221,15 @@ pub mod fixture {
     /// the same store, since a real Postgres holds a row to its title by a
     /// foreign key. Listing, counting and refreshing everything are global,
     /// so a Postgres fixture must give each test a store of its own.
+    #[async_trait::async_trait]
     pub trait EnrichmentStateFixture: Send + Sync {
         /// The repository under contract, empty.
         fn repo(&self) -> &dyn crate::repositories::EnrichmentStateRepository;
         fn movies(&self) -> &dyn crate::repositories::MovieRepository;
         fn shows(&self) -> &dyn crate::repositories::ShowRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
     }
 }
 
@@ -2874,39 +2878,6 @@ macro_rules! show_repository_contract {
             assert_eq!(kept.pin_source, Some(PinSource::Nfo));
             assert!(!repo.clear_admin_pin(Uuid::new_v4()).await.unwrap());
         }
-
-        #[tokio::test]
-        async fn a_librarys_shows_are_those_associated_with_it() {
-            let fixture = $setup().await;
-            let repo = fixture.repo();
-            let library = fixture.new_library().await;
-            let other = fixture.new_library().await;
-            let first = repo
-                .find_or_create_by_identity(new_show("First"))
-                .await
-                .unwrap();
-            let elsewhere = repo
-                .find_or_create_by_identity(new_show("Elsewhere"))
-                .await
-                .unwrap();
-            repo.ensure_library_association(library, first.id)
-                .await
-                .unwrap();
-            repo.ensure_library_association(other, elsewhere.id)
-                .await
-                .unwrap();
-
-            assert_eq!(
-                repo.find_ids_by_library(library).await.unwrap(),
-                vec![first.id]
-            );
-            assert!(
-                repo.find_ids_by_library(fixture.new_library().await)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-        }
     };
 }
 
@@ -3949,50 +3920,6 @@ macro_rules! movie_repository_contract {
                     .await
                     .unwrap(),
                 "the cleared id is free for another title"
-            );
-        }
-
-        #[tokio::test]
-        async fn a_librarys_movies_are_those_associated_with_it() {
-            let fixture = $setup().await;
-            let repo = fixture.repo();
-            let library = fixture.new_library().await;
-            let other = fixture.new_library().await;
-            let first = repo
-                .find_or_create_by_identity(new_movie("First"))
-                .await
-                .unwrap();
-            let second = repo
-                .find_or_create_by_identity(new_movie("Second"))
-                .await
-                .unwrap();
-            let elsewhere = repo
-                .find_or_create_by_identity(new_movie("Elsewhere"))
-                .await
-                .unwrap();
-            repo.ensure_library_association(library, first.id)
-                .await
-                .unwrap();
-            repo.ensure_library_association(library, second.id)
-                .await
-                .unwrap();
-            repo.ensure_library_association(library, second.id)
-                .await
-                .unwrap();
-            repo.ensure_library_association(other, elsewhere.id)
-                .await
-                .unwrap();
-
-            let mut ids = repo.find_ids_by_library(library).await.unwrap();
-            ids.sort();
-            let mut expected = vec![first.id, second.id];
-            expected.sort();
-            assert_eq!(ids, expected);
-            assert!(
-                repo.find_ids_by_library(fixture.new_library().await)
-                    .await
-                    .unwrap()
-                    .is_empty()
             );
         }
     };
@@ -6088,7 +6015,7 @@ macro_rules! genre_repository_contract {
 
 /// Behavioural contract for [`crate::repositories::EnrichmentStateRepository`]'s
 /// administrator surface (issue #185): a title's row read by its title, locks
-/// that replace whole and survive every status change, refreshes of a set of
+/// that replace whole and survive every status change, refreshes of a library's
 /// titles or of all of them, and the admin list's filters, order and pages.
 ///
 /// `$setup` names an `async fn() -> impl EnrichmentStateFixture`.
@@ -6281,46 +6208,80 @@ macro_rules! enrichment_state_repository_contract {
         }
 
         #[tokio::test]
-        async fn refreshing_many_queues_exactly_those_titles_with_a_row() {
+        async fn refreshing_a_library_queues_all_its_titles_and_no_other() {
             let fixture = $setup().await;
             let repo = fixture.repo();
-            let first = new_movie(&fixture).await;
-            let second = new_show(&fixture).await;
-            let untouched = new_movie(&fixture).await;
+            let library = fixture.new_library().await;
+            let other = fixture.new_library().await;
+            let movie = new_movie(&fixture).await;
+            let show = new_show(&fixture).await;
             let rowless = new_movie(&fixture).await;
-            for target in [first, second, untouched] {
+            let elsewhere = new_movie(&fixture).await;
+            for target in [movie, show, elsewhere] {
                 let id = queued(&fixture, target).await;
                 repo.mark_enriched(id, "tmdb:1", 0.8, at(0)).await.unwrap();
             }
+            for (library, target) in [
+                (library, movie),
+                (library, show),
+                (library, rowless),
+                (other, elsewhere),
+            ] {
+                match target {
+                    EnrichmentTargetId::Movie(id) => fixture
+                        .movies()
+                        .ensure_library_association(library, id)
+                        .await
+                        .unwrap(),
+                    EnrichmentTargetId::Show(id) => fixture
+                        .shows()
+                        .ensure_library_association(library, id)
+                        .await
+                        .unwrap(),
+                }
+            }
 
-            assert_eq!(repo.request_refresh_many(&[], true).await.unwrap(), 0);
             assert_eq!(
-                repo.request_refresh_many(&[first, second, rowless], false)
-                    .await
-                    .unwrap(),
-                2,
-                "a title with no row is skipped"
+                repo.request_refresh_library(library, false).await.unwrap(),
+                3,
+                "every title of the library, the one with no row included"
             );
-            for target in [first, second] {
+            for target in [movie, show] {
                 let row = repo.find_by_target(target).await.unwrap().unwrap();
                 assert_eq!(row.status, EnrichmentStatus::Pending);
                 assert!(row.force_refresh);
                 assert_eq!(row.attempts, 0);
                 assert_eq!(row.matched_ref.as_deref(), Some("tmdb:1"), "no rematch");
             }
-            let other = repo.find_by_target(untouched).await.unwrap().unwrap();
-            assert_eq!(other.status, EnrichmentStatus::Enriched);
-            assert!(repo.find_by_target(rowless).await.unwrap().is_none());
+            let made = repo.find_by_target(rowless).await.unwrap().unwrap();
+            assert_eq!(made.status, EnrichmentStatus::Pending);
+            assert_eq!(made.next_attempt_at, None, "due at once");
+            let untouched = repo.find_by_target(elsewhere).await.unwrap().unwrap();
+            assert_eq!(untouched.status, EnrichmentStatus::Enriched);
 
-            assert_eq!(repo.request_refresh_many(&[first], true).await.unwrap(), 1);
+            assert_eq!(
+                repo.request_refresh_library(library, true).await.unwrap(),
+                3,
+                "a title's row is queued, never made twice"
+            );
+            assert_eq!(
+                repo.count(&EnrichmentListFilter::default()).await.unwrap(),
+                4
+            );
             assert!(
-                repo.find_by_target(first)
+                repo.find_by_target(movie)
                     .await
                     .unwrap()
                     .unwrap()
                     .matched_ref
                     .is_none(),
                 "a rematch clears the match"
+            );
+            assert_eq!(
+                repo.request_refresh_library(fixture.new_library().await, false)
+                    .await
+                    .unwrap(),
+                0
             );
         }
 

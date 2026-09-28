@@ -58,7 +58,10 @@ impl Harness {
     fn new(provider: InMemoryEnrichmentProvider) -> Self {
         let movies = Arc::new(InMemoryMovieRepository::default());
         let shows = Arc::new(InMemoryShowRepository::default());
-        let states = Arc::new(InMemoryEnrichmentStateRepository::default());
+        let states = Arc::new(InMemoryEnrichmentStateRepository::over_titles(
+            movies.clone(),
+            shows.clone(),
+        ));
         let libraries = Arc::new(InMemoryLibraryRepository::default());
         let admin_log = Arc::new(InMemoryAdminLogRepository::default());
         let nfo_pins = Arc::new(RecordingNfoPins::default());

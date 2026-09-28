@@ -355,19 +355,6 @@ impl ShowRepository for SqlShowRepository {
         Ok(result.rows_affected == 1)
     }
 
-    async fn find_ids_by_library(&self, library_id: Uuid) -> Result<Vec<Uuid>, DbErr> {
-        use beam_entity::library_show;
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-
-        library_show::Entity::find()
-            .select_only()
-            .column(library_show::Column::ShowId)
-            .filter(library_show::Column::LibraryId.eq(library_id))
-            .into_tuple::<Uuid>()
-            .all(self.db.as_ref())
-            .await
-    }
-
     async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
 

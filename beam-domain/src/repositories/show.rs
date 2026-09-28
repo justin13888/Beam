@@ -91,9 +91,6 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// Unpin `show_id` if an administrator pinned it; see
     /// `MovieRepository::clear_admin_pin`.
     async fn clear_admin_pin(&self, show_id: Uuid) -> Result<bool, DbErr>;
-    /// Every show associated with the library `library_id`
-    /// ([`Self::ensure_library_association`]), in no particular order.
-    async fn find_ids_by_library(&self, library_id: Uuid) -> Result<Vec<Uuid>, DbErr>;
     /// Delete every episode created before `created_before` that no file row
     /// references, then every season left with no episode, then every show
     /// created before `created_before` left with no season, returning how many
@@ -192,6 +189,19 @@ pub mod in_memory {
                 files: Some(files),
                 ..Self::default()
             }
+        }
+
+        /// Every show associated with the library `library_id`, in no
+        /// particular order: what a real store's `library_shows` join
+        /// reads, for the doubles that stand in for one.
+        pub fn ids_in_library(&self, library_id: Uuid) -> Vec<Uuid> {
+            self.library_links
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(library, _)| *library == library_id)
+                .map(|(_, show)| *show)
+                .collect()
         }
 
         /// Episode ids some file row references -- only present files when
@@ -450,17 +460,6 @@ pub mod in_memory {
                 }
                 _ => Ok(false),
             }
-        }
-
-        async fn find_ids_by_library(&self, library_id: Uuid) -> Result<Vec<Uuid>, DbErr> {
-            Ok(self
-                .library_links
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(library, _)| *library == library_id)
-                .map(|(_, show)| *show)
-                .collect())
         }
 
         async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {

@@ -586,26 +586,12 @@ impl EnrichmentControl {
                     .find_by_id(library_id)
                     .await?
                     .ok_or(ControlError::LibraryNotFound(library_id))?;
-                let mut targets: Vec<EnrichmentTargetId> = self
-                    .deps
-                    .movies
-                    .find_ids_by_library(library_id)
-                    .await?
-                    .into_iter()
-                    .map(EnrichmentTargetId::Movie)
-                    .collect();
-                targets.extend(
-                    self.deps
-                        .shows
-                        .find_ids_by_library(library_id)
-                        .await?
-                        .into_iter()
-                        .map(EnrichmentTargetId::Show),
-                );
+                // A title with no row yet is given one, as a title refresh
+                // gives it, so every title of the library is counted.
                 let queued = self
                     .deps
                     .states
-                    .request_refresh_many(&targets, rematch)
+                    .request_refresh_library(library_id, rematch)
                     .await?;
                 (
                     queued,
