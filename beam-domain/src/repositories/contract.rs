@@ -4517,7 +4517,7 @@ macro_rules! sidecar_subtitle_repository_contract {
 
 /// Behavioural contract for [`crate::repositories::AppliedNfoRepository`]
 /// (issue #184): one record per NFO path, recorded in place, listed by
-/// library in path order, and deleted by id.
+/// library in path order, and deleted by id or by the directory above it.
 ///
 /// `$setup` names an `async fn() -> impl AppliedNfoFixture`.
 #[macro_export]
@@ -4639,6 +4639,57 @@ macro_rules! applied_nfo_repository_contract {
             let fixture = $setup().await;
             let path = PathBuf::from(format!("/videos/{}/movie.nfo", Uuid::new_v4()));
             assert_eq!(fixture.repo().find_by_path(&path).await.unwrap(), None);
+        }
+
+        /// The records beneath a directory are those whose path continues it
+        /// by whole components, at any depth -- another library's never. A
+        /// `_` or `%` in the directory's name is itself, not a wildcard.
+        #[tokio::test]
+        async fn delete_beneath_removes_the_records_beneath_a_directory_by_whole_components() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let other = fixture.new_library().await;
+            let base = Uuid::new_v4().to_string();
+            let dir = format!("{base}/Show_%1");
+            for gone in [
+                nfo(library, &dir, "tvshow.nfo"),
+                nfo(library, &format!("{dir}/Season 01"), "S01E01.nfo"),
+            ] {
+                repo.record_by_path(gone).await.unwrap();
+            }
+            // Longer by a character, what the wildcards would match, a
+            // sibling file named like the directory, and another library.
+            let kept = [
+                nfo(library, &format!("{base}/Show_%10"), "tvshow.nfo"),
+                nfo(library, &format!("{base}/ShowAB1"), "tvshow.nfo"),
+                nfo(library, &base, "Show_%1.nfo"),
+                nfo(other, &format!("{dir}/Season 02"), "S02E01.nfo"),
+            ];
+            for record in kept.clone() {
+                repo.record_by_path(record).await.unwrap();
+            }
+
+            let dir_path = PathBuf::from(format!("/videos/{dir}"));
+            assert_eq!(repo.delete_beneath(library, &dir_path).await.unwrap(), 2);
+
+            let mut left: Vec<PathBuf> = repo
+                .find_all_by_library(library)
+                .await
+                .unwrap()
+                .into_iter()
+                .chain(repo.find_all_by_library(other).await.unwrap())
+                .map(|r| r.path)
+                .collect();
+            left.sort();
+            let mut expected: Vec<PathBuf> = kept.into_iter().map(|r| r.path).collect();
+            expected.sort();
+            assert_eq!(left, expected);
+            assert_eq!(
+                repo.delete_beneath(library, &dir_path).await.unwrap(),
+                0,
+                "nothing is left beneath it"
+            );
         }
     };
 }

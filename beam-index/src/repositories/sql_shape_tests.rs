@@ -1858,4 +1858,31 @@ mod applied_nfo {
         assert_bound(&sql[1], &Uuid::from_u128(5).to_string());
         assert_filters(&sql[2], "applied_nfos", "path", "=");
     }
+
+    /// The records beneath a directory go in one statement: a prefix match
+    /// scoped to the library, the directory's own wildcards escaped.
+    #[tokio::test]
+    async fn the_records_beneath_a_directory_are_one_escaped_prefix_delete() {
+        let library = Uuid::from_u128(6);
+        let db = connection(empty_mock());
+        let repo = SqlAppliedNfoRepository::new(db.clone());
+        let _ = repo
+            .delete_beneath(library, Path::new("/lib/Show_%1/"))
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1);
+        assert!(sql[0].sql.starts_with("DELETE"), "{}", sql[0].sql);
+        assert_filters(&sql[0], "applied_nfos", "library_id", "=");
+        assert_bound(&sql[0], &library.to_string());
+        assert_filters(&sql[0], "applied_nfos", "path", "LIKE");
+        // A debug string: each `\` of the pattern reads `\\`.
+        assert_bound(&sql[0], r"/lib/Show\\_\\%1/%");
+        assert!(
+            sql[0].sql.contains("ESCAPE"),
+            "the pattern names its escape character, got:\n{}",
+            sql[0].sql
+        );
+    }
 }

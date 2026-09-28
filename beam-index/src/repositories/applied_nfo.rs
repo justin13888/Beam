@@ -115,4 +115,20 @@ impl AppliedNfoRepository for SqlAppliedNfoRepository {
             .await?;
         Ok(result.rows_affected)
     }
+
+    async fn delete_beneath(&self, library_id: Uuid, dir: &Path) -> Result<u64, DbErr> {
+        use beam_entity::applied_nfo;
+        use sea_orm::sea_query::LikeExpr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let result = applied_nfo::Entity::delete_many()
+            .filter(applied_nfo::Column::LibraryId.eq(library_id))
+            .filter(
+                applied_nfo::Column::Path
+                    .like(LikeExpr::new(super::beneath_pattern(dir)).escape('\\')),
+            )
+            .exec(self.db.as_ref())
+            .await?;
+        Ok(result.rows_affected)
+    }
 }

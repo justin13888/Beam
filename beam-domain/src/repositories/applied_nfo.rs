@@ -26,6 +26,13 @@ pub trait AppliedNfoRepository: Send + Sync + std::fmt::Debug {
     /// Delete the rows `ids`, returning how many went. An empty list deletes
     /// nothing and issues no statement.
     async fn delete_by_ids(&self, ids: Vec<Uuid>) -> Result<u64, DbErr>;
+    /// Delete every record in the library `library_id` whose path lies
+    /// strictly beneath the directory `dir`, returning how many went.
+    /// Beneath by whole path components: `/a/S1` holds `/a/S1/x.nfo` but not
+    /// `/a/S10/x.nfo`, and a `_` or `%` in `dir` is itself. The watcher
+    /// forgets what a removed directory held with it, as it forgets the
+    /// record of a removed NFO (FR-219).
+    async fn delete_beneath(&self, library_id: Uuid, dir: &Path) -> Result<u64, DbErr>;
 }
 
 #[mutants::skip]
@@ -94,6 +101,15 @@ pub mod in_memory {
             let mut rows = self.rows.lock().unwrap();
             let before = rows.len();
             rows.retain(|_, row| !ids.contains(&row.id));
+            Ok((before - rows.len()) as u64)
+        }
+
+        async fn delete_beneath(&self, library_id: Uuid, dir: &Path) -> Result<u64, DbErr> {
+            let mut rows = self.rows.lock().unwrap();
+            let before = rows.len();
+            rows.retain(|path, row| {
+                !(row.library_id == library_id && path != dir && path.starts_with(dir))
+            });
             Ok((before - rows.len()) as u64)
         }
     }

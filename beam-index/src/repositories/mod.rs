@@ -1,3 +1,5 @@
+use std::path::Path;
+
 pub mod admin_log;
 pub mod applied_nfo;
 pub mod enrichment;
@@ -26,6 +28,26 @@ pub use playback_telemetry::SqlPlaybackTelemetryRepository;
 pub use show::SqlShowRepository;
 pub use sidecar_subtitle::SqlSidecarSubtitleRepository;
 pub use stream::SqlMediaStreamRepository;
+
+/// The `LIKE` pattern, escaped with `\`, that matches a stored path strictly
+/// beneath the directory `dir`: its text, wildcards escaped, then a
+/// separator and anything. The separator keeps `/a/S1` from matching
+/// `/a/S10/x.mkv`, and escaping keeps a `_` or `%` in a directory's name
+/// from matching any character.
+pub(crate) fn beneath_pattern(dir: &Path) -> String {
+    let dir = dir.to_string_lossy();
+    let dir = dir.trim_end_matches(std::path::MAIN_SEPARATOR);
+    let mut pattern = String::with_capacity(dir.len() + 2);
+    for c in dir.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern.push(std::path::MAIN_SEPARATOR);
+    pattern.push('%');
+    pattern
+}
 
 #[cfg(test)]
 #[path = "sql_shape_tests.rs"]
