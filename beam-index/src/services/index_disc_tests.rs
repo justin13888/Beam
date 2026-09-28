@@ -573,6 +573,48 @@ async fn discs_in_disc_folders_are_their_films_and_a_shows_are_untitled() {
     assert_eq!(h.entries().len(), 3, "one entry per film");
 }
 
+/// A disc that cannot be read whole leaves its rows exactly as they were
+/// (FR-222): a VOB gone meanwhile is not marked missing and no part moves,
+/// since a title chosen from part of a disc may not be its main title.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_disc_that_cannot_be_read_leaves_its_rows_as_they_were() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new().await;
+    let disc = heat_dvd(&h.root.join("Heat (1995)"));
+    // Another film keeps the root from reading as an unmounted volume.
+    one_disc(&h.root.join("Ronin (1998)"), 1500);
+    h.scan().await.expect("the scan runs");
+    type Row = (
+        Uuid,
+        PathBuf,
+        Option<MediaFileContent>,
+        Option<DateTime<Utc>>,
+    );
+    let heat_rows = || -> Vec<Row> {
+        h.rows()
+            .into_iter()
+            .filter(|row| row.path.starts_with(h.root.join("Heat (1995)")))
+            .map(|row| (row.id, row.path, row.content, row.missing_since))
+            .collect()
+    };
+    let before = heat_rows();
+    assert_eq!(before.len(), 3);
+
+    std::fs::remove_file(disc.join("VTS_02_3.VOB")).unwrap();
+    std::fs::set_permissions(&disc, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&disc).is_ok() {
+        std::fs::set_permissions(&disc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: running as root, which ignores file permissions");
+        return;
+    }
+    let scanned = h.scan().await;
+    std::fs::set_permissions(&disc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    scanned.expect("the scan runs");
+
+    assert_eq!(heat_rows(), before, "no row marked missing, no part moved");
+}
+
 /// A rekey reads no disc, so a disc's stream file keeps the part it was
 /// given; any other file takes the part its name reads.
 #[test]
