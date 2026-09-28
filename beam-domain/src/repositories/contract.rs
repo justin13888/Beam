@@ -247,9 +247,14 @@ macro_rules! watch_state_repository_contract {
         use ::std::time::Duration;
         use ::uuid::Uuid;
         use $crate::models::watch_state::{
-            HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
+            ContinueCandidate, HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
         };
         use $crate::repositories::contract::fixture::WatchStateFixture as _;
+
+        /// The titles of `candidates`, in order.
+        fn titles(candidates: Vec<ContinueCandidate>) -> Vec<TitleRef> {
+            candidates.into_iter().map(|c| c.title).collect()
+        }
 
         /// One report into a 100-second title, so the 95% threshold sits at
         /// 95.0.
@@ -568,22 +573,120 @@ macro_rules! watch_state_repository_contract {
                 .await
                 .unwrap();
 
+            let all = repo.find_continue_candidates(user, None, 10).await.unwrap();
             assert_eq!(
-                repo.find_continue_candidates(user, 10, 0).await.unwrap(),
+                titles(all.clone()),
                 vec![TitleRef::Show(show), TitleRef::Movie(key(movie))],
                 "the show's newest episode places the show once"
             );
+            let newest = repo.find(user, e2).await.unwrap().expect("a row");
             assert_eq!(
-                repo.find_continue_candidates(user, 1, 1).await.unwrap(),
-                vec![TitleRef::Movie(key(movie))],
-                "limit and offset slice the same order"
+                all[0].last_played_at, newest.last_played_at,
+                "a show is as recent as its newest episode"
+            );
+            assert_eq!(
+                repo.find_continue_candidates(user, None, 1).await.unwrap(),
+                all[..1].to_vec(),
+                "the limit cuts the same order"
+            );
+            assert_eq!(
+                repo.find_continue_candidates(user, Some(all[0]), 10)
+                    .await
+                    .unwrap(),
+                all[1..].to_vec(),
+                "a page resumes after the candidate it names"
             );
             assert!(
-                repo.find_continue_candidates(user, 10, 2)
+                repo.find_continue_candidates(user, Some(all[1]), 10)
                     .await
                     .unwrap()
                     .is_empty()
             );
+        }
+
+        /// A bulk mark stamps every title it touches with one instant, so
+        /// paging must break the tie by the title's id: read one at a time,
+        /// the pages are the whole list once each, in the same order.
+        #[tokio::test]
+        async fn candidates_played_at_one_instant_page_by_title_id_without_repeats() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let clock = fixture.clock();
+            let user = fixture.new_user().await;
+            let file = fixture.new_file().await;
+            let mut episodes = Vec::new();
+            for _ in 0..5 {
+                let show = fixture.new_show().await;
+                episodes.push(fixture.new_episode(show).await);
+            }
+            let movie = fixture.new_movie().await;
+            repo.record_progress(report(user, movie, file, 10.0))
+                .await
+                .unwrap();
+            clock.advance(Duration::from_secs(60));
+            repo.mark_played(user, &episodes).await.unwrap();
+
+            let all = repo.find_continue_candidates(user, None, 10).await.unwrap();
+            assert_eq!(all.len(), 6);
+            let tied: Vec<Uuid> = all[..5].iter().map(|c| c.title.id()).collect();
+            let mut descending = tied.clone();
+            descending.sort_by(|a, b| b.cmp(a));
+            assert_eq!(tied, descending, "a tie falls to the larger id first");
+            assert_eq!(all[5].title, TitleRef::Movie(key(movie)));
+
+            let mut paged = Vec::new();
+            let mut after = None;
+            loop {
+                let page = repo.find_continue_candidates(user, after, 1).await.unwrap();
+                let Some(last) = page.last().copied() else {
+                    break;
+                };
+                paged.extend(page);
+                after = Some(last);
+            }
+            assert_eq!(paged, all);
+        }
+
+        #[tokio::test]
+        async fn rows_of_named_shows_are_read_together() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (user, other) = (fixture.new_user().await, fixture.new_user().await);
+            let file = fixture.new_file().await;
+            let (a, b, c) = (
+                fixture.new_show().await,
+                fixture.new_show().await,
+                fixture.new_show().await,
+            );
+            let (a1, a2, b1, c1) = (
+                fixture.new_episode(a).await,
+                fixture.new_episode(a).await,
+                fixture.new_episode(b).await,
+                fixture.new_episode(c).await,
+            );
+            let movie = fixture.new_movie().await;
+            for target in [a1, a2, b1, c1, movie] {
+                repo.record_progress(report(user, target, file, 10.0))
+                    .await
+                    .unwrap();
+            }
+            repo.record_progress(report(other, a1, file, 10.0))
+                .await
+                .unwrap();
+
+            let mut read: Vec<Uuid> = repo
+                .find_for_shows(user, &[a, b])
+                .await
+                .unwrap()
+                .into_iter()
+                .inspect(|row| assert_eq!(row.user_id, user))
+                .map(|row| key(row.target))
+                .collect();
+            read.sort();
+            let mut expected = vec![key(a1), key(a2), key(b1)];
+            expected.sort();
+            assert_eq!(read, expected, "every episode of the named shows, no other");
+            assert!(repo.find_for_shows(user, &[]).await.unwrap().is_empty());
         }
 
         #[tokio::test]
@@ -603,7 +706,7 @@ macro_rules! watch_state_repository_contract {
                 .unwrap();
 
             assert_eq!(
-                repo.find_continue_candidates(user, 10, 0).await.unwrap(),
+                titles(repo.find_continue_candidates(user, None, 10).await.unwrap()),
                 vec![TitleRef::Show(show)]
             );
         }
@@ -630,7 +733,7 @@ macro_rules! watch_state_repository_contract {
 
             repo.dismiss(user, TitleRef::Show(show)).await.unwrap();
             assert_eq!(
-                repo.find_continue_candidates(user, 10, 0).await.unwrap(),
+                titles(repo.find_continue_candidates(user, None, 10).await.unwrap()),
                 vec![TitleRef::Movie(key(movie))]
             );
             assert_eq!(
@@ -648,7 +751,7 @@ macro_rules! watch_state_repository_contract {
                 .await
                 .unwrap();
             assert_eq!(
-                repo.find_continue_candidates(user, 10, 0).await.unwrap(),
+                titles(repo.find_continue_candidates(user, None, 10).await.unwrap()),
                 vec![TitleRef::Show(show), TitleRef::Movie(key(movie))],
                 "any episode played after the dismissal brings the show back"
             );
@@ -2133,6 +2236,62 @@ macro_rules! show_repository_contract {
                 ],
                 "a missing file does not make an episode playable"
             );
+        }
+
+        /// Continue-watching reads a page of shows' outlines at once: each
+        /// show's is its own outline, and a show with no episodes is absent.
+        #[tokio::test]
+        async fn outlines_of_several_shows_are_each_shows_own() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (a_one, a_two) = new_seasons(repo).await;
+            let (b_one, _) = new_seasons(repo).await;
+            let a_s2e1 = repo
+                .find_or_create_episode(episode(a_two, 1, "A S2E1", 30))
+                .await
+                .unwrap();
+            let a_s1e1 = repo
+                .find_or_create_episode(episode(a_one, 1, "A S1E1", 30))
+                .await
+                .unwrap();
+            let b_s1e1 = repo
+                .find_or_create_episode(episode(b_one, 1, "B S1E1", 30))
+                .await
+                .unwrap();
+            episode_file(&fixture, b_s1e1.id).await;
+            let show_of = |season_id: Uuid| async move {
+                repo.find_season_by_id(season_id)
+                    .await
+                    .unwrap()
+                    .expect("the season")
+                    .show_id
+            };
+            let (a, b) = (show_of(a_one).await, show_of(b_one).await);
+            let empty = repo
+                .find_or_create_by_identity(new_show("no episodes"))
+                .await
+                .unwrap()
+                .id;
+
+            let outlines = repo.episode_outlines(&[a, b, empty]).await.unwrap();
+            assert_eq!(outlines.len(), 2, "a show with no episodes is absent");
+            for show in [a, b] {
+                assert_eq!(
+                    outlines[&show],
+                    repo.episode_outline(show).await.unwrap(),
+                    "each show's outline is its own"
+                );
+            }
+            let ids: Vec<(Uuid, bool)> = outlines[&a]
+                .iter()
+                .map(|e| (e.episode_id, e.playable))
+                .collect();
+            assert_eq!(ids, vec![(a_s1e1.id, false), (a_s2e1.id, false)]);
+            assert_eq!(
+                outlines[&b].iter().map(|e| e.playable).collect::<Vec<_>>(),
+                vec![true]
+            );
+            assert!(repo.episode_outlines(&[]).await.unwrap().is_empty());
         }
 
         #[tokio::test]

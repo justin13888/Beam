@@ -14667,7 +14667,7 @@
           },
           "page_info": {
             "$ref": "#/components/schemas/PageInfo",
-            "description": "Always a single, complete page."
+            "description": "No cursors; `has_next_page` says whether more rows may exist."
           }
         },
         "type": "object",
@@ -14675,7 +14675,7 @@
           "items",
           "page_info"
         ],
-        "description": "What `GET /v1/continue-watching` returns: at most `first` titles, most\nrecently played first -- one row per movie, one per show.\n\nA shelf, not a paged list: `items` is the whole answer, both of\n`page_info`'s `has_*_page` flags are `false`, and it carries no cursors."
+        "description": "What `GET /v1/continue-watching` returns: at most `first` titles, most\nrecently played first -- one row per movie, one per show.\n\nA shelf, not a paged list: it carries no cursors, and\n`has_previous_page` is always `false`. A request examines at most the\n1,000 most recently played candidate titles; `has_next_page` is `true`\nwhen candidates were left unexamined -- the shelf filled first, or that\nceiling was reached -- so more rows may exist than `items` holds."
       },
       "HistoryItem": {
         "properties": {

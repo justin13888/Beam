@@ -472,7 +472,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   omitting a show with no such episode and a title with no present file. A next episode the user
   already started resumes from its own position. Each row MUST carry what a client displays
   (title, artwork, season and episode numbers and title) and the file to play: the one last played
-  while present, else the title's primary (FR-513).
+  while present, else the title's primary (FR-513). One request MUST examine at most the 1,000 most
+  recently played candidate titles -- movies with a position and shows, each played since it was
+  last removed -- so its cost is bounded however many shows the user has finished; a title past
+  that ceiling is not listed, and the response's `page_info.has_next_page` MUST say whether
+  candidates were left unexamined, because the rows filled first or the ceiling was reached.
 - **FR-509**: The web client's player (Vidstack-based) MUST support seeking, keyboard shortcuts,
   visible buffering state, fullscreen, and Picture-in-Picture.
 - **FR-510**: On resuming a previously started title, the web client MUST seek playback to the

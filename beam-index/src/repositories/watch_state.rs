@@ -19,7 +19,7 @@ use sea_orm::{
 use uuid::Uuid;
 
 use beam_domain::models::watch_state::{
-    HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
+    ContinueCandidate, HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
 };
 use beam_domain::repositories::WatchStateRepository;
 use beam_domain::services::{Clock, RealClock};
@@ -331,45 +331,91 @@ impl WatchStateRepository for SqlWatchStateRepository {
         .await
     }
 
+    async fn find_for_shows(
+        &self,
+        user_id: Uuid,
+        show_ids: &[Uuid],
+    ) -> Result<Vec<WatchState>, DbErr> {
+        if show_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut values: Vec<Value> = vec![user_id.into()];
+        values.extend(show_ids.iter().map(|id| Value::from(*id)));
+        let sql = format!(
+            "SELECT {COLUMNS} FROM watch_state WHERE user_id = $1 AND show_id IN ({})",
+            placeholders(2, show_ids.len())
+        );
+        rows(self.db.as_ref(), sql, values).await
+    }
+
     async fn find_continue_candidates(
         &self,
         user_id: Uuid,
+        after: Option<ContinueCandidate>,
         limit: u64,
-        offset: u64,
-    ) -> Result<Vec<TitleRef>, DbErr> {
+    ) -> Result<Vec<ContinueCandidate>, DbErr> {
+        use sea_orm::prelude::DateTimeWithTimeZone;
+
         #[derive(Debug, FromQueryResult)]
         struct Candidate {
             movie_id: Option<Uuid>,
             show_id: Option<Uuid>,
+            last_played_at: DateTimeWithTimeZone,
         }
 
         // Movie rows group as (movie_id, NULL), a show's episodes as (NULL,
-        // show_id): GROUP BY treats the NULLs as equal.
-        let sql = "SELECT movie_id, show_id FROM watch_state WHERE user_id = $1 \
-                   GROUP BY movie_id, show_id \
-                   HAVING max(last_played_at) > coalesce(max(dismissed_at), '-infinity') \
-                      AND (bool_or(show_id IS NOT NULL) OR bool_or(position_secs > 0)) \
-                   ORDER BY max(last_played_at) DESC, coalesce(movie_id, show_id) DESC \
-                   LIMIT $2 OFFSET $3";
-        let found = Candidate::find_by_statement(statement(
-            sql,
-            vec![
-                user_id.into(),
-                i64::try_from(limit).unwrap_or(i64::MAX).into(),
-                i64::try_from(offset).unwrap_or(i64::MAX).into(),
-            ],
-        ))
-        .all(self.db.as_ref())
-        .await?;
+        // show_id): GROUP BY treats the NULLs as equal. A page seeks past the
+        // last candidate before it rather than skipping an offset, so reading
+        // on does not re-read what came before.
+        let mut values: Vec<Value> = vec![
+            user_id.into(),
+            i64::try_from(limit).unwrap_or(i64::MAX).into(),
+        ];
+        let seek = match after {
+            None => "",
+            Some(ContinueCandidate {
+                title,
+                last_played_at,
+            }) => {
+                values.extend([Value::from(last_played_at), Value::from(title.id())]);
+                "AND (max(last_played_at), coalesce(movie_id, show_id)) < ($3, $4) "
+            }
+        };
+        let sql = format!(
+            "SELECT movie_id, show_id, max(last_played_at) AS last_played_at \
+               FROM watch_state WHERE user_id = $1 \
+              GROUP BY movie_id, show_id \
+             HAVING max(last_played_at) > coalesce(max(dismissed_at), '-infinity') \
+                AND (bool_or(show_id IS NOT NULL) OR bool_or(position_secs > 0)) \
+                {seek}\
+              ORDER BY max(last_played_at) DESC, coalesce(movie_id, show_id) DESC \
+              LIMIT $2"
+        );
+        let found = Candidate::find_by_statement(statement(sql, values))
+            .all(self.db.as_ref())
+            .await?;
         found
             .into_iter()
             .map(
-                |Candidate { movie_id, show_id }| match (movie_id, show_id) {
-                    (Some(movie_id), None) => Ok(TitleRef::Movie(movie_id)),
-                    (None, Some(show_id)) => Ok(TitleRef::Show(show_id)),
-                    _ => Err(DbErr::Custom(
-                        "a continue-watching group names neither a movie nor a show".to_string(),
-                    )),
+                |Candidate {
+                     movie_id,
+                     show_id,
+                     last_played_at,
+                 }| {
+                    let title = match (movie_id, show_id) {
+                        (Some(movie_id), None) => TitleRef::Movie(movie_id),
+                        (None, Some(show_id)) => TitleRef::Show(show_id),
+                        _ => {
+                            return Err(DbErr::Custom(
+                                "a continue-watching group names neither a movie nor a show"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    Ok(ContinueCandidate {
+                        title,
+                        last_played_at: last_played_at.with_timezone(&Utc),
+                    })
                 },
             )
             .collect()

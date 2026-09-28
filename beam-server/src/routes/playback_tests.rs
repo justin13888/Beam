@@ -40,7 +40,7 @@ use crate::routes::playback::{
 };
 use crate::routes::test_support::make_app_state;
 use crate::services::metadata::{DbMetadataService, MetadataRepositories};
-use crate::services::playback::{DbPlaybackService, PlaybackRepositories};
+use crate::services::playback::{CANDIDATE_CEILING, DbPlaybackService, PlaybackRepositories};
 use crate::services::sources::SourceCatalog;
 use crate::state::{AppServices, AppState};
 
@@ -933,6 +933,13 @@ async fn continue_watching_is_bounded_by_first() {
         .await;
     let shelf: ContinueWatchingConnection = response.json();
     assert_eq!(shelf.items.len(), 2);
+    assert!(
+        shelf.page_info.has_next_page,
+        "a title past a full shelf may offer a row"
+    );
+    let whole = continue_watching(&client, &token).await;
+    assert_eq!(whole.items.len(), 3);
+    assert!(!whole.page_info.has_next_page, "every candidate was read");
     for first in ["0", "51"] {
         let response = client
             .get(&format!("/v1/continue-watching?first={first}"))
@@ -943,9 +950,30 @@ async fn continue_watching_is_bounded_by_first() {
     }
 }
 
-/// A bulk mark makes caught-up shows by the dozen, each played more recently
-/// than anything in progress. However many there are, they are read past,
-/// not counted against the shelf.
+/// Mark `count` new shows of one episode each watched, all after everything
+/// played so far.
+async fn caught_up_shows(
+    fixture: &Fixture,
+    client: &TestClient<AppState>,
+    token: &str,
+    count: u64,
+) {
+    fixture.later();
+    for n in 0..count {
+        let show = fixture
+            .show(&format!("Caught up {n} {}", Uuid::new_v4()))
+            .await;
+        fixture.episode(show, 1, 1).await;
+        assert_eq!(
+            set_watched(client, token, show, true).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+}
+
+/// A bulk mark makes caught-up shows by the hundred, each played more
+/// recently than anything in progress. They are read past, a page of
+/// candidates after another, not counted against the shelf.
 #[tokio::test]
 async fn caught_up_shows_newer_than_an_unfinished_title_never_crowd_it_out() {
     let fixture = fixture();
@@ -954,17 +982,8 @@ async fn caught_up_shows_newer_than_an_unfinished_title_never_crowd_it_out() {
     let movie = fixture.movie("Heat").await;
     let file = fixture.movie_file(movie, 1_000).await;
     watch(&client, &token, file, 30.0).await;
-    // A shelf of one reads two candidates at a time; the old five-read
-    // budget was ten.
-    for n in 0..13 {
-        fixture.later();
-        let show = fixture.show(&format!("Show {n}")).await;
-        fixture.episode(show, 1, 1).await;
-        assert_eq!(
-            set_watched(&client, &token, show, true).await,
-            StatusCode::NO_CONTENT
-        );
-    }
+    // More than one page of candidates, so the movie is found by reading on.
+    caught_up_shows(&fixture, &client, &token, 250).await;
 
     for first in [1, 2] {
         let response = client
@@ -976,7 +995,40 @@ async fn caught_up_shows_newer_than_an_unfinished_title_never_crowd_it_out() {
         let shelf: ContinueWatchingConnection = response.json();
         let rows: Vec<Uuid> = shelf.items.iter().map(|i| i.media_id).collect();
         assert_eq!(rows, vec![movie], "first={first}");
+        assert!(!shelf.page_info.has_next_page, "first={first}");
     }
+}
+
+/// However many caught-up shows a viewer has, one load examines at most
+/// [`CANDIDATE_CEILING`] titles. A title just inside it is listed; one just
+/// past it is not, and the shelf says more may exist.
+#[tokio::test]
+async fn a_load_examines_candidates_up_to_the_ceiling_and_says_when_more_may_exist() {
+    let fixture = fixture();
+    let client = client(&fixture);
+    let token = session(&fixture).await;
+    let movie = fixture.movie("Heat").await;
+    let file = fixture.movie_file(movie, 1_000).await;
+    watch(&client, &token, file, 30.0).await;
+    caught_up_shows(&fixture, &client, &token, CANDIDATE_CEILING - 1).await;
+
+    let inside = continue_watching(&client, &token).await;
+    let rows: Vec<Uuid> = inside.items.iter().map(|i| i.media_id).collect();
+    assert_eq!(rows, vec![movie], "the last title the ceiling reaches");
+    assert!(!inside.page_info.has_next_page);
+
+    caught_up_shows(&fixture, &client, &token, 1).await;
+    let past = continue_watching(&client, &token).await;
+    assert!(past.items.is_empty(), "the movie is past the ceiling");
+    assert!(
+        past.page_info.has_next_page,
+        "a title past the ceiling may offer a row"
+    );
+    assert_eq!(
+        progress(&client, &token, movie).await.position_secs,
+        30.0,
+        "past the ceiling, the title keeps its place"
+    );
 }
 
 // ── History ──────────────────────────────────────────────────────────────────

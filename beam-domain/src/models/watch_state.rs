@@ -48,6 +48,16 @@ pub enum TitleRef {
     Show(Uuid),
 }
 
+impl TitleRef {
+    /// The movie's or the show's id.
+    #[must_use]
+    pub fn id(self) -> Uuid {
+        match self {
+            Self::Movie(id) | Self::Show(id) => id,
+        }
+    }
+}
+
 /// One user's state for one movie or episode.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatchState {
@@ -162,6 +172,15 @@ impl Played {
 pub struct HistoryPosition {
     pub last_played_at: DateTime<Utc>,
     pub id: Uuid,
+}
+
+/// A title continue-watching considers, with the newest `last_played_at`
+/// among its rows. Candidates are read newest `(last_played_at, title id)`
+/// first, and a page of them resumes after the last one read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContinueCandidate {
+    pub title: TitleRef,
+    pub last_played_at: DateTime<Utc>,
 }
 
 impl From<&WatchState> for HistoryPosition {

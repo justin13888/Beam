@@ -53,8 +53,9 @@ an episode, a season or a whole show watched or unwatched.
 `GET /v1/continue-watching` returns one row per movie and one per show — a show's row being the
 episode to resume or start next — and `GET /v1/history` pages through everything watched, newest
 first, with `first` and `after`. Both carry each row's title, artwork and episode numbers, and the
-`file_id` to play. `DELETE /v1/continue-watching/{id}` takes a title off the row until it is next
-played. Detail responses carry a `user_state` for the movie, or for the show and each season and
+`file_id` to play. The continue-watching row takes no cursor: it looks through at most the 1,000
+titles played most recently, and its `page_info.has_next_page` says whether it left any unexamined.
+`DELETE /v1/continue-watching/{id}` takes a title off the row until it is next played. Detail responses carry a `user_state` for the movie, or for the show and each season and
 episode; `GET /v1/episodes/{id}` and `GET /v1/seasons/{id}` describe one episode (with its show and
 the episodes either side) or one season.
 

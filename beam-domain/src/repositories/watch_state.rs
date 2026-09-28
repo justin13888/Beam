@@ -6,7 +6,7 @@ use sea_orm::DbErr;
 use uuid::Uuid;
 
 use crate::models::watch_state::{
-    HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
+    ContinueCandidate, HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
 };
 
 /// Per-user watched state, one row per (user, movie) or (user, episode)
@@ -55,8 +55,17 @@ pub trait WatchStateRepository: Send + Sync + std::fmt::Debug {
     /// The rows for every episode of `show_id` the user has any.
     async fn find_for_show(&self, user_id: Uuid, show_id: Uuid) -> Result<Vec<WatchState>, DbErr>;
 
-    /// The titles continue-watching considers, one per movie or show, most
-    /// recently played first, sliced by `offset` and `limit`.
+    /// The rows for every episode of each of `show_ids` the user has any.
+    /// One statement, none for an empty slice.
+    async fn find_for_shows(
+        &self,
+        user_id: Uuid,
+        show_ids: &[Uuid],
+    ) -> Result<Vec<WatchState>, DbErr>;
+
+    /// At most `limit` of the titles continue-watching considers, one per
+    /// movie or show, newest `(last_played_at, title id)` first, starting
+    /// after `after` -- the last candidate of the page before.
     ///
     /// A title is considered when it was played after it was last
     /// dismissed, and -- for a movie -- it has a position to resume from. A
@@ -66,9 +75,9 @@ pub trait WatchStateRepository: Send + Sync + std::fmt::Debug {
     async fn find_continue_candidates(
         &self,
         user_id: Uuid,
+        after: Option<ContinueCandidate>,
         limit: u64,
-        offset: u64,
-    ) -> Result<Vec<TitleRef>, DbErr>;
+    ) -> Result<Vec<ContinueCandidate>, DbErr>;
 
     /// One page of the user's rows, newest `(last_played_at, id)` first,
     /// starting after `after`.
@@ -309,12 +318,30 @@ pub mod in_memory {
                 .collect())
         }
 
+        async fn find_for_shows(
+            &self,
+            user_id: Uuid,
+            show_ids: &[Uuid],
+        ) -> Result<Vec<WatchState>, DbErr> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| {
+                    r.user_id == user_id
+                        && matches!(r.target, WatchTarget::Episode { show_id, .. } if show_ids.contains(&show_id))
+                })
+                .cloned()
+                .collect())
+        }
+
         async fn find_continue_candidates(
             &self,
             user_id: Uuid,
+            after: Option<ContinueCandidate>,
             limit: u64,
-            offset: u64,
-        ) -> Result<Vec<TitleRef>, DbErr> {
+        ) -> Result<Vec<ContinueCandidate>, DbErr> {
             let rows = self.rows.lock().unwrap();
             let mut titles: Vec<(TitleRef, DateTime<Utc>)> = Vec::new();
             let mut seen: Vec<TitleRef> = Vec::new();
@@ -338,15 +365,20 @@ pub mod in_memory {
                     titles.push((title, latest));
                 }
             }
-            let id_of = |title: &TitleRef| match title {
-                TitleRef::Movie(id) | TitleRef::Show(id) => *id,
-            };
-            titles.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| id_of(&b.0).cmp(&id_of(&a.0))));
+            let key = |(title, latest): &(TitleRef, DateTime<Utc>)| (*latest, title.id());
+            titles.sort_by_key(|title| std::cmp::Reverse(key(title)));
             Ok(titles
                 .into_iter()
-                .map(|(title, _)| title)
-                .skip(offset as usize)
+                .filter(|candidate| {
+                    after.is_none_or(|after| {
+                        key(candidate) < (after.last_played_at, after.title.id())
+                    })
+                })
                 .take(limit as usize)
+                .map(|(title, last_played_at)| ContinueCandidate {
+                    title,
+                    last_played_at,
+                })
                 .collect())
         }
 

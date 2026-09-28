@@ -140,6 +140,13 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// whether a present file backs it -- what next-up walks (issue #188).
     /// One statement however many episodes the show has.
     async fn episode_outline(&self, show_id: Uuid) -> Result<Vec<OutlineEpisode>, DbErr>;
+    /// [`Self::episode_outline`] of each of `show_ids`, by show. A show with
+    /// no episodes, or no such show, is absent. One statement however many
+    /// shows, none for an empty slice.
+    async fn episode_outlines(
+        &self,
+        show_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<OutlineEpisode>>, DbErr>;
     /// Apply enrichment-provider data to an existing show. Overwrites the
     /// current values except those `locks` holds, same as
     /// `MovieRepository::apply_enrichment`, and likewise never touches the
@@ -608,6 +615,20 @@ pub mod in_memory {
                 .collect();
             outline.sort_by_key(|e| (e.season_number, e.episode_number));
             Ok(outline)
+        }
+
+        async fn episode_outlines(
+            &self,
+            show_ids: &[Uuid],
+        ) -> Result<HashMap<Uuid, Vec<OutlineEpisode>>, DbErr> {
+            let mut outlines = HashMap::new();
+            for show_id in show_ids {
+                let outline = self.episode_outline(*show_id).await?;
+                if !outline.is_empty() {
+                    outlines.insert(*show_id, outline);
+                }
+            }
+            Ok(outlines)
         }
 
         async fn apply_enrichment(

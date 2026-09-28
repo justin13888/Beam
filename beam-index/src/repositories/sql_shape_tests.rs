@@ -110,7 +110,7 @@ fn assert_bound(statement: &Statement, expected: &str) {
 mod watch_state {
     use super::*;
     use beam_domain::models::watch_state::{
-        HistoryPosition, RecordProgress, TitleRef, WatchTarget,
+        ContinueCandidate, HistoryPosition, RecordProgress, TitleRef, WatchTarget,
     };
     use beam_domain::repositories::WatchStateRepository;
 
@@ -301,26 +301,64 @@ mod watch_state {
     }
 
     #[tokio::test]
-    async fn candidates_group_per_title_and_page() {
+    async fn candidates_group_per_title_and_seek_past_the_last_read() {
         let db = connection(empty_mock());
         let repo = SqlWatchStateRepository::new(db.clone());
+        let after = ContinueCandidate {
+            title: TitleRef::Show(Uuid::from_u128(5)),
+            last_played_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
         let _ = repo
-            .find_continue_candidates(Uuid::from_u128(7), 20, 40)
+            .find_continue_candidates(Uuid::from_u128(7), None, 20)
+            .await;
+        let _ = repo
+            .find_continue_candidates(Uuid::from_u128(7), Some(after), 20)
             .await;
         drop(repo);
 
         let sql = statements(db);
-        assert_eq!(sql.len(), 1);
-        assert_contains(&sql[0], "GROUP BY movie_id, show_id");
+        assert_eq!(sql.len(), 2);
+        for statement in &sql {
+            assert_contains(statement, "GROUP BY movie_id, show_id");
+            assert_contains(
+                statement,
+                "HAVING max(last_played_at) > coalesce(max(dismissed_at), '-infinity')",
+            );
+            assert_contains(statement, "bool_or(position_secs > 0)");
+            assert_contains(
+                statement,
+                "ORDER BY max(last_played_at) DESC, coalesce(movie_id, show_id) DESC",
+            );
+            assert_contains(statement, "LIMIT $2");
+            assert!(!statement.sql.contains("OFFSET"), "{}", statement.sql);
+            assert_bound(statement, "20");
+        }
+        assert!(!sql[0].sql.contains("< ($3, $4)"), "{}", sql[0].sql);
         assert_contains(
-            &sql[0],
-            "HAVING max(last_played_at) > coalesce(max(dismissed_at), '-infinity')",
+            &sql[1],
+            "(max(last_played_at), coalesce(movie_id, show_id)) < ($3, $4)",
         );
-        assert_contains(&sql[0], "bool_or(position_secs > 0)");
-        assert_contains(&sql[0], "ORDER BY max(last_played_at) DESC");
-        assert_contains(&sql[0], "LIMIT $2 OFFSET $3");
-        assert_bound(&sql[0], "20");
-        assert_bound(&sql[0], "40");
+        assert_bound(&sql[1], &Uuid::from_u128(5).to_string());
+        assert_bound(&sql[1], "2023-11-14");
+    }
+
+    #[tokio::test]
+    async fn a_page_of_shows_is_read_in_one_statement_and_none_is_read_for_no_show() {
+        let db = connection(empty_mock());
+        let repo = SqlWatchStateRepository::new(db.clone());
+        let _ = repo.find_for_shows(Uuid::from_u128(7), &[]).await;
+        let _ = repo
+            .find_for_shows(
+                Uuid::from_u128(7),
+                &[Uuid::from_u128(1), Uuid::from_u128(2)],
+            )
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1, "an empty slice reads nothing");
+        assert_contains(&sql[0], "WHERE user_id = $1 AND show_id IN ($2, $3)");
+        assert_bound(&sql[0], &Uuid::from_u128(2).to_string());
     }
 
     #[tokio::test]
@@ -1147,6 +1185,26 @@ mod show {
     use beam_domain::repositories::ShowRepository;
 
     use crate::repositories::SqlShowRepository;
+
+    #[tokio::test]
+    async fn outlines_of_a_page_of_shows_are_one_statement_and_none_for_no_show() {
+        let db = connection(empty_mock());
+        let repo = SqlShowRepository::new(db.clone());
+        let _ = repo.episode_outlines(&[]).await;
+        let _ = repo
+            .episode_outlines(&[Uuid::from_u128(1), Uuid::from_u128(2)])
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1, "an empty slice reads nothing");
+        assert_contains(&sql[0], "WHERE se.show_id IN ($1, $2)");
+        assert_contains(
+            &sql[0],
+            "ORDER BY se.show_id, se.season_number, e.episode_number",
+        );
+        assert_bound(&sql[0], &Uuid::from_u128(2).to_string());
+    }
 
     /// Two statements whichever way the insert goes: the atomic insert, then
     /// the read-back of the row that won.

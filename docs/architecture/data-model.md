@@ -488,10 +488,14 @@ episode it has then; a later episode has none.
 Continue-watching groups a user's rows by `(movie_id, show_id)` -- a movie, or all of one show's
 episodes -- and keeps a group played after its last dismissal (`max(last_played_at) >
 max(dismissed_at)`) that is a show, or a movie with a position. A show's row is the episode
-`beam_domain::utils::next_up` picks from `ShowRepository::episode_outline`, and a title with no
-present file to play is skipped, as is a show whose viewer is caught up. History lists every row,
-and skips (but counts) one whose title has no present file. Purging a file keeps the rows that
-last played it, without it; deleting a movie or episode takes its rows. Migration
+`beam_domain::utils::next_up` picks from the show's outline, and a title with no present file to
+play is skipped, as is a show whose viewer is caught up. The groups are read newest
+`(max(last_played_at), coalesce(movie_id, show_id))` first, 100 at a time, each page seeking past
+the last group read rather than skipping an offset; each page's rows and outlines are read in one
+query per kind (`WatchStateRepository::find_for_movies` and `find_for_shows`,
+`ShowRepository::episode_outlines`), and a request examines at most 1,000 groups. History lists
+every row, and skips (but counts) one whose title has no present file. Purging a file keeps the
+rows that last played it, without it; deleting a movie or episode takes its rows. Migration
 `m20261011_000001_watch_state` built this table from `playback_progress` (one row per user and
 file), merging each user's rows per title -- the newest row's position (clamped to its duration),
 duration and file, a tie going to the larger file id, played if any row was, a play per played row

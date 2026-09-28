@@ -24,13 +24,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use beam_domain::models::watch_state::{
-    HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
+    ContinueCandidate, HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
 };
 use beam_domain::models::{Episode, MediaFileContent, Movie, Season, Show};
 use beam_domain::repositories::{
     FileRepository, MovieRepository, ShowRepository, WatchStateRepository,
 };
-use beam_domain::utils::next_up::{EpisodeWatch, NextUp, next_up};
+use beam_domain::utils::next_up::{EpisodeWatch, NextUp, OutlineEpisode, next_up};
 use beam_domain::utils::progress_validation::{ReportFault, validate_report};
 
 use crate::models::{
@@ -77,6 +77,28 @@ pub enum TitleStateError {
 pub enum PlaybackReadError {
     #[error("database error: {0}")]
     Db(#[from] sea_orm::DbErr),
+}
+
+/// How many candidate titles continue-watching reads at a time, whatever
+/// the shelf's size: a shelf of one reads past caught-up shows a hundred at a
+/// time, not two.
+const CANDIDATE_PAGE: u64 = 100;
+
+/// The most candidate titles one load of continue-watching examines. A
+/// caught-up show stays a candidate until it is dismissed, so without a
+/// ceiling a viewer who has finished thousands of shows pays for every one of
+/// them on each load. Past it the shelf holds what the first thousand
+/// offered, and says more may follow.
+pub const CANDIDATE_CEILING: u64 = 1_000;
+
+/// A continue-watching shelf.
+#[derive(Debug, Clone)]
+pub struct ContinueWatchingPage {
+    pub items: Vec<ContinueWatchingItem>,
+    /// Whether candidate titles were left unexamined -- because the shelf
+    /// filled first, or because the load reached [`CANDIDATE_CEILING`] -- so
+    /// more rows may exist.
+    pub has_next_page: bool,
 }
 
 /// One page of history, with where it starts and ends for the cursors.
@@ -128,12 +150,13 @@ pub trait PlaybackService: Send + Sync + std::fmt::Debug {
     /// viewer next plays it. An episode or season id hides its show.
     async fn dismiss(&self, user_id: Uuid, media_id: Uuid) -> Result<(), TitleStateError>;
 
-    /// At most `first` rows of continue-watching, most recently played first.
+    /// At most `first` rows of continue-watching, most recently played
+    /// first, from at most [`CANDIDATE_CEILING`] candidate titles.
     async fn get_continue_watching(
         &self,
         user_id: Uuid,
         first: NonZeroU32,
-    ) -> Result<Vec<ContinueWatchingItem>, PlaybackReadError>;
+    ) -> Result<ContinueWatchingPage, PlaybackReadError>;
 
     /// One page of watch history, newest first, after `after`.
     async fn get_history(
@@ -275,6 +298,16 @@ fn episode_key(state: &WatchState) -> Option<Uuid> {
     }
 }
 
+/// What deciding one page of continue-watching candidates reads, one query
+/// per kind for the whole page: each movie's state, each show's episode
+/// states, and each show's outline.
+#[derive(Debug, Default)]
+struct CandidateReads {
+    movies: HashMap<Uuid, WatchState>,
+    shows: HashMap<Uuid, Vec<WatchState>>,
+    outlines: HashMap<Uuid, Vec<OutlineEpisode>>,
+}
+
 impl DbPlaybackService {
     pub fn new(repositories: PlaybackRepositories) -> Self {
         let PlaybackRepositories {
@@ -405,18 +438,51 @@ impl DbPlaybackService {
         }))
     }
 
-    /// The continue-watching row of one candidate title, or `None` when it
-    /// has nothing to offer: a movie with no present file, or a show whose
-    /// viewer is caught up.
-    async fn continue_item(
+    /// Read what deciding `candidates` needs, as [`CandidateReads`].
+    async fn candidate_reads(
         &self,
         user_id: Uuid,
+        candidates: &[ContinueCandidate],
+    ) -> Result<CandidateReads, sea_orm::DbErr> {
+        let mut movie_ids = Vec::new();
+        let mut show_ids = Vec::new();
+        for candidate in candidates {
+            match candidate.title {
+                TitleRef::Movie(id) => movie_ids.push(id),
+                TitleRef::Show(id) => show_ids.push(id),
+            }
+        }
+        let mut reads = CandidateReads::default();
+        for state in self
+            .watch_state
+            .find_for_movies(user_id, &movie_ids)
+            .await?
+        {
+            if let WatchTarget::Movie { movie_id } = state.target {
+                reads.movies.insert(movie_id, state);
+            }
+        }
+        for state in self.watch_state.find_for_shows(user_id, &show_ids).await? {
+            if let WatchTarget::Episode { show_id, .. } = state.target {
+                reads.shows.entry(show_id).or_default().push(state);
+            }
+        }
+        reads.outlines = self.shows.episode_outlines(&show_ids).await?;
+        Ok(reads)
+    }
+
+    /// The continue-watching row of one candidate title, or `None` when it
+    /// has nothing to offer: a movie with no present file, or a show whose
+    /// viewer is caught up. Only a title that offers a row costs a read of
+    /// its own: its display and its files.
+    async fn continue_item(
+        &self,
         title: TitleRef,
+        reads: &CandidateReads,
     ) -> Result<Option<ContinueWatchingItem>, sea_orm::DbErr> {
         match title {
             TitleRef::Movie(movie_id) => {
-                let target = WatchTarget::Movie { movie_id };
-                let Some(state) = self.watch_state.find(user_id, target).await? else {
+                let Some(state) = reads.movies.get(&movie_id) else {
                     return Ok(None);
                 };
                 if !state.is_resumable() {
@@ -434,11 +500,11 @@ impl DbPlaybackService {
                 )))
             }
             TitleRef::Show(show_id) => {
-                let states = self.watch_state.find_for_show(user_id, show_id).await?;
+                let states = reads.shows.get(&show_id).map_or(&[][..], Vec::as_slice);
                 let Some(latest) = states.iter().map(|s| s.last_played_at).max() else {
                     return Ok(None);
                 };
-                let outline = self.shows.episode_outline(show_id).await?;
+                let outline = reads.outlines.get(&show_id).map_or(&[][..], Vec::as_slice);
                 let watched: Vec<EpisodeWatch> = states
                     .iter()
                     .filter_map(|state| {
@@ -450,7 +516,7 @@ impl DbPlaybackService {
                         })
                     })
                     .collect();
-                let (reason, episode_id, state) = match next_up(&outline, &watched) {
+                let (reason, episode_id, state) = match next_up(outline, &watched) {
                     NextUp::Resume { episode_id } => (
                         ContinueWatchingReason::Resume,
                         episode_id,
@@ -770,38 +836,46 @@ impl PlaybackService for DbPlaybackService {
         &self,
         user_id: Uuid,
         first: NonZeroU32,
-    ) -> Result<Vec<ContinueWatchingItem>, PlaybackReadError> {
+    ) -> Result<ContinueWatchingPage, PlaybackReadError> {
         let wanted = first.get() as usize;
-        // Twice the shelf per read: most candidates yield a row, and a
-        // caught-up show that yields none should not cost a read of its own.
-        let page = u64::from(first.get()).saturating_mul(2);
-        let mut items = Vec::with_capacity(wanted);
-        // Read on until the shelf is full or the candidates run out. A title
-        // with nothing to offer -- above all a caught-up show, which a bulk
-        // mark makes by the hundred -- must not use up a budget the titles
-        // behind it need, or marking a library watched would empty the shelf.
-        let mut offset = 0_u64;
+        let mut items = Vec::with_capacity(wanted.min(CANDIDATE_PAGE as usize));
+        // Read on until the shelf is full, the candidates run out, or the
+        // ceiling is reached. A title with nothing to offer -- above all a
+        // caught-up show, which a bulk mark makes by the hundred -- must not
+        // use up a budget the titles behind it need, or marking a library
+        // watched would empty the shelf; the ceiling is what bounds a load.
+        let mut examined = 0_u64;
+        let mut after = None;
         loop {
-            let candidates = self
+            let limit = CANDIDATE_PAGE.min(CANDIDATE_CEILING - examined);
+            // One past the page says whether a candidate lies beyond it.
+            let mut candidates = self
                 .watch_state
-                .find_continue_candidates(user_id, page, offset)
+                .find_continue_candidates(user_id, after, limit + 1)
                 .await?;
-            let read = candidates.len() as u64;
-            offset += read;
-            let exhausted = read < page;
-            for title in candidates {
-                if let Some(item) = self.continue_item(user_id, title).await? {
+            let beyond = candidates.len() as u64 > limit;
+            candidates.truncate(limit as usize);
+            examined += candidates.len() as u64;
+            after = candidates.last().copied();
+            let reads = self.candidate_reads(user_id, &candidates).await?;
+            for (index, candidate) in candidates.iter().enumerate() {
+                if let Some(item) = self.continue_item(candidate.title, &reads).await? {
                     items.push(item);
                     if items.len() == wanted {
-                        return Ok(items);
+                        return Ok(ContinueWatchingPage {
+                            items,
+                            has_next_page: index + 1 < candidates.len() || beyond,
+                        });
                     }
                 }
             }
-            if exhausted {
-                break;
+            if !beyond || examined == CANDIDATE_CEILING {
+                return Ok(ContinueWatchingPage {
+                    items,
+                    has_next_page: beyond,
+                });
             }
         }
-        Ok(items)
     }
 
     async fn get_history(

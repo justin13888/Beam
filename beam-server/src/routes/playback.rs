@@ -22,7 +22,9 @@ use crate::routes::api_error::{
 };
 use crate::routes::tags::Playback;
 use crate::services::history_cursor;
-use crate::services::playback::{PlaybackError, PlaybackReadError, TitleStateError};
+use crate::services::playback::{
+    ContinueWatchingPage, PlaybackError, PlaybackReadError, TitleStateError,
+};
 use crate::services::playback_telemetry::IngestError;
 use crate::state::AppState;
 
@@ -317,7 +319,10 @@ pub async fn get_continue_watching(
     let first = page_size(first, CONTINUE_WATCHING_DEFAULT, CONTINUE_WATCHING_MAX)
         .map_err(ContinueWatchingError::InvalidPagination)?;
 
-    let items = state
+    let ContinueWatchingPage {
+        items,
+        has_next_page,
+    } = state
         .services
         .playback
         .get_continue_watching(user_id, first)
@@ -326,7 +331,7 @@ pub async fn get_continue_watching(
     Ok(Json(ContinueWatchingConnection {
         items,
         page_info: PageInfo {
-            has_next_page: false,
+            has_next_page,
             has_previous_page: false,
             start_cursor: None,
             end_cursor: None,

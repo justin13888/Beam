@@ -169,12 +169,15 @@ pub struct HistoryItem {
 /// What `GET /v1/continue-watching` returns: at most `first` titles, most
 /// recently played first -- one row per movie, one per show.
 ///
-/// A shelf, not a paged list: `items` is the whole answer, both of
-/// `page_info`'s `has_*_page` flags are `false`, and it carries no cursors.
+/// A shelf, not a paged list: it carries no cursors, and
+/// `has_previous_page` is always `false`. A request examines at most the
+/// 1,000 most recently played candidate titles; `has_next_page` is `true`
+/// when candidates were left unexamined -- the shelf filled first, or that
+/// ceiling was reached -- so more rows may exist than `items` holds.
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct ContinueWatchingConnection {
     pub items: Vec<ContinueWatchingItem>,
-    /// Always a single, complete page.
+    /// No cursors; `has_next_page` says whether more rows may exist.
     pub page_info: PageInfo,
 }
 
