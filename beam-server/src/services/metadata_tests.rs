@@ -1388,6 +1388,135 @@ mod browse {
         );
     }
 
+    /// NFR-205: every read that hydrates a page is load-bearing. A failure
+    /// in any one of them -- the movies, the shows, either kind's genres, the
+    /// shows' counts -- fails the page as an internal error (a 500), never a
+    /// page with those titles, genres or counts silently missing.
+    #[tokio::test]
+    async fn a_failing_hydration_read_fails_the_page_rather_than_thinning_it() {
+        use beam_domain::repositories::genre::MockGenreRepository;
+        use beam_domain::repositories::show::MockShowRepository;
+
+        fn reset() -> DbErr {
+            DbErr::Custom("connection reset".to_string())
+        }
+
+        #[derive(Debug, Clone, Copy)]
+        enum Failing {
+            Movies,
+            Shows,
+            MovieGenres,
+            ShowGenres,
+            ChildCounts,
+        }
+
+        for failing in [
+            Failing::Movies,
+            Failing::Shows,
+            Failing::MovieGenres,
+            Failing::ShowGenres,
+            Failing::ChildCounts,
+        ] {
+            let library = Library::new();
+            let movie = library.movie("Arrival").await;
+            let show = library.full_show("Severance").await;
+            let page = vec![
+                CatalogPosition {
+                    kind: TitleKind::Movie,
+                    id: movie,
+                    key: SortKey::Title("arrival".to_string()),
+                },
+                CatalogPosition {
+                    kind: TitleKind::Show,
+                    id: show,
+                    key: SortKey::Title("severance".to_string()),
+                },
+            ];
+            let mut catalog = MockCatalogRepository::new();
+            catalog.expect_browse().returning(move |_| Ok(page.clone()));
+
+            // Each read before the failing one answers from the doubles the
+            // titles were written through; the failing one errs; nothing
+            // after it may be asked (mockall refuses an unexpected call).
+            let mut movies = MockMovieRepository::new();
+            let mut shows = MockShowRepository::new();
+            let mut genres = MockGenreRepository::new();
+            let (movie_store, show_store, genre_store) = (
+                library.movies.clone(),
+                library.shows.clone(),
+                library.genres.clone(),
+            );
+            match failing {
+                Failing::Movies => {
+                    movies.expect_find_by_ids().returning(|_| Err(reset()));
+                }
+                Failing::Shows
+                | Failing::MovieGenres
+                | Failing::ShowGenres
+                | Failing::ChildCounts => {
+                    let found = movie_store.find_by_ids(&[movie]).await.unwrap();
+                    movies
+                        .expect_find_by_ids()
+                        .returning(move |_| Ok(found.clone()));
+                }
+            }
+            match failing {
+                Failing::Movies => {}
+                Failing::Shows => {
+                    shows.expect_find_by_ids().returning(|_| Err(reset()));
+                }
+                Failing::MovieGenres | Failing::ShowGenres | Failing::ChildCounts => {
+                    let found = show_store.find_by_ids(&[show]).await.unwrap();
+                    shows
+                        .expect_find_by_ids()
+                        .returning(move |_| Ok(found.clone()));
+                }
+            }
+            match failing {
+                Failing::Movies | Failing::Shows => {}
+                Failing::MovieGenres => {
+                    genres
+                        .expect_movie_genre_names()
+                        .returning(|_| Err(reset()));
+                }
+                Failing::ShowGenres | Failing::ChildCounts => {
+                    let found = genre_store.movie_genre_names(&[movie]).await.unwrap();
+                    genres
+                        .expect_movie_genre_names()
+                        .returning(move |_| Ok(found.clone()));
+                }
+            }
+            match failing {
+                Failing::Movies | Failing::Shows | Failing::MovieGenres => {}
+                Failing::ShowGenres => {
+                    genres.expect_show_genre_names().returning(|_| Err(reset()));
+                }
+                Failing::ChildCounts => {
+                    let found = genre_store.show_genre_names(&[show]).await.unwrap();
+                    genres
+                        .expect_show_genre_names()
+                        .returning(move |_| Ok(found.clone()));
+                    shows.expect_child_counts().returning(|_| Err(reset()));
+                }
+            }
+
+            let result = DbMetadataService::new(MetadataRepositories {
+                movies: Arc::new(movies),
+                shows: Arc::new(shows),
+                files: Arc::new(InMemoryFileRepository::default()),
+                streams: Arc::new(InMemoryMediaStreamRepository::default()),
+                catalog: Arc::new(catalog),
+                genres: Arc::new(genres),
+            })
+            .search_media(request(None, None))
+            .await;
+            assert!(
+                matches!(result, Err(MetadataError::InternalError(_))),
+                "{failing:?} failing: {result:?}"
+            );
+        }
+    }
+
     /// A title the page named but that has gone by the time it is read is
     /// left out; the page's cursors still mark where the page ended, so the
     /// next page starts after it.

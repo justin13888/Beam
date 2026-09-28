@@ -8,6 +8,7 @@ use crate::models::genre::Genre;
 
 /// Genres, shared across movies/shows via junction tables and upserted by
 /// slug so the same genre name reuses one row across titles.
+#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait GenreRepository: Send + Sync + std::fmt::Debug {
     /// Upsert genres by slug and replace the movie's complete genre set with
