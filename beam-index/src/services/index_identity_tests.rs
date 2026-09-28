@@ -1333,10 +1333,13 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
         merged_shows,
         ambiguous_movies,
         ambiguous_shows,
+        conflicting_movies,
+        conflicting_shows,
     } = h.service.rekey_stale_titles().await.unwrap();
     assert_eq!(rekeyed, 0);
     assert!(merged_movies.is_empty() && merged_shows.is_empty());
     assert!(ambiguous_movies.is_empty() && ambiguous_shows.is_empty());
+    assert!(conflicting_movies.is_empty() && conflicting_shows.is_empty());
     h.scan().await;
     assert_eq!(h.only_show().id, folder);
     assert_eq!(h.only_movie().id, older);
@@ -1607,6 +1610,182 @@ async fn a_rekey_does_not_retitle_a_title_whose_files_spell_another_year() {
     assert_eq!(movie.identity_key.as_deref(), Some("heat|1995"));
 }
 
+/// Which pairs of provider ids name different entries: both titles are
+/// matched, and they disagree on an id both carry or share none.
+#[test]
+fn provider_ids_conflict_only_when_both_are_matched_to_different_entries() {
+    let ids = |tmdb: Option<u32>, imdb: Option<&'static str>| ProviderIds {
+        tmdb,
+        imdb,
+        tvdb: None,
+        anilist: None,
+    };
+    let only = |tvdb: Option<u32>, anilist: Option<u32>| ProviderIds {
+        tmdb: None,
+        imdb: None,
+        tvdb,
+        anilist,
+    };
+    let cases = [
+        // Neither, or only one, is matched: nothing to lose.
+        (ids(None, None), ids(None, None), false),
+        (ids(Some(1), None), ids(None, None), false),
+        (ids(None, None), ids(None, Some("tt1")), false),
+        (only(None, Some(3)), ids(None, None), false),
+        // An id agreeing and none disagreeing: the same entry.
+        (ids(Some(1), None), ids(Some(1), None), false),
+        (ids(Some(1), Some("tt1")), ids(Some(1), None), false),
+        (only(Some(7), None), only(Some(7), Some(3)), false),
+        (only(None, Some(3)), only(None, Some(3)), false),
+        // An id disagreeing, however many agree.
+        (ids(Some(1), None), ids(Some(2), None), true),
+        (ids(Some(1), Some("tt1")), ids(Some(1), Some("tt2")), true),
+        (only(Some(7), Some(3)), only(Some(7), Some(4)), true),
+        (only(Some(7), None), only(Some(8), None), true),
+        // No id both carry: nothing says they are one.
+        (ids(Some(1), None), ids(None, Some("tt1")), true),
+        (only(Some(7), None), only(None, Some(3)), true),
+    ];
+    for (a, b, conflict) in cases {
+        assert_eq!(provider_ids_conflict(a, b), conflict, "{a:?} / {b:?}");
+        assert_eq!(provider_ids_conflict(b, a), conflict, "{b:?} / {a:?}");
+    }
+}
+
+/// Two movies providers matched to different entries are two films, however
+/// the current rules read their names (C3 of the #233 review): the stale one
+/// is not merged into the one holding the key it now derives. Each keeps its
+/// key, its match and its file -- which a scan leaves where it is rather than
+/// moving to the holder -- and the administrator is told.
+#[tokio::test]
+async fn a_rekey_never_merges_movies_matched_to_different_entries() {
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let whole = "Movie (2019)/Movie (2019).mkv";
+    let part = "Movie (2019)/Movie (2019) - CD2.avi";
+    let holder = h
+        .keyed_movie("Movie", Some(2019), "movie|2019", &[whole], base)
+        .await;
+    assert!(
+        h.movie_repo
+            .rekey(holder, Some("movie|2019".to_string()), CLASSIFIER_VERSION)
+            .await
+            .unwrap()
+    );
+    h.enrich_movie(holder, 2019, 1).await;
+    let stale = h
+        .keyed_movie(
+            "Movie - CD2",
+            Some(2019),
+            "movie cd2|2019",
+            &[part],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    h.enrich_movie(stale, 2019, 2).await;
+
+    // Twice: the second process start finds the pair as the first left it.
+    for _ in 0..2 {
+        h.service
+            .scan_all_libraries(ScanTrigger::Periodic)
+            .await
+            .unwrap();
+
+        let movie = |id| h.movie_repo.movies.lock().unwrap()[&id].clone();
+        assert_eq!(
+            (movie(holder).identity_key, movie(holder).tmdb_id),
+            (Some("movie|2019".to_string()), Some(1))
+        );
+        assert_eq!(
+            (movie(stale).identity_key, movie(stale).tmdb_id),
+            (Some("movie cd2|2019".to_string()), Some(2)),
+            "the stale movie keeps its key and its match"
+        );
+        for (id, rel) in [(holder, whole), (stale, part)] {
+            let entries = h.movie_repo.find_entries_by_movie_id(id).await.unwrap();
+            assert_eq!(entries.len(), 1, "{rel}");
+            let files: Vec<(std::path::PathBuf, Option<u32>)> = h
+                .file_repo
+                .find_by_movie_entry_id(entries[0].id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|f| match f.content {
+                    Some(MediaFileContent::Movie { part_number, .. }) => (f.path, part_number),
+                    other => panic!("not a movie file: {other:?}"),
+                })
+                .collect();
+            assert_eq!(files, vec![(h.root.join(rel), None)], "{rel} stays put");
+        }
+        assert_eq!(h.file_version(part), CLASSIFIER_VERSION);
+    }
+
+    let warning = h
+        .admin_log_details("different provider entries")
+        .await
+        .expect("the administrator is told");
+    assert_eq!(
+        warning["conflicting_movies"],
+        serde_json::json!([{ "stale": stale, "holder": holder }])
+    );
+    assert!(
+        h.admin_log_details("identity keys of").await.is_none(),
+        "nothing was rekeyed or merged"
+    );
+}
+
+/// The show counterpart: two shows matched to different entries are never
+/// merged by a rekey, and a scan leaves each its episodes.
+#[tokio::test]
+async fn a_rekey_never_merges_shows_matched_to_different_entries() {
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let scene_file = "Greys.Anatomy.S01E01.720p.mkv";
+    let folder_file = "Grey's Anatomy/Season 1/Greys.Anatomy.S01E01.mkv";
+    let scene = h
+        .keyed_show("Greys Anatomy", "greys anatomy|", &[scene_file], base)
+        .await;
+    h.enrich_show(scene, 1416).await;
+    let folder = h
+        .keyed_show(
+            "Grey's Anatomy",
+            "grey s anatomy|",
+            &[folder_file],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    h.enrich_show(folder, 9999).await;
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let show = |id| h.show_repo.shows.lock().unwrap()[&id].clone();
+    assert_eq!(
+        (show(scene).identity_key, show(scene).tmdb_id),
+        (Some("greys anatomy|".to_string()), Some(1416))
+    );
+    assert_eq!(
+        (show(folder).identity_key, show(folder).tmdb_id),
+        (Some("grey s anatomy|".to_string()), Some(9999)),
+        "the stale show keeps its key and its match"
+    );
+    assert_eq!(h.season_one(scene), vec![(1, vec![scene_file.to_string()])]);
+    assert_eq!(
+        h.season_one(folder),
+        vec![(1, vec![folder_file.to_string()])]
+    );
+    let warning = h
+        .admin_log_details("different provider entries")
+        .await
+        .expect("the administrator is told");
+    assert_eq!(
+        warning["conflicting_shows"],
+        serde_json::json!([{ "stale": folder, "holder": scene }])
+    );
+}
+
 /// What an administrator set on a title a merge retires survives it (issue
 /// #185): its pin moves to the survivor, which is queued to be fetched by
 /// it, and its field locks join the survivor's. Of two titles an
@@ -1619,7 +1798,10 @@ async fn a_merge_keeps_what_an_administrator_set_on_the_retired_title() {
 
     let h = Harness::keeping_missing_files().await;
     let base = chrono::Utc::now() - chrono::Duration::days(30);
-    // Both matched, so the older survives -- and the newer carries the pin.
+    // Both matched to one entry, so they merge and the older survives --
+    // and the newer carries the pin. (Matched to different entries, they
+    // would be kept apart: see
+    // `a_rekey_never_merges_movies_matched_to_different_entries`.)
     let older = h
         .keyed_movie(
             "Ocean's Eleven",
@@ -1639,7 +1821,7 @@ async fn a_merge_keeps_what_an_administrator_set_on_the_retired_title() {
         )
         .await;
     h.enrich_movie(older, 2001, 1).await;
-    h.enrich_movie(newer, 2001, 2).await;
+    h.enrich_movie(newer, 2001, 1).await;
     assert!(
         h.movie_repo
             .set_pinned_ref(newer, &ProviderPin::Tmdb(161), PinSource::Admin)
@@ -1679,7 +1861,7 @@ async fn a_merge_keeps_what_an_administrator_set_on_the_retired_title() {
         )
         .await;
     h.enrich_show(scene, 1416).await;
-    h.enrich_show(folder, 1417).await;
+    h.enrich_show(folder, 1416).await;
     for (show, pin) in [(scene, 1416), (folder, 1417)] {
         assert!(
             h.show_repo

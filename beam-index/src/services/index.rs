@@ -32,7 +32,7 @@ use beam_domain::models::file::{
     MediaFileContent, ProbeUpdate, UpdateMediaFile, displaced_from, mtime_as_stored,
 };
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
-use beam_domain::models::show::{CreateEpisode, CreateShow, Episode};
+use beam_domain::models::show::{CreateEpisode, CreateShow, Episode, Show};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
     AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
@@ -743,6 +743,11 @@ struct IdentityRekey {
     /// Titles whose files derive more than one key, which keep their old one.
     ambiguous_movies: Vec<Uuid>,
     ambiguous_shows: Vec<Uuid>,
+    /// `(stale, holder)`: titles the current rules read as one, left apart
+    /// because providers matched them to different entries (see
+    /// [`provider_ids_conflict`]). Each keeps its key and its files.
+    conflicting_movies: Vec<(Uuid, Uuid)>,
+    conflicting_shows: Vec<(Uuid, Uuid)>,
 }
 
 /// The one key `rows` derive through `key_of`: from the present files when
@@ -777,6 +782,58 @@ fn has_provider_ids(
     anilist_id: Option<u32>,
 ) -> bool {
     tmdb_id.is_some() || imdb_id.is_some() || tvdb_id.is_some() || anilist_id.is_some()
+}
+
+/// A title's provider ids, as [`provider_ids_conflict`] compares them.
+#[derive(Debug, Clone, Copy)]
+struct ProviderIds<'a> {
+    tmdb: Option<u32>,
+    imdb: Option<&'a str>,
+    tvdb: Option<u32>,
+    anilist: Option<u32>,
+}
+
+impl<'a> ProviderIds<'a> {
+    fn of_movie(movie: &'a Movie) -> Self {
+        Self {
+            tmdb: movie.tmdb_id,
+            imdb: movie.imdb_id.as_deref(),
+            tvdb: movie.tvdb_id,
+            anilist: movie.anilist_id,
+        }
+    }
+
+    fn of_show(show: &'a Show) -> Self {
+        Self {
+            tmdb: show.tmdb_id,
+            imdb: show.imdb_id.as_deref(),
+            tvdb: show.tvdb_id,
+            anilist: show.anilist_id,
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.tmdb.is_some() || self.imdb.is_some() || self.tvdb.is_some() || self.anilist.is_some()
+    }
+}
+
+/// Whether two titles are matched to different provider entries: both carry
+/// provider ids, and they disagree on one both carry or share none to agree
+/// on. Merging such a pair would discard one match, and matches that
+/// disagree say the titles are two, whatever the naming rules read -- `The
+/// Godfather Part 2` and `The Godfather` are two films however a rule
+/// misreads their names (C3 of the #233 review).
+fn provider_ids_conflict(a: ProviderIds<'_>, b: ProviderIds<'_>) -> bool {
+    fn agree<T: PartialEq>(a: Option<T>, b: Option<T>) -> Option<bool> {
+        Some(a? == b?)
+    }
+    let verdicts = [
+        agree(a.tmdb, b.tmdb),
+        agree(a.imdb, b.imdb),
+        agree(a.tvdb, b.tvdb),
+        agree(a.anilist, b.anilist),
+    ];
+    a.any() && b.any() && (verdicts.contains(&Some(false)) || !verdicts.contains(&Some(true)))
 }
 
 /// Whether title `a` survives a merge with title `b`: the one with provider
@@ -2956,6 +3013,16 @@ impl LocalIndexService {
                     continue;
                 }
             };
+            if provider_ids_conflict(
+                ProviderIds::of_movie(&movie),
+                ProviderIds::of_movie(&holder),
+            ) {
+                warn!(stale = %movie.id, holder = %holder.id, %key, "two movies matched to different provider entries read as one; kept apart");
+                self.hold_classification(&rows).await?;
+                report.conflicting_movies.push((movie.id, holder.id));
+                settled.insert(movie.id);
+                continue;
+            }
             let (survivor, loser) = if survives(
                 (&movie.created_at, &movie.id),
                 has_provider_ids(
@@ -3113,6 +3180,13 @@ impl LocalIndexService {
                     continue;
                 }
             };
+            if provider_ids_conflict(ProviderIds::of_show(&show), ProviderIds::of_show(&holder)) {
+                warn!(stale = %show.id, holder = %holder.id, %key, "two shows matched to different provider entries read as one; kept apart");
+                self.hold_classification(&rows).await?;
+                report.conflicting_shows.push((show.id, holder.id));
+                settled.insert(show.id);
+                continue;
+            }
             let (survivor, loser) = if survives(
                 (&show.created_at, &show.id),
                 has_provider_ids(show.tmdb_id, &show.imdb_id, show.tvdb_id, show.anilist_id),
@@ -3228,6 +3302,8 @@ impl LocalIndexService {
             merged_shows,
             ambiguous_movies,
             ambiguous_shows,
+            conflicting_movies,
+            conflicting_shows,
         } = &report;
         if *rekeyed > 0 || !merged_movies.is_empty() || !merged_shows.is_empty() {
             let merged = merged_movies.len() + merged_shows.len();
@@ -3280,7 +3356,59 @@ impl LocalIndexService {
                 )
                 .await;
         }
+        let conflicting = conflicting_movies.len() + conflicting_shows.len();
+        if conflicting > 0 {
+            let pairs = |pairs: &[(Uuid, Uuid)]| {
+                pairs
+                    .iter()
+                    .map(|(stale, holder)| serde_json::json!({ "stale": stale, "holder": holder }))
+                    .collect::<Vec<_>>()
+            };
+            let _ = self
+                .admin_log
+                .log(
+                    AdminLogLevel::Warning,
+                    AdminLogCategory::LibraryScan,
+                    format!(
+                        "{conflicting} pairs of titles the current naming rules read as one are \
+                         matched to different provider entries, so they are kept apart: each \
+                         keeps its identity key and its files. Rename the files or correct a \
+                         match to settle them."
+                    ),
+                    Some(serde_json::json!({
+                        "conflicting_movies": pairs(conflicting_movies),
+                        "conflicting_shows": pairs(conflicting_shows),
+                    })),
+                )
+                .await;
+        }
         Ok(report)
+    }
+
+    /// Stamp the files `rows` names with the current rules' version, as
+    /// classified: a title kept apart from the one its files now key to
+    /// keeps them, where reclassification would move them to that title --
+    /// the merge [`Self::rekey_stale_titles`] declined.
+    async fn hold_classification(
+        &self,
+        rows: &[&(MediaFile, MediaInference)],
+    ) -> Result<(), DbErr> {
+        for (file, _) in rows {
+            if file.classifier_version >= CLASSIFIER_VERSION {
+                continue;
+            }
+            self.file_repo
+                .set_classification(
+                    file.id,
+                    FileClassification {
+                        content: file.content.clone(),
+                        status: file.status,
+                        classifier_version: CLASSIFIER_VERSION,
+                    },
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     /// Give `movie` -- as read before its key was re-derived as `key` -- the
