@@ -1,8 +1,10 @@
-//! Opening a file beneath a library root to read it (issues #186 and #189).
+//! Opening a file beneath a library root to read it (issues #186, #189 and
+//! #238).
 //!
-//! Beam reads what a library holds -- an NFO while indexing, a video or a
-//! subtitle file while serving it -- but a file there is not trusted. Between
-//! the scan that recorded it and the read, it may have been replaced by a
+//! Beam reads what a library holds -- an NFO, and a video's stat, hash and
+//! probe, while indexing; a video or a subtitle file while serving it -- but
+//! a file there is not trusted. Between the walk or scan that found it and
+//! the read, it may have been replaced by a
 //! symbolic link to a file outside the library, or a folder above it may
 //! have been (FR-212: Beam follows no symbolic link beneath a library root);
 //! or it may have become a FIFO or a device, which a read would wait on
@@ -61,6 +63,85 @@ pub fn open_regular_file(root: &Path, relative: &Path) -> io::Result<(File, Meta
         ));
     }
     Ok((file, metadata))
+}
+
+/// A file of a library, opened by [`LibraryFile::open`]: the handle, the
+/// metadata read from that handle, and the full path it was indexed under.
+///
+/// Everything the indexer learns about a media file -- its size, mtime and
+/// identity, its content hash, its streams -- is read from one of these
+/// (issue #238), so none of it can come from a file reached through a link.
+#[derive(Debug)]
+pub struct LibraryFile {
+    file: File,
+    metadata: Metadata,
+    path: PathBuf,
+}
+
+impl LibraryFile {
+    /// Open `path`, a file beneath the library `root`, with
+    /// [`open_regular_file`]: a path not beneath `root`, a link at the file or
+    /// at any folder between it and the root, and anything but a regular file
+    /// all fail -- [`is_refusal`] tells those apart from a failure that says
+    /// nothing about the file.
+    pub fn open(root: &Path, path: &Path) -> io::Result<Self> {
+        let (file, metadata) = open_regular_file(root, relative_to(root, path)?)?;
+        Ok(Self {
+            file,
+            metadata,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The full path the file was opened at: for logs, and for FFmpeg's
+    /// guess at a container from its extension. Never opened again.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The metadata of the open handle, read as it was opened.
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+
+    /// A second handle on the same open file -- not a second open of its
+    /// path. The two share a file offset, so each reader positions it first.
+    pub fn try_clone_file(&self) -> io::Result<File> {
+        self.file.try_clone()
+    }
+
+    /// The handle, its metadata and its path.
+    pub fn into_parts(self) -> (File, Metadata, PathBuf) {
+        let Self {
+            file,
+            metadata,
+            path,
+        } = self;
+        (file, metadata, path)
+    }
+}
+
+/// Whether `err`, from [`LibraryFile::open`], says that no regular file of
+/// the library is at the path: a link at the file or at a folder above it
+/// (`ELOOP`), a folder above it that is no folder any more (`ENOTDIR`), a
+/// path not beneath the root, or a file that is not a regular one. Such a
+/// path is no file of the library, as a walk would not have listed it. Any
+/// other failure -- a file deleted, a permission error, a transient I/O error
+/// -- says nothing about what is there.
+pub fn is_refusal(err: &io::Error) -> bool {
+    if err.kind() == io::ErrorKind::InvalidInput {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        let errno = err.raw_os_error();
+        errno == Some(rustix::io::Errno::LOOP.raw_os_error())
+            || errno == Some(rustix::io::Errno::NOTDIR.raw_os_error())
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 /// `relative` as plain names, one per component: refused unless every
@@ -345,6 +426,54 @@ mod tests {
                 open(&root, Path::new("A/a.mkv")).unwrap_or_else(|err| panic!("{resolver}: {err}"));
             assert_eq!(read(file), "inside", "{resolver}");
         }
+    }
+
+    /// What a failed [`LibraryFile::open`] says about the path: a link at the
+    /// file or above it, a path not beneath the root and a file that is no
+    /// regular one are refusals -- no file of the library is there -- while a
+    /// file that is simply gone says nothing more than that.
+    #[cfg(unix)]
+    #[test]
+    fn a_refusal_is_told_apart_from_a_file_that_is_gone() {
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir(outside.path().join("Season 01")).unwrap();
+        std::fs::write(outside.path().join("Season 01/E01.mkv"), b"outside").unwrap();
+        let root = TempDir::new().unwrap();
+        let root = root.path();
+        std::fs::create_dir(root.join("Show")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("Season 01"),
+            root.join("Show/Season 01"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("Season 01/E01.mkv"),
+            root.join("E01.mkv"),
+        )
+        .unwrap();
+        std::fs::write(root.join("file"), b"not a folder").unwrap();
+
+        let refused = |path: &Path| is_refusal(&LibraryFile::open(root, path).unwrap_err());
+        assert!(
+            refused(&root.join("Show/Season 01/E01.mkv")),
+            "a folder link"
+        );
+        assert!(refused(&root.join("E01.mkv")), "a file link");
+        assert!(
+            refused(&root.join("file/E01.mkv")),
+            "a file where a folder was"
+        );
+        assert!(refused(&root.join("Show")), "a folder where a file was");
+        assert!(
+            refused(&outside.path().join("Season 01/E01.mkv")),
+            "outside the root"
+        );
+        assert!(!refused(&root.join("gone.mkv")), "a file that is gone");
+
+        let opened =
+            LibraryFile::open(outside.path(), &outside.path().join("Season 01/E01.mkv")).unwrap();
+        assert_eq!(opened.path(), outside.path().join("Season 01/E01.mkv"));
+        assert_eq!(opened.metadata().len(), 7);
     }
 
     #[test]

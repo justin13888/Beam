@@ -67,9 +67,9 @@ impl Harness {
             .expect_hash_async()
             .returning(move |_| Ok(next_hash.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let mut prober = MockMediaInfoService::new();
-        prober.expect_get_video_metadata().returning(|path| {
+        prober.expect_get_video_metadata().returning(|file| {
             Ok(VideoFileMetadata {
-                file_path: path.to_path_buf(),
+                file_path: file.path().to_path_buf(),
                 metadata: HashMap::default(),
                 best_video_stream: None,
                 best_audio_stream: None,
@@ -191,7 +191,7 @@ impl Harness {
     /// matching the disk so reconciling it touches no hasher or prober.
     async fn legacy_file(&self, rel: &str, content: Option<MediaFileContent>, runtime: Duration) {
         let path = self.write(rel);
-        let (size_bytes, mtime) = read_fs_meta(&path).unwrap();
+        let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
         let hash = u64::MAX - self.file_repo.files.lock().unwrap().len() as u64;
         self.file_repo
             .create(CreateMediaFile {
@@ -523,7 +523,7 @@ async fn a_legacy_sidecar_row_is_marked_missing() {
     h.write("Movie (2019)/Movie.2019.mkv");
     // A build before issue #182 indexed sidecars as `Unknown` rows.
     let nfo = h.write("Movie (2019)/movie.nfo");
-    let (size_bytes, mtime) = read_fs_meta(&nfo).unwrap();
+    let (size_bytes, mtime) = read_fs_meta(nfo.parent().unwrap(), &nfo).unwrap();
     h.file_repo
         .create(CreateMediaFile {
             library_id: h.library.id,

@@ -1,5 +1,6 @@
 //! Example program that extracts and displays metadata from a media file.
 
+use beam_index::library_file::LibraryFile;
 use beam_index::probe::metadata::{StreamMetadata, VideoFileMetadata};
 
 use std::{env, error::Error, path::Path};
@@ -8,7 +9,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     beam_index::probe::init()?;
 
     let file_path = env::args().nth(1).expect("missing file");
-    let metadata = VideoFileMetadata::from_path(Path::new(&file_path))?;
+    // Probed as the indexer probes a library file: opened beneath its folder
+    // with no link followed, and read from that handle.
+    let file_path = Path::new(&file_path).canonicalize()?;
+    let folder = file_path.parent().ok_or("a file has a folder")?;
+    let metadata = VideoFileMetadata::from_library_file(LibraryFile::open(folder, &file_path)?)?;
 
     println!("=== FILE INFORMATION ===");
     println!(

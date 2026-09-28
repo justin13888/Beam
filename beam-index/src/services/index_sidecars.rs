@@ -192,7 +192,7 @@ impl LocalIndexService {
             }
             return Ok(());
         }
-        let Ok((size, mtime)) = read_fs_meta(path) else {
+        let Ok((size, mtime)) = read_fs_meta(&library.root_path, path) else {
             // A failed stat says nothing about the file: leave its row.
             return Ok(());
         };
@@ -502,7 +502,9 @@ impl LocalIndexService {
             .any(|video| hints::may_describe(path, video))
             || {
                 let inodes = self.inodes_of(library);
-                candidates.iter().any(|file| may_have_moved(file, inodes))
+                candidates
+                    .iter()
+                    .any(|file| may_have_moved(&library.root_path, file, inodes))
             }
         {
             return Ok(true);

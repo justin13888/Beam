@@ -12,6 +12,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::library_file::{LibraryFile, is_refusal};
 use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
 use crate::services::admin_log::AdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FilesystemProbe, StatfsFilesystemProbe};
@@ -49,11 +50,15 @@ use beam_domain::utils::media_path::{
 };
 use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path};
 
-/// Read the size and modification time of a file in a single stat call,
-/// the mtime as [`stored_mtime`] reads it.
-fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
-    let meta = std::fs::metadata(path)?;
-    Ok((meta.len(), stored_mtime(&meta)))
+/// Read the size and modification time of `path`, a file beneath the
+/// library `root`, the mtime as [`stored_mtime`] reads it. They are the
+/// handle's, opened beneath the root with no link followed
+/// ([`LibraryFile::open`], issue #238), so a file reached through a link
+/// swapped in since the walk fails rather than lending its own.
+fn read_fs_meta(root: &Path, path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
+    let opened = LibraryFile::open(root, path)?;
+    let meta = opened.metadata();
+    Ok((meta.len(), stored_mtime(meta)))
 }
 
 /// Whether a library's filesystem keeps a file's inode number from one scan
@@ -96,6 +101,17 @@ struct FileStat {
 }
 
 impl FileStat {
+    /// What `meta`, a regular file's, says, on a filesystem whose inodes
+    /// are `inodes`.
+    fn of(meta: &std::fs::Metadata, inodes: Inodes) -> Self {
+        FileStat {
+            size: meta.len(),
+            mtime: stored_mtime(meta),
+            identity: stored_identity(meta),
+            inodes,
+        }
+    }
+
     /// Whether `row` records the file this stat describes, as far as a stat
     /// can tell -- so the file need not be hashed. See [`Self::agrees_with`].
     fn is_recorded_by(&self, row: &MediaFile) -> bool {
@@ -132,16 +148,14 @@ impl FileStat {
     }
 }
 
-/// Stat `path` for what a row records of it (see [`FileStat`]), on a
-/// filesystem whose inodes are `inodes`.
-fn read_stat(path: &Path, inodes: Inodes) -> std::io::Result<FileStat> {
-    let meta = std::fs::metadata(path)?;
-    Ok(FileStat {
-        size: meta.len(),
-        mtime: stored_mtime(&meta),
-        identity: stored_identity(&meta),
-        inodes,
-    })
+/// Stat `path`, a file beneath the library `root`, for what a row records
+/// of it (see [`FileStat`]), on a filesystem whose inodes are `inodes`. The
+/// stat is the `fstat` of a handle opened with [`LibraryFile::open`]: a link
+/// at the file or at a folder above it fails ([`is_refusal`]) rather than
+/// lending the stat of the file it leads to (issue #238).
+fn read_stat(root: &Path, path: &Path, inodes: Inodes) -> std::io::Result<FileStat> {
+    let opened = LibraryFile::open(root, path)?;
+    Ok(FileStat::of(opened.metadata(), inodes))
 }
 
 /// The [`FileIdentity`] `meta` records, its ctime at the precision a row
@@ -337,6 +351,41 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
     }
 }
 
+/// The walked `files` of the library rooted at `root`, each stat'ed as a row
+/// records it ([`read_stat`]), on a filesystem whose inodes are `inodes`.
+///
+/// A file that no longer opens as a regular file beneath the root -- it, or
+/// a folder above it, has become a link since the walk listed it -- is
+/// dropped (issue #238): it is no file of the library, exactly as a link the
+/// walk saw is not, so its row is treated as missing. A file whose stat fails
+/// for any other reason is kept, unstat'ed: that failure says nothing about
+/// what is there.
+fn stat_walked(
+    root: &Path,
+    files: Vec<PathBuf>,
+    inodes: Inodes,
+) -> (Vec<PathBuf>, HashMap<PathBuf, FileStat>) {
+    let mut kept = Vec::with_capacity(files.len());
+    let mut stats = HashMap::new();
+    for path in files {
+        match read_stat(root, &path, inodes) {
+            Ok(stat) => {
+                stats.insert(path.clone(), stat);
+                kept.push(path);
+            }
+            Err(err) if is_refusal(&err) => {
+                info!(
+                    path = %path.display(),
+                    error = %err,
+                    "a walked file is no longer a regular file beneath the root reached without a link; treating it as missing"
+                );
+            }
+            Err(_) => kept.push(path),
+        }
+    }
+    (kept, stats)
+}
+
 /// Whether a library root should be read as unmounted rather than emptied:
 /// it holds no video file (`video_files_seen`, as a walk counts them) while
 /// video files of it are indexed. An unmounted volume usually leaves its
@@ -517,19 +566,15 @@ fn choose_relink_candidate<'a>(
 }
 
 /// Whether `row`'s file may no longer be at its path: it is marked missing,
-/// or what is there now -- by a stat that does not follow links -- is not
-/// what the row recorded. A path that cannot be stat'ed says nothing, so it
-/// may have moved too. The watcher leaves a file whose content matches such
-/// a row to the next scan rather than guess (issue #180). `inodes` is what
-/// the row's library's filesystem keeps.
-fn may_have_moved(row: &MediaFile, inodes: Inodes) -> bool {
+/// or what is there now -- by a stat that follows no link beneath the
+/// library `root` ([`read_stat`]) -- is not what the row recorded. A path
+/// that cannot be stat'ed says nothing, so it may have moved too. The
+/// watcher leaves a file whose content matches such a row to the next scan
+/// rather than guess (issue #180). `inodes` is what the row's library's
+/// filesystem keeps.
+fn may_have_moved(root: &Path, row: &MediaFile, inodes: Inodes) -> bool {
     row.missing_since.is_some()
-        || match std::fs::symlink_metadata(&row.path) {
-            Ok(meta) if meta.is_file() => {
-                !read_stat(&row.path, inodes).is_ok_and(|stat| stat.is_recorded_by(row))
-            }
-            _ => true,
-        }
+        || !read_stat(root, &row.path, inodes).is_ok_and(|stat| stat.is_recorded_by(row))
 }
 
 /// Whether the content `row` records has left its path, as a scan's walk
@@ -1582,6 +1627,12 @@ impl LocalIndexService {
     /// `known` is what a scan found at the path before, reused when the file
     /// is still as it was found ([`FileStat::is_same_as`]) rather than hashed
     /// again. `inodes` is what the library's filesystem keeps.
+    ///
+    /// The file is opened once, beneath the library root with no link
+    /// followed ([`LibraryFile::open`]), and its stat, hash and probe are all
+    /// read from that handle (issue #238): a file or a folder above it
+    /// swapped for a link since the walk fails to open, and nothing is
+    /// recorded for it.
     async fn process_new_file(
         &self,
         path: &Path,
@@ -1592,10 +1643,12 @@ impl LocalIndexService {
     ) -> Result<FileOutcome, IndexError> {
         info!("Processing new file: {}", path.display());
 
-        let stat = read_stat(path, inodes).map_err(|e| {
+        let root = library.root_path.as_path();
+        let opened = LibraryFile::open(root, path).map_err(|e| {
             warn!(path = %path.display(), error = %e, "Failed to read file metadata");
             IndexError::PathNotFound(format!("Could not read file metadata: {e}"))
         })?;
+        let stat = FileStat::of(opened.metadata(), inodes);
         let FileStat {
             size,
             mtime,
@@ -1612,7 +1665,7 @@ impl LocalIndexService {
 
         let hash = match known {
             Some(found) if stat.is_same_as(&found.stat()) => Some(found.hash),
-            _ => self.hash_settled(path, stat).await.map_err(|e| {
+            _ => self.hash_settled(root, &opened, stat).await.map_err(|e| {
                 error!(path = %path.display(), error = %e, "Failed to hash file");
                 IndexError::PathNotFound(format!("Hash failed: {}", e))
             })?,
@@ -1648,7 +1701,11 @@ impl LocalIndexService {
             // A row whose path now holds something else may be this file,
             // moved in a swap or a rotation whose other halves have not
             // reached the watcher: the scan sees them all.
-            if hash != 0 && candidates.iter().any(|row| may_have_moved(row, inodes)) {
+            if hash != 0
+                && candidates
+                    .iter()
+                    .any(|row| may_have_moved(root, row, inodes))
+            {
                 info!(
                     path = %path.display(),
                     "a new file matches a file of the library that may have moved; leaving it to the next scan"
@@ -1657,7 +1714,7 @@ impl LocalIndexService {
             }
         }
 
-        let metadata = match self.media_info_service.get_video_metadata(path).await {
+        let metadata = match self.media_info_service.get_video_metadata(opened).await {
             Ok(m) => m,
             Err(e) => {
                 warn!("Failed to extract metadata for {}: {}", path.display(), e);
@@ -1722,17 +1779,26 @@ impl LocalIndexService {
         Ok(FileOutcome::Added)
     }
 
-    /// Hash `path`, which a stat just before found as `stat`.
+    /// Hash `opened`, a file beneath the library `root` whose handle a stat
+    /// just before found as `stat`, from that handle.
     ///
-    /// With a settle window, the file is stat'ed again afterwards: `None`
-    /// when it changed while it was read, since the hash then describes no
-    /// version of the file that ever existed whole.
-    async fn hash_settled(&self, path: &Path, stat: FileStat) -> std::io::Result<Option<u64>> {
-        let hash = self.hash_service.hash_async(path.to_path_buf()).await?;
+    /// With a settle window, its path is stat'ed again afterwards: `None`
+    /// when the file changed while it was read, since the hash then
+    /// describes no version of the file that ever existed whole.
+    async fn hash_settled(
+        &self,
+        root: &Path,
+        opened: &LibraryFile,
+        stat: FileStat,
+    ) -> std::io::Result<Option<u64>> {
+        let hash = self
+            .hash_service
+            .hash_async(opened.try_clone_file()?)
+            .await?;
         if self.settle_window.is_zero() {
             return Ok(Some(hash));
         }
-        let after = read_stat(path, stat.inodes)?;
+        let after = read_stat(root, opened.path(), stat.inodes)?;
         if !after.is_same_as(&stat) {
             return Ok(None);
         }
@@ -1904,14 +1970,18 @@ impl LocalIndexService {
     /// already record: a path with no row, or one its row does not record
     /// as it is ([`FileStat::is_recorded_by`]). `None` for a file that is as
     /// recorded, still being written, or cannot be read -- whoever reconciles
-    /// it next finds out which, and reports a failure.
+    /// it next finds out which, and reports a failure. The stat and the hash
+    /// are read from one handle on the file, opened beneath the library
+    /// `root` with no link followed.
     async fn fingerprint(
         &self,
+        root: &Path,
         path: &Path,
         recorded: Option<&MediaFile>,
         inodes: Inodes,
     ) -> Option<Fingerprint> {
-        let stat = read_stat(path, inodes).ok()?;
+        let opened = LibraryFile::open(root, path).ok()?;
+        let stat = FileStat::of(opened.metadata(), inodes);
         if recorded.is_some_and(|row| stat.is_recorded_by(row)) {
             return None;
         }
@@ -1920,7 +1990,7 @@ impl LocalIndexService {
         {
             return None;
         }
-        let hash = self.hash_settled(path, stat).await.ok()??;
+        let hash = self.hash_settled(root, &opened, stat).await.ok()??;
         let FileStat {
             size,
             mtime,
@@ -1959,6 +2029,10 @@ impl LocalIndexService {
     /// what a scan found at the path before, reused when the file is still
     /// as it was found ([`FileStat::is_same_as`]) rather than hashed again.
     /// `inodes` is what the library's filesystem keeps.
+    ///
+    /// Its stat, hash and probe are read from one handle, opened beneath the
+    /// library root with no link followed (issue #238); a file that fails to
+    /// open is left as it is, like one that fails to stat.
     async fn reconcile_existing_file(
         &self,
         existing: &MediaFile,
@@ -1972,14 +2046,16 @@ impl LocalIndexService {
             self.reclassify_existing(existing, path, library).await?;
         }
 
-        let stat = match read_stat(path, inodes) {
-            Ok(stat) => stat,
+        let root = library.root_path.as_path();
+        let opened = match LibraryFile::open(root, path) {
+            Ok(opened) => opened,
             Err(e) => {
                 // A transient stat failure must not delete or corrupt the row.
                 warn!("Failed to stat {}: {}", path.display(), e);
                 return Ok(FileOutcome::Unchanged);
             }
         };
+        let stat = FileStat::of(opened.metadata(), inodes);
         let FileStat {
             size,
             mtime,
@@ -2032,7 +2108,7 @@ impl LocalIndexService {
             hash
         } else if moved || existing.hash == 0 {
             // Rehash to confirm the content actually changed.
-            match self.hash_settled(path, stat).await {
+            match self.hash_settled(root, &opened, stat).await {
                 Ok(Some(h)) => h,
                 Ok(None) => {
                     debug!(path = %path.display(), "a file changed while it was hashed; deferring it");
@@ -2069,7 +2145,7 @@ impl LocalIndexService {
         }
 
         let changed = self
-            .reprobe_file(existing, path, library, stat, new_hash)
+            .reprobe_file(existing, opened, library, stat, new_hash)
             .await?;
         if changed {
             record_file_outcome("changed");
@@ -2098,14 +2174,19 @@ impl LocalIndexService {
     /// failed probe of a file whose content did not change writes only the
     /// size, modification time and identity it was found with, so the next
     /// visit -- which tries the probe again -- does not rehash it.
+    ///
+    /// The probe reads `opened`, the handle the file was stat'ed and hashed
+    /// from (issue #238).
     async fn reprobe_file(
         &self,
         existing: &MediaFile,
-        path: &Path,
+        opened: LibraryFile,
         library: &Library,
         stat: FileStat,
         new_hash: u64,
     ) -> Result<bool, IndexError> {
+        let path = opened.path().to_path_buf();
+        let path = path.as_path();
         let FileStat {
             size,
             mtime,
@@ -2117,7 +2198,7 @@ impl LocalIndexService {
             info!("File content changed, reconciling: {}", path.display());
         }
 
-        match self.media_info_service.get_video_metadata(path).await {
+        match self.media_info_service.get_video_metadata(opened).await {
             Ok(metadata) => {
                 // Replace the file's stream set with the freshly extracted one.
                 self.stream_repo.delete_by_file_id(existing.id).await?;
@@ -3464,6 +3545,14 @@ impl LocalIndexService {
                 return Ok(ReconcileOutcome::Done);
             }
         };
+        // Nor is a file reached through a link: the stat above follows a
+        // folder above the path that has become one, but the opener every
+        // read of a library file goes through refuses it (issue #238), so
+        // such a path reconciles as gone too.
+        let meta = meta.filter(|meta| {
+            !(meta.is_file()
+                && LibraryFile::open(&library.root_path, &path).is_err_and(|err| is_refusal(&err)))
+        });
 
         // A subtitle or an NFO beside the media (issue #184). Handled here,
         // before the file-row bookkeeping below -- which still marks missing a
@@ -3546,7 +3635,9 @@ impl LocalIndexService {
                 // this row's path. Which row is which needs every path at
                 // once, so the next scan decides (issue #180); the row is not
                 // even restored meanwhile.
-                let found = self.fingerprint(path, Some(&existing), inodes).await;
+                let found = self
+                    .fingerprint(&library.root_path, path, Some(&existing), inodes)
+                    .await;
                 if let Some(found) = &found
                     && found.hash != existing.hash
                     && found.hash != 0
@@ -3558,7 +3649,7 @@ impl LocalIndexService {
                         .any(|row| {
                             row.id != existing.id
                                 && row.size_bytes == found.size
-                                && may_have_moved(row, inodes)
+                                && may_have_moved(&library.root_path, row, inodes)
                         })
                 {
                     info!(
@@ -4072,22 +4163,23 @@ impl LocalIndexService {
     /// left its path: a row the walk did not see, or one whose path
     /// changed. With neither, nothing moved, and
     /// each file is hashed, if at all, when it is reconciled; with both, the
-    /// hash taken here is the one reconciling it reuses. `inodes` is what the
-    /// library's filesystem keeps.
+    /// hash taken here is the one reconciling it reuses. `walked_stats` is
+    /// each walked file's stat as [`stat_walked`] read it; a file with none is
+    /// not hashed here, and each is hashed on the filesystem its stat was.
     async fn fingerprint_walk(
         &self,
+        root: &Path,
         walked_files: &[PathBuf],
+        walked_stats: &HashMap<PathBuf, FileStat>,
         rows: &HashMap<PathBuf, MediaFile>,
-        walked: &std::collections::HashSet<&Path>,
         is_shielded: &impl Fn(&Path) -> bool,
         ticket: &ScanTicket,
-        inodes: Inodes,
     ) -> Result<HashMap<PathBuf, Fingerprint>, IndexError> {
         let mut changed = 0usize;
-        let mut to_hash: Vec<&PathBuf> = Vec::new();
+        let mut to_hash: Vec<(&PathBuf, Inodes)> = Vec::new();
         for path in walked_files {
             let row = rows.get(path);
-            let Ok(stat) = read_stat(path, inodes) else {
+            let Some(stat) = walked_stats.get(path) else {
                 continue;
             };
             match row {
@@ -4095,8 +4187,10 @@ impl LocalIndexService {
                 Some(_) => changed += 1,
                 None => {}
             }
-            to_hash.push(path);
+            to_hash.push((path, stat.inodes));
         }
+        let walked: std::collections::HashSet<&Path> =
+            walked_files.iter().map(PathBuf::as_path).collect();
         let gone = rows.values().any(|row| {
             row.hash != 0 && !walked.contains(row.path.as_path()) && !is_shielded(&row.path)
         });
@@ -4104,12 +4198,12 @@ impl LocalIndexService {
         if !(gone || changed > 0) {
             return Ok(fingerprints);
         }
-        for path in to_hash {
+        for (path, inodes) in to_hash {
             if ticket.is_cancelled() {
                 info!("Scan cancelled");
                 return Err(IndexError::Cancelled);
             }
-            if let Some(found) = self.fingerprint(path, rows.get(path), inodes).await {
+            if let Some(found) = self.fingerprint(root, path, rows.get(path), inodes).await {
                 fingerprints.insert(path.clone(), found);
             }
         }
@@ -4193,6 +4287,8 @@ impl LocalIndexService {
             subtitles: walked_subtitles,
             nfos: walked_nfos,
         } = walk_library_root(&library.root_path, &self.path_policy);
+        let inodes = self.inodes_of(library);
+        let (walked_files, walked_stats) = stat_walked(&library.root_path, walked_files, inodes);
         let walked_media = walked_files.clone();
 
         // An unmounted volume usually leaves its mount point behind as an empty
@@ -4273,15 +4369,14 @@ impl LocalIndexService {
                     .iter()
                     .any(|failed| path.starts_with(failed))
         };
-        let inodes = self.inodes_of(library);
         let fingerprints = self
             .fingerprint_walk(
+                &library.root_path,
                 &walked_files,
+                &walked_stats,
                 &existing_map,
-                &walked,
                 &is_shielded,
                 ticket,
-                inodes,
             )
             .await?;
         let matches = content_matches(&existing_map, &walked, &fingerprints, is_shielded);
@@ -4610,6 +4705,10 @@ mod relink_tests;
 #[cfg(test)]
 #[path = "index_scan_tests.rs"]
 mod scan_tests;
+
+#[cfg(test)]
+#[path = "index_no_follow_tests.rs"]
+mod no_follow_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6598,7 +6697,7 @@ mod tests {
     /// touches neither the hasher nor the prober: hashed, and probed (a row
     /// whose probe never succeeded is probed again on every visit).
     fn indexed_file_matching_disk(library_id: Uuid, path: &Path) -> MediaFile {
-        let (size_bytes, mtime) = read_fs_meta(path).unwrap();
+        let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), path).unwrap();
         MediaFile {
             id: Uuid::new_v4(),
             library_id,
@@ -7139,7 +7238,7 @@ mod tests {
     async fn test_scan_library_real_prober_marks_corrupt_file_unknown() {
         // Same Unknown-on-unprobeable behaviour as above, but exercised through
         // the REAL FFmpeg prober (LocalMediaInfoService) rather than a stub:
-        // a corrupt .mp4 makes `from_path` return Err, and the scan must
+        // a corrupt .mp4 makes `from_library_file` return Err, and the scan must
         // absorb it (file inserted as Unknown, scan still Ok) rather than abort.
         let _ = crate::probe::init();
 
@@ -7440,7 +7539,7 @@ mod tests {
         let file_path = dir.path().join("movie.mp4");
         std::fs::write(&file_path, b"unchanged content").unwrap();
         // As a row records it: at the precision a repository keeps.
-        let (size_bytes, mtime) = read_fs_meta(&file_path).unwrap();
+        let (size_bytes, mtime) = read_fs_meta(file_path.parent().unwrap(), &file_path).unwrap();
 
         let existing = MediaFile {
             id: Uuid::new_v4(),

@@ -211,7 +211,8 @@ impl Harness {
         let probe_fails = Arc::new(AtomicBool::new(false));
         let prober_fails = probe_fails.clone();
         let mut prober = MockMediaInfoService::new();
-        prober.expect_get_video_metadata().returning(move |path| {
+        prober.expect_get_video_metadata().returning(move |file| {
+            let path = file.path();
             if prober_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(MetadataError::UnknownError("not probeable yet".to_string()));
             }

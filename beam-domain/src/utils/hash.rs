@@ -1,8 +1,6 @@
 use std::{
-    fs::File,
     io::{self, BufReader, Read},
     ops::Deref,
-    path::Path,
 };
 
 use serde::{Deserialize, Serialize};
@@ -32,12 +30,17 @@ impl std::fmt::Debug for XXH3Hash {
     }
 }
 
-/// Computes the hash of a file using XXH3 (64-bit).
-pub fn compute_hash(path: &Path) -> io::Result<u64> {
+/// Computes the XXH3 (64-bit) hash of everything `content` yields, from
+/// where it stands to its end.
+///
+/// It takes a reader, not a path: which file is read -- and how it was
+/// opened -- is the caller's. The indexer hands it a handle opened beneath a
+/// library root with no link followed (issue #238), which this crate, knowing
+/// nothing of libraries, could not open itself.
+pub fn compute_hash(content: impl Read) -> io::Result<u64> {
     const BUFFER_SIZE: usize = 1024 * 1024; // 1 MB buffer
 
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
+    let mut reader = BufReader::with_capacity(BUFFER_SIZE, content);
     let mut hasher = Xxh3::new();
     let mut buffer = vec![0; BUFFER_SIZE];
 
@@ -57,7 +60,14 @@ pub fn compute_hash(path: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
+    use std::path::Path;
+
+    /// `path`'s content, hashed.
+    fn hash_of(path: &Path) -> io::Result<u64> {
+        compute_hash(File::open(path)?)
+    }
 
     /// `compute_hash` reads a real file, and a `TempDir` is a real filesystem
     /// that needs no infrastructure -- so the subject here is the function
@@ -86,14 +96,14 @@ mod tests {
     #[test]
     fn hashes_an_empty_file() {
         let (_dir, path) = file_containing(b"");
-        assert_eq!(compute_hash(&path).unwrap(), expected(b""));
+        assert_eq!(hash_of(&path).unwrap(), expected(b""));
     }
 
     #[test]
     fn hashes_a_small_file() {
         let bytes = b"the quick brown fox jumps over the lazy dog";
         let (_dir, path) = file_containing(bytes);
-        assert_eq!(compute_hash(&path).unwrap(), expected(bytes));
+        assert_eq!(hash_of(&path).unwrap(), expected(bytes));
     }
 
     #[test]
@@ -105,7 +115,7 @@ mod tests {
             .map(|i| (i % 251) as u8)
             .collect();
         let (_dir, path) = file_containing(&bytes);
-        assert_eq!(compute_hash(&path).unwrap(), expected(&bytes));
+        assert_eq!(hash_of(&path).unwrap(), expected(&bytes));
     }
 
     #[test]
@@ -114,8 +124,8 @@ mod tests {
         let (_a, path_a) = file_containing(bytes);
         let (_b, path_b) = file_containing(bytes);
         assert_eq!(
-            compute_hash(&path_a).unwrap(),
-            compute_hash(&path_b).unwrap(),
+            hash_of(&path_a).unwrap(),
+            hash_of(&path_b).unwrap(),
             "the hash identifies content, not location -- deduplication depends on it"
         );
     }
@@ -126,26 +136,20 @@ mod tests {
         let (_a, path_a) = file_containing(&bytes);
         bytes[2048] = 1;
         let (_b, path_b) = file_containing(&bytes);
-        assert_ne!(
-            compute_hash(&path_a).unwrap(),
-            compute_hash(&path_b).unwrap()
-        );
+        assert_ne!(hash_of(&path_a).unwrap(), hash_of(&path_b).unwrap());
     }
 
     #[test]
-    fn a_missing_file_is_an_error_not_a_hash_of_nothing() {
+    fn a_failed_read_is_an_error_not_a_hash_of_what_was_read() {
         let dir = tempfile::tempdir().unwrap();
-        let err = compute_hash(&dir.path().join("absent.bin"))
-            .expect_err("hashing a file that does not exist must fail");
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn a_directory_is_an_error_not_a_hash_of_nothing() {
-        let dir = tempfile::tempdir().unwrap();
+        // A directory opens on Unix, but reading it fails: the failure is
+        // returned, not a digest of the bytes read before it.
+        let Ok(handle) = File::open(dir.path()) else {
+            return;
+        };
         assert!(
-            compute_hash(dir.path()).is_err(),
-            "a directory is not hashable content"
+            compute_hash(handle).is_err(),
+            "a read that fails is not hashable content"
         );
     }
 
