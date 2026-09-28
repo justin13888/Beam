@@ -522,10 +522,11 @@ impl EnrichmentControl {
             return self.detail(id).await;
         }
         // Queued before the pin goes, so a failure from here on leaves the
-        // title queued under the administrator's pin -- fetched by it again,
-        // and cleared by a retry -- never unpinned and stale. Queued again
-        // after, for a pass that ran in between fetched it by the pin just
-        // cleared.
+        // title queued: still under the administrator's pin, for a retry to
+        // clear, or -- if the release got as far as clearing it -- with its
+        // NFOs forgotten as applied, for the next scan to pin it by. Queued
+        // again after, for a pass that ran in between fetched it by the pin
+        // just cleared.
         self.queue_rematch(target).await?;
         self.deps.nfo_pins.release_admin_pin(target).await?;
         self.queue_rematch(target).await?;
