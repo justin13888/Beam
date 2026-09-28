@@ -301,6 +301,7 @@ impl From<beam_domain::models::MediaFile> for LocatedFile {
             hash: _,
             size_bytes: _,
             mtime: _,
+            identity: _,
             mime_type,
             duration: _,
             container_format: _,

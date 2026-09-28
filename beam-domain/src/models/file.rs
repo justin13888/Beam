@@ -13,7 +13,8 @@ use crate::utils::classification::ContainerTags;
 /// since 2000-01-01 -- truncating toward that epoch, so an instant before it
 /// rounds up. A filesystem reports nanoseconds, so an mtime read from disk
 /// almost never equals the one its row holds: every comparison of the two
-/// first brings the file's to this precision.
+/// first brings the file's to this precision. The same holds for a
+/// [`FileIdentity`]'s `ctime`, kept in a `TIMESTAMPTZ` too.
 pub fn mtime_as_stored(mtime: DateTime<Utc>) -> DateTime<Utc> {
     let epoch = DateTime::from_timestamp(946_684_800, 0).expect("2000-01-01 is a valid instant");
     // chrono spans about 262,000 years either side of year 0, so no instant
@@ -23,6 +24,36 @@ pub fn mtime_as_stored(mtime: DateTime<Utc>) -> DateTime<Utc> {
         .num_microseconds()
         .expect("chrono's range fits in i64 microseconds from 2000-01-01");
     epoch + chrono::TimeDelta::microseconds(micros)
+}
+
+/// What a rename or a replace always changes about the file at a path, as
+/// the indexer recorded it (issue #228): its inode and its change time.
+///
+/// A size and an mtime can both survive a swap -- two files of one size
+/// written within one timestamp tick, or copied by a tool that keeps mtimes
+/// (`cp -p`, `rsync -a`). An inode cannot: a file renamed over a path brings
+/// its own. Nor can a ctime: the kernel sets it on every rename and write,
+/// and no copy tool can set it back. So a file whose identity is not its
+/// row's may hold other content, and is hashed.
+///
+/// Read only on Unix, Beam's first-class platforms (Linux and macOS);
+/// elsewhere a file has none and only its size and mtime are compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub inode: u64,
+    /// Held at the precision [`mtime_as_stored`] describes.
+    pub ctime: DateTime<Utc>,
+}
+
+impl FileIdentity {
+    /// This identity as a [`crate::repositories::FileRepository`] reads it
+    /// back: its `ctime` brought to [`mtime_as_stored`]'s precision.
+    pub fn as_stored(self) -> Self {
+        Self {
+            inode: self.inode,
+            ctime: mtime_as_stored(self.ctime),
+        }
+    }
 }
 
 /// Represents a media file in the library
@@ -36,6 +67,10 @@ pub struct MediaFile {
     /// Filesystem modification time; paired with `size_bytes` for change
     /// detection. Held at the precision [`mtime_as_stored`] describes.
     pub mtime: Option<DateTime<Utc>>,
+    /// The file's [`FileIdentity`] when it was last recorded; `None` on a
+    /// platform without one, or for a row recorded before identities were
+    /// (the next scan that finds the file unchanged records it).
+    pub identity: Option<FileIdentity>,
     pub mime_type: Option<String>,
     pub duration: Option<Duration>,
     pub container_format: Option<String>,
@@ -112,6 +147,8 @@ pub struct CreateMediaFile {
     pub hash: u64,
     pub size_bytes: u64,
     pub mtime: Option<DateTime<Utc>>,
+    /// See [`MediaFile::identity`].
+    pub identity: Option<FileIdentity>,
     pub mime_type: Option<String>,
     pub duration: Option<Duration>,
     pub container_format: Option<String>,
@@ -141,19 +178,23 @@ pub struct UpdateMediaFile {
     pub size_bytes: Option<u64>,
     /// `Some` sets the stored mtime; `None` leaves it unchanged.
     pub mtime: Option<DateTime<Utc>>,
+    /// `Some` sets the stored [`FileIdentity`]; `None` leaves it unchanged.
+    pub identity: Option<FileIdentity>,
     pub probe: ProbeUpdate,
     pub content: Option<MediaFileContent>,
     pub status: Option<FileStatus>,
 }
 
 /// A row pointed at the path its file now has -- moved, renamed, or swapped
-/// with another (issue #180) -- found there at `size_bytes` and `mtime`.
+/// with another (issue #180) -- found there at `size_bytes`, `mtime` and
+/// `identity`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRelink {
     pub id: Uuid,
     pub path: PathBuf,
     pub size_bytes: u64,
     pub mtime: Option<DateTime<Utc>>,
+    pub identity: Option<FileIdentity>,
 }
 
 /// Where a *displaced* row is kept: one whose path a relink hands to another
@@ -260,6 +301,16 @@ impl From<beam_entity::files::Model> for MediaFile {
             hash: model.hash_xxh3 as u64,
             size_bytes: model.file_size as u64,
             mtime: model.mtime.map(|d| d.with_timezone(&Utc)),
+            // Written together, so a row has both or neither (a CHECK
+            // enforces it). The inode is a `BIGINT`: its bits, as
+            // `hash_xxh3`'s are.
+            identity: model
+                .inode
+                .zip(model.ctime)
+                .map(|(inode, ctime)| FileIdentity {
+                    inode: inode as u64,
+                    ctime: ctime.with_timezone(&Utc),
+                }),
             mime_type: model.mime_type,
             duration: model.duration_secs.map(Duration::from_secs_f64),
             container_format: model.container_format,

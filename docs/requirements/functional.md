@@ -294,7 +294,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   row has changed content, a new path gets a new row, and a file whose original is still at its path
   is a copy with a row of its own. A full scan MUST decide every path it walked at once,
   deterministically -- every path gets at most one row and every row at most one path -- and MUST
-  apply the relinks atomically, one row per path holding when they are done. Among several rows for
+  apply the relinks atomically, one row per path holding when they are done. A scan MUST NOT take
+  a path's size and modification time alone as proof that it still holds its row's content: on
+  Linux and macOS it MUST also record each file's inode and change time, and hash a path whose
+  inode or change time is not its row's, so a swap or a rotation of files of one size and one
+  modification time (written within one timestamp tick, or copied by a tool that keeps mtimes) is
+  relinked like any other. A row with none recorded MUST be given its file's by the next visit that
+  finds it unchanged, without hashing it. Among several rows for
   one path, and several paths for one row, the pairing with the same file name wins, then the same
   directory, then the row played most recently by anyone (a row never played last), then the lowest
   row id, then the lowest path. One pairing is declined, a replace-by-rename: when the row a path

@@ -140,6 +140,7 @@ fn make_media_file(content: MediaFileContent) -> MediaFile {
         hash: 0,
         size_bytes: 1024,
         mtime: None,
+        identity: None,
         mime_type: Some("video/mp4".to_owned()),
         duration: Some(std::time::Duration::from_secs(7200)),
         container_format: Some("mp4".to_owned()),

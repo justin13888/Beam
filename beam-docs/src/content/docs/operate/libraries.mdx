@@ -26,7 +26,9 @@ Each library shows its scan state: **Scanning…** while one runs, otherwise how
 one finished, or **Not scanned**. Progress streams live.
 
 Scans are incremental — a file whose size and modification time are unchanged is skipped, so a
-rescan of a large library is far cheaper than the first one. A filesystem watcher also picks up
+rescan of a large library is far cheaper than the first one. On Linux and macOS a file must also
+still be the same file on disk (its inode and change time), so two files of one size swapped
+between names are still told apart even when a copy kept their modification times. A filesystem watcher also picks up
 changes as they happen — or within a poll interval, for a library on a network share (see
 [below](#network-shares-and-the-watch-limit)) — so routine additions usually need no manual scan.
 

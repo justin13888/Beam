@@ -132,6 +132,7 @@ async fn seed_hevc_file(fixture: &Fixture) -> Uuid {
             hash: 1,
             size_bytes: 20_000_000_000,
             mtime: None,
+            identity: None,
             mime_type: Some("video/x-matroska".to_string()),
             duration: Some(Duration::from_secs(7_200)),
             container_format: Some("matroska,webm".to_string()),

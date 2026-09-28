@@ -119,6 +119,7 @@ impl LibraryFile {
             hash,
             size_bytes,
             mtime: _,
+            identity: _,
             mime_type,
             duration,
             container_format,

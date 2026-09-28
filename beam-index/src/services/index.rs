@@ -26,8 +26,8 @@ use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
-    CreateMediaFile, FileClassification, FileRelink, FileStatus, MediaFile, MediaFileContent,
-    ProbeUpdate, UpdateMediaFile, displaced_from, mtime_as_stored,
+    CreateMediaFile, FileClassification, FileIdentity, FileRelink, FileStatus, MediaFile,
+    MediaFileContent, ProbeUpdate, UpdateMediaFile, displaced_from, mtime_as_stored,
 };
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode};
@@ -49,8 +49,68 @@ use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path
 /// Read the size and modification time of a file in a single stat call,
 /// the mtime as [`stored_mtime`] reads it.
 fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
+    let FileStat { size, mtime, .. } = read_stat(path)?;
+    Ok((size, mtime))
+}
+
+/// What one stat says about a media file that a row records: its size,
+/// modification time and [`FileIdentity`], each at the precision a row
+/// keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStat {
+    size: u64,
+    mtime: Option<DateTime<Utc>>,
+    identity: Option<FileIdentity>,
+}
+
+impl FileStat {
+    /// Whether `row` records the file this stat describes, as far as a stat
+    /// can tell -- so the file need not be hashed. Its size and mtime must be
+    /// the row's, and so must its identity when both sides have one (issue
+    /// #228): a swap or a rotation of files of one size and mtime changes
+    /// every path's inode and ctime. A row recorded before identities were,
+    /// or a platform without them, falls back to size and mtime alone.
+    fn is_recorded_by(&self, row: &MediaFile) -> bool {
+        let identity_agrees = match (self.identity, row.identity) {
+            (Some(found), Some(recorded)) => found == recorded,
+            _ => true,
+        };
+        self.size == row.size_bytes && self.mtime == row.mtime && identity_agrees
+    }
+}
+
+/// Stat `path` for what a row records of it (see [`FileStat`]).
+fn read_stat(path: &Path) -> std::io::Result<FileStat> {
     let meta = std::fs::metadata(path)?;
-    Ok((meta.len(), stored_mtime(&meta)))
+    Ok(FileStat {
+        size: meta.len(),
+        mtime: stored_mtime(&meta),
+        identity: stored_identity(&meta),
+    })
+}
+
+/// The [`FileIdentity`] `meta` records, its ctime at the precision a row
+/// keeps. `None` off Unix: Beam's first-class platforms are Linux and macOS,
+/// and elsewhere a file is compared by size and mtime alone.
+fn stored_identity(meta: &std::fs::Metadata) -> Option<FileIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let ctime =
+            DateTime::from_timestamp(meta.ctime(), meta.ctime_nsec().clamp(0, 999_999_999) as u32)?;
+        Some(
+            FileIdentity {
+                inode: meta.ino(),
+                ctime,
+            }
+            .as_stored(),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 /// The modification time `meta` records -- the only way the indexer reads an
@@ -323,13 +383,25 @@ fn path_is_absent(path: &Path) -> bool {
     )
 }
 
-/// A walked file's size, modification time and content hash, read together
-/// once it had settled.
+/// A walked file's size, modification time, identity and content hash, read
+/// together once it had settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fingerprint {
     size: u64,
     mtime: Option<DateTime<Utc>>,
+    identity: Option<FileIdentity>,
     hash: u64,
+}
+
+impl Fingerprint {
+    /// The stat this fingerprint was taken at.
+    fn stat(&self) -> FileStat {
+        FileStat {
+            size: self.size,
+            mtime: self.mtime,
+            identity: self.identity,
+        }
+    }
 }
 
 /// How much `row` looks like the file now at `path`, best first: the same
@@ -396,7 +468,7 @@ fn may_have_moved(row: &MediaFile) -> bool {
     row.missing_since.is_some()
         || match std::fs::symlink_metadata(&row.path) {
             Ok(meta) if meta.is_file() => {
-                read_fs_meta(&row.path).ok() != Some((row.size_bytes, row.mtime))
+                !read_stat(&row.path).is_ok_and(|stat| stat.is_recorded_by(row))
             }
             _ => true,
         }
@@ -1444,10 +1516,15 @@ impl LocalIndexService {
     ) -> Result<FileOutcome, IndexError> {
         info!("Processing new file: {}", path.display());
 
-        let (size, mtime) = read_fs_meta(path).map_err(|e| {
+        let stat = read_stat(path).map_err(|e| {
             warn!(path = %path.display(), error = %e, "Failed to read file metadata");
             IndexError::PathNotFound(format!("Could not read file metadata: {e}"))
         })?;
+        let FileStat {
+            size,
+            mtime,
+            identity,
+        } = stat;
 
         if let Settle::Unsettled { retry_after } =
             settle_state(self.clock.now(), mtime, self.settle_window)
@@ -1457,8 +1534,8 @@ impl LocalIndexService {
         }
 
         let hash = match known {
-            Some(found) if (found.size, found.mtime) == (size, mtime) => Some(found.hash),
-            _ => self.hash_settled(path, size, mtime).await.map_err(|e| {
+            Some(found) if found.stat() == stat => Some(found.hash),
+            _ => self.hash_settled(path, stat).await.map_err(|e| {
                 error!(path = %path.display(), error = %e, "Failed to hash file");
                 IndexError::PathNotFound(format!("Hash failed: {}", e))
             })?,
@@ -1477,7 +1554,12 @@ impl LocalIndexService {
                 .filter(|row| row.size_bytes == size && row.path != path)
                 .collect();
             let last_played = self.last_played(&candidates).await?;
-            let found = Fingerprint { size, mtime, hash };
+            let found = Fingerprint {
+                size,
+                mtime,
+                identity,
+                hash,
+            };
             if let Some(row) =
                 choose_relink_candidate(path, size, hash, &candidates, path_is_absent, &last_played)
             {
@@ -1511,6 +1593,7 @@ impl LocalIndexService {
                         hash,
                         size_bytes: size,
                         mtime,
+                        identity,
                         mime_type: None,
                         duration: None,
                         container_format: None,
@@ -1544,6 +1627,7 @@ impl LocalIndexService {
                 hash,
                 size_bytes: size,
                 mtime,
+                identity,
                 mime_type: Some(format!("video/{}", metadata.format_name)),
                 duration: Some(duration),
                 container_format: Some(metadata.format_name.clone()),
@@ -1560,23 +1644,18 @@ impl LocalIndexService {
         Ok(FileOutcome::Added)
     }
 
-    /// Hash `path`, which a stat just before measured at `size` and `mtime`.
+    /// Hash `path`, which a stat just before found as `stat`.
     ///
     /// With a settle window, the file is stat'ed again afterwards: `None`
     /// when it changed while it was read, since the hash then describes no
     /// version of the file that ever existed whole.
-    async fn hash_settled(
-        &self,
-        path: &Path,
-        size: u64,
-        mtime: Option<DateTime<Utc>>,
-    ) -> std::io::Result<Option<u64>> {
+    async fn hash_settled(&self, path: &Path, stat: FileStat) -> std::io::Result<Option<u64>> {
         let hash = self.hash_service.hash_async(path.to_path_buf()).await?;
         if self.settle_window.is_zero() {
             return Ok(Some(hash));
         }
-        let after = read_fs_meta(path)?;
-        if after != (size, mtime) {
+        let after = read_stat(path)?;
+        if after != stat {
             return Ok(None);
         }
         Ok(Some(hash))
@@ -1638,6 +1717,7 @@ impl LocalIndexService {
                         path: path.clone(),
                         size_bytes: found.size,
                         mtime: found.mtime,
+                        identity: found.identity,
                     })
                     .collect(),
                 displaced.iter().map(|row| row.id).collect(),
@@ -1725,21 +1805,32 @@ impl LocalIndexService {
     }
 
     /// What is at `path` now, hashed, when it may be content a row does not
-    /// already record: a path with no row, or one whose size or modification
-    /// time is no longer its row's. `None` for a file that is as recorded,
-    /// still being written, or cannot be read -- whoever reconciles it next
-    /// finds out which, and reports a failure.
+    /// already record: a path with no row, or one its row does not record
+    /// as it is ([`FileStat::is_recorded_by`]). `None` for a file that is as
+    /// recorded, still being written, or cannot be read -- whoever reconciles
+    /// it next finds out which, and reports a failure.
     async fn fingerprint(&self, path: &Path, recorded: Option<&MediaFile>) -> Option<Fingerprint> {
-        let (size, mtime) = read_fs_meta(path).ok()?;
-        if recorded.is_some_and(|row| (row.size_bytes, row.mtime) == (size, mtime)) {
+        let stat = read_stat(path).ok()?;
+        if recorded.is_some_and(|row| stat.is_recorded_by(row)) {
             return None;
         }
-        if let Settle::Unsettled { .. } = settle_state(self.clock.now(), mtime, self.settle_window)
+        if let Settle::Unsettled { .. } =
+            settle_state(self.clock.now(), stat.mtime, self.settle_window)
         {
             return None;
         }
-        let hash = self.hash_settled(path, size, mtime).await.ok()??;
-        Some(Fingerprint { size, mtime, hash })
+        let hash = self.hash_settled(path, stat).await.ok()??;
+        let FileStat {
+            size,
+            mtime,
+            identity,
+        } = stat;
+        Some(Fingerprint {
+            size,
+            mtime,
+            identity,
+            hash,
+        })
     }
 
     /// Reconcile a file already present in the index against its current state
@@ -1754,8 +1845,11 @@ impl LocalIndexService {
     /// A video file whose probe has never succeeded (a container whose index
     /// was not written yet, a file probed mid-copy) is probed again on every
     /// visit, changed or not, and classified the first time a probe
-    /// succeeds. It is rehashed only if its size or modification time moved,
-    /// or it was never hashed.
+    /// succeeds. It is rehashed only if its row no longer records it as it is
+    /// -- its size, modification time or identity moved
+    /// ([`FileStat::is_recorded_by`]) -- or it was never hashed. A row with
+    /// no identity yet (one recorded before identities were) is given the
+    /// file's when it is found unchanged, without a hash.
     ///
     /// A changed file is hashed only once it has settled; until then it is
     /// [`FileOutcome::Deferred`] and its row is left as it is. `known` is
@@ -1773,23 +1867,46 @@ impl LocalIndexService {
             self.reclassify_existing(existing, path, library).await?;
         }
 
-        let (size, mtime) = match read_fs_meta(path) {
-            Ok(m) => m,
+        let stat = match read_stat(path) {
+            Ok(stat) => stat,
             Err(e) => {
                 // A transient stat failure must not delete or corrupt the row.
                 warn!("Failed to stat {}: {}", path.display(), e);
                 return Ok(FileOutcome::Unchanged);
             }
         };
+        let FileStat {
+            size,
+            mtime,
+            identity,
+        } = stat;
 
-        let moved = size != existing.size_bytes || mtime != existing.mtime;
+        let moved = !stat.is_recorded_by(existing);
         // Only a file the path policy calls media -- a video file -- is
         // reconciled at all, so nothing else is ever probed here.
         let unprobed = existing.duration.is_none();
 
-        // Cheap gate: only a size or mtime change warrants a rehash, and
-        // only an unprobed file a re-probe.
+        // Cheap gate: only a size, mtime or identity change warrants a
+        // rehash, and only an unprobed file a re-probe.
         if !moved && !unprobed {
+            if existing.identity.is_none() && identity.is_some() {
+                // Recorded before identities were: its size and mtime are
+                // all there is to go on, and they match. Record the identity
+                // it has now, so the next scan can tell a swap from it,
+                // rather than hash every such file at once (issue #228).
+                self.file_repo
+                    .update(UpdateMediaFile {
+                        id: existing.id,
+                        hash: None,
+                        size_bytes: None,
+                        mtime: None,
+                        identity,
+                        probe: ProbeUpdate::Keep,
+                        content: None,
+                        status: None,
+                    })
+                    .await?;
+            }
             record_file_outcome("unchanged");
             return Ok(FileOutcome::Unchanged);
         }
@@ -1803,13 +1920,13 @@ impl LocalIndexService {
         }
 
         let known = known
-            .filter(|found| (found.size, found.mtime) == (size, mtime))
+            .filter(|found| found.stat() == stat)
             .map(|found| found.hash);
         let new_hash = if let Some(hash) = known {
             hash
         } else if moved || existing.hash == 0 {
             // Rehash to confirm the content actually changed.
-            match self.hash_settled(path, size, mtime).await {
+            match self.hash_settled(path, stat).await {
                 Ok(Some(h)) => h,
                 Ok(None) => {
                     debug!(path = %path.display(), "a file changed while it was hashed; deferring it");
@@ -1826,13 +1943,16 @@ impl LocalIndexService {
         };
 
         if new_hash == existing.hash && !unprobed {
-            // Content unchanged (e.g. mtime bumped by `touch`): refresh size/mtime.
+            // Content unchanged (e.g. mtime bumped by `touch`, or a file
+            // rewritten with the same bytes): refresh size, mtime and
+            // identity.
             self.file_repo
                 .update(UpdateMediaFile {
                     id: existing.id,
                     hash: None,
                     size_bytes: Some(size),
                     mtime,
+                    identity,
                     probe: ProbeUpdate::Keep,
                     content: None,
                     status: None,
@@ -1843,7 +1963,7 @@ impl LocalIndexService {
         }
 
         let changed = self
-            .reprobe_file(existing, path, library, size, mtime, new_hash)
+            .reprobe_file(existing, path, library, stat, new_hash)
             .await?;
         if changed {
             record_file_outcome("changed");
@@ -1870,17 +1990,21 @@ impl LocalIndexService {
     /// results are cleared ([`ProbeUpdate::Clear`]): they described the old
     /// content, and a row with no duration is probed again on every visit. A
     /// failed probe of a file whose content did not change writes only the
-    /// size and modification time it was found with, so the next visit --
-    /// which tries the probe again -- does not rehash it.
+    /// size, modification time and identity it was found with, so the next
+    /// visit -- which tries the probe again -- does not rehash it.
     async fn reprobe_file(
         &self,
         existing: &MediaFile,
         path: &Path,
         library: &Library,
-        size: u64,
-        mtime: Option<DateTime<Utc>>,
+        stat: FileStat,
         new_hash: u64,
     ) -> Result<bool, IndexError> {
+        let FileStat {
+            size,
+            mtime,
+            identity,
+        } = stat;
         let content_changed = new_hash != existing.hash;
         if content_changed {
             info!("File content changed, reconciling: {}", path.display());
@@ -1901,6 +2025,7 @@ impl LocalIndexService {
                         hash: Some(new_hash),
                         size_bytes: Some(size),
                         mtime,
+                        identity,
                         probe: ProbeUpdate::Set {
                             mime_type: format!("video/{}", metadata.format_name),
                             duration,
@@ -1948,17 +2073,21 @@ impl LocalIndexService {
                     error = %e,
                     "a file whose probe failed before still does not probe"
                 );
-                // Its size or modification time moved but its content did
-                // not (a `touch`, a copy that kept the bytes): record them,
-                // so the next visit sees the file as it is and does not
-                // hash it again only to find the same content.
-                if size != existing.size_bytes || mtime != existing.mtime {
+                // Its size, modification time or identity moved but its
+                // content did not (a `touch`, a copy that kept the bytes):
+                // record them, so the next visit sees the file as it is and
+                // does not hash it again only to find the same content. A
+                // row with no identity yet is given the file's.
+                if (size, mtime, identity)
+                    != (existing.size_bytes, existing.mtime, existing.identity)
+                {
                     self.file_repo
                         .update(UpdateMediaFile {
                             id: existing.id,
                             hash: None,
                             size_bytes: Some(size),
                             mtime,
+                            identity,
                             probe: ProbeUpdate::Keep,
                             content: None,
                             status: None,
@@ -1989,6 +2118,7 @@ impl LocalIndexService {
                         hash: Some(new_hash),
                         size_bytes: Some(size),
                         mtime,
+                        identity,
                         probe: ProbeUpdate::Clear,
                         content: None,
                         status: Some(status),
@@ -3690,9 +3820,10 @@ impl LocalIndexService {
 
 impl LocalIndexService {
     /// Hash every walked path whose content may have moved to or from it --
-    /// a new path, or an indexed one whose size or modification time moved
-    /// -- when some row's content may have left its path: a row the walk did
-    /// not see, or one whose path changed. With neither, nothing moved, and
+    /// a new path, or an indexed one its row no longer records as it is
+    /// ([`FileStat::is_recorded_by`]) -- when some row's content may have
+    /// left its path: a row the walk did not see, or one whose path
+    /// changed. With neither, nothing moved, and
     /// each file is hashed, if at all, when it is reconciled; with both, the
     /// hash taken here is the one reconciling it reuses.
     async fn fingerprint_walk(
@@ -3707,11 +3838,11 @@ impl LocalIndexService {
         let mut to_hash: Vec<&PathBuf> = Vec::new();
         for path in walked_files {
             let row = rows.get(path);
-            let Ok(stats) = read_fs_meta(path) else {
+            let Ok(stat) = read_stat(path) else {
                 continue;
             };
             match row {
-                Some(row) if (row.size_bytes, row.mtime) == stats => continue,
+                Some(row) if stat.is_recorded_by(row) => continue,
                 Some(_) => changed += 1,
                 None => {}
             }
@@ -5522,6 +5653,7 @@ mod tests {
                 hash: 12345,
                 size_bytes: 1024,
                 mtime: None,
+                identity: None,
                 mime_type: Some("video/mp4".to_string()),
                 duration: None,
                 container_format: None,
@@ -5692,6 +5824,7 @@ mod tests {
                 hash: 67890,
                 size_bytes: 500 * 1024 * 1024,
                 mtime: None,
+                identity: None,
                 mime_type: Some("video/x-matroska".to_string()),
                 duration: None,
                 container_format: None,
@@ -6036,6 +6169,7 @@ mod tests {
             hash: 12345,
             size_bytes: 999,
             mtime: None,
+            identity: None,
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: None,
@@ -6117,6 +6251,7 @@ mod tests {
             hash: 0,
             size_bytes: 1024,
             mtime: None,
+            identity: None,
             mime_type: None,
             duration: None,
             container_format: None,
@@ -6176,6 +6311,7 @@ mod tests {
             hash: 7,
             size_bytes,
             mtime,
+            identity: None,
             mime_type: None,
             duration: Some(Duration::from_secs(60)),
             container_format: None,
@@ -6199,6 +6335,7 @@ mod tests {
             hash: 42,
             size_bytes: 1024,
             mtime: None,
+            identity: None,
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: None,
@@ -6911,6 +7048,7 @@ mod tests {
             hash: 0,
             size_bytes: 5,
             mtime: None,
+            identity: None,
             mime_type: None,
             duration: None,
             container_format: None,
@@ -6933,6 +7071,7 @@ mod tests {
             hash: 0,
             size_bytes: 100,
             mtime: None,
+            identity: None,
             mime_type: None,
             duration: None,
             container_format: None,
@@ -7015,6 +7154,7 @@ mod tests {
             hash: 4242,
             size_bytes,
             mtime,
+            identity: None,
             mime_type: Some("video/mp4".to_string()),
             // Probed: a row whose probe never succeeded is probed again.
             duration: Some(Duration::from_secs(60)),
@@ -7075,6 +7215,7 @@ mod tests {
             size_bytes: disk_meta.len(), // size matches
             mtime: None,                 // stale → suspected
             mime_type: Some("video/mp4".to_string()),
+            identity: None,
             duration: Some(Duration::from_secs(60)),
             container_format: Some("mp4".to_string()),
             // A Known row is a movie's or an episode's file (the `files` CHECK).
@@ -7139,6 +7280,7 @@ mod tests {
             hash: 100,
             size_bytes: 999, // wrong size → suspected
             mtime: None,
+            identity: None,
             mime_type: Some("video/mp4".to_string()),
             duration: None,
             container_format: Some("mp4".to_string()),
@@ -7213,6 +7355,7 @@ mod tests {
             hash: 100,
             size_bytes: 999, // wrong size → suspected
             mtime: None,
+            identity: None,
             mime_type: Some("video/x-matroska".to_string()),
             duration: Some(Duration::from_secs(60)),
             container_format: Some("matroska".to_string()),
@@ -7284,6 +7427,7 @@ mod tests {
             hash: 0,
             size_bytes: 10,
             mtime: None,
+            identity: None,
             mime_type: None,
             duration: None,
             container_format: None,
@@ -7533,6 +7677,7 @@ mod tests {
             hash: 0,
             size_bytes: 1024,
             mtime: None,
+            identity: None,
             mime_type: None,
             duration: duration_secs.map(Duration::from_secs_f64),
             container_format: None,

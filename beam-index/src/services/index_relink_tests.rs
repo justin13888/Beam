@@ -46,6 +46,7 @@ fn candidate(id: u128, path: &str, missing_since: Option<DateTime<Utc>>) -> Medi
         hash: 77,
         size_bytes: 1000,
         mtime: None,
+        identity: None,
         mime_type: None,
         duration: None,
         container_format: None,
@@ -228,6 +229,7 @@ fn found(hash: u64) -> Fingerprint {
     Fingerprint {
         size: 1000,
         mtime: None,
+        identity: None,
         hash,
     }
 }
@@ -1379,6 +1381,150 @@ async fn three_files_rotated_among_their_names_keep_their_own_rows() {
     assert_eq!(h.present(&c).await.id, ids[1]);
     assert_eq!(h.present(&a).await.id, ids[2]);
     assert_eq!(h.row_count().await, 3);
+}
+
+// ─── same size, same mtime (issue #228) ──────────────────────────────────────
+
+/// Set `path`'s modification time to `at`, as `cp -p` or `rsync -a` would
+/// keep it from a source.
+fn set_mtime(path: &Path, at: DateTime<Utc>) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::from(at))
+        .unwrap();
+}
+
+/// Write each of `names` under the root with its own content, all of one
+/// size and one modification time, and scan them in.
+async fn same_size_same_mtime(h: &Harness, names: &[&str]) -> Vec<(PathBuf, Uuid)> {
+    let mut files = Vec::new();
+    for (n, name) in names.iter().enumerate() {
+        let path = h.write(name, &format!("content number {n}"));
+        set_mtime(&path, instant(-60));
+        files.push(path);
+    }
+    h.scan().await;
+    let mut rows = Vec::new();
+    for path in files {
+        let id = h.present(&path).await.id;
+        rows.push((path, id));
+    }
+    rows
+}
+
+/// Every path a size and an mtime alone would call unchanged: each still
+/// has the size and the mtime its own row recorded.
+async fn assert_size_and_mtime_match_every_row(h: &Harness, paths: &[&PathBuf]) {
+    for path in paths {
+        let row = h.present(path).await;
+        assert_eq!(
+            read_fs_meta(path).unwrap(),
+            (row.size_bytes, row.mtime),
+            "{} looks unchanged by size and mtime",
+            path.display()
+        );
+    }
+}
+
+/// Two files of one size and one mtime that swap names each keep their own
+/// row, though each path still has its row's size and mtime: the swap moved
+/// each path's inode. A file the swap did not touch is not hashed again.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_same_size_same_mtime_swap_keeps_each_row_on_its_content() {
+    let h = Harness::new().await;
+    let files = same_size_same_mtime(&h, &["Heat (1995).mkv", "Ronin (1998).mkv"]).await;
+    let (heat, heat_id) = files[0].clone();
+    let (ronin, ronin_id) = files[1].clone();
+    let untouched = h.write("Alien (1979).mkv", "an untouched film");
+    h.scan().await;
+    let (hashes, probes) = (h.hashes(), h.probes());
+
+    let tmp = h.mv(&heat, "tmp.mkv");
+    h.mv(&ronin, "Heat (1995).mkv");
+    h.mv(&tmp, "Ronin (1998).mkv");
+    assert_size_and_mtime_match_every_row(&h, &[&heat, &ronin]).await;
+    let progress = h.scan().await;
+
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        h.present(&ronin).await.id,
+        heat_id,
+        "Heat's row is at its bytes"
+    );
+    assert_eq!(h.present(&heat).await.id, ronin_id);
+    assert_eq!(h.hashes(), hashes + 2, "only the swapped paths are hashed");
+    assert_eq!(h.probes(), probes, "nothing was probed");
+    h.present(&untouched).await;
+
+    h.scan().await;
+    assert_eq!(
+        h.hashes(),
+        hashes + 2,
+        "the relinked rows record what they were found at"
+    );
+}
+
+/// Three files of one size and one mtime rotated among their names each
+/// keep their own row.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_same_size_same_mtime_rotation_keeps_each_row_on_its_content() {
+    let h = Harness::new().await;
+    let files = same_size_same_mtime(&h, &["A.mkv", "B.mkv", "C.mkv"]).await;
+    let [(a, a_id), (b, b_id), (c, c_id)] = [files[0].clone(), files[1].clone(), files[2].clone()];
+
+    let tmp = h.mv(&a, "tmp.mkv");
+    h.mv(&c, "A.mkv");
+    h.mv(&b, "C.mkv");
+    h.mv(&tmp, "B.mkv");
+    assert_size_and_mtime_match_every_row(&h, &[&a, &b, &c]).await;
+    let progress = h.scan().await;
+
+    assert_eq!((progress.relinked, progress.changed), (3, 0));
+    assert_eq!(h.present(&b).await.id, a_id);
+    assert_eq!(h.present(&c).await.id, b_id);
+    assert_eq!(h.present(&a).await.id, c_id);
+    assert_eq!(h.row_count().await, 3);
+}
+
+/// A row recorded before identities were -- none of its own -- is given
+/// its file's by the next scan that finds the file at its size and mtime,
+/// without hashing it; from then on a same-size, same-mtime swap is seen.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_row_without_an_identity_is_given_one_without_a_hash() {
+    let h = Harness::new().await;
+    let files = same_size_same_mtime(&h, &["Heat (1995).mkv", "Ronin (1998).mkv"]).await;
+    let (heat, heat_id) = files[0].clone();
+    let (ronin, ronin_id) = files[1].clone();
+    for row in h.file_repo.files.lock().unwrap().values_mut() {
+        row.identity = None;
+    }
+    let hashes = h.hashes();
+
+    h.scan().await;
+
+    assert_eq!(h.hashes(), hashes, "nothing is hashed");
+    for path in [&heat, &ronin] {
+        let found = read_stat(path).unwrap().identity;
+        assert!(found.is_some(), "a Unix file has an identity");
+        assert_eq!(h.present(path).await.identity, found, "{}", path.display());
+    }
+
+    let tmp = h.mv(&heat, "tmp.mkv");
+    h.mv(&ronin, "Heat (1995).mkv");
+    h.mv(&tmp, "Ronin (1998).mkv");
+    let progress = h.scan().await;
+
+    assert_eq!(progress.relinked, 2);
+    assert_eq!(h.present(&ronin).await.id, heat_id);
+    assert_eq!(h.present(&heat).await.id, ronin_id);
 }
 
 /// A file renamed onto the path of a file deleted earlier, whose row is
