@@ -233,7 +233,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   that id MUST NOT be recorded as applied, so a later scan tries it again -- unless the title
   holding it got it from that same NFO (one describing several titles: a `movie.nfo` beside two
   movies, a `tvshow.nfo` over episodes of two shows), which no retry can change: such an NFO MUST
-  be recorded as applied, pin the one title, and be reported once through the admin log. Deleting
+  be recorded as applied, pin one title -- the one with the lowest id, so the same one at every
+  scan -- and be reported once through the admin log. Deleting
   an NFO forgets its record and leaves the pin it set; an NFO created at that path again is one
   added after indexing and re-pins, so a kept, conflicting NFO deleted and recreated replaces the
   title's pin. That holds only when Beam saw the NFO gone, and the same whether the NFO alone or a

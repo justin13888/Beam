@@ -575,6 +575,8 @@ impl LocalIndexService {
         let root = library.root_path.as_path();
         let is_this = |located: Option<LocatedNfo>| located.is_some_and(|l| l.path == nfo_path);
 
+        // Ordered by id: when the NFO describes several titles, the one with
+        // the lowest id takes its pin, the same one at every scan.
         let mut targets: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
         if is_tvshow_nfo(nfo_path) {
             if !describes(NfoKind::TvShow) {

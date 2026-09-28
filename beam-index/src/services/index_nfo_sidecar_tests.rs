@@ -1502,6 +1502,19 @@ async fn a_movie_nfo_describing_two_movies_is_settled_once_and_the_administrator
         vec![None, Some("tmdb:949".to_string())],
         "an id pins one title"
     );
+    let pinned = [
+        h.movie_of("Collection/Heat (1995).mkv"),
+        h.movie_of("Collection/Alien (1979).mkv"),
+    ]
+    .into_iter()
+    .min_by_key(|movie| movie.id)
+    .unwrap()
+    .pinned_ref;
+    assert_eq!(
+        pinned.as_deref(),
+        Some("tmdb:949"),
+        "the title with the lowest id, the same one every time"
+    );
     assert!(
         h.applied("Collection/movie.nfo").await.is_some(),
         "recorded as applied after one scan"
