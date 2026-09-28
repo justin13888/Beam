@@ -88,10 +88,11 @@ When Beam walks a library — to scan it, when the watcher reports a change, or 
 never follows a symbolic link beneath the library root, to a file or to a directory. A link is
 simply not part of the library: a symlinked video is not indexed, and a symlinked folder is not
 descended into. Nor is a link followed at any component beneath the root when Beam reads a file: an NFO
-it parses, a video it measures, hashes and probes while indexing, or a video or subtitle it
-delivers. A file, or a folder above it, replaced by a link since the walk is treated as missing.
-This keeps every file Beam reads, records or serves inside the root you registered (the root itself
-may be a link) and rules out link cycles.
+it parses, a video or subtitle it measures, a video it hashes and probes while indexing, or a video
+or subtitle it delivers. A file, or a folder above it, replaced by a link since the walk is treated
+as missing. This keeps every file Beam reads, records or serves inside the root you registered (the
+root itself may be a link) and rules out link cycles. Measuring a file does not open it: a scan
+opens only the videos it hashes or probes, so rescanning an unchanged library opens none of them.
 
 If you relied on symlinks before, a file that was indexed through a link is now
 [missing](#when-files-go-missing): hidden, with its progress kept, until the grace period ends. To

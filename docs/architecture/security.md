@@ -143,8 +143,9 @@ server-internal type (`LocatedFile`) that cannot be serialized into a response.
 The indexer also *parses* files it did not write: the Kodi `.nfo` files beside the media (FR-219).
 Anyone who can drop a file into a library can hand Beam one, so an NFO is treated as hostile
 input. It is opened read-only, only when it is a regular file (a symbolic link is never followed:
-it is refused at the `lstat`, and the open itself follows no link beneath the library root, so a
-link swapped in between the two -- for the NFO or for a folder above it -- fails to open; it also
+it is refused at the stat, which follows no link beneath the library root, and the open itself
+follows none either, so a link swapped in between the two -- for the NFO or for a folder above it
+-- fails to open; it also
 carries `O_NONBLOCK`, so a FIFO swapped in opens at once and is refused as not a regular file
 instead of blocking the scan),
 and at most 1 MiB of it is read; bytes that are not UTF-8 are refused rather than guessed at; a
@@ -152,16 +153,26 @@ document type declaration is refused before parsing, so no entity is ever expand
 laughs); and the XML parser (`roxmltree`, which resolves no external resources) is capped at
 10 000 nodes. A rejected NFO is logged and ignored: the file is classified by its path. Subtitle
 files are only stat-ed and their names read; their contents are never opened by the indexer.
-The walk never follows a link, and every later read of a library file opens it beneath the root
-with no link followed at any component: NFO reads, all file delivery, and the indexer's stat, hash
-and probe of a video (issue #238). The indexer opens a video once
-(`beam_index::library_file::LibraryFile::open`) and takes everything it records from that handle:
-its size, modification time and identity from the handle's `fstat`, its content hash from the
-handle's bytes, and its streams from FFmpeg reading the same handle through a custom I/O context
-(`StreamIo`), so FFmpeg never opens the path itself. A subtitle's size and modification time on a
-watcher event are read the same way. A link swapped in at the file or at any folder above it
-between the walk and those reads fails to open (`ELOOP`), and the path is treated as missing, as a
-link the walk saw is -- nothing is recorded from the file it would have led to.
+The walk never follows a link, and every read of a library file resolves it beneath the root with
+no link followed at any component (issue #238): NFO reads, all file delivery, the indexer's hash
+and probe of a video, and every stat Beam records or compares with a row. A file that is only
+stat'ed -- each entry the walk lists (a video's size, modification time and identity, a subtitle's
+size and modification time, an NFO's change stamp), each walked video a scan compares with its row,
+a subtitle on a watcher event -- is not opened: `beam_index::library_file::StatCursor` opens each
+folder from the root with `O_NOFOLLOW | O_DIRECTORY` (on Linux `O_PATH`) and stats the file from
+its folder with `fstatat(AT_SYMLINK_NOFOLLOW)`, refusing a link or anything but a regular file. It
+keeps the folders it opened for the next file, so a walk costs one `fstatat` per file plus one
+open per folder -- about what the `lstat` of a full path it replaces cost, and no open of the file,
+which on an SMB or NFS library would be a round trip of its own. A video is opened only to be
+hashed or probed (`beam_index::library_file::LibraryFile::open`), and everything recorded then
+comes from that handle: its size, modification time and identity from the handle's `fstat`, its
+content hash from the handle's bytes, and its streams from FFmpeg reading the same handle through a
+custom I/O context (`StreamIo`), so FFmpeg never opens the path itself. A link swapped in at the
+file or at any folder above it between the walk and those reads fails to stat or open (`ELOOP`,
+`ENOTDIR`, or the opener's own refusal of a link or a non-regular file), and the path is treated as
+missing, as a link the walk saw is -- nothing is recorded from the file it would have led to. Any
+other failure to stat or open a file (a permission error, a transient I/O error, an `EINVAL` from a
+filesystem) says nothing about it, and its row is left as it is (issue #179).
 
 Delivery reads library files too, and a file can change between the scan that recorded it and the
 request that reads it. Every file the server serves — a video on `/stream` and `/download`, a

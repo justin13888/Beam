@@ -142,17 +142,20 @@ strength. Each requirement is independently testable. See `product.md` for narra
   indexer, the watcher and file delivery MUST NOT follow symbolic links beneath a library root; a
   link is not a library file, so a row whose path has become one is treated as missing (FR-211).
   The walk never follows a link. Every read of a library file that Beam parses, serves or records
-  -- an NFO read by the indexer; a video's size, modification time and identity, its content hash
-  and its probe; a subtitle file's size and modification time on a watcher event; a video or a
-  subtitle file delivered -- MUST open it relative to its library root with no symbolic link
-  followed at any component beneath the root: neither the file nor any folder between it and the
-  root. The root itself is opened as
+  MUST resolve it relative to its library root with no symbolic link followed at any component
+  beneath the root: neither the file nor any folder between it and the root. A file whose contents
+  are read -- an NFO read by the indexer, a video the indexer hashes and probes, a video or a
+  subtitle file delivered -- MUST be opened so; a file whose stat alone is recorded -- the stat of
+  each entry the walk lists (a video's size, modification time and identity, a subtitle's size and
+  modification time, an NFO's change stamp) and every later stat the indexer or the watcher compares
+  with a row -- MUST be stat'ed so, from its folder so resolved, without following a link at the
+  file itself. The root itself is opened as
   configured, so a root that is itself a link is followed. Delivery serves only a regular file so opened, read from that one handle,
   answering a link at any of those components, or a FIFO or device in the file's place, as
-  `source-file-missing`. The indexer stats, hashes and probes a video from one such handle, so a
-  link swapped in at the file or at any folder above it between the walk and those reads fails to
-  open: nothing is recorded from the file, and the path is treated as missing, as a link the walk
-  saw is.
+  `source-file-missing`. The indexer hashes and probes a video from one such handle, so a link
+  swapped in at the file or at any folder above it between the walk and those reads fails to stat
+  or open: nothing is recorded from the file, and the path is treated as missing, as a link the
+  walk saw is.
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
