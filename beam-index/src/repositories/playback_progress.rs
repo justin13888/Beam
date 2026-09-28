@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
@@ -145,5 +147,41 @@ impl PlaybackProgressRepository for SqlPlaybackProgressRepository {
         use sea_orm::PaginatorTrait;
 
         visible_rows_for(user_id).count(self.db.as_ref()).await
+    }
+
+    async fn last_played_at(
+        &self,
+        file_ids: Vec<Uuid>,
+    ) -> Result<HashMap<Uuid, DateTime<Utc>>, DbErr> {
+        use beam_entity::playback_progress;
+        use sea_orm::prelude::DateTimeWithTimeZone;
+        use sea_orm::sea_query::{Expr, Func, SimpleExpr};
+        use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect};
+
+        #[derive(Debug, FromQueryResult)]
+        struct LastPlayed {
+            file_id: Uuid,
+            last_played_at: DateTimeWithTimeZone,
+        }
+
+        if file_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = playback_progress::Entity::find()
+            .select_only()
+            .column(playback_progress::Column::FileId)
+            .column_as(
+                SimpleExpr::from(Func::max(Expr::col(playback_progress::Column::UpdatedAt))),
+                "last_played_at",
+            )
+            .filter(playback_progress::Column::FileId.is_in(file_ids))
+            .group_by(playback_progress::Column::FileId)
+            .into_model::<LastPlayed>()
+            .all(self.db.as_ref())
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.file_id, row.last_played_at.with_timezone(&Utc)))
+            .collect())
     }
 }

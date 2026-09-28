@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
@@ -45,6 +48,16 @@ pub trait PlaybackProgressRepository: Send + Sync + std::fmt::Debug {
     /// for paginating [`find_page_by_user`]. Counts the same rows that method
     /// pages over, so rows whose file is missing are not counted.
     async fn count_by_user(&self, user_id: Uuid) -> Result<u64, DbErr>;
+
+    /// When each of `file_ids` was last played, by anyone: the latest
+    /// `updated_at` among its progress rows, whether or not the file is
+    /// missing. A file no one has played is absent from the map. The indexer
+    /// breaks a tie between identical copies of a moved file with it (issue
+    /// #180), so the row someone is watching keeps the file.
+    async fn last_played_at(
+        &self,
+        file_ids: Vec<Uuid>,
+    ) -> Result<HashMap<Uuid, DateTime<Utc>>, DbErr>;
 }
 
 /// Test doubles. Gated behind `test-utils` so downstream crates can depend on
@@ -196,6 +209,31 @@ pub mod in_memory {
                 .values()
                 .filter(|r| r.user_id == user_id && present.contains(&r.file_id))
                 .count() as u64)
+        }
+
+        async fn last_played_at(
+            &self,
+            file_ids: Vec<Uuid>,
+        ) -> Result<HashMap<Uuid, DateTime<Utc>>, DbErr> {
+            let mut last: HashMap<Uuid, DateTime<Utc>> = HashMap::new();
+            for row in self.rows.lock().unwrap().values() {
+                if file_ids.contains(&row.file_id) {
+                    let latest = last.entry(row.file_id).or_insert(row.updated_at);
+                    *latest = (*latest).max(row.updated_at);
+                }
+            }
+            Ok(last)
+        }
+    }
+
+    impl Default for InMemoryPlaybackProgressRepository {
+        /// A store over a file store of its own, for a caller that never
+        /// reads progress back through the missing-file join.
+        fn default() -> Self {
+            Self::new(
+                Arc::new(crate::services::TestClock::new()),
+                Arc::new(InMemoryFileRepository::default()),
+            )
         }
     }
 }

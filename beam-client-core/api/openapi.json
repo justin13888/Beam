@@ -10793,6 +10793,12 @@
             "format": "uint64",
             "description": "Missing files that came back."
           },
+          "relinked_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Files found at a new path -- moved or renamed -- that kept their\nrow, and with it their id, progress and title."
+          },
           "purged_count": {
             "type": "integer",
             "minimum": 0.0,
@@ -10810,6 +10816,7 @@
           "failed_count",
           "marked_missing_count",
           "restored_count",
+          "relinked_count",
           "purged_count"
         ],
         "description": "A scan's per-file counts so far."

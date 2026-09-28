@@ -1,4 +1,4 @@
-//! Tests for the wiring decisions `AppServices::new` makes from configuration.
+//! Tests for the wiring decisions `AppServices::build` makes from configuration.
 
 use super::*;
 use crate::config::ServerConfig;
