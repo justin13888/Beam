@@ -577,3 +577,82 @@ async fn subtitles_require_a_session() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
     }
 }
+
+/// Every WebVTT converter revision, oldest first, with the fingerprint of
+/// what it renders [`CONVERTER_CORPUS`] to. Append a line -- never edit one
+/// -- when the output changes, with the version bumped.
+const CONVERTER_REVISIONS: &[(u32, &str)] = &[(
+    1,
+    "d0f4f21cb9c254f3e954c93e4bb4c3e542cb7c929d96668df6258f1b2381614c",
+)];
+
+/// Small subtitle files exercising each part of the conversion: encodings,
+/// line ends, markup kept, removed and escaped, damaged cues, and a WebVTT
+/// file with and without its header.
+const CONVERTER_CORPUS: &[(SubtitleFormat, &[u8])] = &[
+    (SubtitleFormat::Srt, SRT),
+    (
+        SubtitleFormat::Srt,
+        b"\xEF\xBB\xBF1\n0:00:01,5 --> 0:00:02,250 X1:10 X2:20\n<font color=\"red\">{\\an8}Top</font> <b>bold</b> <u>u</u>\na --> b < c\n\n\nnot a cue\n\n2\n00:00:03,000 --> 00:00:04,000\nnext\n3\n00:00:05,000 --> 00:00:06,000\nno blank line before\n",
+    ),
+    (
+        SubtitleFormat::Srt,
+        b"\xFF\xFE1\x00\n\x000\x000\x00:\x000\x000\x00:\x000\x001\x00,\x000\x000\x000\x00 \x00-\x00-\x00>\x00 \x000\x000\x00:\x000\x000\x00:\x000\x002\x00,\x000\x000\x000\x00\n\x00\xE9\x00\n\x00",
+    ),
+    (
+        SubtitleFormat::Srt,
+        b"1\r00:00:01,000 --> 00:00:02,000\rcaf\xE9 \x93quoted\x94\r",
+    ),
+    (
+        SubtitleFormat::Vtt,
+        b"WEBVTT - a comment\r\n\r\n00:01.000 --> 00:02.000\r\n<c.yellow>kept</c>",
+    ),
+    (
+        SubtitleFormat::Vtt,
+        b"WEBVTTX\n00:01.000 --> 00:02.000\nno header\n",
+    ),
+    (SubtitleFormat::Vtt, b""),
+];
+
+/// The converter's output is pinned to [`WEBVTT_CONVERTER_VERSION`]: a change
+/// to what any file renders to fails here until the version is bumped, so a
+/// rendition's strong validator never vouches for bytes a client does not
+/// hold.
+///
+/// [`WEBVTT_CONVERTER_VERSION`]: super::WEBVTT_CONVERTER_VERSION
+#[test]
+fn the_converter_version_changes_with_its_output() {
+    use beam_domain::utils::subtitle::{normalize_webvtt, srt_to_webvtt};
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    for (format, bytes) in CONVERTER_CORPUS {
+        let rendered = match format {
+            SubtitleFormat::Srt => srt_to_webvtt(bytes).vtt,
+            SubtitleFormat::Vtt => normalize_webvtt(bytes),
+            SubtitleFormat::Ass | SubtitleFormat::Ssa => unreachable!("no rendition"),
+        };
+        digest.update((rendered.len() as u64).to_le_bytes());
+        digest.update(rendered.as_bytes());
+    }
+    let fingerprint: String = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    let &(latest_version, latest_fingerprint) =
+        CONVERTER_REVISIONS.last().expect("at least one revision");
+    assert_eq!(
+        fingerprint,
+        latest_fingerprint,
+        "the converter's output changed: bump WEBVTT_CONVERTER_VERSION and append \
+         ({}, \"{fingerprint}\") to CONVERTER_REVISIONS",
+        latest_version + 1
+    );
+    assert_eq!(super::WEBVTT_CONVERTER_VERSION, latest_version);
+    for pair in CONVERTER_REVISIONS.windows(2) {
+        assert!(pair[0].0 < pair[1].0, "versions only go up: {pair:?}");
+        assert_ne!(pair[0].1, pair[1].1, "a new version renders differently");
+    }
+}

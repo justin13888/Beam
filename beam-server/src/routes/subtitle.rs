@@ -73,6 +73,9 @@ const WEBVTT_CONTENT_TYPE: &str = "text/vtt; charset=utf-8";
 /// does: bump this with any change to `beam_domain::utils::subtitle` that
 /// changes the bytes a file renders to, or a client holding the old
 /// rendition is told `304` and keeps it.
+///
+/// Pinned by `the_converter_version_changes_with_its_output`, which fails when
+/// the output changes and this has not.
 const WEBVTT_CONVERTER_VERSION: u32 = 1;
 
 impl From<SubtitleError> for SubtitleDeliveryError {
