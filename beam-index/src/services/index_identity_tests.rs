@@ -1549,6 +1549,64 @@ async fn a_rekey_retitles_only_a_title_older_rules_spelled() {
     }
 }
 
+/// The `matched` guard alone: a title a provider matched keeps its name even
+/// while that name is still the one older rules spelled.
+#[tokio::test]
+async fn a_rekey_does_not_retitle_a_matched_title_older_rules_spelled() {
+    let h = Harness::keeping_missing_files().await;
+    let id = h
+        .legacy_movie("Heat - CD1", Some(1995), &["Heat (1995) - CD1.avi"])
+        .await;
+    assert!(
+        h.movie_repo
+            .rekey(id, Some("heat cd1|1995".to_string()), 2)
+            .await
+            .unwrap()
+    );
+    // Matched without renaming it: only the provider id says so.
+    h.movie_repo
+        .movies
+        .lock()
+        .unwrap()
+        .get_mut(&id)
+        .unwrap()
+        .tmdb_id = Some(949);
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let movie = h.only_movie();
+    assert_eq!(movie.title, "Heat - CD1", "a matched title is kept");
+    assert_eq!(movie.identity_key.as_deref(), Some("heat|1995"));
+}
+
+/// The `same_year` guard alone: files that spell another year than the
+/// title's leave its name as it is.
+#[tokio::test]
+async fn a_rekey_does_not_retitle_a_title_whose_files_spell_another_year() {
+    let h = Harness::keeping_missing_files().await;
+    let id = h
+        .legacy_movie("Heat - CD1", Some(1996), &["Heat (1995) - CD1.avi"])
+        .await;
+    assert!(
+        h.movie_repo
+            .rekey(id, Some("heat cd1|1996".to_string()), 2)
+            .await
+            .unwrap()
+    );
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let movie = h.only_movie();
+    assert_eq!(movie.title, "Heat - CD1", "another year keeps the title");
+    assert_eq!(movie.identity_key.as_deref(), Some("heat|1995"));
+}
+
 /// What an administrator set on a title a merge retires survives it (issue
 /// #185): its pin moves to the survivor, which is queued to be fetched by
 /// it, and its field locks join the survivor's. Of two titles an
