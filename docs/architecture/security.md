@@ -152,12 +152,16 @@ document type declaration is refused before parsing, so no entity is ever expand
 laughs); and the XML parser (`roxmltree`, which resolves no external resources) is capped at
 10 000 nodes. A rejected NFO is logged and ignored: the file is classified by its path. Subtitle
 files are only stat-ed and their names read; their contents are never opened by the indexer.
-The walk never follows a link, and NFO reads and all file delivery open beneath the root with no
-link followed at any component. The indexer's hashing and probing of a video are the exception:
-they open the video's full stored path (`compute_hash`, `ffmpeg::format::input`), so a link swapped
-in at the file or at any folder above it, between the walk and that read, is followed for that read. Its
-hash and stream metadata are recorded, and delivery still refuses the file. This is a known gap,
-tracked in [#238](https://github.com/justin13888/Beam/issues/238).
+The walk never follows a link, and every later read of a library file opens it beneath the root
+with no link followed at any component: NFO reads, all file delivery, and the indexer's stat, hash
+and probe of a video (issue #238). The indexer opens a video once
+(`beam_index::library_file::LibraryFile::open`) and takes everything it records from that handle:
+its size, modification time and identity from the handle's `fstat`, its content hash from the
+handle's bytes, and its streams from FFmpeg reading the same handle through a custom I/O context
+(`StreamIo`), so FFmpeg never opens the path itself. A subtitle's size and modification time on a
+watcher event are read the same way. A link swapped in at the file or at any folder above it
+between the walk and those reads fails to open (`ELOOP`), and the path is treated as missing, as a
+link the walk saw is -- nothing is recorded from the file it would have led to.
 
 Delivery reads library files too, and a file can change between the scan that recorded it and the
 request that reads it. Every file the server serves — a video on `/stream` and `/download`, a
