@@ -616,6 +616,133 @@ mod enrichment {
         assert_filters(&sql[0], "metadata_enrichment", "id", "=");
         assert_bound(&sql[0], &id.to_string());
     }
+
+    /// Refreshing everything is one `UPDATE` with no `WHERE` -- not a read of
+    /// every row and a write per row, as it was -- and a rematch clears the
+    /// match in the same statement.
+    #[tokio::test]
+    async fn refreshing_all_is_one_update_of_every_row() {
+        let db = connection(empty_mock());
+        let repo = SqlEnrichmentStateRepository::new(db.clone());
+        let _ = repo.request_refresh_all(true).await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1, "{sql:?}");
+        assert!(sql[0].sql.starts_with("UPDATE"), "{}", sql[0].sql);
+        assert!(!sql[0].sql.contains("WHERE"), "{}", sql[0].sql);
+        assert_contains(&sql[0], r#""force_refresh" = "#);
+        assert_contains(&sql[0], r#""matched_ref" = "#);
+        assert_contains(&sql[0], "CAST(");
+    }
+
+    /// A set of titles is queued by one `UPDATE` naming each by its own
+    /// column; an empty set issues nothing, and a plain refresh keeps the
+    /// match.
+    #[tokio::test]
+    async fn refreshing_many_is_one_update_naming_each_title_by_its_kind() {
+        use beam_domain::models::enrichment::EnrichmentTargetId;
+
+        let db = connection(empty_mock());
+        let repo = SqlEnrichmentStateRepository::new(db.clone());
+        let _ = repo.request_refresh_many(&[], false).await;
+        let _ = repo
+            .request_refresh_many(
+                &[
+                    EnrichmentTargetId::Movie(Uuid::from_u128(61)),
+                    EnrichmentTargetId::Show(Uuid::from_u128(62)),
+                ],
+                false,
+            )
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1, "nothing for an empty set: {sql:?}");
+        assert_filters(&sql[0], "metadata_enrichment", "movie_id", "IN");
+        assert_filters(&sql[0], "metadata_enrichment", "show_id", "IN");
+        assert_contains(&sql[0], " OR ");
+        assert!(!sql[0].sql.contains("matched_ref"), "{}", sql[0].sql);
+        assert_bound(&sql[0], &Uuid::from_u128(61).to_string());
+        assert_bound(&sql[0], &Uuid::from_u128(62).to_string());
+    }
+
+    /// Locking upserts on the title's own unique column and writes only the
+    /// locks: a row's status and match are never reset by it.
+    #[tokio::test]
+    async fn locking_upserts_on_the_titles_column_and_updates_only_the_locks() {
+        use beam_domain::models::enrichment::{EnrichmentTargetId, FieldLocks, MetadataField};
+
+        let db = connection(empty_mock());
+        let repo = SqlEnrichmentStateRepository::new(db.clone());
+        let locks: FieldLocks = [MetadataField::Poster].into_iter().collect();
+        let _ = repo
+            .set_locked_fields(EnrichmentTargetId::Show(Uuid::from_u128(63)), &locks)
+            .await;
+        let _ = repo
+            .set_locked_fields(EnrichmentTargetId::Movie(Uuid::from_u128(64)), &locks)
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_contains(&sql[0], r#"ON CONFLICT ("show_id") DO UPDATE SET"#);
+        assert_contains(&sql[1], r#"ON CONFLICT ("movie_id") DO UPDATE SET"#);
+        for insert in &sql[..2] {
+            let set_list = insert
+                .sql
+                .split("DO UPDATE SET")
+                .nth(1)
+                .and_then(|rest| rest.split(" RETURNING").next())
+                .unwrap_or_default();
+            assert!(set_list.contains(r#""locked_fields""#), "{}", insert.sql);
+            for untouched in ["\"status\"", "\"matched_ref\"", "\"attempts\""] {
+                assert!(!set_list.contains(untouched), "{untouched}: {}", insert.sql);
+            }
+            assert_bound(insert, "poster");
+        }
+    }
+
+    /// The list seeks past its cursor on `(updated_at, id)`, newest first,
+    /// under its filters, one row a page more than the caller shows.
+    #[tokio::test]
+    async fn the_list_seeks_newest_first_under_its_filters() {
+        use beam_domain::models::catalog::TitleKind;
+        use beam_domain::models::enrichment::{
+            EnrichmentListFilter, EnrichmentListPosition, EnrichmentListQuery, EnrichmentStatus,
+        };
+
+        let db = connection(empty_mock());
+        let repo = SqlEnrichmentStateRepository::new(db.clone());
+        let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let _ = repo
+            .list(&EnrichmentListQuery {
+                filter: EnrichmentListFilter {
+                    status: Some(EnrichmentStatus::Failed),
+                    kind: Some(TitleKind::Show),
+                },
+                after: Some(EnrichmentListPosition {
+                    updated_at: at,
+                    id: Uuid::from_u128(65),
+                }),
+                limit: std::num::NonZeroU32::new(21).unwrap(),
+            })
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        let list = &sql[0];
+        assert_filters(list, "metadata_enrichment", "status", "=");
+        assert_filters(list, "metadata_enrichment", "show_id", "IS NOT NULL");
+        assert_filters(list, "metadata_enrichment", "updated_at", "<");
+        assert_filters(list, "metadata_enrichment", "id", "<");
+        assert_contains(
+            list,
+            r#"ORDER BY "metadata_enrichment"."updated_at" DESC, "metadata_enrichment"."id" DESC"#,
+        );
+        assert_bound(list, "failed");
+        assert_bound(list, "21");
+        assert_bound(list, &Uuid::from_u128(65).to_string());
+    }
 }
 
 mod library_shape {
@@ -1048,6 +1175,7 @@ mod title_identity {
                     title: "Amélie".to_string(),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await;
         let shows = SqlShowRepository::new(db.clone());
@@ -1058,6 +1186,7 @@ mod title_identity {
                     title: "Shōgun".to_string(),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await;
         drop((movies, shows));
@@ -1076,6 +1205,76 @@ mod title_identity {
                 "enrichment must not write the identity key:\n{}",
                 update.sql
             );
+        }
+    }
+
+    /// A locked field (issue #185) is not named by enrichment's `UPDATE` at
+    /// all, so what an administrator set stays byte for byte; the match's ids
+    /// are always written.
+    #[tokio::test]
+    async fn apply_enrichment_never_writes_a_locked_column() {
+        use beam_domain::models::enrichment::{FieldLocks, MetadataField};
+
+        let db = connection(
+            MockDatabase::new(DbBackend::Postgres)
+                .append_query_results([vec![stored_movie()], vec![stored_movie()]])
+                .append_query_results([vec![stored_show()], vec![stored_show()]])
+                .append_exec_results((0..4).map(|_| sea_orm::MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected: 1,
+                })),
+        );
+        let locks: FieldLocks = [
+            MetadataField::Title,
+            MetadataField::Poster,
+            MetadataField::Rating,
+            MetadataField::Runtime,
+        ]
+        .into_iter()
+        .collect();
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies
+            .apply_enrichment(
+                Uuid::from_u128(81),
+                &MovieEnrichment {
+                    title: "Amélie".to_string(),
+                    tmdb_id: Some(194),
+                    ..Default::default()
+                },
+                &locks,
+            )
+            .await;
+        let shows = SqlShowRepository::new(db.clone());
+        let _ = shows
+            .apply_enrichment(
+                Uuid::from_u128(82),
+                &ShowEnrichment {
+                    title: "Shōgun".to_string(),
+                    tmdb_id: Some(126308),
+                    ..Default::default()
+                },
+                &locks,
+            )
+            .await;
+        drop((movies, shows));
+
+        let updates: Vec<Statement> = statements(db)
+            .into_iter()
+            .filter(|s| s.sql.starts_with("UPDATE"))
+            .collect();
+        assert_eq!(updates.len(), 2, "one update per title: {updates:?}");
+        for update in &updates {
+            let set_list = update.sql.split(" WHERE ").next().unwrap_or_default();
+            for locked in [
+                "\"title\" =",
+                "\"poster_url\"",
+                "\"rating_tmdb\"",
+                "\"runtime_mins\"",
+            ] {
+                assert!(!set_list.contains(locked), "{locked}: {}", update.sql);
+            }
+            assert!(set_list.contains("\"description\""), "{}", update.sql);
+            assert!(set_list.contains("\"tmdb_id\""), "{}", update.sql);
         }
     }
 

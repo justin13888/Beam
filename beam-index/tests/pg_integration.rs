@@ -19,6 +19,8 @@
 mod applied_nfo;
 #[path = "pg_integration/catalog_repository.rs"]
 mod catalog_repository;
+#[path = "pg_integration/enrichment_state.rs"]
+mod enrichment_state;
 #[path = "pg_integration/file_repository.rs"]
 mod file_repository;
 #[path = "pg_integration/genre_repository.rs"]

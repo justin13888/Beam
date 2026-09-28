@@ -49,9 +49,7 @@ use crate::routes::admin::{
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::hash::HashService;
 use crate::services::library::{InMemoryPathValidator, LibraryService, LocalLibraryService};
-use crate::services::metadata::{
-    MediaConnection, MediaFilter, MetadataError, MetadataService, PageInfo,
-};
+use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
 use crate::services::notification::{
     AdminEvent, EventCategory, InMemoryNotificationService, NotificationService,
 };
@@ -131,17 +129,6 @@ impl MetadataService for StubMetadataService {
             },
         })
     }
-    async fn refresh_metadata(&self, filter: MediaFilter) -> Result<(), MetadataError> {
-        // Part of the trait's contract rather than a shortcut, the same way
-        // the media and stream stubs honour it: a malformed id is `InvalidId`,
-        // which the route owes a 400. While this stub ignored its argument
-        // entirely, the route test below could assert 204 for `some-id` and
-        // pass -- codifying the answer production had just stopped giving.
-        if let MediaFilter::ByMediaId(media_id) = &filter {
-            uuid::Uuid::parse_str(media_id).map_err(|_| MetadataError::InvalidId)?;
-        }
-        Ok(())
-    }
     async fn get_media_sources(
         &self,
         _media_id: &str,
@@ -195,6 +182,7 @@ struct TestFixture {
     user_repo: Arc<InMemoryUserRepository>,
     file_repo: Arc<InMemoryFileRepo>,
     enrichment_repo: Arc<InMemoryEnrichmentRepo>,
+    movie_repo: Arc<beam_domain::repositories::movie::in_memory::InMemoryMovieRepository>,
     notification: Arc<dyn NotificationService>,
     /// The real indexer the library service starts its scans on.
     index: Arc<LocalIndexService>,
@@ -315,6 +303,11 @@ fn build_fixture(
     let library_repo = Arc::new(InMemoryLibraryRepository::default());
     let file_repo = Arc::new(InMemoryFileRepo::default());
     let enrichment_repo = Arc::new(InMemoryEnrichmentRepo::default());
+    let movie_repo =
+        Arc::new(beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default());
+    let show_repo =
+        Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default());
+    let admin_log_for_control = admin_log.clone();
 
     let hash_gate = Arc::new(tokio::sync::Semaphore::new(match gate {
         Gate::Open => tokio::sync::Semaphore::MAX_PERMITS,
@@ -374,15 +367,19 @@ fn build_fixture(
         genre_repo: Arc::new(
             beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
         ),
-        library_repo,
+        library_repo: library_repo.clone(),
         file_repo: file_repo.clone(),
         enrichment_repo: enrichment_repo.clone(),
-        movie_repo: Arc::new(
-            beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
+        enrichment_control: crate::routes::test_support::enrichment_control(
+            movie_repo.clone(),
+            show_repo.clone(),
+            enrichment_repo.clone(),
+            library_repo,
+            Arc::new(beam_domain::providers::enrichment::NoopEnrichmentProvider),
+            admin_log_for_control,
         ),
-        show_repo: Arc::new(
-            beam_domain::repositories::show::in_memory::InMemoryShowRepository::default(),
-        ),
+        movie_repo: movie_repo.clone(),
+        show_repo,
         artwork: crate::routes::test_support::cold_artwork_cache(),
         session_store: session_store.clone(),
         oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
@@ -426,6 +423,7 @@ fn build_fixture(
         user_repo,
         file_repo,
         enrichment_repo,
+        movie_repo,
         notification,
         index,
         hash_gate,
@@ -1270,6 +1268,19 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
                     ..Default::default()
                 },
             }),
+            AdminEvent::warning(
+                EventCategory::Enrichment,
+                "No enrichment match for \"Heat\"",
+                None,
+                None,
+            )
+            .with_enrichment(beam_index::services::notification::EnrichmentEvent {
+                target: EnrichmentTargetId::Show(uuid::Uuid::from_u128(7)),
+                title: Some("Heat".to_string()),
+                status: beam_domain::models::enrichment::EnrichmentStatus::Unmatched,
+                matched_ref: None,
+                error: Some("no candidate cleared the match threshold".to_string()),
+            }),
         ],
     }));
     let client = build_client(&fixture);
@@ -1293,7 +1304,24 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
     assert_eq!(response.header("x-accel-buffering"), Some("no"));
 
     let events = response.events();
-    assert_eq!(events.len(), 3, "one record per broadcast event");
+    assert_eq!(events.len(), 4, "one record per broadcast event");
+
+    // An enrichment outcome arrives with the title it is about (FR-309).
+    let fourth: Value = events[3].json();
+    assert_eq!(fourth["category"], "enrichment");
+    assert_eq!(fourth["level"], "warning");
+    assert_eq!(
+        fourth["enrichment"]["media_id"],
+        uuid::Uuid::from_u128(7).to_string()
+    );
+    assert_eq!(fourth["enrichment"]["kind"], "show");
+    assert_eq!(fourth["enrichment"]["title"], "Heat");
+    assert_eq!(fourth["enrichment"]["status"], "unmatched");
+    assert_eq!(
+        fourth["enrichment"]["error"],
+        "no candidate cleared the match threshold"
+    );
+    assert_eq!(events[2].json::<Value>()["enrichment"], Value::Null);
 
     let first: Value = events[0].json();
     assert_eq!(first["message"], "scan started");
@@ -1341,18 +1369,72 @@ async fn refreshing_media_metadata_as_a_regular_user_is_403() {
 }
 
 #[tokio::test]
-async fn refreshing_media_metadata_as_an_admin_is_204() {
+async fn refreshing_media_metadata_as_an_admin_queues_the_title_and_is_204() {
+    use beam_domain::models::CreateMovie;
+    use beam_domain::models::enrichment::EnrichmentStatus;
+    use beam_domain::repositories::MovieRepository;
+
     let fixture = make_test_state();
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
+    let movie = fixture
+        .movie_repo
+        .find_or_create_by_identity(CreateMovie::new("Heat".to_string(), Some(1995), None))
+        .await
+        .unwrap();
+    let target = EnrichmentTargetId::Movie(movie.id);
+    fixture
+        .enrichment_repo
+        .ensure_pending(target)
+        .await
+        .unwrap();
+    let row = fixture
+        .enrichment_repo
+        .find_by_target(target)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture
+        .enrichment_repo
+        .mark_enriched(row.id, "tmdb:949", 0.9, chrono::Utc::now())
+        .await
+        .unwrap();
 
     let response = client
-        .post("/v1/admin/media/0199a1f0-0000-7000-8000-000000000001/refresh")
+        .post(&format!("/v1/admin/media/{}/refresh", movie.id))
         .cookie("beam_session", &token)
         .send()
         .await;
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let row = fixture
+        .enrichment_repo
+        .find_by_target(target)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, EnrichmentStatus::Pending);
+    assert!(row.force_refresh, "re-fetched fresh");
+    assert_eq!(
+        row.matched_ref.as_deref(),
+        Some("tmdb:949"),
+        "keeps its match"
+    );
+}
+
+#[tokio::test]
+async fn refreshing_an_unknown_media_id_is_404() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    client
+        .post("/v1/admin/media/0199a1f0-0000-7000-8000-000000000001/refresh")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#media-not-found");
 }
 
 /// The route half of the malformed-id fix, which had no test at all.
@@ -1770,6 +1852,30 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
     assert_eq!(body.enrichment.failed, 1);
     assert_eq!(body.enrichment.enriched, 0);
     assert_eq!(body.enrichment.unmatched, 0);
+    // FR-307: no token and AniList off -- neither provider is configured,
+    // and the status says what to set.
+    assert_eq!(
+        body.enrichment_providers
+            .iter()
+            .map(|status| (status.provider, status.state))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                crate::models::MetadataProvider::Tmdb,
+                crate::models::EnrichmentProviderState::NotConfigured
+            ),
+            (
+                crate::models::MetadataProvider::Anilist,
+                crate::models::EnrichmentProviderState::NotConfigured
+            ),
+        ]
+    );
+    assert!(
+        body.enrichment_providers[0]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("BEAM_TMDB_API_TOKEN"))
+    );
 
     let messages: Vec<&str> = body
         .recent_scans

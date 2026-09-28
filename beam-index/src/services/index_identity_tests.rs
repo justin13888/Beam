@@ -438,6 +438,7 @@ impl Harness {
                     tmdb_id: Some(tmdb_id),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .unwrap();
@@ -453,6 +454,7 @@ impl Harness {
                     tmdb_id: Some(tmdb_id),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .unwrap();
@@ -514,6 +516,7 @@ async fn a_renamed_movie_takes_its_next_file_instead_of_duplicating() {
                 tmdb_id: Some(603),
                 ..Default::default()
             },
+            &beam_domain::models::enrichment::FieldLocks::none(),
         )
         .await
         .unwrap();
@@ -565,6 +568,7 @@ async fn a_renamed_show_takes_its_next_episode_instead_of_duplicating() {
                 year: Some(2024),
                 ..Default::default()
             },
+            &beam_domain::models::enrichment::FieldLocks::none(),
         )
         .await
         .unwrap();

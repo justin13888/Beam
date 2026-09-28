@@ -96,7 +96,7 @@ fn is_exact_title(
     normalize(candidate_title) == query || candidate_original.is_some_and(|o| normalize(o) == query)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MatchScore {
     pub title_score: f64,
     pub total_score: f64,
@@ -108,7 +108,10 @@ impl MatchScore {
     }
 }
 
-fn score(
+/// How well a candidate titled `candidate_title` (or `candidate_original`),
+/// released in `candidate_year`, matches the query: the score every ranking
+/// here, and an administrator's candidate list, orders by.
+pub fn score(
     query_title: &str,
     query_year: Option<u32>,
     candidate_title: &str,

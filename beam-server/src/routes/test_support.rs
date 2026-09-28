@@ -21,14 +21,20 @@ use beam_domain::repositories::playback_telemetry::in_memory::InMemoryPlaybackTe
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
+use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
+use beam_domain::repositories::{
+    EnrichmentStateRepository, LibraryRepository, MovieRepository, ShowRepository,
+};
+use beam_index::services::enrichment::control::{
+    EnrichmentControl, EnrichmentControlDeps, TitleNfoPins,
+};
+
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig};
 use crate::services::hash::HashService;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::services::library::LibraryError;
-use crate::services::metadata::{
-    MediaConnection, MediaFilter, MetadataError, MetadataService, PageInfo,
-};
+use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::playback::DbPlaybackService;
 use crate::services::playback_telemetry::{PlaybackTelemetryConfig, PlaybackTelemetryService};
@@ -126,9 +132,6 @@ impl MetadataService for StubMetadataService {
             },
         })
     }
-    async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
-        Ok(())
-    }
     async fn get_media_sources(
         &self,
         _media_id: &str,
@@ -204,6 +207,45 @@ pub(crate) fn cold_artwork_cache() -> Arc<ArtworkCache> {
     ))
 }
 
+/// The indexer's re-pin of a title by its NFOs, for fixtures with no library
+/// on disk: there is no NFO to read, so it re-pins nothing -- a cleared title
+/// is left unpinned, as one with no NFO is. The re-pin itself is tested with
+/// the indexer, over real NFOs (`beam-index`).
+#[derive(Debug, Default)]
+pub(crate) struct NoNfoPins;
+
+#[async_trait::async_trait]
+impl TitleNfoPins for NoNfoPins {
+    async fn repin_from_nfos(
+        &self,
+        _target: beam_domain::models::enrichment::EnrichmentTargetId,
+    ) -> Result<(), beam_index::services::index::IndexError> {
+        Ok(())
+    }
+}
+
+/// An enrichment control over the given stores and provider, with a worker
+/// wake-up nothing listens to.
+pub(crate) fn enrichment_control(
+    movies: Arc<dyn MovieRepository>,
+    shows: Arc<dyn ShowRepository>,
+    states: Arc<dyn EnrichmentStateRepository>,
+    libraries: Arc<dyn LibraryRepository>,
+    provider: Arc<dyn EnrichmentProvider>,
+    admin_log: Arc<dyn AdminLogService>,
+) -> Arc<EnrichmentControl> {
+    Arc::new(EnrichmentControl::new(EnrichmentControlDeps {
+        movies,
+        shows,
+        states,
+        libraries,
+        provider,
+        admin_log,
+        nfo_pins: Arc::new(NoNfoPins),
+        worker: Arc::new(tokio::sync::Notify::new()),
+    }))
+}
+
 /// A library report with no destination over an empty store: previewable,
 /// never scheduled, and -- having no collector -- never sent.
 pub(crate) fn idle_library_report() -> Arc<LibraryReportService> {
@@ -259,6 +301,7 @@ pub(crate) fn make_app_state_with_playback_telemetry(
         None,
         idle_library_report(),
         playback_telemetry,
+        Arc::new(NoopEnrichmentProvider),
     )
 }
 
@@ -277,6 +320,22 @@ pub(crate) fn make_app_state_with_telemetry(
         metrics,
         telemetry,
         idle_playback_telemetry(),
+        Arc::new(NoopEnrichmentProvider),
+    )
+}
+
+/// [`make_app_state`] over the enrichment provider `provider`: its stores
+/// are `state.services`' own, so a test acts through the routes and reads
+/// back through the repositories.
+pub(crate) fn make_app_state_with_enrichment(provider: Arc<dyn EnrichmentProvider>) -> AppState {
+    make_app_state_with_services(
+        |_| {},
+        Arc::new(beam_domain::services::RealClock),
+        Arc::new(InMemoryDependencyProbe::healthy()),
+        None,
+        idle_library_report(),
+        idle_playback_telemetry(),
+        provider,
     )
 }
 
@@ -288,6 +347,7 @@ fn make_app_state_with_services(
     metrics: Option<metrics_exporter_prometheus::PrometheusHandle>,
     telemetry: Arc<LibraryReportService>,
     playback_telemetry: Arc<PlaybackTelemetryService>,
+    enrichment_provider: Arc<dyn EnrichmentProvider>,
 ) -> AppState {
     let notification = Arc::new(InMemoryNotificationService::new());
     let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
@@ -308,6 +368,20 @@ fn make_app_state_with_services(
             show_repo.clone(),
         ));
     let artwork = cold_artwork_cache();
+    let library_repo = Arc::new(
+        beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
+    );
+    let enrichment_repo = Arc::new(
+        beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
+    );
+    let enrichment_control = enrichment_control(
+        movie_repo.clone(),
+        show_repo.clone(),
+        enrichment_repo.clone(),
+        library_repo.clone(),
+        enrichment_provider,
+        admin_log.clone(),
+    );
 
     let services = AppServices {
         hash: Arc::new(StubHashService),
@@ -320,13 +394,10 @@ fn make_app_state_with_services(
         genre_repo: Arc::new(
             beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
         ),
-        library_repo: Arc::new(
-            beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
-        ),
+        library_repo,
         file_repo: Arc::new(InMemoryFileRepository::default()),
-        enrichment_repo: Arc::new(
-            beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
-        ),
+        enrichment_repo,
+        enrichment_control,
         movie_repo,
         show_repo,
         artwork,

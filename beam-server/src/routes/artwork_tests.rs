@@ -69,6 +69,7 @@ mod tests {
             library_repo: base.services.library_repo.clone(),
             file_repo: base.services.file_repo.clone(),
             enrichment_repo: base.services.enrichment_repo.clone(),
+            enrichment_control: base.services.enrichment_control.clone(),
             movie_repo: movies.clone(),
             show_repo: shows.clone(),
             artwork,
@@ -160,6 +161,7 @@ mod tests {
                     poster_url: poster_url.map(str::to_string),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .expect("enrichment applies");
@@ -268,6 +270,7 @@ mod tests {
                     poster_url: Some(REFRESHED.to_string()),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .expect("enrichment applies");
@@ -378,6 +381,7 @@ mod tests {
                     backdrop_url: Some(SHOW_BACKDROP.to_string()),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .expect("enrichment applies");

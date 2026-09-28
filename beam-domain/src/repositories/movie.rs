@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use crate::models::enrichment::{FieldLocks, MetadataField};
 use crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
 use crate::models::pin::{PinSource, ProviderPin};
 use crate::providers::enrichment::MovieEnrichment;
@@ -90,6 +91,15 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
         pin: &ProviderPin,
         source: PinSource,
     ) -> Result<bool, DbErr>;
+    /// Unpin `movie_id` if an administrator pinned it (issue #185), so it is
+    /// pinned by its NFO, or not at all, again. Returns `false`, changing
+    /// nothing, when the movie does not exist or is not pinned by an
+    /// administrator -- an NFO's pin is the NFO's to change.
+    async fn clear_admin_pin(&self, movie_id: Uuid) -> Result<bool, DbErr>;
+    /// Every movie associated with the library `library_id`
+    /// ([`Self::ensure_library_association`]), live or not, in no particular
+    /// order.
+    async fn find_ids_by_library(&self, library_id: Uuid) -> Result<Vec<Uuid>, DbErr>;
     /// Delete every movie entry created before `created_before` that no file
     /// row references, then every movie created before `created_before` left
     /// with no entry, returning how many movies went. A file row that is only
@@ -118,13 +128,16 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     /// Apply enrichment-provider data to an existing movie (display title,
     /// year, description, external IDs, artwork, rating). Overwrites the
     /// current values -- enrichment is treated as the more authoritative
-    /// source once a match is accepted. Never touches the identity key, so the
-    /// next file of this movie still finds it however the provider spells the
-    /// title.
+    /// source once a match is accepted -- except those `locks` holds, which
+    /// an administrator locked (issue #185) and which are left exactly as
+    /// they are. The external ids are always written: they are the match.
+    /// Never touches the identity key, so the next file of this movie still
+    /// finds it however the provider spells the title.
     async fn apply_enrichment(
         &self,
         movie_id: Uuid,
         enrichment: &MovieEnrichment,
+        locks: &FieldLocks,
     ) -> Result<(), DbErr>;
 }
 
@@ -154,6 +167,8 @@ pub mod in_memory {
         /// one a test inserted into `movies` directly -- is version `0`, as a
         /// row keyed before versions existed is.
         pub key_versions: Mutex<HashMap<Uuid, u16>>,
+        /// `(library_id, movie_id)` associations.
+        library_links: Mutex<HashSet<(Uuid, Uuid)>>,
         files: Option<Arc<InMemoryFileRepository>>,
     }
 
@@ -397,6 +412,29 @@ pub mod in_memory {
             }
         }
 
+        async fn clear_admin_pin(&self, movie_id: Uuid) -> Result<bool, DbErr> {
+            let mut movies = self.movies.lock().unwrap();
+            match movies.get_mut(&movie_id) {
+                Some(title) if title.pin_source == Some(PinSource::Admin) => {
+                    title.pinned_ref = None;
+                    title.pin_source = None;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+
+        async fn find_ids_by_library(&self, library_id: Uuid) -> Result<Vec<Uuid>, DbErr> {
+            Ok(self
+                .library_links
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(library, _)| *library == library_id)
+                .map(|(_, movie)| *movie)
+                .collect())
+        }
+
         async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
             let Some(referenced) = self.referenced_entries(false) else {
                 return Ok(0);
@@ -457,9 +495,13 @@ pub mod in_memory {
 
         async fn ensure_library_association(
             &self,
-            _library_id: Uuid,
-            _movie_id: Uuid,
+            library_id: Uuid,
+            movie_id: Uuid,
         ) -> Result<(), DbErr> {
+            self.library_links
+                .lock()
+                .unwrap()
+                .insert((library_id, movie_id));
             Ok(())
         }
 
@@ -467,23 +509,43 @@ pub mod in_memory {
             &self,
             movie_id: Uuid,
             enrichment: &MovieEnrichment,
+            locks: &FieldLocks,
         ) -> Result<(), DbErr> {
             let mut movies = self.movies.lock().unwrap();
             if let Some(movie) = movies.get_mut(&movie_id) {
-                movie.title = enrichment.title.clone();
-                movie.title_localized = enrichment.original_title.clone();
-                movie.description = enrichment.description.clone();
-                movie.year = enrichment.year;
-                movie.release_date = enrichment.release_date;
-                movie.poster_url = enrichment.poster_url.clone();
-                movie.backdrop_url = enrichment.backdrop_url.clone();
+                let open = |field| !locks.is_locked(field);
+                if open(MetadataField::Title) {
+                    movie.title = enrichment.title.clone();
+                }
+                if open(MetadataField::OriginalTitle) {
+                    movie.title_localized = enrichment.original_title.clone();
+                }
+                if open(MetadataField::Description) {
+                    movie.description = enrichment.description.clone();
+                }
+                if open(MetadataField::Year) {
+                    movie.year = enrichment.year;
+                }
+                if open(MetadataField::ReleaseDate) {
+                    movie.release_date = enrichment.release_date;
+                }
+                if open(MetadataField::Poster) {
+                    movie.poster_url = enrichment.poster_url.clone();
+                }
+                if open(MetadataField::Backdrop) {
+                    movie.backdrop_url = enrichment.backdrop_url.clone();
+                }
                 movie.tmdb_id = enrichment.tmdb_id;
                 movie.imdb_id = enrichment.imdb_id.clone();
                 movie.anilist_id = enrichment.anilist_id;
-                movie.runtime = enrichment
-                    .runtime_mins
-                    .map(|mins| std::time::Duration::from_secs(u64::from(mins) * 60));
-                movie.rating_tmdb = enrichment.rating;
+                if open(MetadataField::Runtime) {
+                    movie.runtime = enrichment
+                        .runtime_mins
+                        .map(|mins| std::time::Duration::from_secs(u64::from(mins) * 60));
+                }
+                if open(MetadataField::Rating) {
+                    movie.rating_tmdb = enrichment.rating;
+                }
                 movie.updated_at = chrono::Utc::now();
             }
             Ok(())

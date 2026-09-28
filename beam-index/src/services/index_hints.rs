@@ -985,4 +985,79 @@ impl LocalIndexService {
         }
         Ok(())
     }
+
+    /// Pin the title `target` by its NFO again, as classification would pin
+    /// it now: once an administrator's pin is cleared (issue #185), the title
+    /// goes back to what the NFO beside its files says -- or, with none that
+    /// pins it, to being found by its path. The NFOs are those classification
+    /// locates for the title's files (a movie's own, an episode's show's),
+    /// read afresh, in path order; the first that pins the title settles it,
+    /// and one that cannot be read or pins nothing is passed over. Changes no
+    /// record of what an NFO held: the NFOs are unchanged, only re-read.
+    pub async fn repin_title_from_nfos(
+        &self,
+        target: EnrichmentTargetId,
+    ) -> Result<(), IndexError> {
+        let mut files: Vec<MediaFile> = Vec::new();
+        match target {
+            EnrichmentTargetId::Movie(id) => {
+                for entry in self.movie_repo.find_entries_by_movie_id(id).await? {
+                    files.extend(self.file_repo.find_by_movie_entry_id(entry.id).await?);
+                }
+            }
+            EnrichmentTargetId::Show(id) => {
+                for season in self.show_repo.find_seasons_by_show_id(id).await? {
+                    for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                        files.extend(self.file_repo.find_by_episode_id(episode.id).await?);
+                    }
+                }
+            }
+        }
+
+        // Every NFO the title's files locate, by path, with the library and
+        // the files locating it.
+        let mut libraries: HashMap<Uuid, Option<Library>> = HashMap::new();
+        let mut nfos: std::collections::BTreeMap<PathBuf, (Library, Nfo, Vec<&MediaFile>)> =
+            std::collections::BTreeMap::new();
+        for file in &files {
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                libraries.entry(file.library_id)
+            {
+                slot.insert(self.library_repo.find_by_id(file.library_id).await?);
+            }
+            let Some(Some(library)) = libraries.get(&file.library_id) else {
+                continue;
+            };
+            let root = library.root_path.as_path();
+            let located = match target {
+                EnrichmentTargetId::Movie(_) => locate_file_nfo(root, &file.path),
+                EnrichmentTargetId::Show(_) => file
+                    .path
+                    .parent()
+                    .and_then(|dir| locate_show_nfo(root, dir)),
+            };
+            let Some(LocatedNfo { path, nfo, .. }) = located else {
+                continue;
+            };
+            nfos.entry(path)
+                .or_insert_with(|| (library.clone(), nfo, Vec::new()))
+                .2
+                .push(file);
+        }
+
+        for (path, (library, nfo, located_by)) in &nfos {
+            if nfo.ids.pin().is_none() {
+                continue;
+            }
+            // `Keep`: the title has no pin now, so the NFO's is set; should a
+            // concurrent writer have pinned it meanwhile, that pin stands.
+            let outcome = self
+                .repin_from_nfo(library, path, nfo, located_by, PinConflict::Keep)
+                .await?;
+            if outcome == PinOutcome::Settled {
+                break;
+            }
+        }
+        Ok(())
+    }
 }

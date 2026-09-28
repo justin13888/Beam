@@ -32,10 +32,10 @@ use crate::routes::api_error::{
 };
 use crate::routes::tags::Admin;
 use crate::services::library::LibraryError;
-use crate::services::metadata::{MediaFilter, MetadataError};
 use crate::services::playback_telemetry::ReportError;
 use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
+use beam_index::services::enrichment::control::{ControlError, RefreshScope};
 
 // The service errors are one vocabulary per service; the route errors are one
 // type per operation shape. These conversions are where the two meet, and each
@@ -48,20 +48,20 @@ use crate::state::AppState;
 // bug in this crate, and blaming the caller for it is how a 500 gets reported
 // as a 400 and stops being investigated.
 
-impl From<MetadataError> for MediaRefreshError {
-    fn from(err: MetadataError) -> Self {
+impl From<ControlError> for MediaRefreshError {
+    fn from(err: ControlError) -> Self {
         match err {
-            MetadataError::InvalidId => Self::InvalidMediaId(err.to_string()),
-            MetadataError::MediaNotFound => Self::MediaNotFound(err.to_string()),
-            // `refresh_metadata` applies to any media id; there is no
-            // show-level restriction for it to report.
-            // Nor does it page or search, so a cursor, page size or search
-            // text is never its to refuse.
-            MetadataError::Unsupported(msg)
-            | MetadataError::InternalError(msg)
-            | MetadataError::InvalidCursor(msg)
-            | MetadataError::InvalidPagination(msg)
-            | MetadataError::InvalidSearchQuery(msg) => Self::Internal(msg),
+            ControlError::MediaNotFound(_) => Self::MediaNotFound(err.to_string()),
+            // Unreachable: a refresh of one title names no library, pins no
+            // id, locks nothing and searches no provider.
+            ControlError::LibraryNotFound(_)
+            | ControlError::InvalidExternalRef(_)
+            | ControlError::ProviderNotConfigured(_)
+            | ControlError::ExternalRefTaken(_)
+            | ControlError::FieldNotLockable(_)
+            | ControlError::Provider(_)
+            | ControlError::Db(_)
+            | ControlError::Index(_) => Self::Internal(err.to_string()),
         }
     }
 }
@@ -311,24 +311,25 @@ pub async fn get_library_scan(
     }
 }
 
-/// Force a specific movie/show to re-run metadata enrichment on the next
-/// worker sweep (FR-603). Does not rematch against a different external
-/// title -- see `MetadataService::refresh_metadata`'s `MediaFilter::ByMediaId`
-/// semantics.
+/// Queue a specific movie/show for another enrichment pass, whatever its
+/// status (FR-308, FR-603). It keeps its match, re-fetched fresh; to match it
+/// to a different title, fix the match (`POST /v1/admin/media/{id}/match`).
 #[kynos::post(
     "/admin/media/{id}/refresh",
     tag = Admin,
     operation_id = "refreshMediaMetadata"
 )]
 pub async fn refresh_media_metadata(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, MediaRefreshError> {
+    let id = uuid::Uuid::parse_str(&path.id)
+        .map_err(|_| MediaRefreshError::InvalidMediaId("invalid media id".to_owned()))?;
     state
         .services
-        .metadata
-        .refresh_metadata(MediaFilter::ByMediaId(path.id))
+        .enrichment_control
+        .refresh(RefreshScope::Title(id), false, &auth.0.user_id)
         .await?;
     Ok(NoContent)
 }
@@ -635,6 +636,10 @@ pub async fn get_admin_status(
             files,
         },
         enrichment: EnrichmentQueueCounts::from(enrichment),
+        enrichment_providers: crate::state::provider_statuses(
+            &state.config,
+            &state.services.enrichment_control.available_providers(),
+        ),
         recent_scans: recent_scans.into_iter().map(RecentScanDto::from).collect(),
         watcher,
     }))

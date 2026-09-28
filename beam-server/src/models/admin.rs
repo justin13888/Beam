@@ -38,6 +38,10 @@ pub enum AdminEventCategoryDto {
     /// A scan job's structured progress; the event carries `scan`. Sent on
     /// the live stream only, never kept in the recent-event snapshot.
     ScanProgress,
+    /// What one enrichment attempt made of a title (FR-309); the event
+    /// carries `enrichment`. Sent on the live stream only, never kept in the
+    /// recent-event snapshot.
+    Enrichment,
     System,
 }
 
@@ -46,6 +50,7 @@ impl From<EventCategory> for AdminEventCategoryDto {
         match category {
             EventCategory::LibraryScan => AdminEventCategoryDto::LibraryScan,
             EventCategory::ScanProgress => AdminEventCategoryDto::ScanProgress,
+            EventCategory::Enrichment => AdminEventCategoryDto::Enrichment,
             EventCategory::System => AdminEventCategoryDto::System,
         }
     }
@@ -63,6 +68,9 @@ pub struct AdminEventDto {
     /// The scan job a `scan_progress` event reports on; `null` on every
     /// other category.
     pub scan: Option<ScanEvent>,
+    /// The title an `enrichment` event reports on; `null` on every other
+    /// category.
+    pub enrichment: Option<crate::models::enrichment::EnrichmentEvent>,
 }
 
 impl From<AdminEvent> for AdminEventDto {
@@ -76,6 +84,7 @@ impl From<AdminEvent> for AdminEventDto {
             library_id,
             library_name,
             scan,
+            enrichment,
         } = event;
         Self {
             id,
@@ -86,6 +95,7 @@ impl From<AdminEvent> for AdminEventDto {
             library_id,
             library_name,
             scan: scan.map(ScanEvent::from),
+            enrichment: enrichment.map(crate::models::enrichment::EnrichmentEvent::from),
         }
     }
 }
@@ -488,6 +498,9 @@ pub struct AdminStatusResponse {
     pub version: String,
     pub counts: AdminStatusCounts,
     pub enrichment: EnrichmentQueueCounts,
+    /// Whether each metadata provider is configured (FR-307): a title only
+    /// an unconfigured provider could match stays un-enriched.
+    pub enrichment_providers: Vec<crate::models::enrichment::EnrichmentProviderStatus>,
     /// Most recent `library_scan` admin log entries, newest first.
     pub recent_scans: Vec<RecentScanDto>,
     /// How the filesystem watcher observes each library.
@@ -612,6 +625,7 @@ mod tests {
             library_id: Some("lib-1".to_string()),
             library_name: Some("Movies".to_string()),
             scan: None,
+            enrichment: None,
         };
         let dto = AdminEventDto::from(event.clone());
         assert_eq!(dto.id, "evt-1");
