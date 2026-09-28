@@ -9,6 +9,7 @@
 //! by a scan or a watcher event -- exactly when what it holds differs from
 //! what was last applied (FR-219), recorded per NFO in `applied_nfos`.
 
+use std::collections::HashSet;
 use std::io::Read;
 
 use beam_domain::models::applied_nfo::{AppliedNfo, RecordAppliedNfo};
@@ -806,97 +807,153 @@ impl LocalIndexService {
         Ok(())
     }
 
-    /// Carry the applied state of the NFOs of a video just relinked from
-    /// `from` to `moved`'s path (issue #180), which is never classified
-    /// again: the NFOs classification would read for it now -- a movie's own,
-    /// an episode's show's and its own -- are recorded the way
-    /// [`Self::record_consumed_nfos`] records them, so a later scan or
-    /// watcher event does not take a moved NFO for a new one and replace the
-    /// title's pin with it (FR-219). Only an NFO with no record is touched,
-    /// and what it becomes turns on the NFO the video had at `from`, the one
-    /// classification located there, when that one is gone from disk (it
-    /// moved) and was recorded:
+    /// Carry the applied state of the NFOs of the videos one scan or one
+    /// watcher event just relinked (issue #180) -- each `(from, moved)` a
+    /// video relinked from `from` to `moved`'s path, which is never
+    /// classified again -- to the NFOs classification would read for each of
+    /// them now: a movie's own, an episode's show's and its own (FR-219). A
+    /// later scan or watcher event then does not take a moved NFO for a new
+    /// or an edited one and replace the title's pin with it.
     ///
-    /// * the same content -- moved, not edited: recorded as it is, already
-    ///   applied;
-    /// * other content -- edited during the move: left unrecorded, so the
-    ///   re-apply replaces the pin with it;
-    /// * no such record -- an NFO the title never had, or one whose record a
-    ///   removal forgot first: applied as classification applies a new
-    ///   file's, keeping a title's other pin, then recorded.
+    /// The batch is judged as a whole, against the records as they stood
+    /// before any is written, so the outcome never turns on the order the
+    /// videos come in -- nor on how the folders of a swap or a rotation
+    /// sort. One rule covers a move, a swap and a rotation: an NFO whose
+    /// content its path's record does not hold (or that has no record) has
+    /// *moved* when that content is what the record of another NFO path the
+    /// relinked videos had holds, and the file there no longer holds it --
+    /// gone, or holding other content. A moved NFO takes that record's
+    /// applied state: it is recorded as it is, and changes no pin. An NFO
+    /// whose content no such record holds is judged by itself:
+    ///
+    /// * one its path's record already holds is settled and left alone -- a
+    ///   video moved beside it does not take it;
+    /// * one whose path has a record of other content was edited, and is
+    ///   left for the re-apply to replace the pin with;
+    /// * one with no record, where the NFO the video had at `from` is gone
+    ///   from disk and recorded, was edited during the move: left
+    ///   unrecorded, so the re-apply replaces the pin with it;
+    /// * any other with no record -- an NFO the title never had, or one
+    ///   whose record a removal forgot first -- is applied as classification
+    ///   applies a new file's, keeping a title's other pin, then recorded.
     pub(super) async fn carry_nfos_on_relink(
         &self,
         library: &Library,
-        from: &Path,
-        moved: &MediaFile,
+        relinked: &[(PathBuf, MediaFile)],
     ) -> Result<(), IndexError> {
         let Some(repo) = &self.applied_nfo_repo else {
             return Ok(());
         };
-        let (Some(old_dir), Some(new_dir)) = (from.parent(), moved.path.parent()) else {
-            return Ok(());
-        };
         let root = library.root_path.as_path();
-        // Each NFO with the paths its counterpart at `from` could have had,
-        // in the order classification would have located it there.
-        let old_file_nfos = || {
-            let mut paths: Vec<PathBuf> = from
-                .file_stem()
-                .map(|stem| old_dir.join(format!("{}.nfo", stem.to_string_lossy())))
-                .into_iter()
-                .collect();
-            paths.push(old_dir.join(MOVIE_NFO));
-            paths
-        };
-        let old_show_nfos = || {
-            let mut paths = vec![old_dir.join(TVSHOW_NFO)];
-            if is_season_folder(old_dir)
-                && let Some(above) = old_dir.parent()
-            {
-                paths.push(above.join(TVSHOW_NFO));
-            }
-            paths
-        };
-        let located: Vec<(LocatedNfo, Vec<PathBuf>)> = match moved.content {
-            Some(MediaFileContent::Movie { .. }) => locate_file_nfo(root, &moved.path)
-                .map(|nfo| (nfo, old_file_nfos()))
-                .into_iter()
-                .collect(),
-            Some(MediaFileContent::Episode { .. }) => locate_show_nfo(root, new_dir)
-                .map(|nfo| (nfo, old_show_nfos()))
-                .into_iter()
-                .chain(locate_file_nfo(root, &moved.path).map(|nfo| (nfo, old_file_nfos())))
-                .collect(),
-            None => Vec::new(),
-        };
-        for (located, before) in located {
-            if repo.find_by_path(&located.path).await?.is_some() {
+        // Each relinked video's NFOs, each with the paths its counterpart at
+        // `from` could have had, in the order classification would have
+        // located it there.
+        let mut located: Vec<(&MediaFile, LocatedNfo, Vec<PathBuf>)> = Vec::new();
+        for (from, moved) in relinked {
+            let (Some(old_dir), Some(new_dir)) = (from.parent(), moved.path.parent()) else {
                 continue;
-            }
-            let mut counterpart: Option<AppliedNfo> = None;
-            for old in before {
-                if let Some(record) = repo.find_by_path(&old).await?
-                    && path_is_absent(&old)
+            };
+            let old_file_nfos = || {
+                let mut paths: Vec<PathBuf> = from
+                    .file_stem()
+                    .map(|stem| old_dir.join(format!("{}.nfo", stem.to_string_lossy())))
+                    .into_iter()
+                    .collect();
+                paths.push(old_dir.join(MOVIE_NFO));
+                paths
+            };
+            let old_show_nfos = || {
+                let mut paths = vec![old_dir.join(TVSHOW_NFO)];
+                if is_season_folder(old_dir)
+                    && let Some(above) = old_dir.parent()
                 {
-                    counterpart = Some(record);
-                    break;
+                    paths.push(above.join(TVSHOW_NFO));
                 }
-            }
-            let LocatedNfo { path, nfo, content } = located;
-            match counterpart {
-                Some(old) if content.same_as(&old) => {}
-                Some(_) => continue,
-                None => {
-                    if self
-                        .repin_from_nfo(library, &path, &nfo, &[moved], PinConflict::Keep)
-                        .await?
-                        == PinOutcome::Refused
-                    {
-                        continue;
+                paths
+            };
+            match moved.content {
+                Some(MediaFileContent::Movie { .. }) => {
+                    if let Some(nfo) = locate_file_nfo(root, &moved.path) {
+                        located.push((moved, nfo, old_file_nfos()));
                     }
                 }
+                Some(MediaFileContent::Episode { .. }) => {
+                    if let Some(nfo) = locate_show_nfo(root, new_dir) {
+                        located.push((moved, nfo, old_show_nfos()));
+                    }
+                    if let Some(nfo) = locate_file_nfo(root, &moved.path) {
+                        located.push((moved, nfo, old_file_nfos()));
+                    }
+                }
+                None => {}
             }
-            repo.record_by_path(content.record(library.id, &path, self.clock.now()))
+        }
+
+        // The record of every path involved, read before any is written.
+        let mut records: HashMap<PathBuf, Option<AppliedNfo>> = HashMap::new();
+        for (_, located, before) in &located {
+            for path in std::iter::once(&located.path).chain(before) {
+                if !records.contains_key(path) {
+                    records.insert(path.clone(), repo.find_by_path(path).await?);
+                }
+            }
+        }
+        let record_of = |path: &Path| records.get(path).and_then(Option::as_ref);
+        // The records of the NFOs the relinked videos had whose files no
+        // longer hold what they record -- gone, or holding other content:
+        // the content they record may have moved.
+        let mut vacated: Vec<&AppliedNfo> = Vec::new();
+        let mut looked_at: HashSet<&Path> = HashSet::new();
+        for (_, _, before) in &located {
+            for old in before {
+                if !looked_at.insert(old.as_path()) {
+                    continue;
+                }
+                let Some(record) = record_of(old) else {
+                    continue;
+                };
+                if path_is_absent(old)
+                    || read_nfo_file(old).is_some_and(|read| !read.content.same_as(record))
+                {
+                    vacated.push(record);
+                }
+            }
+        }
+
+        // An NFO two relinked videos share -- a folder's `movie.nfo`, a
+        // show's `tvshow.nfo` -- is judged once, for the first of them.
+        let mut judged: HashSet<&Path> = HashSet::new();
+        for (moved, located, before) in &located {
+            let LocatedNfo { path, nfo, content } = located;
+            if !judged.insert(path.as_path()) {
+                continue;
+            }
+            let stored = record_of(path);
+            if stored.is_some_and(|stored| content.same_as(stored)) {
+                continue;
+            }
+            let moved_here = vacated
+                .iter()
+                .any(|old| old.path != *path && content.same_as(old));
+            if !moved_here {
+                if stored.is_some() {
+                    continue;
+                }
+                let edited_in_the_move = before
+                    .iter()
+                    .any(|old| record_of(old).is_some() && path_is_absent(old));
+                if edited_in_the_move {
+                    continue;
+                }
+                if self
+                    .repin_from_nfo(library, path, nfo, &[*moved], PinConflict::Keep)
+                    .await?
+                    == PinOutcome::Refused
+                {
+                    continue;
+                }
+            }
+            repo.record_by_path(content.record(library.id, path, self.clock.now()))
                 .await?;
         }
         Ok(())

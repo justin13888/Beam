@@ -1636,19 +1636,27 @@ impl LocalIndexService {
                 self.clock.now(),
             )
             .await?;
-        for (row, path, _) in relinks {
-            // A row kept aside is reported by the path it was displaced
-            // from: the one it is kept at never existed on disk.
-            let from = displaced_from(&row.path).unwrap_or_else(|| row.path.clone());
-            // Its NFOs' applied state moves with it (FR-219). A failure is
-            // the NFO's, not the move's: it is only re-applied later.
-            let moved = MediaFile {
-                path: path.clone(),
-                ..row.clone()
-            };
-            if let Err(e) = self.carry_nfos_on_relink(library, &from, &moved).await {
-                warn!(path = %path.display(), error = %e, "could not carry a moved video's NFO records");
-            }
+        // A row kept aside is reported by the path it was displaced from:
+        // the one it is kept at never existed on disk.
+        let moves: Vec<(PathBuf, MediaFile)> = relinks
+            .iter()
+            .map(|(row, path, _)| {
+                let from = displaced_from(&row.path).unwrap_or_else(|| row.path.clone());
+                let moved = MediaFile {
+                    path: path.clone(),
+                    ..row.clone()
+                };
+                (from, moved)
+            })
+            .collect();
+        // The videos' NFOs' applied state moves with them, all at once, so a
+        // swap or a rotation carries each NFO as a move does (FR-219). A
+        // failure is the NFOs', not the moves': they are only re-applied
+        // later.
+        if let Err(e) = self.carry_nfos_on_relink(library, &moves).await {
+            warn!(library_id = %library.id, error = %e, "could not carry moved videos' NFO records");
+        }
+        for ((row, path, _), (from, _)) in relinks.iter().zip(&moves) {
             info!(
                 file_id = %row.id,
                 from = %from.display(),

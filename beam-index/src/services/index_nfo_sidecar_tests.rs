@@ -2277,3 +2277,123 @@ async fn a_video_moved_away_from_an_nfo_that_stays_keeps_the_pin() {
     assert!(h.applied("Two/movie.nfo").await.is_some());
     assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
 }
+
+/// A copy of Heat with its own NFO in each of `folders`, each indexed by a
+/// scan of its own in turn: the first folder's NFO, naming tmdb:949, pins
+/// the movie, and every later one -- naming tmdb:1, tmdb:2, ... -- is kept
+/// against it and recorded as applied (FR-219).
+async fn kept_conflicting_nfos_in(folders: &[&str]) -> Harness {
+    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    for (i, folder) in folders.iter().enumerate() {
+        let id = if i == 0 { 949 } else { i as u32 };
+        h.video(&format!("{folder}/Heat (1995).mkv"));
+        h.write(&format!("{folder}/Heat (1995).nfo"), &tmdb_movie(id));
+        h.scan().await;
+    }
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+    for folder in folders {
+        assert!(
+            h.applied(&format!("{folder}/Heat (1995).nfo"))
+                .await
+                .is_some()
+        );
+    }
+    h
+}
+
+/// Rotate whole folders beneath the harness's root: the contents of
+/// `folders[i]` end up in `folders[i + 1]`, and the last folder's in the
+/// first. Two folders are swapped.
+fn rotate_folders(h: &Harness, folders: &[&str]) {
+    let parked = h.root.parent().unwrap().join("parked");
+    let last = folders.len() - 1;
+    std::fs::rename(h.root.join(folders[last]), &parked).unwrap();
+    for i in (0..last).rev() {
+        std::fs::rename(h.root.join(folders[i]), h.root.join(folders[i + 1])).unwrap();
+    }
+    std::fs::rename(&parked, h.root.join(folders[0])).unwrap();
+}
+
+/// Each folder's video row and the content hash of its NFO's record.
+async fn rows_and_nfo_records(h: &Harness, folders: &[&str]) -> Vec<(Uuid, String)> {
+    let mut found = Vec::new();
+    for folder in folders {
+        let id = h.file(&format!("{folder}/Heat (1995).mkv")).id;
+        let record = h
+            .applied(&format!("{folder}/Heat (1995).nfo"))
+            .await
+            .expect("the NFO is recorded");
+        found.push((id, record.content_hash));
+    }
+    found
+}
+
+/// Folders swapped or rotated whole carry each kept NFO's applied state as
+/// a move does (FR-219, issue #180): every row relinks with its NFO's
+/// record, and the kept, conflicting NFOs stay kept -- through the scan
+/// that finds the change and every scan after it -- whichever way the
+/// folders' names sort.
+#[tokio::test]
+async fn folders_swapped_or_rotated_keep_the_pin_whichever_way_they_sort() {
+    let cases: [&[&str]; 4] = [&["A", "B"], &["B", "A"], &["A", "B", "C"], &["C", "B", "A"]];
+    for folders in cases {
+        let h = kept_conflicting_nfos_in(folders).await;
+        let before = rows_and_nfo_records(&h, folders).await;
+
+        rotate_folders(&h, folders);
+        h.scan().await;
+
+        let after = rows_and_nfo_records(&h, folders).await;
+        let mut expected = before.clone();
+        expected.rotate_right(1);
+        assert_eq!(
+            after, expected,
+            "each row and its NFO's record follow the folder, {folders:?}"
+        );
+        assert_eq!(
+            h.movie_pins(),
+            vec![Some("tmdb:949".to_string())],
+            "{folders:?}"
+        );
+        h.scan().await;
+        assert_eq!(
+            h.movie_pins(),
+            vec![Some("tmdb:949".to_string())],
+            "{folders:?}"
+        );
+    }
+}
+
+/// Two folders swapped, one of whose NFOs was also edited on the way: that
+/// NFO holds content no record does, so it is an edited NFO and replaces
+/// the pin with the id it now names -- whether it is the pinning NFO or the
+/// kept one -- while the other still carries its record.
+#[tokio::test]
+async fn folders_swapped_with_one_nfo_edited_repin_to_the_edit() {
+    for edited in ["A", "B"] {
+        let folders = ["A", "B"];
+        let h = kept_conflicting_nfos_in(&folders).await;
+        let kept_record = h.applied("B/Heat (1995).nfo").await.unwrap().content_hash;
+        let pinning_record = h.applied("A/Heat (1995).nfo").await.unwrap().content_hash;
+
+        rotate_folders(&h, &folders);
+        h.write(&format!("{edited}/Heat (1995).nfo"), &tmdb_movie(2));
+        h.scan().await;
+
+        assert_eq!(
+            h.movie_pins(),
+            vec![Some("tmdb:2".to_string())],
+            "edited in {edited}"
+        );
+        let carried = if edited == "A" {
+            ("B/Heat (1995).nfo", pinning_record)
+        } else {
+            ("A/Heat (1995).nfo", kept_record)
+        };
+        assert_eq!(
+            h.applied(carried.0).await.unwrap().content_hash,
+            carried.1,
+            "the other NFO carries its record, edited in {edited}"
+        );
+    }
+}
