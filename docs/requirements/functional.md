@@ -238,7 +238,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   added after indexing and re-pins, so a kept, conflicting NFO deleted and recreated replaces the
   title's pin. That holds only when Beam saw the NFO gone, and the same whether the NFO alone or a
   folder holding it went -- a watcher removal event for either, or a scan while it was missing; one
-  put back unseen with the same bytes is an unchanged NFO.
+  put back unseen with the same bytes is an unchanged NFO. A video relinked to its row (FR-221) is
+  not classified again, so the NFOs classification would read for it at its new path that have no
+  record MUST take their applied state from the NFO it had at its old path, where that one is gone
+  from disk and recorded: moved with the same content, the NFO is recorded as applied and changes
+  no pin -- a kept, conflicting NFO stays kept; edited in the move, it is applied as edited. One
+  with no such counterpart -- never applied to the title, or forgotten by a removal seen first --
+  MUST be applied as a new file's NFO is, keeping a title's other pin, and recorded.
   A walk that could not read where an NFO lives, or a removal reported while the library root is
   gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a

@@ -177,7 +177,10 @@ and subtitle tracks all follow it, and it is not probed again. This works whethe
 the move as it happens or the next scan finds it, and for a file moved out of the library and back
 in, as long as it comes back within the grace period. Subtitle files and NFOs beside it are matched
 by where they are now: a moved video has the subtitles beside its new name, and an NFO moved with it
-keeps pinning its title to the same id.
+keeps pinning its title to the same id — or, if the admin log said its id was not used because the
+title already had another, still leaves that pin alone. An NFO you edit on the way re-pins the title
+to the id it now names; one already in the folder a video is moved into, which that title never
+had, is applied as a new file's NFO would be.
 
 The same holds when files trade names. Swap two files' names, rotate three, or rename a file onto
 the name of one you deleted earlier, and each record follows its file's contents rather than its

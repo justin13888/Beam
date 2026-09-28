@@ -1640,6 +1640,15 @@ impl LocalIndexService {
             // A row kept aside is reported by the path it was displaced
             // from: the one it is kept at never existed on disk.
             let from = displaced_from(&row.path).unwrap_or_else(|| row.path.clone());
+            // Its NFOs' applied state moves with it (FR-219). A failure is
+            // the NFO's, not the move's: it is only re-applied later.
+            let moved = MediaFile {
+                path: path.clone(),
+                ..row.clone()
+            };
+            if let Err(e) = self.carry_nfos_on_relink(library, &from, &moved).await {
+                warn!(path = %path.display(), error = %e, "could not carry a moved video's NFO records");
+            }
             info!(
                 file_id = %row.id,
                 from = %from.display(),
@@ -3186,7 +3195,8 @@ impl LocalIndexService {
                         self.attach_adjacent_sidecars(library, path).await?;
                     }
                     // A moved video's subtitles are those beside it now
-                    // (issue #184); its NFOs are applied by their own events.
+                    // (issue #184); its NFOs' records moved with it as it was
+                    // relinked, and changes to them are their own events'.
                     FileOutcome::Relinked => self.relink_sidecars(library, path).await?,
                     FileOutcome::Changed
                     | FileOutcome::Unchanged

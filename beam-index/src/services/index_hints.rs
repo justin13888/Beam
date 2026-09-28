@@ -338,8 +338,10 @@ fn carries(
 /// What to do when a title already carries another pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PinConflict {
-    /// A new file's NFO disagrees with the title's pin: keep the pin and tell
-    /// the administrator (two NFOs name different titles for one key).
+    /// A new file's NFO -- or one a relinked video found beside its new path
+    /// that its title never had applied -- disagrees with the title's pin:
+    /// keep the pin and tell the administrator (two NFOs name different
+    /// titles for one key).
     Keep,
     /// The NFO the pin came from was edited: its new id replaces the old.
     Replace,
@@ -545,10 +547,13 @@ impl LocalIndexService {
     /// the shows of the episodes whose `tvshow.nfo` it is, a `movie.nfo` the
     /// movies in its folder with no `<stem>.nfo` of their own, and a
     /// `<stem>.nfo` the movie of its video; an NFO at the library root, or
-    /// further above a video than classification looks, re-pins nothing. The
-    /// NFO's pin replaces the one it set before, but never an
-    /// administrator's (FR-312). An NFO that pins nothing leaves the pin as
-    /// it is: the title stays fetched by the id it was last given.
+    /// further above a video than classification looks, re-pins nothing.
+    /// With [`PinConflict::Replace`] the NFO's pin replaces the one it set
+    /// before; with [`PinConflict::Keep`] -- an NFO a relinked video found
+    /// beside its new path, never applied to its title -- a title's other pin
+    /// is kept, as classification keeps it. Never an administrator's
+    /// (FR-312). An NFO that pins nothing leaves the pin as it is: the title
+    /// stays fetched by the id it was last given.
     /// [`PinOutcome::Refused`] when the unique pin refused any of the titles
     /// because a title this NFO does not describe holds the id. When the
     /// holder is another of its own titles -- a `movie.nfo` beside two
@@ -560,6 +565,7 @@ impl LocalIndexService {
         nfo_path: &Path,
         nfo: &Nfo,
         files: &[&MediaFile],
+        conflict: PinConflict,
     ) -> Result<PinOutcome, IndexError> {
         let mut outcome = PinOutcome::Settled;
         let Some(pin) = nfo.ids.pin() else {
@@ -615,7 +621,7 @@ impl LocalIndexService {
                         show.pin_source,
                         carried,
                         &pin,
-                        PinConflict::Replace,
+                        conflict,
                         nfo_path,
                     )
                     .await?
@@ -672,7 +678,7 @@ impl LocalIndexService {
                     movie.pin_source,
                     carried,
                     &pin,
-                    PinConflict::Replace,
+                    conflict,
                     nfo_path,
                 )
                 .await?
@@ -782,7 +788,10 @@ impl LocalIndexService {
         };
         if !stored.is_some_and(|stored| content.same_as(stored))
             && let Some(nfo) = &nfo
-            && self.repin_from_nfo(library, path, nfo, files).await? == PinOutcome::Refused
+            && self
+                .repin_from_nfo(library, path, nfo, files, PinConflict::Replace)
+                .await?
+                == PinOutcome::Refused
         {
             return Ok(());
         }
@@ -791,6 +800,102 @@ impl LocalIndexService {
             if !stored.is_some_and(|stored| record.matches(stored)) {
                 repo.record_by_path(record).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// Carry the applied state of the NFOs of a video just relinked from
+    /// `from` to `moved`'s path (issue #180), which is never classified
+    /// again: the NFOs classification would read for it now -- a movie's own,
+    /// an episode's show's and its own -- are recorded the way
+    /// [`Self::record_consumed_nfos`] records them, so a later scan or
+    /// watcher event does not take a moved NFO for a new one and replace the
+    /// title's pin with it (FR-219). Only an NFO with no record is touched,
+    /// and what it becomes turns on the NFO the video had at `from`, the one
+    /// classification located there, when that one is gone from disk (it
+    /// moved) and was recorded:
+    ///
+    /// * the same content -- moved, not edited: recorded as it is, already
+    ///   applied;
+    /// * other content -- edited during the move: left unrecorded, so the
+    ///   re-apply replaces the pin with it;
+    /// * no such record -- an NFO the title never had, or one whose record a
+    ///   removal forgot first: applied as classification applies a new
+    ///   file's, keeping a title's other pin, then recorded.
+    pub(super) async fn carry_nfos_on_relink(
+        &self,
+        library: &Library,
+        from: &Path,
+        moved: &MediaFile,
+    ) -> Result<(), IndexError> {
+        let Some(repo) = &self.applied_nfo_repo else {
+            return Ok(());
+        };
+        let (Some(old_dir), Some(new_dir)) = (from.parent(), moved.path.parent()) else {
+            return Ok(());
+        };
+        let root = library.root_path.as_path();
+        // Each NFO with the paths its counterpart at `from` could have had,
+        // in the order classification would have located it there.
+        let old_file_nfos = || {
+            let mut paths: Vec<PathBuf> = from
+                .file_stem()
+                .map(|stem| old_dir.join(format!("{}.nfo", stem.to_string_lossy())))
+                .into_iter()
+                .collect();
+            paths.push(old_dir.join(MOVIE_NFO));
+            paths
+        };
+        let old_show_nfos = || {
+            let mut paths = vec![old_dir.join(TVSHOW_NFO)];
+            if is_season_folder(old_dir)
+                && let Some(above) = old_dir.parent()
+            {
+                paths.push(above.join(TVSHOW_NFO));
+            }
+            paths
+        };
+        let located: Vec<(LocatedNfo, Vec<PathBuf>)> = match moved.content {
+            Some(MediaFileContent::Movie { .. }) => locate_file_nfo(root, &moved.path)
+                .map(|nfo| (nfo, old_file_nfos()))
+                .into_iter()
+                .collect(),
+            Some(MediaFileContent::Episode { .. }) => locate_show_nfo(root, new_dir)
+                .map(|nfo| (nfo, old_show_nfos()))
+                .into_iter()
+                .chain(locate_file_nfo(root, &moved.path).map(|nfo| (nfo, old_file_nfos())))
+                .collect(),
+            None => Vec::new(),
+        };
+        for (located, before) in located {
+            if repo.find_by_path(&located.path).await?.is_some() {
+                continue;
+            }
+            let mut counterpart: Option<AppliedNfo> = None;
+            for old in before {
+                if let Some(record) = repo.find_by_path(&old).await?
+                    && path_is_absent(&old)
+                {
+                    counterpart = Some(record);
+                    break;
+                }
+            }
+            let LocatedNfo { path, nfo, content } = located;
+            match counterpart {
+                Some(old) if content.same_as(&old) => {}
+                Some(_) => continue,
+                None => {
+                    if self
+                        .repin_from_nfo(library, &path, &nfo, &[moved], PinConflict::Keep)
+                        .await?
+                        == PinOutcome::Refused
+                    {
+                        continue;
+                    }
+                }
+            }
+            repo.record_by_path(content.record(library.id, &path, self.clock.now()))
+                .await?;
         }
         Ok(())
     }
