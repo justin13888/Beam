@@ -942,6 +942,42 @@ async fn continue_watching_is_bounded_by_first() {
     }
 }
 
+/// A bulk mark makes caught-up shows by the dozen, each played more recently
+/// than anything in progress. However many there are, they are read past,
+/// not counted against the shelf.
+#[tokio::test]
+async fn caught_up_shows_newer_than_an_unfinished_title_never_crowd_it_out() {
+    let fixture = fixture();
+    let client = client(&fixture);
+    let token = session(&fixture).await;
+    let movie = fixture.movie("Heat").await;
+    let file = fixture.movie_file(movie, 1_000).await;
+    watch(&client, &token, file, 30.0).await;
+    // A shelf of one reads two candidates at a time; the old five-read
+    // budget was ten.
+    for n in 0..13 {
+        fixture.later();
+        let show = fixture.show(&format!("Show {n}")).await;
+        fixture.episode(show, 1, 1).await;
+        assert_eq!(
+            set_watched(&client, &token, show, true).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    for first in [1, 2] {
+        let response = client
+            .get(&format!("/v1/continue-watching?first={first}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{}", response.text());
+        let shelf: ContinueWatchingConnection = response.json();
+        let rows: Vec<Uuid> = shelf.items.iter().map(|i| i.media_id).collect();
+        assert_eq!(rows, vec![movie], "first={first}");
+    }
+}
+
 // ── History ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]

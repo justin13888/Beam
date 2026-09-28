@@ -202,12 +202,6 @@ enum Resolved {
     Show(Show),
 }
 
-/// How many pages of candidates continue-watching reads, at most, to fill
-/// itself past titles with nothing left to play. A viewer caught up on more
-/// shows than this many pages hold gets a short shelf rather than an
-/// unbounded read.
-const MAX_CANDIDATE_PAGES: u64 = 5;
-
 /// What a continue-watching or history row displays of its title.
 ///
 /// The title is the one browse lists the title by: `title_localized` holds
@@ -782,12 +776,19 @@ impl PlaybackService for DbPlaybackService {
         // caught-up show that yields none should not cost a read of its own.
         let page = u64::from(first.get()).saturating_mul(2);
         let mut items = Vec::with_capacity(wanted);
-        for read in 0..MAX_CANDIDATE_PAGES {
+        // Read on until the shelf is full or the candidates run out. A title
+        // with nothing to offer -- above all a caught-up show, which a bulk
+        // mark makes by the hundred -- must not use up a budget the titles
+        // behind it need, or marking a library watched would empty the shelf.
+        let mut offset = 0_u64;
+        loop {
             let candidates = self
                 .watch_state
-                .find_continue_candidates(user_id, page, read * page)
+                .find_continue_candidates(user_id, page, offset)
                 .await?;
-            let exhausted = (candidates.len() as u64) < page;
+            let read = candidates.len() as u64;
+            offset += read;
+            let exhausted = read < page;
             for title in candidates {
                 if let Some(item) = self.continue_item(user_id, title).await? {
                     items.push(item);
