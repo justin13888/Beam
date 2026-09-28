@@ -10,7 +10,8 @@ use std::path::Path;
 use super::*;
 
 /// `episode <series>|<year> s<season> e<first>[-<last>] [<title>] <numbering>
-/// [@<air date>] [!folder<n>]`, `movie <title>|<year> [ed=<edition>]`,
+/// [@<air date>] [!folder<n>]`, `movie <title>|<year> [ed=<edition>]
+/// [part=<n>]`,
 /// `unclassifiable season <n>`, `unclassifiable absolute <n>`,
 /// `unclassifiable fractional <n>.<d>`, or `unclassifiable season range`.
 fn describe(inference: &MediaInference) -> String {
@@ -48,10 +49,17 @@ fn describe(inference: &MediaInference) -> String {
             }
             out
         }
-        MediaInference::Movie(MovieInference { title, edition }) => {
+        MediaInference::Movie(MovieInference {
+            title,
+            edition,
+            part_number,
+        }) => {
             let mut out = format!("movie {}|{}", title.title, year(title.year));
             if let Some(edition) = edition {
                 out.push_str(&format!(" ed={edition}"));
+            }
+            if let Some(part) = part_number {
+                out.push_str(&format!(" part={part}"));
             }
             out
         }
@@ -549,6 +557,57 @@ const CORPUS: &[(&str, &str)] = &[
     ("Uncut.Gems.2019.1080p.mkv", "movie Uncut Gems|2019"),
     ("IMAX Hubble (2010).mkv", "movie IMAX Hubble|2010"),
     ("S1m0ne (2002)/S1m0ne.2002.mkv", "movie S1m0ne|2002"),
+    // One part of a multi-part movie (issue #233), in every token form: the
+    // token is the part, not the title, so every part keys one title.
+    (
+        "Movie (2019)/Movie (2019) - CD1.avi",
+        "movie Movie|2019 part=1",
+    ),
+    (
+        "Movie (2019)/Movie (2019) - CD2.avi",
+        "movie Movie|2019 part=2",
+    ),
+    ("Movie (2019) - Part 1.mkv", "movie Movie|2019 part=1"),
+    ("Movies/Movie (2019) - Part2.mkv", "movie Movie|2019 part=2"),
+    ("Movie (2019) - pt1.mkv", "movie Movie|2019 part=1"),
+    ("Movie.2019.pt.2.mkv", "movie Movie|2019 part=2"),
+    ("Movie (2019) disc1.mkv", "movie Movie|2019 part=1"),
+    ("Movie_2019_disk_2.mkv", "movie Movie|2019 part=2"),
+    (
+        "Movie.2019.DVDRip.XviD.CD1-GRP.avi",
+        "movie Movie|2019 part=1",
+    ),
+    ("Movie (2019)/Movie - CD2.avi", "movie Movie|2019 part=2"),
+    // `part` with no year before it: a part only where the folder names the
+    // title the rest of the name spells (D233-2).
+    ("Movie (2019)/Movie - Part 1.mkv", "movie Movie|2019 part=1"),
+    ("Movies/Movie - Part 1.mkv", "movie Movie - Part 1|-"),
+    // A part and an edition are independent.
+    (
+        "Movie (2019)/Movie (2019) {edition-Director's Cut} - CD2.mkv",
+        "movie Movie|2019 ed=Director's Cut part=2",
+    ),
+    // Numbers that are a title's own.
+    (
+        "Part 2: The Sequel (2020).mkv",
+        "movie Part 2: The Sequel|2020",
+    ),
+    ("Kill Bill Vol 1.mkv", "movie Kill Bill Vol 1|-"),
+    ("Rocky II (1979).mkv", "movie Rocky II|1979"),
+    (
+        "Harry Potter and the Deathly Hallows Part 1 (2010)/Harry Potter and the Deathly Hallows Part 1 (2010).mkv",
+        "movie Harry Potter and the Deathly Hallows Part 1|2010",
+    ),
+    (
+        "Harry Potter and the Deathly Hallows Part 1 (2010)/Harry Potter and the Deathly Hallows Part 1.mkv",
+        "movie Harry Potter and the Deathly Hallows Part 1|2010",
+    ),
+    (
+        "The Godfather Part 2 (1974).mkv",
+        "movie The Godfather Part 2|1974",
+    ),
+    // A season folder's file is an episode or nothing, never a part.
+    ("Show/Season 1/Show - CD1.mkv", "unclassifiable season 1"),
 ];
 
 #[test]

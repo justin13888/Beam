@@ -229,6 +229,31 @@ impl MovieRepository for SqlMovieRepository {
         }
     }
 
+    async fn retitle_from(
+        &self,
+        movie_id: Uuid,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        // One statement: the title is compared and replaced atomically, so
+        // an enrichment landing in between is never overwritten.
+        let result = movie::Entity::update_many()
+            .col_expr(movie::Column::Title, Expr::value(title.to_string()))
+            .col_expr(
+                movie::Column::UpdatedAt,
+                Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(Utc::now())),
+            )
+            .filter(movie::Column::Id.eq(movie_id))
+            .filter(movie::Column::Title.eq(expected))
+            .exec(self.db.as_ref())
+            .await?;
+        Ok(result.rows_affected == 1)
+    }
+
     async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Movie>, DbErr> {
         use beam_entity::movie;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};

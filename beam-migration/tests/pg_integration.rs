@@ -1420,3 +1420,97 @@ async fn the_enrichment_locks_migration_defaults_constrains_and_reverses() {
 
     scoped.drop_schema().await.expect("drop schema");
 }
+
+/// Issue #233's migration: an existing file gains no part, a part sits only
+/// on a movie file and is never below 1, and `down()` takes the column away
+/// so `up()` can apply again.
+#[tokio::test]
+async fn the_movie_parts_migration_constrains_and_reverses() {
+    use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
+
+    let scoped = ScopedSchema::create("movie_parts")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+
+    let before_this_one = beam_migration::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20261012_000001_movie_parts")
+        .expect("the migration is registered");
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(before_this_one as u32))
+        .await
+        .expect("every migration before this one applies");
+    for sql in [
+        "INSERT INTO libraries (id, name, root_path, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
+        "INSERT INTO movies (id, title, identity_key, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000b', 'Movie - CD1', 'movie cd1|2019', now(), now())",
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, created_at) VALUES \
+         ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', \
+          '00000000-0000-0000-0000-00000000000b', NULL, now())",
+        "INSERT INTO files (id, movie_entry_id, library_id, file_path, file_size, hash_xxh3, \
+                            file_status, scanned_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-000000000001', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/Movie (2019) - CD1.avi', 1, 1, \
+          'known', now(), now()), \
+         ('00000000-0000-0000-0000-0000000000f2', NULL, \
+          '00000000-0000-0000-0000-00000000000a', '/videos/unknown.mkv', 1, 2, \
+          'unknown', now(), now())",
+    ] {
+        db.execute_unprepared(sql).await.expect("seed rows");
+    }
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(1))
+        .await
+        .expect("this migration applies over existing rows");
+
+    let text = |sql: &'static str| async move {
+        db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
+            .await
+            .expect("query")
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "v").expect("a text column v"))
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        text("SELECT coalesce(part_number::text, 'none') AS v FROM files ORDER BY id").await,
+        vec!["none", "none"],
+        "an existing file has no part until it is reclassified"
+    );
+    db.execute_unprepared(
+        "UPDATE files SET part_number = 1 WHERE id = '00000000-0000-0000-0000-0000000000f1'",
+    )
+    .await
+    .expect("a movie file takes a part");
+    for (sql, why) in [
+        (
+            "UPDATE files SET part_number = 0 WHERE id = '00000000-0000-0000-0000-0000000000f1'",
+            "no part zero",
+        ),
+        (
+            "UPDATE files SET part_number = 1 WHERE id = '00000000-0000-0000-0000-0000000000f2'",
+            "a file that is no movie's has no part",
+        ),
+    ] {
+        assert!(db.execute_unprepared(sql).await.is_err(), "{why}");
+    }
+
+    beam_migration::Migrator::down(db, Some(1))
+        .await
+        .expect("the migration rolls back");
+    assert!(
+        text(
+            "SELECT column_name::text AS v FROM information_schema.columns \
+              WHERE table_schema = current_schema() AND table_name = 'files' \
+                AND column_name = 'part_number'"
+        )
+        .await
+        .is_empty(),
+        "down() drops the column"
+    );
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+        .await
+        .expect("the migration reapplies over the rolled-back schema");
+
+    scoped.drop_schema().await.expect("drop schema");
+}

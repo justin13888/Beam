@@ -15,7 +15,8 @@ use chrono::{Datelike, NaiveDate};
 use regex::Regex;
 
 use crate::utils::filename::{
-    ParsedFilename, episode_title_after, is_noise_only, normalized_stem, parse_media_filename,
+    ParsedFilename, episode_title_after, is_noise_only, normalized_stem, parse_as_part,
+    parse_media_filename,
 };
 use crate::utils::identity::{normalize_title, title_identity_key};
 
@@ -33,7 +34,13 @@ use crate::utils::identity::{normalize_title, title_identity_key};
 ///   ([`crate::utils::classification`], issue #184). Keys are derived exactly
 ///   as by `1`, so the re-derivation this bump triggers changes none; the
 ///   reclassification it triggers is what applies NFOs already on disk.
-pub const CLASSIFIER_VERSION: u16 = 2;
+/// - `3`: a multi-part movie's part token (`- CD1`, `- Part 2`, `.pt1`,
+///   `disc1`) is read as its part rather than kept in its title (issue #233).
+///   `Movie (2019) - CD1` keyed `movie cd1|2019` and each part was a film of
+///   its own; every part now keys `movie|2019`, so the re-derivation this
+///   bump triggers merges them into one title, and the reclassification
+///   records each file's part.
+pub const CLASSIFIER_VERSION: u16 = 3;
 
 /// A title and year as a path spells them -- what a movie or show is keyed by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,11 +85,16 @@ pub struct EpisodeInference {
     pub contradicted_season_folder: Option<u32>,
 }
 
-/// A movie, and which edition of it the file is.
+/// A movie, which edition of it the file is, and -- for a movie split across
+/// files -- which part.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovieInference {
     pub title: TitleGuess,
     pub edition: Option<String>,
+    /// The part of a multi-part movie the file is (`Movie (2019) - CD2`),
+    /// from 1 (issue #233). Every part keys the same title and edition; the
+    /// parts of one edition are one source, played in part order.
+    pub part_number: Option<u32>,
 }
 
 /// Why a file could not be classified.
@@ -370,6 +382,7 @@ pub(crate) fn movie_reading(rel_path: &Path) -> MovieInference {
                 year: None,
             },
             edition: None,
+            part_number: None,
         },
     }
 }
@@ -518,17 +531,28 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
 
 /// The movie a filename parse names, completed from its parent folder.
 fn movie_of(parsed: ParsedFilename, stem: String, parent: Option<&str>) -> MovieInference {
+    let folder = parent.and_then(title_of);
+    // A `part` token the name alone does not confirm is a part when the
+    // folder names the title the rest of the name spells (decision D233-2):
+    // `Movie (2019)/Movie - Part 1.mkv` is part 1 of *Movie*, but `Harry
+    // Potter and the Deathly Hallows Part 1 (2010)/...Part 1.mkv` is a film.
+    let parsed = match (&parsed.part, &folder) {
+        (None, Some(folder)) => parse_as_part(&stem, false)
+            .filter(|part| same_title(&part.title, &folder.title))
+            .unwrap_or(parsed),
+        _ => parsed,
+    };
     let ParsedFilename {
         title,
         year,
         edition,
+        part,
         ..
     } = parsed;
     // The parent folder (never the library root) fills what the filename
     // leaves out (decision D182-C2): its title when the filename's is empty
     // or nothing but release noise, and its year when the filename names the
     // same title without one -- `Kill Bill (2003)/Kill Bill.mkv`.
-    let folder = parent.and_then(title_of);
     let title = match folder {
         Some(folder) if title.is_empty() || is_noise_only(&title) => TitleGuess {
             title: folder.title,
@@ -543,7 +567,11 @@ fn movie_of(parsed: ParsedFilename, stem: String, parent: Option<&str>) -> Movie
             year,
         },
     };
-    MovieInference { title, edition }
+    MovieInference {
+        title,
+        edition,
+        part_number: part,
+    }
 }
 
 /// An absolute episode number found in a stem.

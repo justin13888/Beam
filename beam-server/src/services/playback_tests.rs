@@ -116,9 +116,7 @@ mod tests {
     #[tokio::test]
     async fn report_progress_known_file_upserts_and_returns_dto() {
         let harness = make_harness();
-        let file = make_media_file(MediaFileContent::Movie {
-            movie_entry_id: Uuid::new_v4(),
-        });
+        let file = make_media_file(MediaFileContent::movie(Uuid::new_v4()));
         let file_id = file.id;
         harness
             .file_repo
@@ -167,9 +165,7 @@ mod tests {
             .unwrap()
             .insert(entry.id, entry);
 
-        let file = make_media_file(MediaFileContent::Movie {
-            movie_entry_id: entry_id,
-        });
+        let file = make_media_file(MediaFileContent::movie(entry_id));
         let file_id = file.id;
         harness
             .file_repo
@@ -316,9 +312,7 @@ mod tests {
             .unwrap()
             .insert(entry.id, entry);
 
-        let file = make_media_file(MediaFileContent::Movie {
-            movie_entry_id: entry_id,
-        });
+        let file = make_media_file(MediaFileContent::movie(entry_id));
         let file_id = file.id;
         harness
             .file_repo
@@ -429,7 +423,7 @@ mod tests {
             .get(&stale_file)
             .and_then(|file| file.content.clone())
         {
-            Some(MediaFileContent::Movie { movie_entry_id }) => movie_entry_id,
+            Some(MediaFileContent::Movie { movie_entry_id, .. }) => movie_entry_id,
             other => panic!("seeded a movie file, got {other:?}"),
         };
         harness
@@ -448,9 +442,7 @@ mod tests {
     #[tokio::test]
     async fn get_continue_watching_leaves_out_a_row_whose_file_is_missing() {
         let harness = make_harness();
-        let file = make_media_file(MediaFileContent::Movie {
-            movie_entry_id: Uuid::new_v4(),
-        });
+        let file = make_media_file(MediaFileContent::movie(Uuid::new_v4()));
         let file_id = file.id;
         harness
             .file_repo

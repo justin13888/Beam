@@ -140,9 +140,7 @@ impl Fixture {
             mime_type: None,
             duration: None,
             container_format: None,
-            content: Some(MediaFileContent::Movie {
-                movie_entry_id: Uuid::new_v4(),
-            }),
+            content: Some(MediaFileContent::movie(Uuid::new_v4())),
             status: FileStatus::Known,
             scanned_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

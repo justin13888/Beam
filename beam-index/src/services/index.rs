@@ -26,12 +26,12 @@ use crate::services::scan::{
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
-use beam_domain::models::enrichment::{EnrichmentTargetId, FieldLocks};
+use beam_domain::models::enrichment::{EnrichmentTargetId, FieldLocks, MetadataField};
 use beam_domain::models::file::{
     CreateMediaFile, FileClassification, FileIdentity, FileRelink, FileStatus, MediaFile,
     MediaFileContent, ProbeUpdate, UpdateMediaFile, displaced_from, mtime_as_stored,
 };
-use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, MovieEntry};
+use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
@@ -1389,10 +1389,18 @@ impl LocalIndexService {
                     last_episode_number: last_episode,
                 }))
             }
-            MediaInference::Movie(MovieInference { title, edition }) => {
+            MediaInference::Movie(MovieInference {
+                title,
+                edition,
+                part_number,
+            }) => {
                 // Found by pin or identity key, never by display title:
                 // enrichment may have renamed the movie since its first file
-                // (#183). A new movie is shown as its NFO names it.
+                // (#183). A new movie is shown as its NFO names it. One part
+                // of a multi-part movie lasts that part, not the movie: a new
+                // movie from it has no runtime until enrichment supplies one,
+                // as a new episode from a multi-episode file has none.
+                let runtime = if part_number.is_some() { None } else { runtime };
                 let mut create = CreateMovie::new(title.title, title.year, runtime);
                 if let Some(TitleGuess { title, year }) = display {
                     create.title = title;
@@ -1407,7 +1415,8 @@ impl LocalIndexService {
                     .await?;
 
                 // One entry per edition of the film in this library: every
-                // copy of the same edition is another file of that entry.
+                // copy of the same edition -- and every part of one -- is
+                // another file of that entry.
                 let entry = self
                     .movie_repo
                     .find_or_create_entry(CreateMovieEntry {
@@ -1419,6 +1428,7 @@ impl LocalIndexService {
 
                 Ok(Some(MediaFileContent::Movie {
                     movie_entry_id: entry.id,
+                    part_number,
                 }))
             }
             MediaInference::Unclassifiable(reason) => {
@@ -2301,7 +2311,16 @@ impl LocalIndexService {
 
         // Gather the sibling files that share this file's movie/episode.
         let siblings: Vec<MediaFile> = match &file.content {
-            Some(MediaFileContent::Movie { movie_entry_id }) => {
+            // One part of a multi-part movie lasts that part, which no other
+            // file of the movie is expected to match.
+            Some(MediaFileContent::Movie {
+                part_number: Some(_),
+                ..
+            }) => return,
+            Some(MediaFileContent::Movie {
+                movie_entry_id,
+                part_number: None,
+            }) => {
                 let entry = match self.movie_repo.find_entry_by_id(*movie_entry_id).await {
                     Ok(Some(entry)) => entry,
                     Ok(None) => return,
@@ -2332,7 +2351,15 @@ impl LocalIndexService {
                 let mut collected = Vec::new();
                 for entry in entries {
                     match self.file_repo.find_by_movie_entry_id(entry.id).await {
-                        Ok(files) => collected.extend(files),
+                        Ok(files) => collected.extend(files.into_iter().filter(|sibling| {
+                            matches!(
+                                sibling.content,
+                                Some(MediaFileContent::Movie {
+                                    part_number: None,
+                                    ..
+                                })
+                            )
+                        })),
                         Err(e) => {
                             warn!(
                                 "Runtime-divergence check failed for {}: {}",
@@ -2588,7 +2615,7 @@ impl LocalIndexService {
             {
                 let inferred = || infer_media(relative_to(&library.root_path, &file.path));
                 match file.content {
-                    Some(MediaFileContent::Movie { movie_entry_id }) => entry_paths
+                    Some(MediaFileContent::Movie { movie_entry_id, .. }) => entry_paths
                         .entry(movie_entry_id)
                         .or_default()
                         .push(inferred()),
@@ -2862,7 +2889,7 @@ impl LocalIndexService {
             {
                 let inferred = infer_media(relative_to(&library.root_path, &file.path));
                 match file.content {
-                    Some(MediaFileContent::Movie { movie_entry_id }) => entry_files
+                    Some(MediaFileContent::Movie { movie_entry_id, .. }) => entry_files
                         .entry(movie_entry_id)
                         .or_default()
                         .push((file, inferred)),
@@ -2903,6 +2930,14 @@ impl LocalIndexService {
                 }
                 continue;
             };
+            // The title the current rules spell from these files.
+            let spelled: Option<TitleGuess> =
+                rows.iter().find_map(|(_, inferred)| match inferred {
+                    MediaInference::Movie(movie) if movie.title.identity_key() == key => {
+                        Some(movie.title.clone())
+                    }
+                    _ => None,
+                });
             let holder = match self.movie_repo.find_by_identity_key(&key).await? {
                 Some(holder) if holder.id != movie.id => holder,
                 _ => {
@@ -2915,6 +2950,8 @@ impl LocalIndexService {
                             report.rekeyed += 1;
                         }
                         settled.insert(movie.id);
+                        self.retitle_as_spelled(&movie, &key, spelled.as_ref())
+                            .await?;
                     }
                     continue;
                 }
@@ -2978,10 +3015,17 @@ impl LocalIndexService {
                     .await?;
                 let moved = entry_files.remove(&entry_id).unwrap_or_default();
                 for (file, _) in &moved {
+                    // A part stays the part it was; a file classified before
+                    // parts were read gets its part from reclassification.
+                    let part_number = match file.content {
+                        Some(MediaFileContent::Movie { part_number, .. }) => part_number,
+                        _ => None,
+                    };
                     self.move_file(
                         file,
                         MediaFileContent::Movie {
                             movie_entry_id: target.id,
+                            part_number,
                         },
                     )
                     .await?;
@@ -2993,6 +3037,8 @@ impl LocalIndexService {
             } else {
                 (&holder, &movie)
             };
+            self.retitle_as_spelled(kept, &key, spelled.as_ref())
+                .await?;
             self.carry_admin_state(
                 (
                     EnrichmentTargetId::Movie(survivor),
@@ -3235,6 +3281,56 @@ impl LocalIndexService {
                 .await;
         }
         Ok(report)
+    }
+
+    /// Give `movie` -- as read before its key was re-derived as `key` -- the
+    /// display title `spelled`, the one the current rules read from its
+    /// files, when the rules changed its key and the title it has is still
+    /// the one older rules read from them: its display title keys to the key
+    /// those rules gave it. `Movie - CD1` becomes `Movie` once part tokens are
+    /// read (issue #233). A title whose key the rules left alone keeps its
+    /// spelling; a title a provider matched, an NFO named or an administrator
+    /// locked is kept, and so is one changed since `movie` was read.
+    async fn retitle_as_spelled(
+        &self,
+        movie: &Movie,
+        key: &str,
+        spelled: Option<&TitleGuess>,
+    ) -> Result<(), IndexError> {
+        let Some(spelled) = spelled else {
+            return Ok(());
+        };
+        if movie.identity_key.as_deref() == Some(key) {
+            return Ok(());
+        }
+        let matched = has_provider_ids(
+            movie.tmdb_id,
+            &movie.imdb_id,
+            movie.tvdb_id,
+            movie.anilist_id,
+        );
+        let as_old_rules_spelled = movie.identity_key.as_deref()
+            == Some(title_identity_key(&movie.title, movie.year).as_str());
+        let same_year = spelled.year == movie.year;
+        if matched || !as_old_rules_spelled || !same_year || spelled.title == movie.title {
+            return Ok(());
+        }
+        if let Some(states) = &self.enrichment_repo
+            && states
+                .find_by_target(EnrichmentTargetId::Movie(movie.id))
+                .await?
+                .is_some_and(|state| state.locked_fields.is_locked(MetadataField::Title))
+        {
+            return Ok(());
+        }
+        if self
+            .movie_repo
+            .retitle_from(movie.id, &movie.title, &spelled.title)
+            .await?
+        {
+            info!(movie_id = %movie.id, from = %movie.title, to = %spelled.title, "retitled a movie to the current naming rules");
+        }
+        Ok(())
     }
 
     /// Point `file` at `content`, keeping its status and classifier version.
@@ -5674,7 +5770,7 @@ mod tests {
             .unwrap();
 
         let entry_id = match content {
-            MediaFileContent::Movie { movie_entry_id } => movie_entry_id,
+            MediaFileContent::Movie { movie_entry_id, .. } => movie_entry_id,
             _ => panic!("expected Movie, got Episode"),
         };
 
@@ -5948,9 +6044,7 @@ mod tests {
                 mime_type: Some("video/mp4".to_string()),
                 duration: None,
                 container_format: None,
-                content: Some(beam_domain::models::MediaFileContent::Movie {
-                    movie_entry_id: entry_id,
-                }),
+                content: Some(beam_domain::models::MediaFileContent::movie(entry_id)),
                 status: FileStatus::Known,
                 classifier_version: 0,
                 container_tags: None,
@@ -6469,9 +6563,7 @@ mod tests {
             duration: None,
             container_format: None,
             // A Known row is a movie's or an episode's file (the `files` CHECK).
-            content: Some(MediaFileContent::Movie {
-                movie_entry_id: Uuid::new_v4(),
-            }),
+            content: Some(MediaFileContent::movie(Uuid::new_v4())),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
             container_tags: None,
@@ -7514,9 +7606,7 @@ mod tests {
             duration: Some(Duration::from_secs(60)),
             container_format: Some("mp4".to_string()),
             // A Known row is a movie's or an episode's file (the `files` CHECK).
-            content: Some(MediaFileContent::Movie {
-                movie_entry_id: Uuid::new_v4(),
-            }),
+            content: Some(MediaFileContent::movie(Uuid::new_v4())),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
             container_tags: None,
@@ -7580,9 +7670,7 @@ mod tests {
             duration: None,
             container_format: Some("mp4".to_string()),
             // A Known row is a movie's or an episode's file (the `files` CHECK).
-            content: Some(MediaFileContent::Movie {
-                movie_entry_id: Uuid::new_v4(),
-            }),
+            content: Some(MediaFileContent::movie(Uuid::new_v4())),
             status: FileStatus::Known,
             classifier_version: CLASSIFIER_VERSION,
             container_tags: None,
@@ -8031,16 +8119,12 @@ mod tests {
             .unwrap();
 
         let file_a = make_file_with_content(
-            Some(MediaFileContent::Movie {
-                movie_entry_id: entry_a.id,
-            }),
+            Some(MediaFileContent::movie(entry_a.id)),
             first_secs,
             "/media/movie-a.mkv",
         );
         let file_b = make_file_with_content(
-            Some(MediaFileContent::Movie {
-                movie_entry_id: entry_b.id,
-            }),
+            Some(MediaFileContent::movie(entry_b.id)),
             second_secs,
             "/media/movie-b.mkv",
         );
@@ -8085,6 +8169,54 @@ mod tests {
                 && l.category == AdminLogCategory::LibraryScan
                 && l.message.contains("Runtime mismatch")
         }));
+    }
+
+    /// One part of a multi-part movie (issue #233) lasts that part: it is
+    /// never compared with a whole file, nor a whole file with it.
+    #[tokio::test]
+    async fn test_divergence_a_part_is_not_compared_with_a_whole_file() {
+        for part_checked in [false, true] {
+            // 40 min against 90 min, which diverge as whole files (see
+            // `test_divergence_movie_wildly_different_runtimes_warns`).
+            let (service, notification, _admin_log_repo, file_a) =
+                seed_two_movie_renditions(Some(40.0 * 60.0), Some(90.0 * 60.0)).await;
+            let files = &service.file_repo;
+            let other = files
+                .find_by_path("/media/movie-b.mkv")
+                .await
+                .unwrap()
+                .expect("seeded");
+            let (part, whole) = if part_checked {
+                (file_a, other)
+            } else {
+                (other, file_a)
+            };
+            let Some(MediaFileContent::Movie { movie_entry_id, .. }) = part.content else {
+                panic!("seeded a movie file");
+            };
+            let part = files
+                .set_classification(
+                    part.id,
+                    FileClassification {
+                        content: Some(MediaFileContent::Movie {
+                            movie_entry_id,
+                            part_number: Some(1),
+                        }),
+                        status: FileStatus::Known,
+                        classifier_version: CLASSIFIER_VERSION,
+                    },
+                )
+                .await
+                .unwrap();
+
+            let checked = if part_checked { &part } else { &whole };
+            service.check_and_report_runtime_divergence(checked).await;
+
+            assert!(
+                notification.published_events().is_empty(),
+                "part checked: {part_checked}"
+            );
+        }
     }
 
     #[tokio::test]

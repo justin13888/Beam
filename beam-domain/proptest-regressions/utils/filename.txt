@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc e7416c56c7856bf010c5832669bb8e2d763a9fba6ac12f15182f63998e8ee41f # shrinks to prefix = "as0E0", season = 1, episode = 1, suffix = ""
+cc fbf52964515e5d233eb44f5f3426bc14bc2118fdaba8a5b5fdad9ed85db1d9e3 # shrinks to title = "Qaa", year = 1950, lead = " - ", word = "cd", sep = "", number = 1, noise = "-GRP"

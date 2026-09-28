@@ -42,6 +42,11 @@ pub struct ParsedFilename {
     /// words (`Director's Cut`, `Extended`, ...) found after the title. Only
     /// read when the stem is not an episode.
     pub edition: Option<String>,
+    /// Which part of a multi-part movie the file is (`Movie (2019) - CD1`,
+    /// `Movie.2019.pt2`), from 1: a part token set off at the end of the
+    /// name, which is not part of the title. Only read when the stem is not an
+    /// episode; see [`part_token`] for which tokens count.
+    pub part: Option<u32>,
 }
 
 static EDITION_TAG_REGEX: LazyLock<Regex> =
@@ -76,6 +81,20 @@ static CROSS_MARKER_REGEX: LazyLock<Regex> =
 static AIR_DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b((?:19|20)\d{2})[ -](\d{2})[ -](\d{2})\b").expect("valid regex")
 });
+
+/// A candidate part token: `cd`, `disc`, `disk`, `part` or `pt` and a one-
+/// or two-digit number, optionally separated, set off before by a separator
+/// and ended by a separator, a bracket or the end of the stem. Whether a
+/// candidate is a part is [`part_token`]'s decision.
+static PART_TOKEN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)[ ._-](cd|disc|disk|part|pt)[ ._-]?(\d{1,2})(?:[ ._\-\[\(\{]|$)")
+        .expect("valid regex")
+});
+
+/// A release group glued to what precedes it by a dash (`CD1-GRP`): the one
+/// word that may follow a part token and not be release noise.
+static RELEASE_GROUP_TAIL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^-[A-Za-z0-9]+$").expect("valid regex"));
 
 static DIGITS_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+").expect("valid regex"));
 
@@ -121,6 +140,7 @@ const NOISE_TOKEN_PREFIXES: &[&str] = &[
     "hevc",
     "av1",
     "xvid",
+    "divx",
     "aac",
     "ac3",
     "eac3",
@@ -428,6 +448,97 @@ fn series_title_before<'a>(tokens: &'a [&'a str]) -> (&'a [&'a str], Option<u32>
 /// Parses a media filename stem (i.e. without its extension) into a clean
 /// title plus whatever year/season/episode information could be extracted.
 pub fn parse_media_filename(stem: &str) -> ParsedFilename {
+    parse_stem(stem, true)
+}
+
+/// A part token [`part_token`] found in a stem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PartToken {
+    /// The stem with the token cut out.
+    pub stripped: String,
+    pub number: u32,
+    /// Whether the name alone says the token is a part. `part` and a number
+    /// is also how a title names one half of a story (`Harry Potter and the
+    /// Deathly Hallows Part 1 (2010)`), so it is a part on its own only after
+    /// the release year (`Movie (2019) - Part 1`); anywhere else only a
+    /// folder naming the same title confirms it. `cd`, `disc`, `disk` and
+    /// `pt` never end a title, so they need nothing more.
+    pub confirmed: bool,
+}
+
+/// The part token of a multi-part movie's stem: the last candidate (see
+/// [`PART_TOKEN_REGEX`]) with a title before it and nothing after it but
+/// release noise, years, bracket groups, punctuation or a dash-glued release
+/// group. A token followed by title words is part of the title (`Movie: Part
+/// 2 The Sequel`), and one that opens the name has no title before it
+/// (`Part 2: The Sequel (2020)`).
+pub(crate) fn part_token(stem: &str) -> Option<PartToken> {
+    let mut found = None;
+    let mut at = 0;
+    while let Some(caps) = PART_TOKEN_REGEX.captures_at(stem, at) {
+        let whole = caps.get(0).expect("group 0 always present");
+        let word = caps.get(1).expect("group 1 always present");
+        let digits = caps.get(2).expect("group 2 always present");
+        // The next search starts inside this match, so the separator that
+        // ends one candidate can begin the next.
+        at = word.start();
+        let Ok(number) = digits.as_str().parse::<u32>() else {
+            continue;
+        };
+        let prefix = &stem[..whole.start()];
+        let tail = &stem[digits.end()..];
+        let group_tail = RELEASE_GROUP_TAIL_REGEX.is_match(tail);
+        if number == 0
+            || !(group_tail || is_release_tail(tail))
+            || !prefix.chars().any(char::is_alphanumeric)
+        {
+            continue;
+        }
+        let confirmed =
+            !word.as_str().eq_ignore_ascii_case("part") || parse_stem(prefix, false).year.is_some();
+        // A release group glued to the token goes with it: kept, it would
+        // read as a title word after a parenthesised year.
+        let tail = if group_tail { "" } else { tail };
+        found = Some(PartToken {
+            stripped: format!("{prefix} {tail}"),
+            number,
+            confirmed,
+        });
+    }
+    found
+}
+
+/// Whether what follows a part token is nothing a title is made of: release
+/// noise, years, bracket groups and punctuation.
+fn is_release_tail(tail: &str) -> bool {
+    normalized_stem(tail)
+        .split_whitespace()
+        .all(|t| is_noise_token(t) || is_punctuation_token(t) || is_year_token(t))
+}
+
+/// `stem` read as one part of a multi-part movie: its [`part_token`] cut out,
+/// provided what is left names a movie. With `confirmed_only`, only a token
+/// the name alone confirms is read.
+pub(crate) fn parse_as_part(stem: &str, confirmed_only: bool) -> Option<ParsedFilename> {
+    let token = part_token(stem)?;
+    if confirmed_only && !token.confirmed {
+        return None;
+    }
+    let parsed = parse_stem(&token.stripped, false);
+    let names_a_movie = parsed.season.is_none()
+        && parsed.air_date.is_none()
+        && !parsed.title.is_empty()
+        && !is_noise_only(&parsed.title);
+    names_a_movie.then_some(ParsedFilename {
+        part: Some(token.number),
+        ..parsed
+    })
+}
+
+/// [`parse_media_filename`], reading a part token only when `read_part`. The
+/// stem a token was cut from is parsed with `read_part` off, so no name loses
+/// two tokens.
+fn parse_stem(stem: &str, read_part: bool) -> ParsedFilename {
     // 0. A Plex/Jellyfin edition tag, read before brace groups are stripped.
     let edition_tag = EDITION_TAG_REGEX
         .captures(stem)
@@ -477,6 +588,7 @@ pub fn parse_media_filename(stem: &str) -> ParsedFilename {
             episode_title: episode_title_after(&normalized, marker.end),
             air_date: None,
             edition: None,
+            part: None,
         };
     }
 
@@ -502,10 +614,17 @@ pub fn parse_media_filename(stem: &str) -> ParsedFilename {
             episode_title: episode_title_after(&normalized, end),
             air_date: Some(air_date),
             edition: None,
+            part: None,
         };
     }
 
-    // 6. No episode marker: extract a year from the token stream unless a
+    // 6. A movie. One part of a multi-part movie is the movie its name
+    // spells without the part token.
+    if read_part && let Some(parsed) = parse_as_part(stem, true) {
+        return parsed;
+    }
+
+    // 7. No episode marker: extract a year from the token stream unless a
     // parenthesized year was already found.
     let tokens: Vec<&str> = normalized.split_whitespace().collect();
     let (year, title_end): (Option<u32>, usize) = if let Some((year, start)) = paren_year_group {
@@ -549,6 +668,7 @@ pub fn parse_media_filename(stem: &str) -> ParsedFilename {
         episode_title: None,
         air_date: None,
         edition,
+        part: None,
     }
 }
 
@@ -604,6 +724,7 @@ mod tests {
             episode_title: None,
             air_date: None,
             edition: None,
+            part: None,
         }
     }
 
@@ -974,6 +1095,115 @@ mod tests {
         }
     }
 
+    /// Every spelling of a part token (issue #233): the token leaves the
+    /// title, and its number is the part.
+    #[test]
+    fn a_trailing_part_token_is_the_part_not_the_title() {
+        let cases = [
+            ("Movie (2019) - CD1", "Movie", Some(2019), 1),
+            ("Movie (2019) - cd2", "Movie", Some(2019), 2),
+            ("Movie (2019) - Part 1", "Movie", Some(2019), 1),
+            ("Movie (2019) - Part2", "Movie", Some(2019), 2),
+            ("Movie (2019) - pt1", "Movie", Some(2019), 1),
+            ("Movie.2019.pt.2", "Movie", Some(2019), 2),
+            ("Movie_2019_disc_1", "Movie", Some(2019), 1),
+            ("Movie (2019) disk2", "Movie", Some(2019), 2),
+            ("Movie (2019)-cd1", "Movie", Some(2019), 1),
+            ("Movie.2019.CD02", "Movie", Some(2019), 2),
+            (
+                "Movie.2019.1080p.BluRay.x264-GRP.cd2",
+                "Movie",
+                Some(2019),
+                2,
+            ),
+            ("Movie.2019.DVDRip.XviD.CD1-GRP", "Movie", Some(2019), 1),
+            ("Movie.2019.CD1.XviD-GRP", "Movie", Some(2019), 1),
+            ("Movie.2019.CD2.DivX-GRP", "Movie", Some(2019), 2),
+            ("Movie (2019) - CD1 [1080p]", "Movie", Some(2019), 1),
+            ("Movie CD1 (2019)", "Movie", Some(2019), 1),
+            // `cd`, `disc`, `disk` and `pt` need no year: no title ends so.
+            ("Movie - CD1", "Movie", None, 1),
+            ("Movie disc 2", "Movie", None, 2),
+            // Of two candidates, the one the name ends with.
+            ("Movie Disc 1 (2019) - CD2", "Movie Disc 1", Some(2019), 2),
+        ];
+        for (stem, title, year, part) in cases {
+            let parsed = parse_media_filename(stem);
+            assert_eq!(
+                (parsed.title.as_str(), parsed.year, parsed.part),
+                (title, year, Some(part)),
+                "{stem}"
+            );
+        }
+    }
+
+    /// A part keeps the edition its name carries: parts and editions are
+    /// independent.
+    #[test]
+    fn a_part_keeps_its_edition() {
+        for stem in [
+            "Movie (2019) {edition-Director's Cut} - CD1",
+            "Movie.2019.Directors.Cut.CD1",
+        ] {
+            let parsed = parse_media_filename(stem);
+            assert_eq!(parsed.edition.as_deref(), Some("Director's Cut"), "{stem}");
+            assert_eq!(parsed.part, Some(1), "{stem}");
+            assert_eq!(parsed.title, "Movie", "{stem}");
+        }
+    }
+
+    /// Numbers that are part of a title, and names no part token ends.
+    #[test]
+    fn a_number_in_a_title_is_not_a_part() {
+        let cases = [
+            // The token opens the name: there is no title before it.
+            (
+                "Part 2: The Sequel (2020)",
+                "Part 2: The Sequel",
+                Some(2020),
+            ),
+            // Not a part token at all.
+            ("Kill Bill Vol 1", "Kill Bill Vol 1", None),
+            ("Kill Bill (2003) Vol 1", "Kill Bill Vol 1", Some(2003)),
+            ("Rocky II", "Rocky II", None),
+            ("Movie (2019) - 1", "Movie - 1", Some(2019)),
+            // `part` before the year is a title's own (D233-2).
+            (
+                "Harry Potter and the Deathly Hallows Part 1 (2010)",
+                "Harry Potter and the Deathly Hallows Part 1",
+                Some(2010),
+            ),
+            (
+                "Harry.Potter.and.the.Deathly.Hallows.Part.1.2010.1080p",
+                "Harry Potter and the Deathly Hallows Part 1",
+                Some(2010),
+            ),
+            ("The Godfather Part 2", "The Godfather Part 2", None),
+            // Title words after the token.
+            (
+                "Movie (2019) - Part 1 Behind the Scenes",
+                "Movie - Part 1 Behind the Scenes",
+                Some(2019),
+            ),
+            // No part zero, and no three-digit part.
+            ("Movie (2019) - CD0", "Movie - CD0", Some(2019)),
+            ("Movie (2019) - CD100", "Movie - CD100", Some(2019)),
+            // Glued to the title word, not set off from it.
+            ("Moviecd1", "Moviecd1", None),
+        ];
+        for (stem, title, year) in cases {
+            let parsed = parse_media_filename(stem);
+            assert_eq!(
+                (parsed.title.as_str(), parsed.year, parsed.part),
+                (title, year, None),
+                "{stem}"
+            );
+        }
+        // An episode is never a part.
+        let episode = parse_media_filename("Show.S01E01.Part.1");
+        assert_eq!((episode.episode, episode.part), (Some(1), None));
+    }
+
     #[test]
     fn bracket_groups_stripped() {
         assert_eq!(
@@ -1170,6 +1400,40 @@ mod properties {
             prop_assert_eq!(parsed.episode, Some(first));
             prop_assert_eq!(parsed.last_episode, Some(last));
             prop_assert_eq!(parsed.title, "Show");
+        }
+
+        /// A part token, however it is spelled and set off, reads as the
+        /// name without it, plus its number (issue #233).
+        #[test]
+        fn a_part_is_the_name_without_its_token(
+            title in "Q[a-z]{2,8}( Q[a-z]{2,8})?",
+            year in 1950u32..2030,
+            lead in proptest::sample::select(vec![" - ", " ", "-", ".", "_"]),
+            word in proptest::sample::select(vec!["cd", "CD", "disc", "Disk", "part", "Part", "pt", "PT"]),
+            sep in proptest::sample::select(vec!["", " ", ".", "_", "-"]),
+            number in 1u32..100,
+            noise in proptest::sample::select(vec!["", ".1080p.x264", " [GRP]", "-GRP"]),
+        ) {
+            let without = format!("{title} ({year})");
+            let stem = format!("{without}{lead}{word}{sep}{number}{noise}");
+            let parsed = parse_media_filename(&stem);
+            prop_assert_eq!(parsed.part, Some(number), "{}", stem);
+            prop_assert_eq!(
+                ParsedFilename { part: None, ..parsed },
+                parse_media_filename(&without),
+                "{}",
+                stem
+            );
+        }
+
+        /// A part number is never zero, and an episode never has one.
+        #[test]
+        fn a_part_is_positive_and_never_an_episodes(stem in ".*") {
+            let parsed = parse_media_filename(&stem);
+            if let Some(part) = parsed.part {
+                prop_assert!(part >= 1, "{parsed:?}");
+                prop_assert!(parsed.episode.is_none() && parsed.air_date.is_none(), "{parsed:?}");
+            }
         }
 
         // `.`, `_` and space all separate words, so which one a release uses

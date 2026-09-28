@@ -127,6 +127,7 @@ pub async fn file(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         ctime: Set(None),
         missing_since: Set(None),
         last_episode_number: Set(None),
+        part_number: Set(None),
         classifier_version: Set(0),
         container_tags: Set(None),
     }

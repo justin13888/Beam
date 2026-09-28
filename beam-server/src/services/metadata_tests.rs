@@ -181,12 +181,7 @@ mod tests {
         let entry_id = entry.id;
         movie_repo.entries.lock().unwrap().insert(entry.id, entry);
 
-        let file = make_media_file(
-            library_id,
-            MediaFileContent::Movie {
-                movie_entry_id: entry_id,
-            },
-        );
+        let file = make_media_file(library_id, MediaFileContent::movie(entry_id));
         file_repo.files.lock().unwrap().insert(file.id, file);
 
         let service = service(
@@ -390,12 +385,7 @@ mod tests {
         let entry_id = entry.id;
         movie_repo.entries.lock().unwrap().insert(entry.id, entry);
 
-        let file = make_media_file(
-            library_id,
-            MediaFileContent::Movie {
-                movie_entry_id: entry_id,
-            },
-        );
+        let file = make_media_file(library_id, MediaFileContent::movie(entry_id));
         let file_id = file.id;
         file_repo.files.lock().unwrap().insert(file.id, file);
 
@@ -441,9 +431,7 @@ mod tests {
             edition: None,
             created_at: chrono::Utc::now(),
         };
-        let content = MediaFileContent::Movie {
-            movie_entry_id: entry.id,
-        };
+        let content = MediaFileContent::movie(entry.id);
         movie_repo.entries.lock().unwrap().insert(entry.id, entry);
         let present = make_media_file(library_id, content.clone());
         let missing = make_media_file(library_id, content);
@@ -712,7 +700,7 @@ mod tests {
 
         let theatrical = entry(&movie_repo, movie_id, None);
         let directors_cut = entry(&movie_repo, movie_id, Some("Director's Cut"));
-        let content = |movie_entry_id| MediaFileContent::Movie { movie_entry_id };
+        let content = MediaFileContent::movie;
         // The 720p file is the largest; the Director's Cut is the tallest
         // and the highest bit rate.
         let hd = file_of(&file_repo, content(theatrical), 9_000, 100);
@@ -778,9 +766,7 @@ mod tests {
         movie_repo.movies.lock().unwrap().insert(movie.id, movie);
         let file = file_of(
             &file_repo,
-            MediaFileContent::Movie {
-                movie_entry_id: entry(&movie_repo, movie_id, None),
-            },
+            MediaFileContent::movie(entry(&movie_repo, movie_id, None)),
             1,
             1,
         );
@@ -878,9 +864,7 @@ mod tests {
         let movie = make_movie("Alien", Some(1979));
         let movie_id = movie.id;
         movie_repo.movies.lock().unwrap().insert(movie.id, movie);
-        let content = MediaFileContent::Movie {
-            movie_entry_id: entry(&movie_repo, movie_id, None),
-        };
+        let content = MediaFileContent::movie(entry(&movie_repo, movie_id, None));
         // The other file is the smaller, so this one is primary and first.
         let file = file_of(&file_repo, content.clone(), 2, 1);
         let other = file_of(&file_repo, content, 1, 1);

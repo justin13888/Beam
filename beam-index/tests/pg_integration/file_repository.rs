@@ -33,9 +33,7 @@ async fn create_persists_a_file_and_reads_it_back_by_path() {
             status: FileStatus::Known,
             classifier_version: 0,
             container_tags: None,
-            content: Some(MediaFileContent::Movie {
-                movie_entry_id: entry_id,
-            }),
+            content: Some(MediaFileContent::movie(entry_id)),
             mtime: None,
             identity: None,
         })
@@ -75,9 +73,7 @@ async fn find_by_hash_matches_the_full_unsigned_range() {
             status: FileStatus::Unknown,
             classifier_version: 0,
             container_tags: None,
-            content: Some(MediaFileContent::Movie {
-                movie_entry_id: entry_id,
-            }),
+            content: Some(MediaFileContent::movie(entry_id)),
             mtime: None,
             identity: None,
         })
