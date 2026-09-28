@@ -42,7 +42,21 @@ never concatenates or remuxes parts, which would be the transcoding ADR-0004 rul
 resumes the part that was playing. Continue-watching reads those per-file rows, so a movie with
 progress on two of its parts is listed once per part. Once the title-level watch state of
 [#188](https://github.com/justin13888/beam/issues/188) lands, it resolves that, and counts a stacked
-movie as played only when the report is on its last part. Sources
+movie as played only when the report is on its last part.
+
+A DVD or Blu-ray folder rip ([#234](https://github.com/justin13888/beam/issues/234), FR-222) is a
+source of its film the same way: its `parts` are the stream files the disc's main title plays --
+the main title set's VOBs, or the main playlist's `.m2ts` clips -- and its `disc_structure` is `dvd`
+or `blu_ray`. They are served as they are, like any file. Whether they play is the client's to say
+([ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md)): a VOB is an MPEG program stream
+(`container_format` `mpeg`), usually MPEG-2 video with AC-3 or MPEG audio, which no browser and not
+the Android app's ExoPlayer container list open, so there the client's capability check lists the
+source as not directly playable with its reason. A Blu-ray clip is a BDAV transport stream
+(`mpegts`, each packet carrying a 4-byte timestamp): the Android app's container list admits
+`mpegts`, so its capability check judges the clip by its codecs -- often refusing its DTS or TrueHD
+audio -- though ExoPlayer has not been verified to demux BDAV's timestamped packets, which a client
+may use `disc_structure` to decide. The server never remuxes a disc into something a
+client can open; an operator who wants one playable everywhere remuxes it to a single file. Sources
 accept a movie id or an episode id; a show id is rejected with 400, since shows have no files of
 their own. Episode sources landed in
 [#102](https://github.com/justin13888/beam/pull/102), closing

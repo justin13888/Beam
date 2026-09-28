@@ -84,7 +84,11 @@ expected to play a multi-part source as a playlist of its parts' streams; the se
 them ([ADR-0004](decisions/ADR-0004-never-transcode.md)). No current client does so yet -- each
 plays the source's top-level `stream_url`, its first part -- and advancing through the parts is the
 client-playback work split from #233. The parts of a folder are one source only as the whole run
-1, 2, ... n; any other set leaves each file a source of its own. The source's `size_bytes` and
+1, 2, ... n; any other set leaves each file a source of its own. A DVD or Blu-ray folder rip is a
+source too ([#234](https://github.com/justin13888/beam/issues/234), FR-222): its `parts` are the
+stream files the disc's main title plays -- VOBs or `.m2ts` clips, served as they are -- and its
+`disc_structure` (`dvd` or `blu_ray`, absent for any other source) says so, so a client that cannot
+play MPEG program streams or BDAV transport streams lists it as not directly playable. The source's `size_bytes` and
 `duration_secs` are all its parts'; its `file_id`, tracks and URLs are its first part's. Every track has its stream `index` and
 FFmpeg's own `codec` name (`h264`, `hevc`, `eac3`, `truehd`, `subrip`, `hdmv_pgs_subtitle`); a value
 the file does not state -- a frame rate, a bit rate, a sample rate -- is absent rather than a

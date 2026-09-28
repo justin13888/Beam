@@ -199,9 +199,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   row -- present or soft-deleted -- is left for it.
 - **FR-216**: The indexer MUST index only video files. It MUST NOT index, hash or probe hidden files
   or anything under a hidden folder; NAS and operating-system housekeeping folders (`@eaDir`,
-  `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); DVD and Blu-ray disc
-  structures (`VIDEO_TS`, `AUDIO_TS`, `BDMV`, `CERTIFICATE`, at any depth: playing one as its title
-  is #234's); extras folders below the top level of a library (`Extras`, `Featurettes`, `Behind The
+  `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); any file of a DVD or
+  Blu-ray disc structure its main title does not play (FR-222), and everything in an `AUDIO_TS` or
+  `CERTIFICATE` folder, at any depth; extras folders below the top level of a library (`Extras`, `Featurettes`, `Behind The
   Scenes`, `Deleted Scenes`, `Interviews`, `Sample(s)`, `Bonus`), and the extras folder names that
   can also name a category (`Scenes`, `Shorts`, `Trailers`, `Other`) only inside a title's folder --
   one naming a title and year, a season folder, or any folder below the top level of a library;
@@ -214,9 +214,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-217**: A library root whose walk found video files -- including ones FR-216 excludes by name
   or by an ignore pattern matching the file -- MUST NOT be refused as unmounted by the empty-root
   guard; only a root with no such video files, under a library with indexed video files, is refused.
-  The walk never descends into a folder FR-216 excludes (hidden, housekeeping, disc structure,
-  extras, or matched by an ignore pattern), so video files under one are not counted: a root holding
-  only those is refused. This errs toward refusing -- the safe side, since a refused scan changes no
+  The walk never descends into a folder FR-216 excludes (hidden, housekeeping, `AUDIO_TS` or
+  `CERTIFICATE`, extras, or matched by an ignore pattern), so video files under one are not counted:
+  a root holding only those is refused. A disc structure's stream files (FR-222) are video files,
+  whether or not its main title plays them, so a library holding only disc folders is not refused. This errs toward refusing -- the safe side, since a refused scan changes no
   rows.
 - **FR-218**: A library scan MUST be a job: requesting one MUST answer once the job is registered
   (`202` with the job) rather than when the scan finishes, and the latest job of each library MUST
@@ -356,6 +357,26 @@ strength. Each requirement is independently testable. See `product.md` for narra
   soft-deleted -- unless the library root holds no video file, which reads as an unmounted volume
   as it does for the scan (FR-211), and leaves the directory to the next scan; the watcher never
   purges.
+- **FR-222**: A DVD or Blu-ray disc structure copied whole -- a `VIDEO_TS` or `BDMV` folder, in any
+  case, at any depth the policy of FR-216 does not exclude -- MUST be indexed as one source of the
+  movie the folder enclosing it names, read as a filename is (FR-204) and completed from the folder
+  above it (`Heat (1995)/VIDEO_TS` is *Heat* (1995); `Heat (1995)/DVD9/VIDEO_TS` too). No file
+  inside a disc is judged by its own name. A disc at the library root, or in a season folder, names
+  no title: its files MUST be indexed without one and the administrator told. The source MUST play
+  the disc's main title, read from the disc: for a DVD, the title set whose longest program chain
+  lasts longest by its `VTS_nn_0.IFO` -- or, when any title set's IFO cannot be parsed, the title
+  set with the most bytes -- whose `VTS_nn_1.VOB`, `VTS_nn_2.VOB`, ... up to the first missing part
+  play in turn; for a Blu-ray, the `BDMV/PLAYLIST/*.mpls` whose play items last longest among
+  those whose every clip is in `BDMV/STREAM`, its clips played in the playlist's order, each once --
+  or, with no such playlist, the largest clip alone. A main title of several files MUST be one
+  source of ordered parts (FR-505); a file's part is its place in the main title and MUST be kept
+  when a rekey re-derives its title from its path (FR-214). Reading a disc MUST follow no link
+  (FR-212) and MUST NOT write anything; a disc that cannot be read whole MUST NOT change its rows,
+  as beneath a folder the walk could not read (FR-211). A watcher event at or inside a disc MUST
+  reconcile the disc whole. A disc's files are served by direct play as they are -- MPEG program
+  stream VOBs and BDAV MPEG transport stream clips -- and never remuxed or transcoded (ADR-0004);
+  the source MUST name its disc structure (`disc_structure`), so a client that cannot play them
+  lists the source as not directly playable, with its reason (ADR-0014).
 
 ## FR-3xx — Metadata Enrichment
 
