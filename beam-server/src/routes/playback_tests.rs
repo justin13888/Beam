@@ -864,6 +864,55 @@ async fn a_multi_episode_file_watched_to_its_end_plays_its_whole_run() {
     );
 }
 
+/// Going back to an earlier episode does not lose the one left part-way
+/// after it: when next-up lands on it, the row resumes it, on the source it
+/// was being played from (FR-507).
+#[tokio::test]
+async fn next_up_onto_an_episode_under_way_resumes_it_from_its_source() {
+    let fixture = fixture();
+    let show = fixture.show("Dark").await;
+    let (_, f1) = fixture.episode(show, 1, 1).await;
+    let (e2, f2) = fixture.episode(show, 1, 2).await;
+    // A second, larger source of E2: the primary, which the viewer did not
+    // choose.
+    let e2_primary = fixture
+        .file(MediaFileContent::episode(e2), 9_000, 100)
+        .await;
+    let client = client(&fixture);
+    let token = session(&fixture).await;
+
+    watch(&client, &token, f2, 60.0).await;
+    fixture.later();
+    // Back to E1, watched to its end: the anchor, and E2 is next.
+    watch(&client, &token, f1, 99.0).await;
+
+    let shelf = continue_watching(&client, &token).await;
+    assert_eq!(shelf.items.len(), 1);
+    let item = &shelf.items[0];
+    assert_eq!(item.episode_id, Some(e2));
+    assert_eq!(item.reason, ContinueWatchingReason::Resume);
+    assert_eq!(item.position_secs, 60.0, "the resume point stands");
+    assert_eq!(item.duration_secs, Some(100.0));
+    assert_eq!(
+        item.file_id, f2,
+        "the source it was played from, not the primary ({e2_primary})"
+    );
+
+    // With no position to resume, the same episode is offered from the start.
+    let fresh = session(&fixture).await;
+    watch(&client, &fresh, f1, 99.0).await;
+    let item = &continue_watching(&client, &fresh).await.items[0];
+    assert_eq!(
+        (
+            item.reason,
+            item.episode_id,
+            item.position_secs,
+            item.file_id
+        ),
+        (ContinueWatchingReason::NextUp, Some(e2), 0.0, e2_primary)
+    );
+}
+
 #[tokio::test]
 async fn continue_watching_is_bounded_by_first() {
     let fixture = fixture();

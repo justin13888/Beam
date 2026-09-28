@@ -463,7 +463,18 @@ impl DbPlaybackService {
                         states.iter().find(|s| episode_key(s) == Some(episode_id)),
                     ),
                     NextUp::Next { episode_id } => {
-                        (ContinueWatchingReason::NextUp, episode_id, None)
+                        // The next episode may already be under way -- left
+                        // part-way before the viewer went back to an earlier
+                        // one. Its resume point and source still stand.
+                        match states
+                            .iter()
+                            .find(|s| episode_key(s) == Some(episode_id) && s.is_resumable())
+                        {
+                            Some(state) => {
+                                (ContinueWatchingReason::Resume, episode_id, Some(state))
+                            }
+                            None => (ContinueWatchingReason::NextUp, episode_id, None),
+                        }
                     }
                     NextUp::Finished => return Ok(None),
                 };

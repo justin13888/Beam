@@ -469,9 +469,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
   rows, most recently played first: one per movie with a resume position, and one per show at the
   episode to watch next -- the episode last touched if it has a position, else the first later
   episode in (season, episode) order, across seasons, that has a present file and is not played --
-  omitting a show with no such episode and a title with no present file. Each row MUST carry what a
-  client displays (title, artwork, season and episode numbers and title) and the file to play: the
-  one last played while present, else the title's primary (FR-513).
+  omitting a show with no such episode and a title with no present file. A next episode the user
+  already started resumes from its own position. Each row MUST carry what a client displays
+  (title, artwork, season and episode numbers and title) and the file to play: the one last played
+  while present, else the title's primary (FR-513).
 - **FR-509**: The web client's player (Vidstack-based) MUST support seeking, keyboard shortcuts,
   visible buffering state, fullscreen, and Picture-in-Picture.
 - **FR-510**: On resuming a previously started title, the web client MUST seek playback to the
