@@ -578,11 +578,39 @@ const CORPUS: &[(&str, &str)] = &[
         "movie Movie|2019 part=1",
     ),
     ("Movie (2019)/Movie - CD2.avi", "movie Movie|2019 part=2"),
-    // `part` or `pt` with no year before it: a part only where the name has
-    // no year and its folder carries one and names the title the rest of the
-    // name spells (D233-2).
-    ("Movie (2019)/Movie - Part 1.mkv", "movie Movie|2019 part=1"),
-    ("Movie (2019)/Movie Pt 2.mkv", "movie Movie|2019 part=2"),
+    // `part` or `pt` with no year before it in the name is the title's, even
+    // in a folder that carries the year and names the title (D233-2): one
+    // year-folder holds two films that share a year as often as one film's
+    // pieces.
+    ("Movie (2019)/Movie - Part 1.mkv", "movie Movie - Part 1|-"),
+    ("Movie (2019)/Movie Pt 2.mkv", "movie Movie Pt 2|-"),
+    ("Che (2008)/Che Part 1.mkv", "movie Che Part 1|-"),
+    ("Che (2008)/Che Part 2.mkv", "movie Che Part 2|-"),
+    (
+        "Nymphomaniac (2013)/Nymphomaniac Part 1.mkv",
+        "movie Nymphomaniac Part 1|-",
+    ),
+    (
+        "Nymphomaniac (2013)/Nymphomaniac Part 2.mkv",
+        "movie Nymphomaniac Part 2|-",
+    ),
+    (
+        "Batman The Long Halloween (2021)/Batman The Long Halloween Part 1.mkv",
+        "movie Batman The Long Halloween Part 1|-",
+    ),
+    (
+        "Batman The Long Halloween (2021)/Batman The Long Halloween Part 2.mkv",
+        "movie Batman The Long Halloween Part 2|-",
+    ),
+    // A sequel filed in its predecessor's folder is a film of its own.
+    (
+        "The Godfather (1972)/The Godfather.mkv",
+        "movie The Godfather|1972",
+    ),
+    (
+        "The Godfather (1972)/The Godfather Part 2.mkv",
+        "movie The Godfather Part 2|-",
+    ),
     ("Movies/Movie - Part 1.mkv", "movie Movie - Part 1|-"),
     ("Movies/Movie - pt1.mkv", "movie Movie - pt1|-"),
     // A year-less folder is as often a franchise's or a collection's: its

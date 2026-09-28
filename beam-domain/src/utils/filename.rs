@@ -457,14 +457,14 @@ pub(crate) struct PartToken {
     /// The stem with the token cut out.
     pub stripped: String,
     pub number: u32,
-    /// Whether the name alone says the token is a part. `part` and a number
-    /// -- and `pt`, its abbreviation -- is also how a title names one film of
-    /// a pair (`Harry Potter and the Deathly Hallows Part 1 (2010)`, `The
-    /// Hunger Games Mockingjay Pt 1`), so either is a part on its own only
-    /// after the release year (`Movie (2019) - Part 1`); anywhere else only a
-    /// year-bearing folder naming the same title confirms it (decision
-    /// D233-2). `cd`, `disc` and `disk` number the pieces of one rip, so they
-    /// need nothing more.
+    /// Whether the name says the token is a part. `part` and a number -- and
+    /// `pt`, its abbreviation -- is also how a title names one film of a pair
+    /// (`Harry Potter and the Deathly Hallows Part 1 (2010)`, `The Hunger
+    /// Games Mockingjay Pt 1`, `Che Part 2`), so either is a part only after
+    /// the release year in the name itself (`Movie (2019) - Part 1`); nothing
+    /// outside the name, such as its folder, confirms it (decision D233-2).
+    /// `cd`, `disc` and `disk` number the pieces of one rip, so they need
+    /// nothing more.
     pub confirmed: bool,
 }
 
@@ -521,11 +521,11 @@ fn is_release_tail(tail: &str) -> bool {
 }
 
 /// `stem` read as one part of a multi-part movie: its [`part_token`] cut out,
-/// provided what is left names a movie. With `confirmed_only`, only a token
-/// the name alone confirms is read.
-pub(crate) fn parse_as_part(stem: &str, confirmed_only: bool) -> Option<ParsedFilename> {
+/// provided the token is [confirmed](PartToken::confirmed) and what is left
+/// names a movie.
+fn parse_as_part(stem: &str) -> Option<ParsedFilename> {
     let token = part_token(stem)?;
-    if confirmed_only && !token.confirmed {
+    if !token.confirmed {
         return None;
     }
     let parsed = parse_stem(&token.stripped, false);
@@ -624,7 +624,7 @@ fn parse_stem(stem: &str, read_part: bool) -> ParsedFilename {
 
     // 6. A movie. One part of a multi-part movie is the movie its name
     // spells without the part token.
-    if read_part && let Some(parsed) = parse_as_part(stem, true) {
+    if read_part && let Some(parsed) = parse_as_part(stem) {
         return parsed;
     }
 

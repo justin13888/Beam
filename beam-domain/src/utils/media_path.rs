@@ -15,8 +15,7 @@ use chrono::{Datelike, NaiveDate};
 use regex::Regex;
 
 use crate::utils::filename::{
-    ParsedFilename, episode_title_after, is_noise_only, normalized_stem, parse_as_part,
-    parse_media_filename,
+    ParsedFilename, episode_title_after, is_noise_only, normalized_stem, parse_media_filename,
 };
 use crate::utils::identity::{normalize_title, title_identity_key};
 
@@ -531,22 +530,6 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
 
 /// The movie a filename parse names, completed from its parent folder.
 fn movie_of(parsed: ParsedFilename, stem: String, parent: Option<&str>) -> MovieInference {
-    let folder = parent.and_then(title_of);
-    // A `part` or `pt` token the name alone does not confirm is a part when
-    // the name carries no year and its folder is the film's own: it carries
-    // the year, and names the title the rest of the name spells (decision
-    // D233-2). `Movie (2019)/Movie - Part 1.mkv` is part 1 of *Movie*. A
-    // year-less folder is as often a franchise's or a collection's --
-    // `The Godfather/The Godfather Part 2.mkv` is a film -- and a year in the
-    // name after the token (`Movie Pt 1 (2010)`) makes the token the title's.
-    let parsed = match (&parsed.part, &folder) {
-        (None, Some(folder)) if folder.year.is_some() && parsed.year.is_none() => {
-            parse_as_part(&stem, false)
-                .filter(|part| same_title(&part.title, &folder.title))
-                .unwrap_or(parsed)
-        }
-        _ => parsed,
-    };
     let ParsedFilename {
         title,
         year,
@@ -557,7 +540,13 @@ fn movie_of(parsed: ParsedFilename, stem: String, parent: Option<&str>) -> Movie
     // The parent folder (never the library root) fills what the filename
     // leaves out (decision D182-C2): its title when the filename's is empty
     // or nothing but release noise, and its year when the filename names the
-    // same title without one -- `Kill Bill (2003)/Kill Bill.mkv`.
+    // same title without one -- `Kill Bill (2003)/Kill Bill.mkv`. It never
+    // makes a `part` or `pt` token a part (decision D233-2): one year-folder
+    // holds distinct films as often as one film's pieces --
+    // `Che (2008)/Che Part 1.mkv` and `Che Part 2.mkv` are two films, and so
+    // is `The Godfather (1972)/The Godfather Part 2.mkv` beside its
+    // predecessor.
+    let folder = parent.and_then(title_of);
     let title = match folder {
         Some(folder) if title.is_empty() || is_noise_only(&title) => TitleGuess {
             title: folder.title,
