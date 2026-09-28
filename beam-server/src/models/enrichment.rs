@@ -6,7 +6,7 @@
 //! Named without `Dto`/`Response` suffixes, per the wire conventions; the
 //! domain types they mirror stay free of any web-framework derive.
 
-use beam_domain::models::catalog::TitleKind;
+use beam_domain::models::catalog;
 use beam_domain::models::enrichment as domain;
 use beam_domain::models::pin as domain_pin;
 use beam_index::services::enrichment::control::{
@@ -18,13 +18,13 @@ use kynos::Schema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::models::search::{MediaTypeFilter, PageInfo, UnknownVariant};
+use crate::models::search::{PageInfo, TitleKind, UnknownVariant};
 
-impl From<TitleKind> for MediaTypeFilter {
-    fn from(kind: TitleKind) -> Self {
+impl From<catalog::TitleKind> for TitleKind {
+    fn from(kind: catalog::TitleKind) -> Self {
         match kind {
-            TitleKind::Movie => MediaTypeFilter::Movie,
-            TitleKind::Show => MediaTypeFilter::Show,
+            catalog::TitleKind::Movie => TitleKind::Movie,
+            catalog::TitleKind::Show => TitleKind::Show,
         }
     }
 }
@@ -175,7 +175,7 @@ impl From<domain_pin::PinSource> for PinSource {
 pub struct MediaEnrichment {
     /// The movie's or show's id.
     pub media_id: Uuid,
-    pub kind: MediaTypeFilter,
+    pub kind: TitleKind,
     /// The title's display title.
     pub title: String,
     pub year: Option<u32>,
@@ -362,7 +362,7 @@ pub struct EnrichmentProviderStatus {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Schema)]
 pub struct EnrichmentEvent {
     pub media_id: Uuid,
-    pub kind: MediaTypeFilter,
+    pub kind: TitleKind,
     /// The display title, when the title still exists.
     pub title: Option<String>,
     pub status: EnrichmentStatus,

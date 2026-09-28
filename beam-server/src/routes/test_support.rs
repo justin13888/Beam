@@ -214,20 +214,16 @@ pub(crate) fn make_app_state_with_clock(
     )
 }
 
-/// [`make_app_state_with`] with the dependency probe chosen too.
+/// [`make_app_state_with`] with the dependency probe and the clock chosen too.
 ///
 /// `/v1/health` reports what the probe says, so a test that wants a degraded
 /// answer configures the probe to fail rather than breaking a real dependency
-/// (NFR-205).
+/// (NFR-205); the clock is what its `checked_at` reads.
 pub(crate) fn make_app_state_with_probe(
     probe: Arc<dyn crate::services::health::DependencyProbe>,
+    clock: Arc<dyn beam_domain::services::Clock>,
 ) -> AppState {
-    make_app_state_full(
-        |_| {},
-        Arc::new(beam_domain::services::RealClock),
-        probe,
-        None,
-    )
+    make_app_state_full(|_| {}, clock, probe, None)
 }
 
 /// An artwork cache that serves nothing, for the fixtures that do not exercise

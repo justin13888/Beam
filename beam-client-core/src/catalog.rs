@@ -777,10 +777,10 @@ impl DeviceSession {
 }
 
 /// Map the server's `media_type` onto the core's own enum.
-fn kind_from_wire(media_type: wire::MediaTypeFilter) -> MediaKind {
+fn kind_from_wire(media_type: wire::TitleKind) -> MediaKind {
     match media_type {
-        wire::MediaTypeFilter::Movie => MediaKind::Movie,
-        wire::MediaTypeFilter::Show => MediaKind::Show,
+        wire::TitleKind::Movie => MediaKind::Movie,
+        wire::TitleKind::Show => MediaKind::Show,
     }
 }
 
@@ -862,28 +862,33 @@ impl HistoryEntry {
 }
 
 impl LogLevel {
-    fn from_log(level: wire::AdminLogLevelDto) -> Self {
+    /// The server speaks one level for its log and its event stream alike.
+    fn from_wire(level: wire::LogLevel) -> Self {
         match level {
-            wire::AdminLogLevelDto::Info => Self::Info,
-            wire::AdminLogLevelDto::Warning => Self::Warning,
-            wire::AdminLogLevelDto::Error => Self::Error,
+            wire::LogLevel::Info => Self::Info,
+            wire::LogLevel::Warning => Self::Warning,
+            wire::LogLevel::Error => Self::Error,
         }
     }
+}
 
-    fn from_event(level: wire::AdminEventLevelDto) -> Self {
-        match level {
-            wire::AdminEventLevelDto::Info => Self::Info,
-            wire::AdminEventLevelDto::Warning => Self::Warning,
-            wire::AdminEventLevelDto::Error => Self::Error,
-        }
+/// The admin log category as the text the UniFFI record carries: the server's
+/// own spelling, so a native screen shows what the web admin shows.
+fn log_category_name(category: wire::AdminLogCategory) -> String {
+    match category {
+        wire::AdminLogCategory::LibraryScan => "library_scan",
+        wire::AdminLogCategory::System => "system",
+        wire::AdminLogCategory::Auth => "auth",
+        wire::AdminLogCategory::Enrichment => "enrichment",
     }
+    .to_owned()
 }
 
 impl AdminStatus {
     /// Normalise a generated status response.
     #[must_use]
-    pub fn from_generated(status: wire::AdminStatusResponse) -> Self {
-        let wire::AdminStatusResponse {
+    pub fn from_generated(status: wire::AdminStatus) -> Self {
+        let wire::AdminStatus {
             counts,
             enrichment,
             // Which metadata providers are configured (issue #185) is an operator
@@ -913,7 +918,7 @@ impl AdminStatus {
             recent_scans: recent_scans
                 .into_iter()
                 .map(|scan| RecentScan {
-                    level: LogLevel::from_log(scan.level),
+                    level: LogLevel::from_wire(scan.level),
                     message: scan.message,
                     timestamp_unix: scan.timestamp.0.unix_timestamp(),
                 })
@@ -925,8 +930,8 @@ impl AdminStatus {
 impl AdminUser {
     /// Normalise a generated admin user row.
     #[must_use]
-    pub fn from_generated(user: wire::AdminUserDto, record: &ServerRecord) -> Self {
-        let wire::AdminUserDto {
+    pub fn from_generated(user: wire::AdminUser, record: &ServerRecord) -> Self {
+        let wire::AdminUser {
             avatar_url,
             created_at,
             disabled,
@@ -950,8 +955,8 @@ impl AdminUser {
 impl AdminLogEntry {
     /// Normalise a generated log line.
     #[must_use]
-    pub fn from_generated(entry: wire::AdminLogEntryDto) -> Self {
-        let wire::AdminLogEntryDto {
+    pub fn from_generated(entry: wire::AdminLogEntry) -> Self {
+        let wire::AdminLogEntry {
             category,
             created_at,
             details,
@@ -961,8 +966,8 @@ impl AdminLogEntry {
         } = entry;
         Self {
             id,
-            level: LogLevel::from_log(level),
-            category,
+            level: LogLevel::from_wire(level),
+            category: log_category_name(category),
             message,
             // `details` is an untyped JSON value in the contract, so it is
             // carried across the boundary as text and rendered verbatim
@@ -976,8 +981,8 @@ impl AdminLogEntry {
 impl AdminEvent {
     /// Normalise a generated server event.
     #[must_use]
-    pub fn from_generated(event: wire::AdminEventDto) -> Self {
-        let wire::AdminEventDto {
+    pub fn from_generated(event: wire::AdminEvent) -> Self {
+        let wire::AdminEvent {
             category,
             // An enrichment outcome reads, in the feed, as its message; the
             // structured title is for the admin screens that act on it.
@@ -992,15 +997,16 @@ impl AdminEvent {
         } = event;
         Self {
             id,
-            level: LogLevel::from_event(level),
+            level: LogLevel::from_wire(level),
             category: match category {
                 // A scan's structured progress reads, in the feed, as the
                 // scan event it is; the numbers are in the message too.
-                wire::AdminEventCategoryDto::LibraryScan
-                | wire::AdminEventCategoryDto::ScanProgress => EventCategory::LibraryScan,
+                wire::AdminEventCategory::LibraryScan | wire::AdminEventCategory::ScanProgress => {
+                    EventCategory::LibraryScan
+                }
                 // An enrichment outcome (issue #185) has no category of its own in
                 // the native apps yet; it reads as the server event it is.
-                wire::AdminEventCategoryDto::Enrichment | wire::AdminEventCategoryDto::System => {
+                wire::AdminEventCategory::Enrichment | wire::AdminEventCategory::System => {
                     EventCategory::System
                 }
             },
@@ -1019,15 +1025,30 @@ impl ServerHealth {
         let wire::HealthStatus {
             checks,
             status,
-            timestamp: _,
+            checked_at: _,
             uptime_secs,
             version,
         } = health;
+        let wire::HealthChecks { database } = checks;
+        // The record keeps its text fields: the typed report is read here and
+        // spelled as the server spells it, so the native screens are unchanged.
+        let wire::DependencyCheck {
+            status: database_status,
+            detail: database_detail,
+        } = database;
         Self {
-            status,
+            status: match status {
+                wire::HealthState::Healthy => "healthy",
+                wire::HealthState::Degraded => "degraded",
+            }
+            .to_owned(),
             version,
             uptime_secs: u64::try_from(uptime_secs).unwrap_or(0),
-            database: checks.database,
+            database: match (database_status, database_detail) {
+                (wire::CheckStatus::Ok, _) => "ok".to_owned(),
+                (wire::CheckStatus::Error, Some(detail)) => format!("error: {detail}"),
+                (wire::CheckStatus::Error, None) => "error".to_owned(),
+            },
         }
     }
 }
@@ -1407,12 +1428,13 @@ mod tests {
     fn an_admin_log_entry_carries_untyped_details_as_text() {
         // `details` has no schema in the contract, so it is rendered verbatim
         // rather than given a shape the server never promised.
-        let json = r#"{"id":"1","level":"warning","category":"scan",
+        let json = r#"{"id":"1","level":"warning","category":"library_scan",
                        "message":"skipped","created_at":"2026-01-01",
                        "details":{"path":"/media/x.mkv"}}"#;
-        let entry: wire::AdminLogEntryDto = serde_json::from_str(json).expect("a valid log entry");
+        let entry: wire::AdminLogEntry = serde_json::from_str(json).expect("a valid log entry");
         let mapped = AdminLogEntry::from_generated(entry);
         assert_eq!(mapped.level, LogLevel::Warning);
+        assert_eq!(mapped.category, "library_scan");
         assert_eq!(
             mapped.details.as_deref(),
             Some(r#"{"path":"/media/x.mkv"}"#)
@@ -1494,11 +1516,24 @@ mod tests {
 
     #[test]
     fn a_health_report_narrows_its_uptime() {
-        let json = r#"{"status":"ok","version":"0.1.0","uptime_secs":1234,
-                       "timestamp":"2026-01-01","checks":{"database":"ok"}}"#;
+        let json = r#"{"status":"healthy","version":"0.1.0","uptime_secs":1234,
+                       "checked_at":"2026-01-01T00:00:00Z",
+                       "checks":{"database":{"status":"ok","detail":null}}}"#;
         let health: wire::HealthStatus = serde_json::from_str(json).expect("a valid health report");
         let mapped = ServerHealth::from_generated(health);
+        assert_eq!(mapped.status, "healthy");
         assert_eq!(mapped.uptime_secs, 1234);
         assert_eq!(mapped.database, "ok");
+    }
+
+    #[test]
+    fn a_degraded_health_report_keeps_the_failing_checks_reason() {
+        let json = r#"{"status":"degraded","version":"0.1.0","uptime_secs":5,
+                       "checked_at":"2026-01-01T00:00:00Z",
+                       "checks":{"database":{"status":"error","detail":"connection refused"}}}"#;
+        let health: wire::HealthStatus = serde_json::from_str(json).expect("a valid health report");
+        let mapped = ServerHealth::from_generated(health);
+        assert_eq!(mapped.status, "degraded");
+        assert_eq!(mapped.database, "error: connection refused");
     }
 }

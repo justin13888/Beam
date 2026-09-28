@@ -47,7 +47,7 @@ mod tests {
     /// listing them here is what makes adding another a reviewed change rather
     /// than a new warning nobody reads.
     const UNCHECKED_SCHEMAS: [&str; 1] =
-        ["#/components/schemas/AdminLogEntryDto/properties/details/anyOf/0"];
+        ["#/components/schemas/AdminLogEntry/properties/details/anyOf/0"];
 
     /// The router describes itself, with nothing merely tolerated beyond the
     /// waivers in [`UNCHECKED_SCHEMAS`].

@@ -1,23 +1,65 @@
+use chrono::{DateTime, Utc};
 use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::routes::tags::Health;
 use crate::state::AppState;
 
-/// Per-dependency check results reported by [`HealthStatus`].
-#[derive(Serialize, Deserialize, Schema)]
-pub struct HealthChecks {
-    /// `"ok"` when the database round-trips, otherwise `"error: <reason>"`.
-    pub database: String,
+/// The server's overall health: `healthy` exactly when every dependency
+/// check is `ok`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthState {
+    Healthy,
+    Degraded,
 }
 
-#[derive(Serialize, Deserialize, Schema)]
+/// The outcome of probing one dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Ok,
+    Error,
+}
+
+/// One probed dependency.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct DependencyCheck {
+    pub status: CheckStatus,
+    /// Why the check failed; absent when it passed.
+    pub detail: Option<String>,
+}
+
+impl DependencyCheck {
+    fn from_probe<E: std::fmt::Display>(result: Result<(), E>) -> Self {
+        match result {
+            Ok(()) => Self {
+                status: CheckStatus::Ok,
+                detail: None,
+            },
+            Err(error) => Self {
+                status: CheckStatus::Error,
+                detail: Some(error.to_string()),
+            },
+        }
+    }
+}
+
+/// Per-dependency check results reported by [`HealthStatus`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct HealthChecks {
+    /// Whether the database round-trips.
+    pub database: DependencyCheck,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
 pub struct HealthStatus {
-    /// `"healthy"` when every dependency check passed, `"degraded"` otherwise.
-    pub status: String,
+    /// `healthy` when every dependency check passed, `degraded` otherwise.
+    pub status: HealthState,
     /// Result of each probed dependency.
     pub checks: HealthChecks,
-    pub timestamp: String,
+    /// When the checks ran.
+    pub checked_at: DateTime<Utc>,
     pub version: String,
     /// Whole seconds the process has been serving.
     pub uptime_secs: u64,
@@ -55,23 +97,30 @@ pub enum HealthReply {
 pub async fn health_check(Inject(state): Inject<AppState>) -> HealthReply {
     let uptime_secs = state.uptime_secs();
 
-    let (status, database, healthy) = match state.probe.check_database().await {
-        Ok(()) => ("healthy", "ok".to_owned(), true),
-        Err(e) => ("degraded", format!("error: {e}"), false),
+    let checked_at = state.clock().now();
+    let checks = HealthChecks {
+        database: DependencyCheck::from_probe(state.probe.check_database().await),
+    };
+    // Destructured so a new dependency cannot be added without deciding here
+    // whether it degrades the server.
+    let HealthChecks { database } = &checks;
+    let status = if database.status == CheckStatus::Ok {
+        HealthState::Healthy
+    } else {
+        HealthState::Degraded
     };
 
     let body = HealthStatus {
-        status: status.to_owned(),
-        checks: HealthChecks { database },
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        status,
+        checks,
+        checked_at,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         uptime_secs,
     };
 
-    if healthy {
-        HealthReply::Healthy(body)
-    } else {
-        HealthReply::Degraded(body)
+    match status {
+        HealthState::Healthy => HealthReply::Healthy(body),
+        HealthState::Degraded => HealthReply::Degraded(body),
     }
 }
 

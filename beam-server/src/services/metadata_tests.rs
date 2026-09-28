@@ -1623,10 +1623,10 @@ mod tests {
     }
 
     fn only_shows() -> MediaSearchFilters {
-        use crate::services::metadata::MediaTypeFilter;
+        use crate::services::metadata::TitleKind;
 
         MediaSearchFilters {
-            media_type: Some(MediaTypeFilter::Show),
+            media_type: Some(TitleKind::Show),
             genre: None,
             year: None,
             year_from: None,
@@ -1759,8 +1759,8 @@ mod browse {
     use crate::services::cursor;
     use crate::services::metadata::{
         BrowseRequest, DEFAULT_PAGE_SIZE, DbMetadataService, MAX_PAGE_SIZE, MediaConnection,
-        MediaSearchFilters, MediaSortField, MediaTypeFilter, MetadataError, MetadataRepositories,
-        MetadataService, PageDirection, PageRequest, SortOrder,
+        MediaSearchFilters, MediaSortField, MetadataError, MetadataRepositories, MetadataService,
+        PageDirection, PageRequest, SortOrder,
     };
 
     /// Every double, with the catalogue and genre store reading the title
@@ -2384,7 +2384,7 @@ mod browse {
         let page = service
             .search_media(BrowseRequest {
                 filters: MediaSearchFilters {
-                    media_type: Some(MediaTypeFilter::Show),
+                    media_type: Some(crate::models::TitleKind::Show),
                     ..Default::default()
                 },
                 ..request(None, None)

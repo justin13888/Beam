@@ -21,5 +21,5 @@ pub use beam_index::services::index::{IndexError, IndexService, LocalIndexServic
 
 // Re-export types for convenience
 pub use metadata::{
-    MediaConnection, MediaSearchFilters, MediaSortField, MediaTypeFilter, PageInfo, SortOrder,
+    MediaConnection, MediaSearchFilters, MediaSortField, PageInfo, SortOrder, TitleKind,
 };

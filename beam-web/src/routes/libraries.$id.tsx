@@ -74,26 +74,26 @@ type SortDirection = "asc" | "desc";
 
 function StatusIcon({ status }: { status: FileIndexStatus }) {
 	switch (status) {
-		case "Known":
+		case "known":
 			return <CheckCircle2 size={16} className="text-emerald-400" />;
-		case "Changed":
+		case "changed":
 			return <AlertTriangle size={16} className="text-amber-400" />;
-		case "Unknown":
+		case "unknown":
 			return <CircleDot size={16} className="text-gray-400" />;
 	}
 }
 
 function StatusBadge({ status }: { status: FileIndexStatus }) {
 	const styles: Record<FileIndexStatus, string> = {
-		Known: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
-		Changed: "bg-amber-500/15 text-amber-400 border-amber-500/20",
-		Unknown: "bg-gray-500/15 text-gray-400 border-gray-500/20",
+		known: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
+		changed: "bg-amber-500/15 text-amber-400 border-amber-500/20",
+		unknown: "bg-gray-500/15 text-gray-400 border-gray-500/20",
 	};
 
 	const labels: Record<FileIndexStatus, string> = {
-		Known: "Indexed",
-		Changed: "Changed",
-		Unknown: "Unknown",
+		known: "Indexed",
+		changed: "Changed",
+		unknown: "Unknown",
 	};
 
 	return (
@@ -108,21 +108,21 @@ function StatusBadge({ status }: { status: FileIndexStatus }) {
 
 function ContentTypeBadge({ contentType }: { contentType: FileContentType }) {
 	switch (contentType) {
-		case "Movie":
+		case "movie":
 			return (
 				<span className="inline-flex items-center gap-1 text-xs text-purple-400">
 					<Film size={12} />
 					Movie
 				</span>
 			);
-		case "Episode":
+		case "episode":
 			return (
 				<span className="inline-flex items-center gap-1 text-xs text-blue-400">
 					<Tv size={12} />
 					Episode
 				</span>
 			);
-		case "Unclassified":
+		case "unclassified":
 			return (
 				<span className="inline-flex items-center gap-1 text-xs text-gray-500">
 					<FileQuestion size={12} />
@@ -307,9 +307,9 @@ export function LibraryDetailPage({ libraryId: id }: { libraryId: string }) {
 
 	// Stats
 	const stats = useMemo(() => {
-		const known = files.filter((f) => f.status === "Known").length;
-		const changed = files.filter((f) => f.status === "Changed").length;
-		const unknown = files.filter((f) => f.status === "Unknown").length;
+		const known = files.filter((f) => f.status === "known").length;
+		const changed = files.filter((f) => f.status === "changed").length;
+		const unknown = files.filter((f) => f.status === "unknown").length;
 		const totalSize = files.reduce((sum, f) => sum + f.size_bytes, 0);
 		return { known, changed, unknown, totalSize };
 	}, [files]);
@@ -487,9 +487,9 @@ export function LibraryDetailPage({ libraryId: id }: { libraryId: string }) {
 									{(
 										[
 											{ label: "All", value: "all" },
-											{ label: "Indexed", value: "Known" },
-											{ label: "Changed", value: "Changed" },
-											{ label: "Unknown", value: "Unknown" },
+											{ label: "Indexed", value: "known" },
+											{ label: "Changed", value: "changed" },
+											{ label: "Unknown", value: "unknown" },
 										] as const
 									).map((opt) => (
 										<button

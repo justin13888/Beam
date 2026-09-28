@@ -46,6 +46,10 @@ mod contract_tests;
 #[path = "taxonomy_tests.rs"]
 mod taxonomy_tests;
 
+#[cfg(test)]
+#[path = "conventions_tests.rs"]
+mod conventions_tests;
+
 /// The interceptors the groups inside [`rest_routes`] carry, innermost last.
 ///
 /// Kynos carries every scope's interceptors in the router's type, so that

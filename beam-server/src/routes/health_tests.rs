@@ -17,16 +17,31 @@ mod tests {
     use kynos::test::TestClient;
     use serde_json::Value;
 
+    use beam_domain::services::TestClock;
+    use chrono::{DateTime, Utc};
+
     use crate::routes::health::health_check;
     use crate::routes::test_support::make_app_state_with_probe;
     use crate::services::health::{DependencyProbe, InMemoryDependencyProbe};
     use crate::state::AppState;
 
-    /// The health endpoint alone, over a state whose probe the caller chose.
+    /// The instant every probe here runs at, so `checked_at` is asserted
+    /// exactly rather than as "some string".
+    fn checked_at() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-03-01T12:00:00Z")
+            .expect("a valid instant")
+            .with_timezone(&Utc)
+    }
+
+    /// The health endpoint alone, over a state whose probe the caller chose,
+    /// on a clock stopped at [`checked_at`].
     fn client(probe: Arc<dyn DependencyProbe>) -> TestClient<AppState> {
         let service = Router::new()
             .nest("/v1", Router::new().mount(kynos::routes![health_check]))
-            .build(make_app_state_with_probe(probe))
+            .build(make_app_state_with_probe(
+                probe,
+                Arc::new(TestClock::starting_at(checked_at())),
+            ))
             .expect("the health router describes itself");
 
         TestClient::new(service)
@@ -43,10 +58,16 @@ mod tests {
 
         let body: Value = response.json();
         assert_eq!(body["status"], "healthy");
-        assert_eq!(body["checks"]["database"], "ok");
+        assert_eq!(body["checks"]["database"]["status"], "ok");
+        assert!(
+            body["checks"]["database"]["detail"].is_null(),
+            "a passing check has nothing to explain"
+        );
         assert!(body["uptime_secs"].is_u64(), "uptime_secs must be present");
         assert!(body["version"].is_string());
-        assert!(body["timestamp"].is_string());
+        let reported: DateTime<Utc> = serde_json::from_value(body["checked_at"].clone())
+            .expect("checked_at is an RFC 3339 date-time");
+        assert_eq!(reported, checked_at(), "checked_at is read from the clock");
     }
 
     #[tokio::test]
@@ -62,7 +83,8 @@ mod tests {
 
         let body: Value = response.json();
         assert_eq!(body["status"], "degraded");
-        assert_eq!(body["checks"]["database"], "error: connection refused");
+        assert_eq!(body["checks"]["database"]["status"], "error");
+        assert_eq!(body["checks"]["database"]["detail"], "connection refused");
         assert!(body["uptime_secs"].is_u64());
     }
 }
