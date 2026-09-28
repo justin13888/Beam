@@ -42,6 +42,15 @@ pub trait WatchStateRepository: Send + Sync + std::fmt::Debug {
     /// continue-watching until it is next played.
     async fn dismiss(&self, user_id: Uuid, title: TitleRef) -> Result<(), DbErr>;
 
+    /// Move every user's row for `from` onto `to`: the indexer merged two
+    /// movies, or two shows' episodes, into one, and the title retired would
+    /// otherwise take its viewers' state with it. A user with a row for both
+    /// keeps one: the more recently played row's position, duration and file,
+    /// played if either was, the plays of both, and the later dismissal.
+    /// Atomic. `from` and `to` must be the same kind; the same target changes
+    /// nothing.
+    async fn carry(&self, from: WatchTarget, to: WatchTarget) -> Result<(), DbErr>;
+
     async fn find(&self, user_id: Uuid, target: WatchTarget) -> Result<Option<WatchState>, DbErr>;
 
     /// The rows for those of `movie_ids` the user has any. One statement,
@@ -267,6 +276,47 @@ pub mod in_memory {
                 .filter(|r| r.user_id == user_id && title_of(r) == title)
             {
                 row.dismissed_at = Some(now);
+            }
+            Ok(())
+        }
+
+        async fn carry(&self, from: WatchTarget, to: WatchTarget) -> Result<(), DbErr> {
+            if std::mem::discriminant(&from) != std::mem::discriminant(&to) {
+                return Err(DbErr::Custom(
+                    "watch state is carried between two movies or two episodes".to_string(),
+                ));
+            }
+            if key(from) == key(to) {
+                return Ok(());
+            }
+            let mut rows = self.rows.lock().unwrap();
+            let moving: Vec<WatchState> = rows
+                .iter()
+                .filter(|r| key(r.target) == key(from))
+                .cloned()
+                .collect();
+            rows.retain(|r| key(r.target) != key(from));
+            for mut row in moving {
+                match rows
+                    .iter_mut()
+                    .find(|r| r.user_id == row.user_id && key(r.target) == key(to))
+                {
+                    Some(kept) => {
+                        if row.last_played_at > kept.last_played_at {
+                            kept.position_secs = row.position_secs;
+                            kept.duration_secs = row.duration_secs.or(kept.duration_secs);
+                            kept.last_file_id = row.last_file_id.or(kept.last_file_id);
+                            kept.last_played_at = row.last_played_at;
+                        }
+                        kept.completed |= row.completed;
+                        kept.play_count += row.play_count;
+                        kept.dismissed_at = kept.dismissed_at.max(row.dismissed_at);
+                    }
+                    None => {
+                        row.target = to;
+                        rows.push(row);
+                    }
+                }
             }
             Ok(())
         }

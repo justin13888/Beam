@@ -547,6 +547,102 @@ macro_rules! watch_state_repository_contract {
             assert_eq!(state(&kept), (0.0, true, 1));
         }
 
+        /// Two titles the indexer merges into one keep their viewers' state
+        /// on the one kept: a lone row moves, and two rows of one viewer fold
+        /// into one, the newer's place with the plays of both.
+        #[tokio::test]
+        async fn carrying_moves_a_retired_titles_rows_onto_the_kept_one() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let clock = fixture.clock();
+            let (alone, older_kept, newer_gone) = (
+                fixture.new_user().await,
+                fixture.new_user().await,
+                fixture.new_user().await,
+            );
+            let (gone, kept) = (fixture.new_movie().await, fixture.new_movie().await);
+            let (old_file, new_file) = (fixture.new_file().await, fixture.new_file().await);
+
+            repo.record_progress(report(alone, gone, old_file, 40.0))
+                .await
+                .unwrap();
+            repo.record_progress(report(older_kept, gone, old_file, 99.0))
+                .await
+                .unwrap();
+            repo.record_progress(report(newer_gone, kept, old_file, 20.0))
+                .await
+                .unwrap();
+            repo.dismiss(newer_gone, TitleRef::Movie(key(kept)))
+                .await
+                .unwrap();
+            clock.advance(Duration::from_secs(60));
+            repo.record_progress(report(older_kept, kept, new_file, 30.0))
+                .await
+                .unwrap();
+            repo.record_progress(report(newer_gone, gone, new_file, 50.0))
+                .await
+                .unwrap();
+            let later = repo.find(newer_gone, gone).await.unwrap().expect("a row");
+
+            repo.carry(gone, kept).await.unwrap();
+
+            for user in [alone, older_kept, newer_gone] {
+                assert!(repo.find(user, gone).await.unwrap().is_none());
+            }
+            let moved = repo.find(alone, kept).await.unwrap().expect("moved");
+            assert_eq!(state(&moved), (40.0, false, 0));
+            assert_eq!(moved.last_file_id, Some(old_file));
+
+            let folded = repo.find(older_kept, kept).await.unwrap().expect("kept");
+            assert_eq!(
+                state(&folded),
+                (30.0, true, 1),
+                "the newer place, played as the retired row was"
+            );
+            assert_eq!(folded.last_file_id, Some(new_file));
+            assert_eq!(repo.count_by_user(older_kept).await.unwrap(), 1);
+
+            let taken = repo.find(newer_gone, kept).await.unwrap().expect("kept");
+            assert_eq!(state(&taken), (50.0, false, 0), "the retired row was newer");
+            assert_eq!(taken.last_file_id, Some(new_file));
+            assert_eq!(taken.last_played_at, later.last_played_at);
+            assert!(
+                taken.dismissed_at.is_some(),
+                "the kept row's dismissal stays"
+            );
+            assert_eq!(
+                titles(
+                    repo.find_continue_candidates(newer_gone, None, 10)
+                        .await
+                        .unwrap()
+                ),
+                vec![TitleRef::Movie(key(kept))],
+                "played since the dismissal, it is back"
+            );
+
+            let show = fixture.new_show().await;
+            let other = fixture.new_show().await;
+            let (from, to) = (
+                fixture.new_episode(show).await,
+                fixture.new_episode(other).await,
+            );
+            repo.record_progress(report(alone, from, old_file, 10.0))
+                .await
+                .unwrap();
+            repo.carry(from, to).await.unwrap();
+            let rows = repo.find_for_show(alone, other).await.unwrap();
+            assert_eq!(rows.len(), 1, "the episode's row joins the kept show");
+            assert_eq!(rows[0].target, to);
+            assert!(repo.find_for_show(alone, show).await.unwrap().is_empty());
+
+            assert!(repo.carry(kept, to).await.is_err(), "a movie is no episode");
+            repo.carry(kept, kept).await.unwrap();
+            assert_eq!(
+                state(&repo.find(alone, kept).await.unwrap().expect("unchanged")),
+                (40.0, false, 0)
+            );
+        }
+
         #[tokio::test]
         async fn candidates_are_one_per_title_newest_first() {
             let fixture = $setup().await;

@@ -33,6 +33,7 @@ use beam_domain::models::file::{
 };
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode};
+use beam_domain::models::watch_state::WatchTarget;
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
     AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
@@ -2988,6 +2989,14 @@ impl LocalIndexService {
                 }
                 entry_files.entry(target.id).or_default().extend(moved);
             }
+            // The retired movie's viewers keep their place on the survivor;
+            // left behind, it would go when the retired movie does.
+            self.progress_repo
+                .carry(
+                    WatchTarget::Movie { movie_id: loser },
+                    WatchTarget::Movie { movie_id: survivor },
+                )
+                .await?;
             let (kept, retired) = if survivor == movie.id {
                 (&movie, &holder)
             } else {
@@ -3151,6 +3160,18 @@ impl LocalIndexService {
                         .await?;
                     }
                     episode_files.entry(target.id).or_default().extend(moved);
+                    self.progress_repo
+                        .carry(
+                            WatchTarget::Episode {
+                                episode_id,
+                                show_id: loser,
+                            },
+                            WatchTarget::Episode {
+                                episode_id: target.id,
+                                show_id: survivor,
+                            },
+                        )
+                        .await?;
                 }
             }
             let (kept, retired) = if survivor == show.id {

@@ -23,6 +23,7 @@ use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use tempfile::TempDir;
 
 struct Harness {
@@ -35,6 +36,7 @@ struct Harness {
     show_repo: Arc<InMemoryShowRepository>,
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
     enrichment_repo: Arc<InMemoryEnrichmentStateRepository>,
+    watch_state: Arc<InMemoryWatchStateRepository>,
     service: LocalIndexService,
 }
 
@@ -76,6 +78,7 @@ impl Harness {
         let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
         let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
+        let watch_state = Arc::new(InMemoryWatchStateRepository::default());
         let library = library_repo
             .create(CreateLibrary {
                 name: "Identity".to_string(),
@@ -123,7 +126,7 @@ impl Harness {
             Arc::new(LocalAdminLogService::new(
                 admin_log_repo.clone() as Arc<dyn AdminLogRepository>
             )),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
+            watch_state.clone(),
         )
         .with_missing_file_grace(grace)
         .with_enrichment_repo(enrichment_repo.clone());
@@ -138,6 +141,7 @@ impl Harness {
             show_repo,
             admin_log_repo,
             enrichment_repo,
+            watch_state,
             service,
         }
     }
@@ -1339,6 +1343,149 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     assert_eq!(h.only_show().id, folder);
     assert_eq!(h.only_movie().id, older);
     assert_eq!(h.season_one(folder).len(), 2);
+}
+
+/// A merge moves each viewer's watch state from the retired title onto the
+/// kept one (issue #188): the retired title goes, and its rows would go with
+/// it. A viewer with state on both keeps one row per title.
+#[tokio::test]
+async fn a_merge_carries_each_viewers_watch_state_to_the_kept_title() {
+    use beam_domain::models::watch_state::{RecordProgress, WatchTarget};
+    use beam_domain::repositories::WatchStateRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let scene = h
+        .keyed_show(
+            "Greys Anatomy",
+            "greys anatomy|",
+            &["Greys.Anatomy.S01E01.720p.mkv", "Greys.Anatomy.S01E02.mkv"],
+            base,
+        )
+        .await;
+    let folder = h
+        .keyed_show(
+            "Grey's Anatomy",
+            "grey s anatomy|",
+            &["Grey's Anatomy/Season 1/Greys.Anatomy.S01E01.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    h.enrich_show(folder, 1416).await;
+    let older = h
+        .keyed_movie(
+            "Ocean's Eleven",
+            Some(2001),
+            "ocean s eleven|2001",
+            &["Ocean's Eleven (2001)/Ocean's Eleven (2001).mkv"],
+            base,
+        )
+        .await;
+    let newer = h
+        .keyed_movie(
+            "Oceans Eleven",
+            Some(2001),
+            "oceans eleven|2001",
+            &["Oceans.Eleven.2001.1080p.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    let scene_season = h.show_repo.find_seasons_by_show_id(scene).await.unwrap()[0].id;
+    let mut scene_episodes = h
+        .show_repo
+        .find_episodes_by_season_id(scene_season)
+        .await
+        .unwrap();
+    scene_episodes.sort_by_key(|e| e.episode_number);
+    let (viewer, both) = (Uuid::new_v4(), Uuid::new_v4());
+    let report = |user_id, target, position_secs| RecordProgress {
+        user_id,
+        target,
+        file_id: Uuid::new_v4(),
+        position_secs,
+        duration_secs: Some(100.0),
+    };
+    let movie = |movie_id| WatchTarget::Movie { movie_id };
+    for (user, target, position) in [
+        (viewer, movie(newer), 40.0),
+        (both, movie(newer), 99.0),
+        (both, movie(older), 30.0),
+        (
+            viewer,
+            WatchTarget::Episode {
+                episode_id: scene_episodes[0].id,
+                show_id: scene,
+            },
+            20.0,
+        ),
+        (
+            viewer,
+            WatchTarget::Episode {
+                episode_id: scene_episodes[1].id,
+                show_id: scene,
+            },
+            99.0,
+        ),
+    ] {
+        h.watch_state
+            .record_progress(report(user, target, position))
+            .await
+            .unwrap();
+    }
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+    assert_eq!(h.only_movie().id, older);
+    assert_eq!(h.only_show().id, folder);
+
+    let place = |row: Option<beam_domain::models::watch_state::WatchState>| {
+        let row = row.expect("a row");
+        (row.position_secs, row.completed, row.play_count)
+    };
+    assert_eq!(
+        place(h.watch_state.find(viewer, movie(older)).await.unwrap()),
+        (40.0, false, 0)
+    );
+    assert!(
+        h.watch_state
+            .find(viewer, movie(newer))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        place(h.watch_state.find(both, movie(older)).await.unwrap()),
+        (30.0, true, 1),
+        "two rows of one viewer fold into one"
+    );
+    let mut episodes: Vec<(u32, f64, bool)> = Vec::new();
+    for row in h.watch_state.find_for_show(viewer, folder).await.unwrap() {
+        let WatchTarget::Episode { episode_id, .. } = row.target else {
+            panic!("a show's row is an episode's");
+        };
+        let episode = h
+            .show_repo
+            .find_episode_by_id(episode_id)
+            .await
+            .unwrap()
+            .expect("an episode of the kept show");
+        episodes.push((episode.episode_number, row.position_secs, row.completed));
+    }
+    episodes.sort_by_key(|(number, _, _)| *number);
+    assert_eq!(
+        episodes,
+        vec![(1, 20.0, false), (2, 0.0, true)],
+        "each episode's state is on the kept show's episode of that number"
+    );
+    assert!(
+        h.watch_state
+            .find_for_show(viewer, scene)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// What an administrator set on a title a merge retires survives it (issue

@@ -495,7 +495,10 @@ the last group read rather than skipping an offset; each page's rows and outline
 query per kind (`WatchStateRepository::find_for_movies` and `find_for_shows`,
 `ShowRepository::episode_outlines`), and a request examines at most 1,000 groups. History lists
 every row, and skips (but counts) one whose title has no present file. Purging a file keeps the
-rows that last played it, without it; deleting a movie or episode takes its rows. Migration
+rows that last played it, without it; deleting a movie or episode takes its rows, so a merge of
+two titles by the indexer first carries the retired title's rows onto the kept one
+(`WatchStateRepository::carry`), folding a user's two rows into one -- the newer row's position
+and file, played if either was, the plays of both. Migration
 `m20261011_000001_watch_state` built this table from `playback_progress` (one row per user and
 file), merging each user's rows per title -- the newest row's position (clamped to its duration),
 duration and file, a tie going to the larger file id, played if any row was, a play per played row
