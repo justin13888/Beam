@@ -379,19 +379,28 @@ Movies/
 
 Beam reads a part from the end of the name: `cd`, `disc`, `disk`, `part` or `pt` and a number,
 after a space, dot, dash or underscore — `- CD1`, `- Part 2`, `.pt1`, `_disc_1`. Only release
-details such as `1080p` or a `[GROUP]` tag may follow it. `part` counts only after the year
-(`Movie (2019) - Part 1.mkv`) or in a folder named for the movie, because some titles end in it:
-*Harry Potter and the Deathly Hallows Part 1 (2010)* is a film of its own. A number that opens the
-name (`Part 2: The Sequel (2020).mkv`) or is followed by more of the title is part of the title.
+details such as `1080p` or a `[GROUP]` tag may follow it. `part` and `pt` count only after the
+year (`Movie (2019) - Part 1.mkv`), or in the movie's own folder — one that carries the year and
+names the same title — when the file name has no year (`Movie (2019)/Movie - Part 1.mkv`). That is
+because some titles end in them: *Harry Potter and the Deathly Hallows Part 1 (2010)* and *The
+Hunger Games Mockingjay Pt 1* are films of their own, and a folder without a year, such as `The
+Godfather/`, is as often a collection as one film, so *The Godfather Part 2* in it stays a film. A
+number that opens the name (`Part 2: The Sequel (2020).mkv`) or is followed by more of the title
+is part of the title. A file in an extras folder (`Extras/`, `Trailers/`) is never a part.
 
 The parts of one edition in one folder are one version of the movie, listed in part order, and its
 size and length are all the parts' together. Parts of different editions — `{edition-Director's
-Cut} - CD1` — are a version of that edition. If two files in one folder claim the same part, Beam
-cannot tell which to play, so it lists each of that folder's parts as a version of its own.
+Cut} - CD1` — are a version of that edition. The parts must run from 1 with no gap: if two files
+in one folder claim the same part, or the folder has parts 2 and 3 but no part 1, or parts 1 and 3
+but no part 2, Beam cannot play them as one film, so it lists each of that folder's parts as a
+version of its own.
 
 A library indexed by an earlier Beam, which listed each part as a film (*Movie - CD1*, *Movie -
 CD2*), is merged on the first scan after the upgrade: the films become one, named *Movie*, and
-every file keeps its watch progress. A title a provider matched or you renamed keeps its name.
+every file keeps its watch progress. A title a provider matched or you renamed keeps its name. Two
+titles a provider matched to different films are never merged, even when their names now read as
+one: both are kept as they were, and the admin log names the pair so you can rename the files or
+correct a match.
 
 The web player and the apps start a multi-part version at its first part; they do not yet move on
 to the next part by themselves.

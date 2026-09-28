@@ -98,9 +98,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   - one part of a movie split across files -- a trailing `cd`, `disc`, `disk`, `part` or `pt` and a
     number, set off by a space, dot, dash or underscore (`Movie (2019) - CD1`, `- Part 2`, `.pt1`,
     `disc1`) with nothing after it but release noise -- MUST key the movie its name spells without
-    the token and record the number as its part; `part` MUST count only after the release year or
-    where the parent folder names the same title, since a title can end in it (`Harry Potter and
-    the Deathly Hallows Part 1 (2010)`), and a token that opens the name or is followed by title
+    the token and record the number as its part; `part` and `pt` MUST count only after the release
+    year, or where the name carries no year and the parent folder carries one and names the same
+    title, since a title can end in them (`Harry Potter and the Deathly Hallows Part 1 (2010)`,
+    `The Hunger Games Mockingjay Pt 1`) and a year-less folder may be a franchise's (`The
+    Godfather/The Godfather Part 2.mkv`), and a token that opens the name or is followed by title
     words (`Part 2: The Sequel (2020)`) is the title's;
   - a file in a season folder with no episode number, a file in a range-only folder with no season
     and episode marker, a `<title> - <n>` name no folder names as a show, and a fractional
@@ -460,8 +462,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   client can present a source-quality picker and choose tracks. A value the file does not state
   MUST be absent, never a substituted default. A file holding a run of episodes MUST say so. The
   parts of a multi-part movie that share an edition and a folder MUST be one version listing every
-  part's file in part order, each with its own stream URL, so a client plays them in sequence
-  without the server joining them; its size and duration are all the parts'. The
+  part's file in part order, each with its own stream URL, so a client can play them in sequence
+  without the server joining them, when their numbers run 1..n with no gap or repeat (otherwise
+  each file MUST be a version of its own); its size and duration are all the parts'. The
   endpoint accepts a movie id or an episode id; a show id is rejected, since shows have no files of
   their own.
 - **FR-506**: Switching between file versions during the source-selection scenario MUST result in
