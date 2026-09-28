@@ -15,7 +15,8 @@ use tracing::{info, warn};
 use beam_domain::models::ProviderPin;
 use beam_domain::models::enrichment::{EnrichmentState, EnrichmentTargetId, MetadataField};
 use beam_domain::providers::enrichment::{
-    EnrichmentError, EnrichmentProvider, ExternalMediaRef, MediaQuery,
+    EnrichmentError, EnrichmentProvider, ExternalMediaRef, MediaQuery, MovieEnrichment,
+    ShowEnrichment,
 };
 use beam_domain::repositories::{
     EnrichmentStateRepository, GenreRepository, MovieRepository, ShowRepository,
@@ -98,6 +99,19 @@ fn contradiction(
     Some(format!(
         "the NFO pins {pin}, but the best match found is {found}"
     ))
+}
+
+/// A title's enrichment fetched by the id it was matched to, with the
+/// confidence of the match, or why the fetch failed.
+type Fetched<T> = Result<(ExternalMediaRef, T, f32), EnrichmentError>;
+
+/// What an exhausted row becomes.
+#[derive(Debug, Clone, Copy)]
+enum Exhausted {
+    /// The provider kept failing.
+    Failed,
+    /// The provider kept answering that it has no such title.
+    Unmatched,
 }
 
 /// Outcome of processing a single due row.
@@ -313,6 +327,120 @@ impl MetadataEnrichmentService {
         self.notifications.publish(event);
     }
 
+    /// Search for `movie` by its title and year and fetch the best match,
+    /// which must not contradict `pin`. `Err` is the outcome, already
+    /// recorded, when the search settles the row without a match.
+    async fn search_movie(
+        &self,
+        row: &EnrichmentState,
+        movie_id: uuid::Uuid,
+        movie: &beam_domain::models::Movie,
+        pin: Option<&ProviderPin>,
+    ) -> Result<Fetched<MovieEnrichment>, ProcessOutcome> {
+        let query = MediaQuery {
+            title: movie.title.clone(),
+            year: movie.year,
+        };
+        let hits = match self.provider.search_movies(&query).await {
+            Ok(hits) => hits,
+            Err(err) => return Err(self.handle_error(row, err).await),
+        };
+        let Some((hit, score)) =
+            matcher::best_movie_match(&movie.title, movie.year, &hits, self.policy.min_confidence)
+        else {
+            self.log_unmatched_movie(row.id, &movie.title, movie.year, &hits)
+                .await;
+            return Err(self
+                .mark_unmatched(row, "no candidate cleared the match threshold")
+                .await);
+        };
+        let ref_id = hit.external_ref.clone();
+        let enrichment = match self.provider.movie_enrichment(&ref_id).await {
+            Ok(enrichment) => enrichment,
+            Err(err) => return Ok(Err(err)),
+        };
+        if let Some(reason) = pin.and_then(|pin| {
+            contradiction(
+                pin,
+                enrichment.tmdb_id,
+                enrichment.imdb_id.as_deref(),
+                enrichment.anilist_id,
+            )
+        }) {
+            warn!(
+                movie_id = %movie_id,
+                candidate = %ref_id,
+                reason,
+                "the best match contradicts the NFO's pin"
+            );
+            return Err(self.mark_unmatched(row, &reason).await);
+        }
+        Ok(Ok((ref_id, enrichment, score.total_score as f32)))
+    }
+
+    /// [`Self::search_movie`], for a show.
+    async fn search_show(
+        &self,
+        row: &EnrichmentState,
+        show_id: uuid::Uuid,
+        show: &beam_domain::models::Show,
+        pin: Option<&ProviderPin>,
+    ) -> Result<Fetched<ShowEnrichment>, ProcessOutcome> {
+        let query = MediaQuery {
+            title: show.title.clone(),
+            year: show.year,
+        };
+        let hits = match self.provider.search_shows(&query).await {
+            Ok(hits) => hits,
+            Err(err) => return Err(self.handle_error(row, err).await),
+        };
+        let Some((hit, score)) =
+            matcher::best_show_match(&show.title, show.year, &hits, self.policy.min_confidence)
+        else {
+            self.log_unmatched_show(row.id, &show.title, show.year, &hits)
+                .await;
+            return Err(self
+                .mark_unmatched(row, "no candidate cleared the match threshold")
+                .await);
+        };
+        let ref_id = hit.external_ref.clone();
+        let enrichment = match self.provider.show_enrichment(&ref_id).await {
+            Ok(enrichment) => enrichment,
+            Err(err) => return Ok(Err(err)),
+        };
+        if let Some(reason) = pin.and_then(|pin| {
+            contradiction(
+                pin,
+                enrichment.tmdb_id,
+                enrichment.imdb_id.as_deref(),
+                enrichment.anilist_id,
+            )
+        }) {
+            warn!(
+                show_id = %show_id,
+                candidate = %ref_id,
+                reason,
+                "the best match contradicts the NFO's pin"
+            );
+            return Err(self.mark_unmatched(row, &reason).await);
+        }
+        Ok(Ok((ref_id, enrichment, score.total_score as f32)))
+    }
+
+    /// Clear `row`'s match, `gone`, which the provider no longer has, so no
+    /// later pass asks for it again: whatever the search that follows
+    /// finds, or fails to, the row no longer names it.
+    async fn forget_match(&self, row: &EnrichmentState, gone: &ExternalMediaRef) {
+        info!(
+            target = ?row.target,
+            matched = %gone,
+            "the provider no longer has a title's match; searching for it again"
+        );
+        if let Err(err) = self.state_repo.request_refresh(row.target, true).await {
+            warn!(error = %err, "could not clear a match the provider no longer has");
+        }
+    }
+
     async fn process_movie(
         &self,
         row: &EnrichmentState,
@@ -343,70 +471,38 @@ impl MetadataEnrichmentService {
         // searched for; one pinned to an id only a match can be checked
         // against is searched, and the match must not contradict the pin. A
         // refresh of a match already made (`force_refresh` with
-        // `matched_ref`) comes first.
+        // `matched_ref`) comes first. A fetch by an id the provider has no
+        // title for is retried with backoff for a pinned title, and searched
+        // for afresh for an unpinned one (FR-304, FR-313).
         let (pin, pinned_ref) = self.pin_of(movie.pinned_ref.as_deref());
-        let by_id = external_ref.clone().or_else(|| pinned_ref.clone());
+        let mut by_id = external_ref.clone().or_else(|| pinned_ref.clone());
         let resolved = match (external_ref, pinned_ref) {
-            (Some(ref_id), _) => {
+            (Some(ref_id), pinned_ref) => {
                 self.provider.invalidate(&ref_id).await;
-                self.provider
-                    .movie_enrichment(&ref_id)
-                    .await
-                    .map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0)))
+                match self.provider.movie_enrichment(&ref_id).await {
+                    // The match of a title no pin holds, gone from the
+                    // provider: it is searched for again, as a title never
+                    // matched is, rather than asked for by a dead id.
+                    Err(EnrichmentError::NotFound) if pinned_ref.is_none() => {
+                        self.forget_match(row, &ref_id).await;
+                        by_id = None;
+                        match self.search_movie(row, movie_id, &movie, pin.as_ref()).await {
+                            Ok(fetched) => fetched,
+                            Err(outcome) => return outcome,
+                        }
+                    }
+                    fetched => fetched.map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0))),
+                }
             }
             (None, Some(ref_id)) => self
                 .provider
                 .movie_enrichment(&ref_id)
                 .await
                 .map(|e| (ref_id, e, 1.0)),
-            (None, None) => {
-                let query = MediaQuery {
-                    title: movie.title.clone(),
-                    year: movie.year,
-                };
-                match self.provider.search_movies(&query).await {
-                    Ok(hits) => match matcher::best_movie_match(
-                        &movie.title,
-                        movie.year,
-                        &hits,
-                        self.policy.min_confidence,
-                    ) {
-                        Some((hit, score)) => {
-                            let ref_id = hit.external_ref.clone();
-                            match self.provider.movie_enrichment(&ref_id).await {
-                                Ok(e) => {
-                                    if let Some(reason) = pin.as_ref().and_then(|pin| {
-                                        contradiction(
-                                            pin,
-                                            e.tmdb_id,
-                                            e.imdb_id.as_deref(),
-                                            e.anilist_id,
-                                        )
-                                    }) {
-                                        warn!(
-                                            movie_id = %movie_id,
-                                            candidate = %ref_id,
-                                            reason,
-                                            "the best match contradicts the NFO's pin"
-                                        );
-                                        return self.mark_unmatched(row, &reason).await;
-                                    }
-                                    Ok((ref_id, e, score.total_score as f32))
-                                }
-                                Err(err) => Err(err),
-                            }
-                        }
-                        None => {
-                            self.log_unmatched_movie(row.id, &movie.title, movie.year, &hits)
-                                .await;
-                            return self
-                                .mark_unmatched(row, "no candidate cleared the match threshold")
-                                .await;
-                        }
-                    },
-                    Err(err) => return self.handle_error(row, err).await,
-                }
-            }
+            (None, None) => match self.search_movie(row, movie_id, &movie, pin.as_ref()).await {
+                Ok(fetched) => fetched,
+                Err(outcome) => return outcome,
+            },
         };
 
         match resolved {
@@ -463,68 +559,33 @@ impl MetadataEnrichmentService {
         // As for a movie: a refresh of a match already made, else the pin an
         // NFO or an administrator set, else a search.
         let (pin, pinned_ref) = self.pin_of(show.pinned_ref.as_deref());
-        let by_id = external_ref.clone().or_else(|| pinned_ref.clone());
+        let mut by_id = external_ref.clone().or_else(|| pinned_ref.clone());
         let resolved = match (external_ref, pinned_ref) {
-            (Some(ref_id), _) => {
+            (Some(ref_id), pinned_ref) => {
                 self.provider.invalidate(&ref_id).await;
-                self.provider
-                    .show_enrichment(&ref_id)
-                    .await
-                    .map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0)))
+                match self.provider.show_enrichment(&ref_id).await {
+                    // As for a movie: a lost match of an unpinned show is
+                    // searched for again.
+                    Err(EnrichmentError::NotFound) if pinned_ref.is_none() => {
+                        self.forget_match(row, &ref_id).await;
+                        by_id = None;
+                        match self.search_show(row, show_id, &show, pin.as_ref()).await {
+                            Ok(fetched) => fetched,
+                            Err(outcome) => return outcome,
+                        }
+                    }
+                    fetched => fetched.map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0))),
+                }
             }
             (None, Some(ref_id)) => self
                 .provider
                 .show_enrichment(&ref_id)
                 .await
                 .map(|e| (ref_id, e, 1.0)),
-            (None, None) => {
-                let query = MediaQuery {
-                    title: show.title.clone(),
-                    year: show.year,
-                };
-                match self.provider.search_shows(&query).await {
-                    Ok(hits) => match matcher::best_show_match(
-                        &show.title,
-                        show.year,
-                        &hits,
-                        self.policy.min_confidence,
-                    ) {
-                        Some((hit, score)) => {
-                            let ref_id = hit.external_ref.clone();
-                            match self.provider.show_enrichment(&ref_id).await {
-                                Ok(e) => {
-                                    if let Some(reason) = pin.as_ref().and_then(|pin| {
-                                        contradiction(
-                                            pin,
-                                            e.tmdb_id,
-                                            e.imdb_id.as_deref(),
-                                            e.anilist_id,
-                                        )
-                                    }) {
-                                        warn!(
-                                            show_id = %show_id,
-                                            candidate = %ref_id,
-                                            reason,
-                                            "the best match contradicts the NFO's pin"
-                                        );
-                                        return self.mark_unmatched(row, &reason).await;
-                                    }
-                                    Ok((ref_id, e, score.total_score as f32))
-                                }
-                                Err(err) => Err(err),
-                            }
-                        }
-                        None => {
-                            self.log_unmatched_show(row.id, &show.title, show.year, &hits)
-                                .await;
-                            return self
-                                .mark_unmatched(row, "no candidate cleared the match threshold")
-                                .await;
-                        }
-                    },
-                    Err(err) => return self.handle_error(row, err).await,
-                }
-            }
+            (None, None) => match self.search_show(row, show_id, &show, pin.as_ref()).await {
+                Ok(fetched) => fetched,
+                Err(outcome) => return outcome,
+            },
         };
 
         match resolved {
@@ -572,18 +633,25 @@ impl MetadataEnrichmentService {
         }
     }
 
-    /// A title fetched by an id -- its pin, or the match being refreshed --
-    /// that the provider says does not exist. Asking again would get the
-    /// same answer, so the title is left unmatched at once, with the id
-    /// named, for an administrator to fix the match (issue #185).
+    /// A pinned title fetched by an id -- its pin, or its match being
+    /// refreshed -- that the provider says it has no title for. A provider's
+    /// "not found" can be a passing fault, so it is retried with backoff like
+    /// any other failure (FR-304); once the attempts are spent the title is
+    /// left unmatched, naming the id, for an administrator to fix the match
+    /// (issue #185). An unpinned title never gets here: its lost match is
+    /// searched for again instead.
     async fn missing_by_id(
         &self,
         row: &EnrichmentState,
         id: Option<&ExternalMediaRef>,
     ) -> ProcessOutcome {
         let id = id.map_or_else(String::new, ToString::to_string);
-        self.mark_unmatched(row, &format!("the provider has no title {id}"))
-            .await
+        self.retry_or(
+            row,
+            &format!("the provider has no title {id}"),
+            Exhausted::Unmatched,
+        )
+        .await
     }
 
     /// The pin a title carries, and the reference to fetch it by when a
@@ -629,23 +697,39 @@ impl MetadataEnrichmentService {
             EnrichmentError::NotFound
             | EnrichmentError::Transport(_)
             | EnrichmentError::Provider(_) => {
-                let attempts = row.attempts + 1;
-                if attempts >= self.policy.max_attempts {
-                    self.terminal_failure(row, &err.to_string()).await;
-                    ProcessOutcome::Failed
-                } else {
-                    let delay = self.policy.backoff_for(attempts);
-                    let next_attempt_at = self.clock.now()
-                        + chrono::Duration::from_std(delay)
-                            .unwrap_or(chrono::Duration::seconds(60));
-                    let _ = self
-                        .state_repo
-                        .mark_retrying(row.id, &err.to_string(), attempts, next_attempt_at)
-                        .await;
-                    ProcessOutcome::Retrying
-                }
+                self.retry_or(row, &err.to_string(), Exhausted::Failed)
+                    .await
             }
         }
+    }
+
+    /// Schedule `row`'s next attempt after the backoff its attempts have
+    /// earned, recording `reason`; once they are spent, settle it as
+    /// `exhausted` says instead.
+    async fn retry_or(
+        &self,
+        row: &EnrichmentState,
+        reason: &str,
+        exhausted: Exhausted,
+    ) -> ProcessOutcome {
+        let attempts = row.attempts + 1;
+        if attempts >= self.policy.max_attempts {
+            return match exhausted {
+                Exhausted::Failed => {
+                    self.terminal_failure(row, reason).await;
+                    ProcessOutcome::Failed
+                }
+                Exhausted::Unmatched => self.mark_unmatched(row, reason).await,
+            };
+        }
+        let delay = self.policy.backoff_for(attempts);
+        let next_attempt_at = self.clock.now()
+            + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
+        let _ = self
+            .state_repo
+            .mark_retrying(row.id, reason, attempts, next_attempt_at)
+            .await;
+        ProcessOutcome::Retrying
     }
 
     async fn mark_enriched(
@@ -722,6 +806,8 @@ mod tests {
     use super::*;
     use crate::services::admin_log::LocalAdminLogService;
     use crate::services::notification::InMemoryNotificationService;
+    use beam_domain::models::catalog::TitleKind;
+    use beam_domain::models::enrichment::EnrichmentStatus;
     use beam_domain::models::{CreateMovie, CreateShow};
     use beam_domain::providers::enrichment::test_utils::InMemoryEnrichmentProvider;
     use beam_domain::providers::enrichment::{
@@ -999,43 +1085,221 @@ mod tests {
         assert!(events.published_events().is_empty());
     }
 
-    /// A title an NFO pins to an id the provider has no title for is left
-    /// unmatched at once, naming the id, rather than retried until it fails:
-    /// asking again gets the same answer.
+    /// Sweep `target` until its row leaves `Pending`, advancing the clock
+    /// past each backoff, and return how many sweeps attempted it.
+    async fn sweep_until_settled(
+        service: &MetadataEnrichmentService,
+        state_repo: &InMemoryEnrichmentStateRepository,
+        clock: &TestClock,
+        target: EnrichmentTargetId,
+    ) -> u32 {
+        let mut sweeps = 0;
+        loop {
+            sweeps += service.sweep_once().await.processed;
+            let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+            if row.status != EnrichmentStatus::Pending {
+                return sweeps;
+            }
+            assert!(sweeps < 50, "never settled: {row:?}");
+            clock.advance(Duration::from_secs(90_000));
+        }
+    }
+
+    /// A pinned title the provider answers "not found" for is retried with
+    /// backoff (FR-304) -- the answer may be a passing fault -- naming the id
+    /// meanwhile, and left unmatched, never failed, once the attempts are
+    /// spent (FR-313): for a movie and for a show alike.
     #[tokio::test]
-    async fn a_pin_the_provider_has_no_title_for_is_unmatched_without_retrying() {
-        let provider = InMemoryEnrichmentProvider::new(&["tmdb"]);
+    async fn a_pin_the_provider_has_no_title_for_is_retried_then_left_unmatched() {
+        use beam_domain::models::PinSource;
+
+        for kind in [TitleKind::Movie, TitleKind::Show] {
+            let provider = InMemoryEnrichmentProvider::new(&["tmdb"]);
+            let (service, movie_repo, show_repo, state_repo, _genres, clock) = harness(provider);
+            let pin = ProviderPin::Tmdb(424_242);
+            let target = match kind {
+                TitleKind::Movie => {
+                    let movie = movie_repo
+                        .find_or_create_by_identity(CreateMovie::new(
+                            "Heat".to_string(),
+                            None,
+                            None,
+                        ))
+                        .await
+                        .unwrap();
+                    assert!(
+                        movie_repo
+                            .set_pinned_ref(movie.id, &pin, PinSource::Nfo)
+                            .await
+                            .unwrap()
+                    );
+                    EnrichmentTargetId::Movie(movie.id)
+                }
+                TitleKind::Show => {
+                    let show = show_repo
+                        .find_or_create_by_identity(CreateShow::new("Shogun".to_string(), None))
+                        .await
+                        .unwrap();
+                    assert!(
+                        show_repo
+                            .set_pinned_ref(show.id, &pin, PinSource::Admin)
+                            .await
+                            .unwrap()
+                    );
+                    EnrichmentTargetId::Show(show.id)
+                }
+            };
+            state_repo.ensure_pending(target).await.unwrap();
+
+            let report = service.sweep_once().await;
+            assert_eq!((report.retrying, report.unmatched), (1, 0), "{kind:?}");
+            let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+            assert_eq!(row.status, EnrichmentStatus::Pending, "{kind:?}");
+            assert_eq!(row.attempts, 1, "{kind:?}");
+            assert!(row.next_attempt_at.is_some(), "{kind:?}: backed off");
+            assert_eq!(
+                row.last_error.as_deref(),
+                Some("the provider has no title tmdb:424242"),
+                "{kind:?}"
+            );
+
+            let sweeps = sweep_until_settled(&service, &state_repo, &clock, target).await;
+            let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+            assert_eq!(
+                1 + sweeps,
+                EnrichmentPolicy::default().max_attempts,
+                "{kind:?}"
+            );
+            assert_eq!(row.status, EnrichmentStatus::Unmatched, "{kind:?}");
+            assert_eq!(
+                row.last_error.as_deref(),
+                Some("the provider has no title tmdb:424242"),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// A refresh of a pinned title's match fetches by that match, and a
+    /// match the provider no longer has is what the retry names -- not the
+    /// pin, which was never asked for.
+    #[tokio::test]
+    async fn a_pinned_titles_lost_match_is_retried_by_that_match() {
+        let provider =
+            InMemoryEnrichmentProvider::new(&["tmdb"]).with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(603),
+                title: "The Matrix".to_string(),
+                ..Default::default()
+            });
         let (service, movie_repo, _shows, state_repo, _genres, _clock) = harness(provider);
-        let movie = movie_repo
-            .find_or_create_by_identity(CreateMovie::new("Heat".to_string(), None, None))
-            .await
-            .unwrap();
-        movie_repo
-            .set_pinned_ref(
-                movie.id,
-                &ProviderPin::Tmdb(424_242),
-                beam_domain::models::PinSource::Nfo,
-            )
-            .await
-            .unwrap();
+        let id = pinned_movie(&movie_repo, &state_repo, "matrix", ProviderPin::Tmdb(603)).await;
+        let target = EnrichmentTargetId::Movie(id);
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
         state_repo
-            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
+            .mark_enriched(row, "tmdb:999", 1.0, chrono::Utc::now())
             .await
             .unwrap();
+        state_repo.request_refresh(target, false).await.unwrap();
 
         let report = service.sweep_once().await;
 
-        assert_eq!((report.unmatched, report.retrying), (1, 0));
-        let row = state_repo
-            .find_by_target(EnrichmentTargetId::Movie(movie.id))
-            .await
-            .unwrap()
-            .unwrap();
+        assert_eq!(report.retrying, 1, "{report:?}");
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap();
         assert_eq!(
             row.last_error.as_deref(),
-            Some("the provider has no title tmdb:424242")
+            Some("the provider has no title tmdb:999")
         );
-        assert_eq!(row.attempts, 0);
+        assert_eq!(
+            movie_repo.find_by_id(id).await.unwrap().unwrap().title,
+            "matrix",
+            "nothing was applied"
+        );
+    }
+
+    /// An unpinned title whose match the provider no longer has is searched
+    /// for by its name in the same pass, as a title never matched is, rather
+    /// than retried by the dead id -- and the dead id is gone from its row
+    /// whatever the search finds.
+    #[tokio::test]
+    async fn an_unpinned_titles_lost_match_is_searched_for_again() {
+        let movie_hit = MovieSearchHit {
+            external_ref: ExternalMediaRef::new("tmdb", "949"),
+            title: "Heat".to_string(),
+            original_title: None,
+            year: Some(1995),
+            popularity: None,
+            vote_average: None,
+        };
+        let show_hit = ShowSearchHit {
+            external_ref: ExternalMediaRef::new("tmdb", "1399"),
+            title: "Shogun".to_string(),
+            original_title: None,
+            year: Some(2024),
+            popularity: None,
+            vote_average: None,
+        };
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+            .with_movie_search("Heat", vec![movie_hit])
+            .with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(949),
+                title: "Heat".to_string(),
+                year: Some(1995),
+                ..Default::default()
+            })
+            .with_show_search("Shogun", vec![show_hit])
+            .with_show_enrichment(
+                ExternalMediaRef::new("tmdb", "1399"),
+                ShowEnrichment {
+                    tmdb_id: Some(1399),
+                    title: "Shogun".to_string(),
+                    year: Some(2024),
+                    ..Default::default()
+                },
+            );
+        let (service, movie_repo, show_repo, state_repo, _genres, _clock) = harness(provider);
+        let found = movie_repo
+            .find_or_create_by_identity(CreateMovie::new("Heat".to_string(), Some(1995), None))
+            .await
+            .unwrap();
+        let show = show_repo
+            .find_or_create_by_identity(CreateShow::new("Shogun".to_string(), Some(2024)))
+            .await
+            .unwrap();
+        let lost = movie_repo
+            .find_or_create_by_identity(CreateMovie::new("Nowhere".to_string(), None, None))
+            .await
+            .unwrap();
+        let targets = [
+            (EnrichmentTargetId::Movie(found.id), Some("tmdb:949")),
+            (EnrichmentTargetId::Show(show.id), Some("tmdb:1399")),
+            (EnrichmentTargetId::Movie(lost.id), None),
+        ];
+        for (target, _) in targets {
+            state_repo.ensure_pending(target).await.unwrap();
+            let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
+            state_repo
+                .mark_enriched(row, "tmdb:1", 0.8, chrono::Utc::now())
+                .await
+                .unwrap();
+            state_repo.request_refresh(target, false).await.unwrap();
+        }
+
+        let report = service.sweep_once().await;
+
+        assert_eq!((report.enriched, report.unmatched), (2, 1), "{report:?}");
+        assert_eq!(report.retrying, 0, "the dead id is never retried");
+        for (target, matched) in targets {
+            let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+            assert_eq!(row.matched_ref.as_deref(), matched, "{target:?}");
+        }
+        assert_eq!(
+            movie_repo
+                .find_by_id(found.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .tmdb_id,
+            Some(949)
+        );
     }
 
     #[tokio::test]

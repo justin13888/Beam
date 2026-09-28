@@ -373,8 +373,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   queues the title with its old match cleared -- and clear that pin again, returning the title to
   its NFO's pin or to a search; and lock individual fields (title, original title, description,
   year, release date, runtime, poster, backdrop, rating, genres), which enrichment MUST then leave
-  as they are. A fetch by an id the provider has no title for MUST leave the title unmatched at
-  once, naming the id, rather than retry it.
+  as they are. A fetch by an id the provider answers it has no title for MUST be retried with
+  backoff (FR-304), naming the id, for a title a pin holds -- an NFO's or an administrator's --
+  and leave it unmatched rather than failed once the retries are spent; a title with no pin a
+  configured provider resolves, whose stored match the provider no longer has, MUST be searched
+  for again by its name instead.
 
 ## FR-4xx — Browse, Search & Detail
 

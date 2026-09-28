@@ -84,8 +84,9 @@ When search keeps picking the wrong title, fix the match rather than the filenam
    other than the title's own name.
 2. `POST /v1/admin/media/{id}/match` with `{"external_ref": "tmdb:603"}` fixes it. The title is
    pinned to that id as **your** pin — it outranks any NFO's, and no NFO replaces it — and queued;
-   the next pass fetches it by that id, with no search. An id the provider has no title for leaves
-   the title unmatched at once, naming the id.
+   the next pass fetches it by that id, with no search. An id the provider says it has no title
+   for is retried with a growing delay, naming the id, and the title is left unmatched once the
+   retries run out.
 3. `DELETE /v1/admin/media/{id}/match` undoes it: your pin is cleared, the title goes back to
    what an NFO beside its files says or, with none, to being searched for by its name, and it is matched again.
 
@@ -102,7 +103,9 @@ ids are never locked: they are the match, which you change by fixing it.
 
 ## Re-running enrichment
 
-Failures retry automatically with a growing delay. You can also trigger a re-enrich for a title
+Failures retry automatically with a growing delay. So does a pinned title whose id the provider
+answers "not found" for; a title no pin holds whose match the provider no longer has is searched
+for again by its name instead. You can also trigger a re-enrich for a title
 from the admin area — the right move after fixing a filename, or after adding a TMDB token to a
 library that was indexed without one. `POST /v1/admin/libraries/{id}/refresh` re-enriches one
 library, and `POST /v1/admin/media/refresh` everything; each answers with how many titles it

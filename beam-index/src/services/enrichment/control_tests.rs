@@ -225,9 +225,20 @@ async fn the_sweep_fetches_a_fixed_title_by_the_chosen_id_at_full_confidence() {
     );
 }
 
+/// A fixed id the provider says it has no title for is retried with backoff
+/// (FR-304), naming the id -- never searched for instead, though a search
+/// would find a title: the administrator chose this one.
 #[tokio::test]
-async fn a_fixed_id_the_provider_does_not_have_is_left_unmatched_at_once() {
-    let h = Harness::new(InMemoryEnrichmentProvider::new(&["tmdb"]));
+async fn a_fixed_id_the_provider_does_not_have_is_retried_and_never_searched() {
+    let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+        .with_movie_search("Heat", vec![movie_hit("tmdb:949", "Heat", Some(1995))])
+        .with_movie_enrichment(MovieEnrichment {
+            tmdb_id: Some(949),
+            title: "Heat".to_string(),
+            year: Some(1995),
+            ..Default::default()
+        });
+    let h = Harness::new(provider);
     let id = h.movie("Heat", Some(1995)).await;
     h.control
         .fix_match(id, Some("tmdb:999999"), ADMIN)
@@ -236,10 +247,11 @@ async fn a_fixed_id_the_provider_does_not_have_is_left_unmatched_at_once() {
 
     let report = h.sweep().sweep_once().await;
 
-    assert_eq!((report.unmatched, report.retrying), (1, 0));
+    assert_eq!((report.retrying, report.enriched), (1, 0));
     let row = h.state(EnrichmentTargetId::Movie(id)).await;
-    assert_eq!(row.status, EnrichmentStatus::Unmatched);
-    assert_eq!(row.attempts, 0, "a missing id is not retried");
+    assert_eq!(row.status, EnrichmentStatus::Pending);
+    assert_eq!(row.attempts, 1);
+    assert_eq!(row.matched_ref, None, "no search match was taken");
     assert!(
         row.last_error.as_deref().unwrap().contains("tmdb:999999"),
         "{:?}",
