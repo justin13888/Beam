@@ -139,8 +139,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
   `library-path-overlaps-data-dir` (400), compared by whole components after canonicalization. At
   startup the server MUST refuse to start if `BEAM_DATA_DIR` overlaps a stored library root, and
   MUST log a warning, not refuse, for stored library roots that overlap each other. The
-  indexer and the watcher MUST NOT follow symbolic links beneath a library root; a link is not a
-  library file, so a row whose path has become one is treated as missing (FR-211).
+  indexer, the watcher and file delivery MUST NOT follow symbolic links beneath a library root; a
+  link is not a library file, so a row whose path has become one is treated as missing (FR-211),
+  and delivery serves only a regular file, opened once and read from that handle, answering a
+  link, FIFO or device in its place as `source-file-missing`.
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
@@ -437,7 +439,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   and WebVTT normalised to UTF-8. Rewriting a text subtitle is not transcoding (FR-501,
   [ADR-0020](../architecture/decisions/ADR-0020-text-subtitle-delivery.md)). A subtitle stream
   inside the video MUST NOT be extracted; it is listed with its stream index and no URL. A subtitle
-  of a video that is missing from disk MUST NOT be served.
+  of a video that is missing from disk MUST NOT be served. A subtitle file is hostile input: the
+  server MUST open it never through a symbolic link and only as a regular file (FR-212), serving a
+  link, FIFO or device in its place as missing; MUST serve length and bytes from that one open
+  handle; MUST read no more than 8 MiB of it for conversion, whatever its size claims; and MUST
+  convert it in time linear in its length, whatever markup it holds.
 - **FR-513**: Of a title's file versions, exactly one MUST be marked primary and listed first: the
   default edition before a named one, then the tallest picture, the highest video bit rate, the
   largest file, and the lowest file id. The choice MUST be computed from the files when read, and

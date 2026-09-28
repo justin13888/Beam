@@ -85,9 +85,11 @@ the embedded tracks, and served read-only
 | Endpoint | Serves |
 |---|---|
 | `GET /v1/files/{fileId}/subtitles/{subtitleId}` | The file as stored, with its format's content type (`application/x-subrip`, `text/vtt`, `text/x-ass`, `text/x-ssa`), Range-capable through the same byte source and validator as file delivery. |
-| `GET /v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | A SubRip file converted to WebVTT, or a WebVTT file normalised to UTF-8 with LF line ends, as `text/vtt; charset=utf-8`, for a browser's `<track>`. Produced per request from the file on disk and never stored; its `ETag` derives from the file's modification time and length. ASS, SSA and any file over 8 MiB are `404` `subtitle-rendition-unavailable`: fetch the track's `url` instead. |
+| `GET /v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | A SubRip file converted to WebVTT, or a WebVTT file normalised to UTF-8 with LF line ends, as `text/vtt; charset=utf-8`, for a browser's `<track>`. Produced per request from the file on disk and never stored; its `ETag` derives from the file's modification time and length and the converter's revision. ASS, SSA and any file over 8 MiB are `404` `subtitle-rendition-unavailable`: fetch the track's `url` instead. |
 
 A track offers the second exactly when it carries a `webvtt_url`. A subtitle id is only valid
 beside the video whose sources listed it, and a subtitle of a video missing from disk is not
-served. Converting a subtitle is rewriting a few kilobytes of cue text with a pure function, not
+served. Both open the file never through a symbolic link and only as a regular file, and serve it
+from that one handle; the rendition reads at most 8 MiB and converts in time linear in its length
+(ADR-0020). Converting a subtitle is rewriting cue text with a pure function, not
 transcoding media: see ADR-0020 for where that line is drawn.

@@ -3,9 +3,10 @@
 //! (issue #189).
 //!
 //! Rewriting a text subtitle is not transcoding (ADR-0020): ADR-0004 keeps
-//! Beam from re-encoding or remuxing media, and a few kilobytes of cue text
-//! are neither. Both operations are read-only: nothing is written beside the
-//! library's files.
+//! Beam from re-encoding or remuxing media, and rewriting cue text is
+//! neither. Both operations are read-only -- nothing is written beside the
+//! library's files -- and read a subtitle file never through a symbolic link
+//! and only as a regular file, from one open handle.
 
 use bytes::Bytes;
 use kynos::http::etag::ETag;

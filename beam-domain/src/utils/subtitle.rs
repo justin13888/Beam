@@ -3,11 +3,13 @@
 //! A browser's `<track>` element reads WebVTT and nothing else, and most text
 //! subtitles in a library are SubRip (`.srt`). So Beam offers every SubRip
 //! and WebVTT sidecar a second time as WebVTT: SubRip rewritten, WebVTT
-//! normalised to UTF-8 with LF line ends. This is a rewrite of a few kilobytes
-//! of text, not of media -- ADR-0004 forbids transcoding and remuxing audio
-//! and video, and ADR-0020 records why this falls outside it.
+//! normalised to UTF-8 with LF line ends. This is a rewrite of text, not of
+//! media -- ADR-0004 forbids transcoding and remuxing audio and video, and
+//! ADR-0020 records why this falls outside it.
 //!
-//! Pure: bytes in, text out. Nothing here reads a file.
+//! Pure: bytes in, text out. Nothing here reads a file. The bytes come from a
+//! library root and are not trusted, so every function here is linear in its
+//! input, whatever it holds.
 
 use std::borrow::Cow;
 

@@ -208,7 +208,8 @@ everyone out of the server.
 
 ### source-file-missing
 
-**404.** The file *is* in the catalogue. The path it names is not on disk.
+**404.** The file *is* in the catalogue. The path it names is not on disk -- or is no longer a
+regular file: a symbolic link, a FIFO or a device in its place is never followed or read.
 
 **What to do.** This one is an operator's problem, not a viewer's, and no amount of retrying will
 change it: Beam's catalogue and your storage have diverged. A bind mount is missing, the library
