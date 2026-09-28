@@ -1169,6 +1169,65 @@ async fn an_unprobed_file_touched_is_hashed_once_not_on_every_visit() {
     assert_eq!(h.probes(), 3, "while the probe is still retried");
 }
 
+/// The same for a file whose identity alone moved: a `chmod` leaves its
+/// size and mtime as recorded but moves its ctime. The file is hashed once
+/// and its new identity recorded, so the next visit -- which probes it
+/// again -- does not hash it again (issue #228).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unprobed_file_chmodded_is_hashed_once_not_on_every_visit() {
+    let h = Harness::new().await;
+    h.prober.fails.store(true, Ordering::SeqCst);
+    let path = h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    let before = h.present(&path).await;
+    assert_eq!(before.duration, None, "the probe failed");
+    let hashes = h.hashes();
+
+    chmod_until_ctime_moves(&path, before.identity.expect("recorded").ctime);
+    h.scan().await;
+    assert_eq!(h.hashes(), hashes + 1, "a moved ctime is hashed once");
+    let after = h.present(&path).await;
+    assert_eq!((after.id, after.hash), (before.id, before.hash));
+    assert_eq!(
+        after.identity,
+        read_stat(&path, Inodes::Stable).unwrap().identity,
+        "and the identity found is recorded"
+    );
+
+    h.scan().await;
+    assert_eq!(h.hashes(), hashes + 1, "and not again");
+    assert_eq!(h.probes(), 3, "while the probe is still retried");
+}
+
+/// An unprobed row recorded before identities were is given its file's
+/// identity by the next visit, which probes it again and fails, without a
+/// hash -- so a same-size, same-mtime swap involving it can be seen from
+/// then on (issue #228).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unprobed_row_without_an_identity_is_given_one_without_a_hash() {
+    let h = Harness::new().await;
+    h.prober.fails.store(true, Ordering::SeqCst);
+    let path = h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    for row in h.file_repo.files.lock().unwrap().values_mut() {
+        row.identity = None;
+    }
+    let before = h.present(&path).await;
+    assert_eq!(before.duration, None, "the probe failed");
+    let hashes = h.hashes();
+
+    h.scan().await;
+
+    assert_eq!(h.hashes(), hashes, "nothing is hashed");
+    let after = h.present(&path).await;
+    assert_eq!((after.id, after.hash), (before.id, before.hash));
+    let found = read_stat(&path, Inodes::Stable).unwrap().identity;
+    assert!(found.is_some(), "a Unix file has an identity");
+    assert_eq!(after.identity, found, "and the identity found is recorded");
+}
+
 /// An event for the library root itself is left to the scan: a root that
 /// reads as empty may be a volume that is not mounted, and only the scan's
 /// empty-root guard can tell. Nothing beneath it is marked missing.
