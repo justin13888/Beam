@@ -517,13 +517,21 @@ movie *or* show, never both, never neither).
 | `matched_ref` | TEXT | yes | canonical `"provider:id"` string, e.g. `"tmdb:603"` |
 | `force_refresh` | BOOLEAN | no | default `false`; set by the re-enrich admin action, cleared once processed |
 | `last_error` | TEXT | yes | most recent failure/unmatched detail, for admin triage |
+| `locked_fields` | TEXT[] | no | default `'{}'`; the fields an administrator locked, which enrichment leaves as they are (issue #185): `title`, `original_title`, `description`, `year`, `release_date`, `runtime`, `poster`, `backdrop`, `rating`, `genres` -- a `CHECK` (`<@`) holds it to these. External ids are never lockable: they are the match |
 | `created_at` | TIMESTAMPTZ | no | |
-| `updated_at` | TIMESTAMPTZ | no | |
+| `updated_at` | TIMESTAMPTZ | no | when the row last changed: queued, attempted, or locked -- the admin list's order |
 
 **CHECK constraint:** exactly one of `movie_id` / `show_id` is set. Unique indexes on `movie_id` and
 on `show_id` guarantee at most one enrichment row per title — a rescan or refresh updates the
-existing row, and multiple files mapping to the same title share one row. Composite index on
-`(status, next_attempt_at)` for the worker's due-row poll.
+existing row, and multiple files mapping to the same title share one row, and they are the
+conflict target of the lock upsert. Composite index on `(status, next_attempt_at)` for the
+worker's due-row poll, and `idx_metadata_enrichment_list` on `(status, updated_at DESC, id DESC)`
+for the admin list by status (FR-303).
+
+A lock changes what the next pass writes, not whether one runs: a locked column is left out of
+the title's `UPDATE`, and locked `genres` leave the genre links alone. An administrator's
+fix-match is not stored here but as the title's pin (`pinned_ref`, `pin_source = 'admin'`), which
+the worker fetches by.
 
 ## Admin / log tables
 

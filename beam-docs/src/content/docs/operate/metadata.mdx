@@ -46,7 +46,12 @@ parses to, however the provider spells it. See
 [Managing libraries](/operate/libraries/#multiple-versions).
 
 The admin **Status** tab shows each title's enrichment state, so you can tell "not tried yet"
-apart from "tried and found nothing".
+apart from "tried and found nothing", and whether each provider is configured: TMDB shows as
+`not_configured` until `BEAM_TMDB_API_TOKEN` is set, and a provider that is set but whose client
+could not start shows as `unavailable` (the server log says why).
+
+`GET /v1/admin/enrichment?status=unmatched` (or `failed`) lists the titles to fix, newest first,
+each with the reason it was left that way.
 
 ## Pinned titles
 
@@ -54,7 +59,8 @@ A provider id in an `.nfo` beside your media **pins** the title to it (see
 [NFO files](/operate/libraries/#nfo-files-container-tags-and-subtitles)). Enrichment then works
 in this order:
 
-1. A match an administrator chose for the title comes first.
+1. A match an administrator chose for the title comes first (see [Fixing a wrong match](#fixing-a-wrong-match)).
+   It is itself a pin, the administrator's, fetched by its id.
 2. A **TMDB or AniList** pin, for a provider you have configured, is fetched directly by its id —
    no search, no confidence threshold. This is the fix for a title search keeps getting wrong:
    write its id into an NFO.
@@ -69,11 +75,38 @@ and keeps its pin. A pin an administrator sets by matching a title by hand takes
 any NFO: no NFO — edited, or beside a new file — replaces it, so correcting a title never means
 editing a file in your library.
 
+## Fixing a wrong match
+
+When search keeps picking the wrong title, fix the match rather than the filename:
+
+1. `GET /v1/admin/media/{id}/match-candidates` lists what the configured providers offer, best
+   first, scored as enrichment scores them. Pass `query` (and `year`) to search for something
+   other than the title's own name.
+2. `POST /v1/admin/media/{id}/match` with `{"external_ref": "tmdb:603"}` fixes it. The title is
+   pinned to that id as **your** pin — it outranks any NFO's, and no NFO replaces it — and queued;
+   the next pass fetches it by that id, with no search. An id the provider has no title for leaves
+   the title unmatched at once, naming the id.
+3. `DELETE /v1/admin/media/{id}/match` undoes it: your pin is cleared, the title goes back to
+   what an NFO beside its files says or, with none, to being searched for by its name, and it is matched again.
+
+The id must be from a provider you have configured, and one id pins one title: if another title
+already holds it, the two are probably the same title — fix the other one first.
+
+## Locking fields
+
+`PUT /v1/admin/media/{id}/enrichment/locks` with `{"locked_fields": ["title", "poster"]}` keeps
+those fields exactly as they are through every later enrichment; everything not listed is
+unlocked. Lockable: `title`, `original_title`, `description`, `year`, `release_date`, `runtime`,
+`poster`, `backdrop`, `rating`, `genres` — a show has no `release_date` or `runtime`. The provider
+ids are never locked: they are the match, which you change by fixing it.
+
 ## Re-running enrichment
 
 Failures retry automatically with a growing delay. You can also trigger a re-enrich for a title
 from the admin area — the right move after fixing a filename, or after adding a TMDB token to a
-library that was indexed without one.
+library that was indexed without one. `POST /v1/admin/libraries/{id}/refresh` re-enriches one
+library, and `POST /v1/admin/media/refresh` everything; each answers with how many titles it
+queued. The outcome of every title arrives on the admin event stream as an `enrichment` event.
 
 A show's rating is stored when the show is enriched. A show an older Beam enriched — before
 shows kept a rating — has none until it is enriched again, so it is left out of a minimum-rating filter and sorts with the unrated titles
