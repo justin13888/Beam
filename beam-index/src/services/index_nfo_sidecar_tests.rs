@@ -688,6 +688,23 @@ async fn an_nfo_that_is_a_symlink_is_not_read() {
     assert_eq!(h.movie_of("Matrix/matrix.mkv").pinned_ref, None);
 }
 
+/// A folder above an NFO that is a link out of the library is not followed
+/// either (FR-212): the NFO of that name outside is never read, while one
+/// reached through a real folder is.
+#[cfg(unix)]
+#[test]
+fn an_nfo_beneath_a_folder_that_is_a_symlink_is_not_read() {
+    let outside = TempDir::new().unwrap();
+    std::fs::write(outside.path().join("movie.nfo"), MATRIX_NFO).unwrap();
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("Matrix")).unwrap();
+    std::fs::write(root.path().join("Matrix/movie.nfo"), MATRIX_NFO).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("Linked")).unwrap();
+
+    assert!(hints::read_nfo_file(root.path(), &root.path().join("Matrix/movie.nfo")).is_some());
+    assert!(hints::read_nfo_file(root.path(), &root.path().join("Linked/movie.nfo")).is_none());
+}
+
 /// An NFO added after its video was indexed pins the title at the next scan
 /// -- even one copied in with its old modification time kept (`cp -p`,
 /// `rsync -a`), or from a NAS whose clock runs behind the server's: whether

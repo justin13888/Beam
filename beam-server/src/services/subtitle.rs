@@ -17,9 +17,9 @@ use tracing::error;
 use uuid::Uuid;
 
 use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat};
-use beam_domain::repositories::{FileRepository, SidecarSubtitleRepository};
+use beam_domain::repositories::{FileRepository, LibraryRepository, SidecarSubtitleRepository};
 use beam_domain::utils::subtitle::{normalize_webvtt, srt_to_webvtt};
-use beam_index::library_file::open_regular_file;
+use beam_index::library_file::{open_regular_file, relative_to};
 
 use crate::services::sources::{SUBTITLE_CONVERT_MAX_BYTES, has_webvtt_rendition};
 
@@ -47,6 +47,9 @@ pub enum SubtitleError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocatedSubtitle {
     pub path: PathBuf,
+    /// Root of the library the video was indexed under, which the subtitle
+    /// file is opened beneath (FR-212).
+    pub library_root: PathBuf,
     pub format: SubtitleFormat,
 }
 
@@ -88,45 +91,59 @@ pub trait SubtitleService: Send + Sync + std::fmt::Debug {
 /// Serves the sidecars the indexer recorded, reading them from disk.
 #[derive(Debug)]
 pub struct DbSubtitleService {
+    libraries: Arc<dyn LibraryRepository>,
     files: Arc<dyn FileRepository>,
     sidecars: Arc<dyn SidecarSubtitleRepository>,
 }
 
 impl DbSubtitleService {
     pub fn new(
+        libraries: Arc<dyn LibraryRepository>,
         files: Arc<dyn FileRepository>,
         sidecars: Arc<dyn SidecarSubtitleRepository>,
     ) -> Self {
-        Self { files, sidecars }
+        Self {
+            libraries,
+            files,
+            sidecars,
+        }
     }
 
+    /// The subtitle `subtitle_id` of the video file `file_id`, with the root
+    /// of the library the video is in.
     async fn find(
         &self,
         file_id: Uuid,
         subtitle_id: Uuid,
-    ) -> Result<SidecarSubtitle, SubtitleError> {
+    ) -> Result<(SidecarSubtitle, PathBuf), SubtitleError> {
         let internal = |err: sea_orm::DbErr| {
             error!(%file_id, %subtitle_id, ?err, "failed to look up a subtitle");
             SubtitleError::Internal("Failed to look up subtitle".to_owned())
         };
         // A visible read: a video file gone from disk takes its subtitles'
         // delivery with it, though their rows stay until the next scan.
-        if self
-            .files
-            .find_by_id(file_id)
+        let Some(file) = self.files.find_by_id(file_id).await.map_err(internal)? else {
+            return Err(SubtitleError::FileNotFound);
+        };
+        // A library's files go with it; were the video's gone, there would
+        // be no root to open its subtitles beneath.
+        let Some(library) = self
+            .libraries
+            .find_by_id(file.library_id)
             .await
             .map_err(internal)?
-            .is_none()
-        {
+        else {
             return Err(SubtitleError::FileNotFound);
-        }
-        self.sidecars
+        };
+        let sidecar = self
+            .sidecars
             .find_by_file_id(file_id)
             .await
             .map_err(internal)?
             .into_iter()
             .find(|sidecar| sidecar.id == subtitle_id)
-            .ok_or(SubtitleError::SubtitleNotFound)
+            .ok_or(SubtitleError::SubtitleNotFound)?;
+        Ok((sidecar, library.root_path))
     }
 }
 
@@ -137,9 +154,10 @@ impl SubtitleService for DbSubtitleService {
         file_id: Uuid,
         subtitle_id: Uuid,
     ) -> Result<LocatedSubtitle, SubtitleError> {
-        let sidecar = self.find(file_id, subtitle_id).await?;
+        let (sidecar, library_root) = self.find(file_id, subtitle_id).await?;
         Ok(LocatedSubtitle {
             path: sidecar.path,
+            library_root,
             format: sidecar.info.format,
         })
     }
@@ -149,7 +167,7 @@ impl SubtitleService for DbSubtitleService {
         file_id: Uuid,
         subtitle_id: Uuid,
     ) -> Result<WebVttRendition, SubtitleError> {
-        let sidecar = self.find(file_id, subtitle_id).await?;
+        let (sidecar, library_root) = self.find(file_id, subtitle_id).await?;
         let format = sidecar.info.format;
         // Decided on the recorded size first, as the sources route decided
         // whether to offer the rendition at all, and again by `render_file`
@@ -165,21 +183,25 @@ impl SubtitleService for DbSubtitleService {
             }
         };
         let path = sidecar.path;
-        tokio::task::spawn_blocking(move || render_file(&path, format, render))
+        tokio::task::spawn_blocking(move || render_file(&library_root, &path, format, render))
             .await
             .map_err(|err| SubtitleError::Internal(format!("subtitle conversion failed: {err}")))?
     }
 }
 
-/// Read the subtitle file at `path` and render it, all from one handle.
+/// Read the subtitle file at `path`, in the library rooted at
+/// `library_root`, and render it, all from one handle.
 ///
-/// Opened as every read of a library file is -- never through a symbolic
-/// link, and only a regular file ([`open_regular_file`]) -- so a sidecar
-/// replaced by a link, a FIFO or a device since the scan is
-/// [`SubtitleError::SourceFileMissing`], never another file's contents. The
+/// Opened as every read of a library file is -- beneath its root with no
+/// symbolic link followed, the file's own or a folder's above it, and only a
+/// regular file ([`open_regular_file`]) -- so a sidecar, or a folder above
+/// it, replaced by a link since the scan, or a sidecar replaced by a FIFO or
+/// a device, is [`SubtitleError::SourceFileMissing`], never another file's
+/// contents. The
 /// size is checked again on the handle, as the file may have grown since the
 /// scan, and the read is bounded by the ceiling whatever the handle claims.
 fn render_file(
+    library_root: &Path,
     path: &Path,
     format: SubtitleFormat,
     render: fn(&[u8]) -> String,
@@ -188,7 +210,9 @@ fn render_file(
         error!(?path, ?err, "failed to read a subtitle file");
         SubtitleError::SourceFileMissing
     };
-    let (file, metadata) = open_regular_file(path).map_err(missing)?;
+    let (file, metadata) = relative_to(library_root, path)
+        .and_then(|relative| open_regular_file(library_root, relative))
+        .map_err(missing)?;
     if !has_webvtt_rendition(format, metadata.len()) {
         return Err(SubtitleError::RenditionUnavailable);
     }

@@ -5,8 +5,9 @@
 //! Rewriting a text subtitle is not transcoding (ADR-0020): ADR-0004 keeps
 //! Beam from re-encoding or remuxing media, and rewriting cue text is
 //! neither. Both operations are read-only -- nothing is written beside the
-//! library's files -- and read a subtitle file never through a symbolic link
-//! and only as a regular file, from one open handle.
+//! library's files -- and read a subtitle file beneath its library root with
+//! no symbolic link followed, at the file or any folder above it, and only as
+//! a regular file, from one open handle.
 
 use bytes::Bytes;
 use kynos::http::etag::ETag;
@@ -108,19 +109,19 @@ pub async fn get_subtitle(
 ) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
     let LocatedSubtitle {
         path: file_path,
+        library_root,
         format,
     } = state
         .services
         .subtitles
         .locate(path.file_id, path.subtitle_id)
         .await?;
-    let (source, modified, length) =
-        FileByteSource::open(file_path.clone())
-            .await
-            .map_err(|err| {
-                error!(path = ?file_path, ?err, "failed to read subtitle file metadata");
-                SubtitleError::SourceFileMissing
-            })?;
+    let (source, modified, length) = FileByteSource::open(library_root, file_path.clone())
+        .await
+        .map_err(|err| {
+            error!(path = ?file_path, ?err, "failed to read subtitle file metadata");
+            SubtitleError::SourceFileMissing
+        })?;
 
     let delivery = Served::<_, AnyMedia>::new(source)
         .etag(ETag::strong(validator_tag(modified, length)))

@@ -283,6 +283,7 @@ pub(crate) fn make_app_state_with_telemetry(
 /// Subtitle delivery over an empty index: every lookup is a miss.
 pub(crate) fn idle_subtitles() -> Arc<dyn crate::services::subtitle::SubtitleService> {
     Arc::new(crate::services::subtitle::DbSubtitleService::new(
+        Arc::new(beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default()),
         Arc::new(InMemoryFileRepository::default()),
         Arc::new(
             beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),

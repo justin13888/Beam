@@ -453,7 +453,7 @@ impl LocalIndexService {
         let Some(dir) = path.parent() else {
             return Ok(());
         };
-        let Some(read) = hints::read_nfo_file(path) else {
+        let Some(read) = hints::read_nfo_file(&library.root_path, path) else {
             return Ok(());
         };
         let under = self.file_repo.find_all_under(library.id, dir).await?;
@@ -515,7 +515,7 @@ impl LocalIndexService {
                 record.path != path
                     && content.same_as(record)
                     && (path_is_absent(&record.path)
-                        || hints::read_nfo_file(&record.path)
+                        || hints::read_nfo_file(&library.root_path, &record.path)
                             .is_some_and(|read| !read.content.same_as(record)))
             }))
     }

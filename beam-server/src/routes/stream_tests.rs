@@ -343,11 +343,23 @@ fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
     TestClient::new(service)
 }
 
-/// Constructs a minimal `LocatedFile` fixture for a given `(id, path)` pair.
+/// Constructs a minimal `LocatedFile` fixture for a given `(id, path)` pair,
+/// in a library rooted at the folder the file is in.
 fn make_located_file(id: &str, path: &str) -> LocatedFile {
+    let path = PathBuf::from(path);
+    let root = path
+        .parent()
+        .expect("fixture paths have a folder")
+        .to_owned();
+    make_located_file_in(id, root, path)
+}
+
+/// A `LocatedFile` fixture at `path` in the library rooted at `root`.
+fn make_located_file_in(id: &str, root: PathBuf, path: PathBuf) -> LocatedFile {
     LocatedFile {
         id: uuid::Uuid::parse_str(id).expect("fixture ids are UUIDs"),
-        path: PathBuf::from(path),
+        path,
+        library_root: root,
         mime_type: Some("video/mp4".to_string()),
     }
 }
@@ -489,6 +501,50 @@ async fn a_video_replaced_by_a_link_is_not_followed() {
     )]);
     let client = build_client(&fixture);
     let token = seed_session_token(&fixture).await;
+
+    for url in [STREAM, DOWNLOAD] {
+        let response = client.get(url).cookie("beam_session", &token).send().await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{url}");
+        let problem: serde_json::Value =
+            serde_json::from_slice(response.bytes()).expect("a problem document");
+        assert_eq!(
+            problem["type"], "https://beam.justinchung.net/reference/errors/#source-file-missing",
+            "{url}"
+        );
+    }
+}
+
+/// A folder above the video swapped for a link to a folder outside the
+/// library, holding a file of the video's name, is not followed either
+/// (FR-212): no link beneath the library root is, at any level.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_folder_above_a_video_replaced_by_a_link_is_not_followed() {
+    let outside = TempDir::new().unwrap();
+    std::fs::write(outside.path().join("video.mkv"), b"OUTSIDE SECRET").unwrap();
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("Film")).unwrap();
+    let path = root.path().join("Film/video.mkv");
+    std::fs::write(&path, b"indexed video").unwrap();
+
+    let fixture = make_test_state(vec![make_located_file_in(
+        TEST_FILE_ID,
+        root.path().to_owned(),
+        path,
+    )]);
+    let client = build_client(&fixture);
+    let token = seed_session_token(&fixture).await;
+    // Served while the folder is a folder: the file is reached through it.
+    let response = client
+        .get(STREAM)
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().as_ref(), b"indexed video");
+
+    std::fs::remove_dir_all(root.path().join("Film")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("Film")).unwrap();
 
     for url in [STREAM, DOWNLOAD] {
         let response = client.get(url).cookie("beam_session", &token).send().await;

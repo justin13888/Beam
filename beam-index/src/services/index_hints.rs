@@ -3,7 +3,8 @@
 //!
 //! Beam never writes into a library root. Every NFO is read with a read-only
 //! open, at most [`MAX_NFO_BYTES`] of it, and only when it is a regular file:
-//! a symbolic link is not part of the library (issue #186).
+//! a symbolic link -- the NFO itself or a folder above it beneath the library
+//! root -- is not part of the library (issues #186 and #189).
 //!
 //! An NFO is applied when classification first reads it, and re-applied --
 //! by a scan or a watcher event -- exactly when what it holds differs from
@@ -19,7 +20,7 @@ use beam_domain::models::show::Show;
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::utils::nfo::{MAX_NFO_BYTES, Nfo, NfoKind, parse_nfo};
 
-use crate::library_file::open_regular_file;
+use crate::library_file::{open_regular_file, relative_to};
 
 use super::*;
 
@@ -144,11 +145,13 @@ thread_local! {
     pub(super) static NFO_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Read the NFO at `path`: `None` when there is no regular file there, or it
-/// is larger than [`MAX_NFO_BYTES`], or cannot be read. Opened read-only and
-/// never through a link; a failure is logged, never raised -- a broken NFO
-/// leaves the file classified by its path.
-pub(super) fn read_nfo_file(path: &Path) -> Option<NfoRead> {
+/// Read the NFO at `path` in the library rooted at `root`: `None` when there
+/// is no regular file there, or it is larger than [`MAX_NFO_BYTES`], or
+/// cannot be read. Opened read-only and never through a link, the NFO's own
+/// or a folder's above it beneath the root ([`open_regular_file`]); a
+/// failure is logged, never raised -- a broken NFO leaves the file
+/// classified by its path.
+pub(super) fn read_nfo_file(root: &Path, path: &Path) -> Option<NfoRead> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return None;
@@ -160,13 +163,14 @@ pub(super) fn read_nfo_file(path: &Path) -> Option<NfoRead> {
     // The open file is statted before it is read: a write after this stat
     // moves the stamp, so the next read sees it, whereas a stamp taken after
     // the read could vouch for content the read never saw.
-    let (file, meta) = match open_regular_file(path) {
-        Ok(opened) => opened,
-        Err(err) => {
-            warn!(path = %path.display(), error = %err, "could not open an NFO; ignored");
-            return None;
-        }
-    };
+    let (file, meta) =
+        match relative_to(root, path).and_then(|relative| open_regular_file(root, relative)) {
+            Ok(opened) => opened,
+            Err(err) => {
+                warn!(path = %path.display(), error = %err, "could not open an NFO; ignored");
+                return None;
+            }
+        };
     #[cfg(test)]
     NFO_READS.with(|reads| reads.set(reads.get() + 1));
     let mut bytes = Vec::new();
@@ -203,9 +207,10 @@ pub(super) struct LocatedNfo {
     pub(super) content: NfoContent,
 }
 
-/// Read the NFO at `path` as a located one: `None` unless Beam trusts it.
-fn located(path: PathBuf) -> Option<LocatedNfo> {
-    let NfoRead { content, nfo } = read_nfo_file(&path)?;
+/// Read the NFO at `path`, in the library rooted at `root`, as a located
+/// one: `None` unless Beam trusts it.
+fn located(root: &Path, path: PathBuf) -> Option<LocatedNfo> {
+    let NfoRead { content, nfo } = read_nfo_file(root, &path)?;
     Some(LocatedNfo {
         path,
         nfo: nfo?,
@@ -236,10 +241,10 @@ pub(super) fn locate_file_nfo(root: &Path, path: &Path) -> Option<LocatedNfo> {
     let dir = path.parent()?;
     path.file_stem()
         .map(|stem| dir.join(format!("{}.nfo", stem.to_string_lossy())))
-        .and_then(located)
+        .and_then(|nfo| located(root, nfo))
         .or_else(|| {
             below_root(root, dir)
-                .then(|| located(dir.join(MOVIE_NFO)))
+                .then(|| located(root, dir.join(MOVIE_NFO)))
                 .flatten()
         })
 }
@@ -262,7 +267,7 @@ pub(super) fn locate_show_nfo(root: &Path, dir: &Path) -> Option<LocatedNfo> {
         .into_iter()
         .flatten()
         .filter(|folder| below_root(root, folder))
-        .find_map(|folder| located(folder.join(TVSHOW_NFO)))
+        .find_map(|folder| located(root, folder.join(TVSHOW_NFO)))
 }
 
 /// Find and read the NFOs describing the video at `path`.
@@ -761,7 +766,7 @@ impl LocalIndexService {
         stored: Option<&AppliedNfo>,
         files: &[&MediaFile],
     ) -> Result<(), IndexError> {
-        let Some(read) = read_nfo_file(path) else {
+        let Some(read) = read_nfo_file(&library.root_path, path) else {
             return Ok(());
         };
         self.reapply_read_nfo(library, path, stored, files, read)
@@ -905,7 +910,7 @@ impl LocalIndexService {
                     continue;
                 };
                 if path_is_absent(old)
-                    || read_nfo_file(old).is_some_and(|read| !read.content.same_as(record))
+                    || read_nfo_file(root, old).is_some_and(|read| !read.content.same_as(record))
                 {
                     vacated.push(record);
                 }

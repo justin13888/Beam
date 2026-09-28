@@ -453,7 +453,11 @@ impl AppServices {
                 })
                 .with_enrichment_repo(enrichment_repo.clone()),
             ),
-            subtitles: Arc::new(DbSubtitleService::new(file_repo.clone(), sidecar_repo)),
+            subtitles: Arc::new(DbSubtitleService::new(
+                library_repo.clone(),
+                file_repo.clone(),
+                sidecar_repo,
+            )),
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,

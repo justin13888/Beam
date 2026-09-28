@@ -51,10 +51,13 @@ what is being rewritten, not how long it takes.
 Anyone who can drop a file into a library can hand Beam one, and the file can change between the
 scan that recorded it and the request that reads it. So both operations:
 
-- open the file with no-follow, regular-file semantics (`beam_index::library_file::open_regular_file`:
-  `O_NOFOLLOW | O_NONBLOCK`, then refused unless the handle `fstat`s as a regular file), so a link
-  out of the library, a FIFO or a device in the file's place is `#source-file-missing` and never
-  read (FR-212);
+- open the file beneath its library root with no symbolic link followed at any component below
+  the root, the file or a folder above it, and with regular-file semantics
+  (`beam_index::library_file::open_regular_file`: `openat2(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH)`
+  on Linux, else an `openat` walk from the root with `O_NOFOLLOW` at every step; `O_NONBLOCK`; then
+  refused unless the handle `fstat`s as a regular file), so a link out of the library at any level,
+  or a FIFO or a device in the file's place, is `#source-file-missing` and never read (FR-212). The
+  root itself is opened as configured, so a root that is itself a link is followed;
 - serve length, modification time and bytes from that one handle, never from a second lookup of the
   path;
 - for the rendition, read at most 8 MiB plus one byte, refusing the file when the handle's size or

@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use beam_auth::utils::session_store::SessionData;
 use beam_domain::models::sidecar::{SidecarInfo, SubtitleFormat, UpsertSidecarSubtitle};
-use beam_domain::models::{FileStatus, MediaFile, MediaFileContent};
+use beam_domain::models::{CreateLibrary, FileStatus, MediaFile, MediaFileContent};
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
-use beam_domain::repositories::{FileRepository, SidecarSubtitleRepository};
+use beam_domain::repositories::{FileRepository, LibraryRepository, SidecarSubtitleRepository};
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
@@ -31,30 +32,46 @@ const SRT: &[u8] = b"1\r\n00:00:01,000 --> 00:00:02,500\r\n<i>Hello</i> & welcom
 const SRT_AS_WEBVTT: &str = "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.500\n<i>Hello</i> &amp; welcome\n\n2\n00:01:00.000 --> 00:01:01.000\nBye\n";
 
 /// The state, the index doubles behind its subtitle service, and the
-/// directory the subtitle files live in.
+/// directory the subtitle files live in -- the root of the one library the
+/// videos are in.
 struct Fixture {
     state: AppState,
     files: Arc<InMemoryFileRepository>,
     sidecars: Arc<InMemorySidecarSubtitleRepository>,
+    library_id: Uuid,
     dir: TempDir,
 }
 
-fn fixture() -> Fixture {
+async fn fixture() -> Fixture {
     let base = make_app_state();
+    let libraries = Arc::new(InMemoryLibraryRepository::default());
     let files = Arc::new(InMemoryFileRepository::default());
     let sidecars = Arc::new(InMemorySidecarSubtitleRepository::default());
+    let dir = TempDir::new().expect("a temp dir");
+    let library = libraries
+        .create(CreateLibrary {
+            name: "Films".to_owned(),
+            root_path: dir.path().to_owned(),
+            description: None,
+        })
+        .await
+        .expect("create the library");
 
     let services = AppServices {
         hash: base.services.hash.clone(),
         library: base.services.library.clone(),
         metadata: base.services.metadata.clone(),
-        subtitles: Arc::new(DbSubtitleService::new(files.clone(), sidecars.clone())),
+        subtitles: Arc::new(DbSubtitleService::new(
+            libraries.clone(),
+            files.clone(),
+            sidecars.clone(),
+        )),
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: base.services.user_repo.clone(),
         playback: base.services.playback.clone(),
         genre_repo: base.services.genre_repo.clone(),
-        library_repo: base.services.library_repo.clone(),
+        library_repo: libraries,
         file_repo: files.clone(),
         enrichment_repo: base.services.enrichment_repo.clone(),
         movie_repo: base.services.movie_repo.clone(),
@@ -74,7 +91,8 @@ fn fixture() -> Fixture {
         state: AppState::new(base.config.clone(), services, base.probe.clone(), None),
         files,
         sidecars,
-        dir: TempDir::new().expect("a temp dir"),
+        library_id: library.id,
+        dir,
     }
 }
 
@@ -113,7 +131,7 @@ impl Fixture {
     fn video(&self) -> Uuid {
         let file = MediaFile {
             id: Uuid::new_v4(),
-            library_id: Uuid::new_v4(),
+            library_id: self.library_id,
             path: self.dir.path().join("Movie.mkv"),
             hash: 0,
             size_bytes: 1,
@@ -150,7 +168,7 @@ impl Fixture {
         self.sidecars
             .upsert_by_path(UpsertSidecarSubtitle {
                 file_id,
-                library_id: Uuid::new_v4(),
+                library_id: self.library_id,
                 path,
                 info: SidecarInfo {
                     format,
@@ -184,7 +202,7 @@ fn url(file_id: Uuid, subtitle_id: Uuid) -> String {
 
 #[tokio::test]
 async fn a_subrip_file_is_served_as_stored_with_its_own_type() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let srt = f.sidecar(video, "Movie.en.srt", SRT).await;
     let token = f.session().await;
@@ -206,7 +224,7 @@ async fn a_subrip_file_is_served_as_stored_with_its_own_type() {
 
 #[tokio::test]
 async fn each_format_is_served_as_stored_with_its_type() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let token = f.session().await;
     for (name, content_type) in [
@@ -232,7 +250,7 @@ async fn each_format_is_served_as_stored_with_its_type() {
 
 #[tokio::test]
 async fn a_range_of_a_subtitle_is_served_as_a_part() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let srt = f.sidecar(video, "Movie.en.srt", SRT).await;
     let token = f.session().await;
@@ -255,7 +273,7 @@ async fn a_range_of_a_subtitle_is_served_as_a_part() {
 
 #[tokio::test]
 async fn a_subrip_file_is_served_as_webvtt_and_revalidates() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let srt = f.sidecar(video, "Movie.en.srt", SRT).await;
     let token = f.session().await;
@@ -296,7 +314,7 @@ async fn a_subrip_file_is_served_as_webvtt_and_revalidates() {
 
 #[tokio::test]
 async fn a_webvtt_file_is_normalised_to_utf8_with_lf_line_ends() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let vtt = f
         .sidecar(
@@ -320,7 +338,7 @@ async fn a_webvtt_file_is_normalised_to_utf8_with_lf_line_ends() {
 
 #[tokio::test]
 async fn ass_and_an_oversized_file_have_no_webvtt_rendition() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let ass = f.sidecar(video, "Movie.en.ass", b"[Script Info]\n").await;
     // Indexed small, then grown past the ceiling: the file as it is now
@@ -350,7 +368,7 @@ async fn ass_and_an_oversized_file_have_no_webvtt_rendition() {
 
 #[tokio::test]
 async fn a_subtitle_is_found_only_beside_its_own_present_video() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let other = f.video();
     let gone = f.video();
@@ -408,7 +426,7 @@ async fn a_subtitle_is_found_only_beside_its_own_present_video() {
 
 #[tokio::test]
 async fn a_subtitle_deleted_from_disk_is_source_file_missing() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let srt = f.sidecar(video, "Movie.en.srt", SRT).await;
     std::fs::remove_file(f.path("Movie.en.srt")).expect("delete the subtitle");
@@ -438,7 +456,7 @@ async fn a_subtitle_deleted_from_disk_is_source_file_missing() {
 #[tokio::test]
 async fn a_subtitle_replaced_by_a_link_or_a_fifo_is_source_file_missing() {
     const SECRET: &[u8] = b"1\n00:00:01,000 --> 00:00:02,000\nDATABASE_URL=postgres://secret\n";
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let outside = f.path("outside.srt");
     std::fs::write(&outside, SECRET).expect("write the file outside");
@@ -482,9 +500,55 @@ async fn a_subtitle_replaced_by_a_link_or_a_fifo_is_source_file_missing() {
     }
 }
 
+/// A folder above a subtitle swapped for a link to a folder outside the
+/// library, holding a file of the subtitle's name, is not followed either
+/// (FR-212): no link beneath the library root is, at any level.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_folder_above_a_subtitle_replaced_by_a_link_is_source_file_missing() {
+    let f = fixture().await;
+    let video = f.video();
+    std::fs::create_dir(f.path("Subs")).expect("make the subtitle folder");
+    let srt = f.sidecar(video, "Subs/Movie.en.srt", SRT).await;
+    let token = f.session().await;
+    let paths = [url(video, srt), format!("{}/webvtt", url(video, srt))];
+
+    // Served while the folder is a folder: the file is reached through it.
+    for path in &paths {
+        let response = f
+            .client()
+            .get(path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+
+    let outside = TempDir::new().expect("a folder outside the library");
+    std::fs::write(outside.path().join("Movie.en.srt"), b"OUTSIDE SECRET")
+        .expect("write the file outside");
+    std::fs::remove_dir_all(f.path("Subs")).expect("remove the folder");
+    std::os::unix::fs::symlink(outside.path(), f.path("Subs")).expect("link it out");
+
+    for path in &paths {
+        let response = f
+            .client()
+            .get(path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(
+            problem_type(response.bytes()),
+            "https://beam.justinchung.net/reference/errors/#source-file-missing",
+            "{path}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_malformed_id_is_refused_before_any_lookup() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let token = f.session().await;
 
@@ -504,7 +568,7 @@ async fn a_malformed_id_is_refused_before_any_lookup() {
 
 #[tokio::test]
 async fn subtitles_require_a_session() {
-    let f = fixture();
+    let f = fixture().await;
     let video = f.video();
     let srt = f.sidecar(video, "Movie.en.srt", SRT).await;
 

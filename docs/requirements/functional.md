@@ -140,9 +140,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   startup the server MUST refuse to start if `BEAM_DATA_DIR` overlaps a stored library root, and
   MUST log a warning, not refuse, for stored library roots that overlap each other. The
   indexer, the watcher and file delivery MUST NOT follow symbolic links beneath a library root; a
-  link is not a library file, so a row whose path has become one is treated as missing (FR-211),
-  and delivery serves only a regular file, opened once and read from that handle, answering a
-  link, FIFO or device in its place as `source-file-missing`.
+  link is not a library file, so a row whose path has become one is treated as missing (FR-211).
+  Every read of a library file's contents -- an NFO, a video or a subtitle file -- MUST open it
+  relative to its library root with no symbolic link followed at any component beneath the root:
+  neither the file nor any folder between it and the root. The root itself is opened as
+  configured, so a root that is itself a link is followed. Delivery serves only a regular file
+  so opened, read from that one handle, answering a link at any of those components, or a FIFO
+  or device in the file's place, as `source-file-missing`.
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
@@ -269,8 +273,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   A walk that could not read where an NFO lives, or a removal reported while the library root is
   gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a
-  symbolic link, FR-212 -- on Unix with `O_NOFOLLOW`, and `O_NONBLOCK` so a FIFO cannot stall
-  the read) and at most 1 MiB of it; an NFO larger than that, not
+  symbolic link at any component beneath the library root, FR-212 -- and on Unix with
+  `O_NONBLOCK`, so a FIFO cannot stall the read) and at most 1 MiB of it; an NFO larger than
+  that, not
   UTF-8, declaring a document type, or over 10 000 XML nodes MUST be ignored and the file
   classified by its path. Reading these MUST NOT write anything under a library root (FR-202).
 - **FR-220**: A text subtitle file (`.srt`, `.vtt`, `.ass`, `.ssa`) beside an indexed video, named
@@ -453,8 +458,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   [ADR-0020](../architecture/decisions/ADR-0020-text-subtitle-delivery.md)). A subtitle stream
   inside the video MUST NOT be extracted; it is listed with its stream index and no URL. A subtitle
   of a video that is missing from disk MUST NOT be served. A subtitle file is hostile input: the
-  server MUST open it never through a symbolic link and only as a regular file (FR-212), serving a
-  link, FIFO or device in its place as missing; MUST serve length and bytes from that one open
+  server MUST open it beneath its library root never through a symbolic link, at the file or at
+  any folder above it, and only as a regular file (FR-212), serving a link there, or a FIFO or
+  device in its place, as missing; MUST serve length and bytes from that one open
   handle; MUST read no more than 8 MiB of it for conversion, whatever its size claims; and MUST
   convert it in time linear in its length, whatever markup it holds.
 - **FR-513**: Of a title's file versions, exactly one MUST be marked primary and listed first: the

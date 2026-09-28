@@ -89,7 +89,8 @@ the embedded tracks, and served read-only
 
 A track offers the second exactly when it carries a `webvtt_url`. A subtitle id is only valid
 beside the video whose sources listed it, and a subtitle of a video missing from disk is not
-served. Both open the file never through a symbolic link and only as a regular file, and serve it
+served. Both open the file beneath its library root with no symbolic link followed at the file or
+any folder above it, and only as a regular file, and serve it
 from that one handle; the rendition reads at most 8 MiB and converts in time linear in its length
 (ADR-0020). Converting a subtitle is rewriting cue text with a pure function, not
 transcoding media: see ADR-0020 for where that line is drawn.

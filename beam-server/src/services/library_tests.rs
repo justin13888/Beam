@@ -4,7 +4,8 @@ mod tests {
         InMemoryPathValidator, LibraryError, LibraryService, LocalLibraryService, LocatedFile,
     };
     use crate::services::notification::{InMemoryNotificationService, NotificationService};
-    use beam_domain::models::{FileStatus, Library as DomainLibrary, MediaFile};
+    use beam_domain::models::{CreateLibrary, FileStatus, Library as DomainLibrary, MediaFile};
+    use beam_domain::repositories::LibraryRepository;
     use beam_domain::repositories::file::MockFileRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::library::MockLibraryRepository;
@@ -807,8 +808,17 @@ mod tests {
     #[tokio::test]
     async fn test_get_file_by_id_existing_file_returns_some() {
         let video_dir = PathBuf::from("/media/videos");
+        let library_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let lib_id = Uuid::new_v4();
+        let lib_id = library_repo
+            .create(CreateLibrary {
+                name: "Videos".to_string(),
+                root_path: video_dir.clone(),
+                description: None,
+            })
+            .await
+            .unwrap()
+            .id;
         let file_id = Uuid::new_v4();
 
         file_repo
@@ -818,13 +828,13 @@ mod tests {
             .insert(file_id, make_media_file(file_id, lib_id));
 
         let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
+            library_repo,
             file_repo,
             video_dir.clone(),
             PathBuf::from("/beam-data"),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
+            Arc::new(InMemoryPathValidator::success(video_dir.clone())),
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
@@ -839,6 +849,7 @@ mod tests {
             Some(LocatedFile {
                 id: file_id,
                 path: PathBuf::from("/media/videos/test.mp4"),
+                library_root: video_dir.clone(),
                 mime_type: Some("video/mp4".to_string()),
             })
         );
