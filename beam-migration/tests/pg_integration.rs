@@ -1176,7 +1176,7 @@ async fn the_tracks_migration_renames_codecs_and_reverses() {
         text("SELECT codec AS v FROM media_streams ORDER BY stream_index").await,
         codecs
             .iter()
-            .map(|(_, _, renamed)| renamed.to_string())
+            .map(|(_, _, renamed)| String::from(*renamed))
             .collect::<Vec<_>>()
     );
     assert_eq!(
