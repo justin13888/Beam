@@ -851,6 +851,29 @@ fn survives(
     }
 }
 
+/// The part a movie file on the title keyed `key` is: the one the current
+/// rules read from its name, when they key it to that title, else the one
+/// stored on it (issue #233).
+///
+/// The stored part alone is not enough when a rekey settles a title. A file
+/// [`LocalIndexService::hold_classification`] held apart carries the current
+/// classifier version but never had its part read, and reclassification
+/// skips it from then on, so the part it stores -- none -- would stay none
+/// once a corrected match merges its title or the title takes its key. A
+/// file its name keys elsewhere keeps its stored part until reclassification
+/// reads it.
+fn part_as_read(file: &MediaFile, inferred: &MediaInference, key: &str) -> Option<u32> {
+    match inferred {
+        MediaInference::Movie(inferred) if inferred.title.identity_key() == key => {
+            inferred.part_number
+        }
+        _ => match file.content {
+            Some(MediaFileContent::Movie { part_number, .. }) => part_number,
+            _ => None,
+        },
+    }
+}
+
 /// The identity key of the movie a file's path names, if it names one.
 ///
 /// Used by the identity-key backfill. It is the key classification gives a
@@ -3009,6 +3032,7 @@ impl LocalIndexService {
                         settled.insert(movie.id);
                         self.retitle_as_spelled(&movie, &key, spelled.as_ref())
                             .await?;
+                        self.read_held_parts(&rows, &key).await?;
                     }
                     continue;
                 }
@@ -3061,6 +3085,10 @@ impl LocalIndexService {
                 settled.insert(loser);
                 continue;
             }
+            if survivor == movie.id {
+                // Its files stay where they are; the holder's move below.
+                self.read_held_parts(&rows, &key).await?;
+            }
             for entry in self.movie_repo.find_entries_by_movie_id(loser).await? {
                 let MovieEntry {
                     id: entry_id,
@@ -3082,23 +3110,7 @@ impl LocalIndexService {
                     .await?;
                 let moved = entry_files.remove(&entry_id).unwrap_or_default();
                 for (file, inferred) in &moved {
-                    // The part the current rules read, when they key the file
-                    // to the merged title. The stored part is not enough: a
-                    // file `hold_classification` kept apart is stamped with
-                    // the current version but never had its part read, and
-                    // reclassification skips it from then on, so a part
-                    // stored as none would stay none after the merge
-                    // (issue #233). A file keyed elsewhere keeps its stored
-                    // part until reclassification re-reads it.
-                    let part_number = match inferred {
-                        MediaInference::Movie(inferred) if inferred.title.identity_key() == key => {
-                            inferred.part_number
-                        }
-                        _ => match file.content {
-                            Some(MediaFileContent::Movie { part_number, .. }) => part_number,
-                            _ => None,
-                        },
-                    };
+                    let part_number = part_as_read(file, inferred, &key);
                     self.move_file(
                         file,
                         MediaFileContent::Movie {
@@ -3419,6 +3431,42 @@ impl LocalIndexService {
                     },
                 )
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// Give each movie file in `rows` -- the files of a title just settled on
+    /// `key`, rekeyed in place or kept by a merge -- the part the current
+    /// rules read from its name, where that is not the part it has. A file
+    /// [`Self::hold_classification`] held needs it: it carries the current
+    /// version, so reclassification never reads its part. A file still
+    /// awaiting reclassification gets early the part reclassification would
+    /// give it; one classified by the current rules already has it.
+    async fn read_held_parts(
+        &self,
+        rows: &[&(MediaFile, MediaInference)],
+        key: &str,
+    ) -> Result<(), DbErr> {
+        for (file, inferred) in rows {
+            let Some(MediaFileContent::Movie {
+                movie_entry_id,
+                part_number,
+            }) = file.content
+            else {
+                continue;
+            };
+            let read = part_as_read(file, inferred, key);
+            if read == part_number {
+                continue;
+            }
+            self.move_file(
+                file,
+                MediaFileContent::Movie {
+                    movie_entry_id,
+                    part_number: read,
+                },
+            )
+            .await?;
         }
         Ok(())
     }

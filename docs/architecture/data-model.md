@@ -235,8 +235,9 @@ matched, and disagreeing on an id both carry or sharing none -- are never merged
 version, its files are stamped with the current version as they are classified (so
 reclassification does not move them onto the other title), and an admin-log warning names the
 pair at every process start until it is settled. Correcting either title's match to the other's
-entry settles it: the next process start merges the two, and a file moved by a merge takes the part
-the current rules read from its name -- not the part stored on it, which a held file never had
+entry settles it, and the next process start merges the two; if the holder is retired instead, the
+next process start gives the held title its key in place. Either way each file of the settled title takes the
+part the current rules read from its name -- not the part stored on it, which a held file never had
 read. Rekeys and merges are listed in an admin-log entry.
 
 **Live titles.** A title is *live* while at least one file behind it is present
