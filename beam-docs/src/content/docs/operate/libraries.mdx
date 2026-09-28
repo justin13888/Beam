@@ -191,10 +191,11 @@ old name — your place in *Heat* stays with *Heat*. NFOs follow in the same way
 or rotate three, and each NFO counts as moved rather than edited, so one whose id the admin log
 said was not used still leaves the pin alone, however the folders' names sort. Only an NFO whose
 contents you also changed on the way re-pins its title. The watcher sees such a change one name at a
-time and cannot tell which file is which yet, so it leaves those files as they were and the next
-scan sorts them out; scan the library to have it done at once. If a file takes over the name of one
-whose contents are nowhere in the library any more, that old record is kept as missing, not
-deleted, and goes after the grace period like any other missing file.
+time and cannot tell which file is which yet, so it leaves those files — the videos and the NFOs
+beside them — as they were, and the next scan sorts them out; scan the library to have it done at
+once. If a file takes over the name of one whose contents are nowhere in the library any more, that
+old record is kept as missing, not deleted, and goes after the grace period like any other missing
+file.
 
 One exception keeps a common habit working: replacing a film you have been watching by renaming
 another file onto its name — a better copy downloaded beside it, say. When someone has played the
@@ -422,8 +423,9 @@ XML followed by a URL.
   When two NFOs pin one title to different ids, the first pin is kept and the admin log says so.
 
 An NFO added or edited after its video was indexed re-pins the title at the next scan, or as soon
-as the watcher sees it — whatever modification time it carries, so one copied in with `cp -p` or
-`rsync -a` counts too. Only the files an NFO actually describes are re-pinned: a `movie.nfo`
+as the watcher sees it (unless a video beside it is being moved, swapped or replaced at the same
+time: then the next scan applies it) — whatever modification time it carries, so one copied in
+with `cp -p` or `rsync -a` counts too. Only the files an NFO actually describes are re-pinned: a `movie.nfo`
 leaves alone a video that has its own `<file name>.nfo`, and an NFO at the top of the library, in a
 category folder above your show folders (`TV/tvshow.nfo` above `TV/Lost/`), or more than one folder
 above an episode, pins nothing. An NFO that describes several titles — a `movie.nfo` in a folder

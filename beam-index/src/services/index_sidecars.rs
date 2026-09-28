@@ -417,12 +417,24 @@ impl LocalIndexService {
     /// Reconcile the NFO at `path` after a watcher event: re-apply it when
     /// its content changed since it was last applied, to the indexed files
     /// it can describe -- read by one query for its folder, never the whole
-    /// library -- or forget its record when it is gone.
+    /// library's files -- or forget its record when it is gone.
+    ///
+    /// A changed NFO the watcher cannot yet tell moved from edited is left
+    /// as it is -- neither applied nor recorded -- for the next scan, which
+    /// sees every path at once and carries a moved NFO with its video
+    /// (FR-219): one beside a video this event left to the scan
+    /// (`left_to_scan`, one half of a swap or a rotation) or whose file is
+    /// no longer the one its row records, and one holding what another NFO
+    /// path's record holds, where the file there no longer does -- moved
+    /// from there, perhaps ahead of its video's event. Without an
+    /// [`AppliedNfoRepository`] the scan re-applies nothing, so nothing is
+    /// left to it.
     pub(super) async fn reconcile_nfo_event(
         &self,
         library: &Library,
         path: &Path,
         is_file: bool,
+        left_to_scan: &[PathBuf],
     ) -> Result<(), IndexError> {
         let stored = match &self.applied_nfo_repo {
             Some(repo) => repo.find_by_path(path).await?,
@@ -441,12 +453,67 @@ impl LocalIndexService {
         let Some(dir) = path.parent() else {
             return Ok(());
         };
+        let Some(read) = hints::read_nfo_file(path) else {
+            return Ok(());
+        };
         let under = self.file_repo.find_all_under(library.id, dir).await?;
         let candidates: Vec<&MediaFile> = under
             .iter()
             .filter(|file| hints::may_describe(path, &file.path))
             .collect();
-        self.reapply_nfo(library, path, stored.as_ref(), &candidates)
+        if !stored
+            .as_ref()
+            .is_some_and(|stored| read.content.same_as(stored))
+            && self
+                .nfo_may_have_moved(library, path, &read.content, &candidates, left_to_scan)
+                .await?
+        {
+            info!(
+                path = %path.display(),
+                "a changed NFO may have moved with a video; leaving it to the next scan"
+            );
+            return Ok(());
+        }
+        self.reapply_read_nfo(library, path, stored.as_ref(), &candidates, read)
             .await
+    }
+
+    /// Whether the NFO at `path`, found holding `content` that its record
+    /// does not, may be one half of a move the watcher cannot sort out: it
+    /// may describe a video of `left_to_scan`, or one of the indexed
+    /// `candidates` whose file is no longer the one its row records (moved
+    /// or swapped, its own event not yet reconciled or left to the scan);
+    /// or another NFO path's record holds `content` and the file there no
+    /// longer does -- gone, or holding other content. The library's NFO
+    /// records are read only here, for an NFO that changed.
+    async fn nfo_may_have_moved(
+        &self,
+        library: &Library,
+        path: &Path,
+        content: &hints::NfoContent,
+        candidates: &[&MediaFile],
+        left_to_scan: &[PathBuf],
+    ) -> Result<bool, IndexError> {
+        let Some(repo) = &self.applied_nfo_repo else {
+            return Ok(false);
+        };
+        if left_to_scan
+            .iter()
+            .any(|video| hints::may_describe(path, video))
+            || candidates.iter().any(|file| may_have_moved(file))
+        {
+            return Ok(true);
+        }
+        Ok(repo
+            .find_all_by_library(library.id)
+            .await?
+            .iter()
+            .any(|record| {
+                record.path != path
+                    && content.same_as(record)
+                    && (path_is_absent(&record.path)
+                        || hints::read_nfo_file(&record.path)
+                            .is_some_and(|read| !read.content.same_as(record)))
+            }))
     }
 }

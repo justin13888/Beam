@@ -256,7 +256,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   seen first -- MUST be applied as a new file's NFO is, keeping a title's other pin, and recorded.
   An NFO forgotten by a removal and put back at the same path is therefore one added after
   indexing and re-pins its title, while one that comes back with its video at another path keeps
-  the title's pin.
+  the title's pin. A watcher event sees a move one name at a time, so it MUST leave a changed NFO
+  as it is -- neither applied nor recorded -- for the next scan to judge as above when the NFO may
+  be one half of a move: a video it may describe was left to the scan by the same event (FR-221)
+  or is no longer the file its row records, or its content is what another NFO path's record
+  holds and the file there no longer holds it.
   A walk that could not read where an NFO lives, or a removal reported while the library root is
   gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a

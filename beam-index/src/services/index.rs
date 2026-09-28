@@ -3103,7 +3103,8 @@ impl LocalIndexService {
         {
             let is_file = meta.as_ref().is_some_and(std::fs::Metadata::is_file);
             if hints::is_nfo(&path) {
-                self.reconcile_nfo_event(&library, &path, is_file).await?;
+                self.reconcile_nfo_event(&library, &path, is_file, &[])
+                    .await?;
             } else {
                 self.reconcile_sidecar_event(&library, &path, is_file)
                     .await?;
@@ -3355,6 +3356,7 @@ impl LocalIndexService {
         };
 
         let mut retry_after: Option<Duration> = None;
+        let mut left_to_scan: Vec<PathBuf> = Vec::new();
         for path in &files {
             let outcome = match self.reconcile_file(path, library, false).await {
                 Ok(outcome) => outcome,
@@ -3365,8 +3367,16 @@ impl LocalIndexService {
                     FileOutcome::Failed
                 }
             };
-            if let FileOutcome::Deferred(after) = outcome {
-                retry_after = Some(retry_after.map_or(after, |before| before.min(after)));
+            match outcome {
+                FileOutcome::Deferred(after) => {
+                    retry_after = Some(retry_after.map_or(after, |before| before.min(after)));
+                }
+                FileOutcome::LeftToScan => left_to_scan.push(path.clone()),
+                FileOutcome::Added
+                | FileOutcome::Relinked
+                | FileOutcome::Changed
+                | FileOutcome::Unchanged
+                | FileOutcome::Failed => {}
             }
         }
 
@@ -3374,7 +3384,8 @@ impl LocalIndexService {
         // are at their paths: each subtitle is recorded against the video
         // that owns it, and each NFO applied as its own event would apply it
         // -- a watcher that reports a renamed directory reports nothing of
-        // the files inside it.
+        // the files inside it. A changed NFO beside a video left to the scan
+        // is left to the scan with it (FR-219).
         for subtitle in &subtitles {
             if let Err(e) = self
                 .reconcile_sidecar_event(library, &subtitle.path, true)
@@ -3384,7 +3395,10 @@ impl LocalIndexService {
             }
         }
         for nfo in &nfos {
-            if let Err(e) = self.reconcile_nfo_event(library, &nfo.path, true).await {
+            if let Err(e) = self
+                .reconcile_nfo_event(library, &nfo.path, true, &left_to_scan)
+                .await
+            {
                 warn!(path = %nfo.path.display(), error = %e, "failed to reconcile an NFO of a changed directory");
             }
         }

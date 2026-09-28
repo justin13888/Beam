@@ -2400,3 +2400,150 @@ async fn folders_swapped_with_one_nfo_edited_repin_to_the_edit() {
         );
     }
 }
+
+/// Two folders swapped through a third name, as the watcher reports it: the
+/// third name's removal, then each folder's directory event, in either
+/// order. Each folder's video holds another row's content and is left to
+/// the scan, and so is the NFO beside it: the watcher cannot yet tell a
+/// moved NFO from an edited one. So the kept NFO stays kept -- whichever
+/// folder held the pinning NFO, and whichever event comes first -- and the
+/// scan then carries each NFO with its video (FR-219).
+#[tokio::test]
+async fn folders_swapped_under_the_watcher_leave_their_nfos_to_the_scan_and_keep_the_pin() {
+    for folders in [["A", "B"], ["B", "A"]] {
+        for events in [["A", "B"], ["B", "A"]] {
+            let h = kept_conflicting_nfos_in(&folders).await;
+            let before = rows_and_nfo_records(&h, &folders).await;
+
+            std::fs::rename(h.root.join("A"), h.root.join("T")).unwrap();
+            std::fs::rename(h.root.join("B"), h.root.join("A")).unwrap();
+            std::fs::rename(h.root.join("T"), h.root.join("B")).unwrap();
+            h.event("T", FsEventKind::Removed).await;
+            for folder in events {
+                h.event(folder, FsEventKind::Created).await;
+            }
+
+            assert_eq!(
+                h.movie_pins(),
+                vec![Some("tmdb:949".to_string())],
+                "after the events, pinned by {folders:?}, events {events:?}"
+            );
+            assert_eq!(
+                rows_and_nfo_records(&h, &folders).await,
+                before,
+                "rows and NFO records left for the scan, {folders:?}, {events:?}"
+            );
+            h.scan().await;
+            let mut expected = before.clone();
+            expected.reverse();
+            assert_eq!(
+                rows_and_nfo_records(&h, &folders).await,
+                expected,
+                "each row and its NFO's record follow the folder, {folders:?}, {events:?}"
+            );
+            assert_eq!(
+                h.movie_pins(),
+                vec![Some("tmdb:949".to_string())],
+                "after the scan, pinned by {folders:?}, events {events:?}"
+            );
+        }
+    }
+}
+
+/// Two folders swapped with one NFO edited on the way, as a watcher that
+/// reports each file hears it, the NFOs first: the edited NFO holds content
+/// no record does, but the video it describes is no longer the file its row
+/// records, so it too is left to the scan rather than applied -- which would
+/// overwrite the record that shows the other NFO moved. The scan then
+/// carries the other NFO and replaces the pin with the edit, as a scan alone
+/// does.
+#[tokio::test]
+async fn folders_swapped_with_one_nfo_edited_under_per_file_events_repin_to_the_edit() {
+    for edited in ["A", "B"] {
+        let folders = ["A", "B"];
+        let other = if edited == "A" { "B" } else { "A" };
+        let h = kept_conflicting_nfos_in(&folders).await;
+
+        rotate_folders(&h, &folders);
+        h.write(&format!("{edited}/Heat (1995).nfo"), &tmdb_movie(2));
+        for rel in [
+            format!("{edited}/Heat (1995).nfo"),
+            format!("{other}/Heat (1995).nfo"),
+            format!("{edited}/Heat (1995).mkv"),
+            format!("{other}/Heat (1995).mkv"),
+        ] {
+            h.event(&rel, FsEventKind::Created).await;
+        }
+        assert_eq!(
+            h.movie_pins(),
+            vec![Some("tmdb:949".to_string())],
+            "left for the scan, edited in {edited}"
+        );
+
+        h.scan().await;
+        assert_eq!(
+            h.movie_pins(),
+            vec![Some("tmdb:2".to_string())],
+            "edited in {edited}"
+        );
+    }
+}
+
+/// A video moved into a new folder while another took its old name is left
+/// to the scan by the new folder's event, and so is the NFO beside it -- one
+/// its title never had, describing no indexed file yet. Applied then, it
+/// would be recorded having pinned nothing; left, the scan relinks the
+/// video and applies the NFO as a new file's, pinning the title.
+#[tokio::test]
+async fn an_nfo_beside_a_video_left_to_the_scan_is_applied_by_the_scan() {
+    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    h.write("One/Heat (1995).mkv", "one");
+    h.write("Two/Heat (1995).mkv", "two, a longer copy");
+    h.scan().await;
+    assert_eq!(h.movie_pins(), vec![None]);
+    let id = h.file("Two/Heat (1995).mkv").id;
+
+    move_file(&h, "Two/Heat (1995).mkv", "New/Heat (1995).mkv");
+    move_file(&h, "One/Heat (1995).mkv", "Two/Heat (1995).mkv");
+    h.write("New/Heat (1995).nfo", &tmdb_movie(5));
+    h.event("New", FsEventKind::Created).await;
+
+    assert!(
+        h.applied("New/Heat (1995).nfo").await.is_none(),
+        "left to the scan with its video"
+    );
+    h.scan().await;
+    assert_eq!(h.file("New/Heat (1995).mkv").id, id, "relinked");
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:5".to_string())]);
+}
+
+/// A kept NFO moved with its video file by file, its own event heard before
+/// the video's: it holds what its old path's record holds, and the file
+/// there is gone, so the watcher does not take it for a new NFO and replace
+/// the pin with it. The video's event then relinks the video and carries
+/// the NFO's record with it.
+#[tokio::test]
+async fn a_kept_nfos_event_heard_before_its_moved_videos_keeps_the_pin() {
+    let h = a_kept_conflicting_nfo_in_its_own_folder().await;
+    let id = h.file("Two/Heat (1995).mkv").id;
+
+    move_file(&h, "Two/Heat (1995).mkv", "Moved/Heat (1995).mkv");
+    move_file(&h, "Two/Heat (1995).nfo", "Moved/Heat (1995).nfo");
+    h.event("Moved/Heat (1995).nfo", FsEventKind::Created).await;
+
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+    assert!(
+        h.applied("Moved/Heat (1995).nfo").await.is_none(),
+        "left for its video's relink"
+    );
+
+    h.event("Moved/Heat (1995).mkv", FsEventKind::Created).await;
+    h.event("Two/Heat (1995).mkv", FsEventKind::Removed).await;
+    h.event("Two/Heat (1995).nfo", FsEventKind::Removed).await;
+
+    assert_eq!(h.file("Moved/Heat (1995).mkv").id, id, "relinked");
+    assert!(h.applied("Moved/Heat (1995).nfo").await.is_some());
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+    h.scan().await;
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+}

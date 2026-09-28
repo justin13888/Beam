@@ -786,9 +786,23 @@ impl LocalIndexService {
         stored: Option<&AppliedNfo>,
         files: &[&MediaFile],
     ) -> Result<(), IndexError> {
-        let Some(NfoRead { content, nfo }) = read_nfo_file(path) else {
+        let Some(read) = read_nfo_file(path) else {
             return Ok(());
         };
+        self.reapply_read_nfo(library, path, stored, files, read)
+            .await
+    }
+
+    /// [`Self::reapply_nfo`], for an NFO the caller has already read.
+    pub(super) async fn reapply_read_nfo(
+        &self,
+        library: &Library,
+        path: &Path,
+        stored: Option<&AppliedNfo>,
+        files: &[&MediaFile],
+        read: NfoRead,
+    ) -> Result<(), IndexError> {
+        let NfoRead { content, nfo } = read;
         if !stored.is_some_and(|stored| content.same_as(stored))
             && let Some(nfo) = &nfo
             && self

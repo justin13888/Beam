@@ -103,7 +103,8 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   `index_hints.rs` (reads the NFOs beside a video -- read-only opens of regular files, at most
   1 MiB -- finds or creates a title by the provider id they pin before its identity key, and
   re-pins the titles an NFO describes when a scan or the watcher finds its content changed since
-  it was last applied, per `applied_nfos`, and carries the NFO records of the videos one scan or
+  it was last applied, per `applied_nfos` -- the watcher leaving to the scan a changed NFO that
+  may have moved with a video --, and carries the NFO records of the videos one scan or
   event relinks to their new paths, the whole batch judged at once so a swap or rotation carries
   each NFO as a move does, `carry_nfos_on_relink`) and `index_sidecars.rs` (records the
   text subtitles beside indexed videos as `sidecar_subtitles`, from the scan's walk and from
