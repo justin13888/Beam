@@ -42,9 +42,10 @@ One upgrade moves watch progress rather than discarding it: from the version tha
 per title (issue [#188](https://github.com/justin13888/beam/issues/188)), each person's positions
 in the different files of one movie or episode are merged into one — the most recent position and
 file, watched if any of them was finished. A finished file holding several episodes marks each of
-them watched. Progress on a file that belongs to no movie or episode has no title to move to and is
-dropped. The old per-file table is gone afterwards, so a dump from
-before the upgrade is the only way back.
+them watched. A position left at a file's end without the file being finished moves over as not
+watched, and resumes at that end. Progress on a file that belongs to no movie or episode has no
+title to move to and is dropped. The old per-file table is gone afterwards, so a dump from before
+the upgrade is the only way back.
 
 Re-indexing is cheap, and your media is untouched. Treat the catalogue as reproducible and the
 database dump as the thing that protects the parts that are not.

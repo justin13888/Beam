@@ -1794,10 +1794,10 @@ impl LocalIndexService {
     /// missing -- in one step, so rows can trade paths (issue #180).
     ///
     /// A relinked row keeps its id, and so its movie or episode, its streams,
-    /// and its place as the file a viewer's watch state last played; a missing row is visible again. Nothing
-    /// is probed or classified: the content is the content the row already
-    /// describes. Each move, and each displaced row, is told to the
-    /// administrator.
+    /// and its place as the file a viewer's watch state last played; a
+    /// missing row is visible again. Nothing is probed or classified: the
+    /// content is the content the row already describes. Each move, and each
+    /// displaced row, is told to the administrator.
     async fn relink_files(
         &self,
         relinks: &[(MediaFile, PathBuf, Fingerprint)],

@@ -138,10 +138,14 @@ SELECT gen_random_uuid(),
 "#;
 
 /// Play the rest of each finished multi-episode file's run: the episodes of
-/// its season numbered after the file's own, up to its last. As
-/// `WatchStateRepository::mark_played` does at runtime, an episode gains a
-/// played row at the start, or its existing row is played and counts a play;
-/// its place goes back to the start unless the viewer played it since.
+/// its season numbered after the file's own, up to its last. An episode with
+/// no row gains a played one at the start, counting a play per finished
+/// file. An existing row is played and -- unlike
+/// `WatchStateRepository::mark_played` at runtime, which leaves a row already
+/// played at its start alone -- always adds those plays and moves
+/// `last_played_at` on to the later of its own and the file's: each finish
+/// of the file was a play of the whole run. Its place goes back to the start
+/// unless the viewer played the episode since.
 const SPREAD: &str = r#"
 WITH spread AS (
     SELECT p.user_id,
