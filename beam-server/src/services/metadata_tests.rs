@@ -1112,13 +1112,15 @@ mod browse {
                 cursor,
             })
         };
-        let cases: Vec<(
+        /// `first`, `after`, `last`, `before`, and the page they ask for.
+        type Case = (
             Option<u32>,
             Option<String>,
             Option<u32>,
             Option<String>,
             Result<PageRequest, ()>,
-        )> = vec![
+        );
+        let cases: Vec<Case> = vec![
             (
                 None,
                 None,
