@@ -174,8 +174,20 @@ mod watch_state {
                 "the primary key must survive the conflict:\n{}",
                 sql[0].sql
             );
-            assert_bound(&sql[0], "12.0");
-            assert_bound(&sql[0], &Uuid::from_u128(8).to_string());
+            // By position: the real clock is bound too, and its seconds can
+            // read "12.0" whatever the position was.
+            let values = &sql[0]
+                .values
+                .as_ref()
+                .expect("the upsert binds its values")
+                .0;
+            assert_eq!(
+                values[5],
+                Value::from(Uuid::from_u128(8)),
+                "$6 (last_file_id)"
+            );
+            assert_eq!(values[6], Value::Double(Some(12.0)), "$7 (position_secs)");
+            assert_eq!(values[8], Value::Bool(Some(false)), "$9 (completed)");
         }
     }
 
@@ -195,12 +207,22 @@ mod watch_state {
         drop(repo);
 
         let sql = statements(db);
-        let values = bound_values(&sql[0]);
-        assert!(
-            values.iter().any(|v| v.contains("0.0")) && !values.iter().any(|v| v.contains("97")),
-            "the end is stored as the start: {values:?}"
+        assert_contains(&sql[0], "position_secs, duration_secs, completed");
+        assert_contains(&sql[0], "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,");
+        // By position, not by substring: the row id and the clock are bound
+        // too, and either can contain any digit run.
+        let values = &sql[0]
+            .values
+            .as_ref()
+            .expect("the upsert binds its values")
+            .0;
+        assert_eq!(
+            values[6],
+            Value::Double(Some(0.0)),
+            "$7 (position_secs): the end is stored as the start"
         );
-        assert!(values.iter().any(|v| v.contains("true")), "{values:?}");
+        assert_eq!(values[7], Value::Double(Some(100.0)), "$8 (duration_secs)");
+        assert_eq!(values[8], Value::Bool(Some(true)), "$9 (completed)");
     }
 
     #[tokio::test]
