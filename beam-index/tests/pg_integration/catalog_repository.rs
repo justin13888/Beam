@@ -223,6 +223,9 @@ mod plans {
     const MOVIES: u32 = 6_000;
     const SHOWS: u32 = 3_000;
     const EPISODES_PER_SHOW: u32 = 4;
+    /// Roughly half the titles the seeded catalogue lists: every show and
+    /// nine movies in ten.
+    const MID_LISTING: u32 = (MOVIES / 10 * 9 + SHOWS) / 2;
 
     /// Seed the catalogue set-based -- one statement per table -- with every
     /// tenth movie's file missing, so liveness really filters, then refresh
@@ -316,14 +319,10 @@ mod plans {
         }
     }
 
-    /// Rows a sort may take in: a few pages. A page near an end of the
-    /// listing may seek into a short index range and sort just that; a sort of
-    /// a whole branch would take in thousands.
-    const SORTED_AT_MOST: f64 = 10.0 * 21.0;
-
     /// `query` reads each kind it lists through `index` on that kind's table,
-    /// and nothing -- no title, no file -- sequentially, hashed or sorted
-    /// whole.
+    /// and nothing -- no title, no file -- sequentially, hashed or sorted:
+    /// each branch arrives in order from its index and the outer query only
+    /// merges them.
     #[track_caller]
     fn assert_index_served(plan: &[serde_json::Value], query: &CatalogQuery, index: &str) {
         let shown = serde_json::to_string_pretty(&plan[0]).unwrap_or_default();
@@ -334,13 +333,7 @@ mod plans {
                 "{query:?} reads a table whole: {shown}"
             );
             assert_ne!(node_type, "Hash", "{query:?} hashes a whole table: {shown}");
-            if node_type == "Sort" {
-                let rows = node["Plan Rows"].as_f64().unwrap_or(f64::INFINITY);
-                assert!(
-                    rows <= SORTED_AT_MOST,
-                    "{query:?} sorts {rows} rows, a whole branch: {shown}"
-                );
-            }
+            assert_ne!(node_type, "Sort", "{query:?} sorts a branch: {shown}");
         }
         for (kind, table) in [(TitleKind::Movie, "movies"), (TitleKind::Show, "shows")] {
             let expected = format!("idx_{table}_{index}");
@@ -368,13 +361,17 @@ mod plans {
             for direction in [SortDirection::Asc, SortDirection::Desc] {
                 let sort = CatalogSort { field, direction };
                 let first = page(sort, Seek::Forward(None), None);
-                // A real boundary, so the seek is one the listing produced.
+                // A real boundary the listing produced, mid-listing, so a
+                // seek either way leaves thousands of titles to page through.
                 let boundary: CatalogPosition = repo
-                    .browse(&first)
+                    .browse(&CatalogQuery {
+                        limit: NonZeroU32::new(MID_LISTING).expect("positive"),
+                        ..first.clone()
+                    })
                     .await
-                    .expect("the first page")
+                    .expect("the listing up to its middle")
                     .pop()
-                    .expect("a full first page");
+                    .expect("a listing past its middle");
                 for query in [
                     first,
                     page(sort, Seek::Forward(Some(boundary.clone())), None),
