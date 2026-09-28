@@ -50,9 +50,12 @@ pub struct ContainerTags {
 pub const MAX_TAG_VALUE_BYTES: usize = 512;
 
 /// `value` cut to at most [`MAX_TAG_VALUE_BYTES`] bytes, never inside a
-/// character.
+/// character, and trimmed again: a cut that lands after a space must not
+/// store a value ending in one, which the uncut value never does.
 fn capped(value: &str) -> String {
-    value[..value.floor_char_boundary(MAX_TAG_VALUE_BYTES)].to_string()
+    value[..value.floor_char_boundary(MAX_TAG_VALUE_BYTES)]
+        .trim_end()
+        .to_string()
 }
 
 /// The earliest and latest release years a tag is believed about.
@@ -572,6 +575,15 @@ mod tests {
         );
     }
 
+    /// A cut that lands just after a space stores the words before it, not
+    /// a value ending in a space.
+    #[test]
+    fn a_text_tag_cut_after_a_space_is_trimmed() {
+        let value = format!("{} {}", "a".repeat(MAX_TAG_VALUE_BYTES - 1), "b".repeat(8));
+        let tags = ContainerTags::from_tags([("title", value.as_str())]);
+        assert_eq!(tags.title, Some("a".repeat(MAX_TAG_VALUE_BYTES - 1)));
+    }
+
     proptest! {
         /// A text tag is kept whole up to [`MAX_TAG_VALUE_BYTES`], and a
         /// longer one is cut to a prefix of it no longer than that -- never
@@ -579,18 +591,22 @@ mod tests {
         /// the whole character.
         #[test]
         fn a_text_tag_is_kept_whole_or_cut_to_a_prefix_within_the_cap(
-            value in "[a-z\u{e9}\u{4e2d}\u{1f3ac}]{1,400}",
+            value in "[a-z\u{e9}\u{4e2d}\u{1f3ac}][a-z \u{e9}\u{4e2d}\u{1f3ac}]{0,398}[a-z\u{e9}\u{4e2d}\u{1f3ac}]",
         ) {
             let tags = ContainerTags::from_tags([("title", value.as_str()), ("show", value.as_str())]);
             let title = tags.title.expect("a non-blank title is read");
             prop_assert!(title.len() <= MAX_TAG_VALUE_BYTES);
             prop_assert!(value.starts_with(&title));
+            prop_assert_eq!(title.trim_end(), title.as_str(), "never ends in a space");
             if value.len() <= MAX_TAG_VALUE_BYTES {
                 prop_assert_eq!(&title, &value);
             } else {
-                // Only a character too wide to fit was dropped at the cut.
-                let next = value[title.len()..].chars().next().expect("cut short");
-                prop_assert!(title.len() + next.len_utf8() > MAX_TAG_VALUE_BYTES);
+                // Only a character too wide to fit, and the spaces before
+                // it, were dropped at the cut.
+                let rest = &value[title.len()..];
+                let dropped = rest.len() - rest.trim_start_matches(' ').len();
+                let next = rest[dropped..].chars().next().expect("cut short");
+                prop_assert!(title.len() + dropped + next.len_utf8() > MAX_TAG_VALUE_BYTES);
             }
             prop_assert_eq!(tags.show.as_ref(), Some(&title));
         }
