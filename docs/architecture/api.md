@@ -272,6 +272,18 @@ still use the pre-migration dotted names. While that holds, the TypeScript compi
 contract check for `beam-web`; the Rust side of the contract is checked by `codegen:openapi:check`
 and by the router refusing to build if it cannot describe itself.
 
+**Wire conventions.** `routes/conventions_tests.rs` walks the exported document and fails on any
+violation, with no exception list — a schema that cannot comply is changed, not waived
+([#190](https://github.com/justin13888/beam/issues/190)):
+
+- **R1** every enum value is `snake_case` (`^[a-z][a-z0-9_]*$`);
+- **R2** no schema name ends in `Dto` or `Response` — a name is the thing on the wire. Where a wire
+  type shares its name with the domain type it mirrors (`AdminEvent`, `AdminLogCategory`,
+  `TitleKind`), the domain type is reached through its module;
+- **R2b** no two enums carry the same set of values: one meaning is one enum (`LogLevel` serves the
+  admin log and the admin event stream alike; `TitleKind` is the browse filter, the
+  continue-watching and history `media_type`, and an enrichment row's `kind`).
+
 ## Server-Sent Events
 
 Real-time admin events (scan progress, enrichment outcomes, system events) are delivered over SSE at
