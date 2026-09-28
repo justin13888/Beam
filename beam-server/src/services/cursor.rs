@@ -12,7 +12,8 @@
 //! server can change it behind the version. It is **not** signed: everything
 //! in it is either public (a title's id and its sort value) or checked
 //! against the request (the sort), and a forged position only ever seeks to a
-//! place in a listing the caller could page to anyway.
+//! place in a listing the caller could page to anyway -- a key no store could
+//! hold, such as a title containing NUL, is refused as malformed.
 //!
 //! The key is kept, not just the id, so a page after a title that has since
 //! gone -- its file removed, its title renamed -- still starts in the right
@@ -72,7 +73,16 @@ fn key_from(sort: MediaSortField, value: serde_json::Value) -> Option<SortKey> {
         serde_json::from_value(value).ok()
     }
     Some(match sort {
-        MediaSortField::Title => SortKey::Title(value.as_str()?.to_owned()),
+        // No stored title holds a NUL -- Postgres text cannot -- and binding
+        // one fails the whole statement, so it is refused here as the
+        // caller's error rather than surfacing as the server's.
+        MediaSortField::Title => {
+            let title = value.as_str()?;
+            if title.contains('\0') {
+                return None;
+            }
+            SortKey::Title(title.to_owned())
+        }
         MediaSortField::Year => SortKey::Year(nullable(value)?),
         MediaSortField::Runtime => SortKey::Runtime(nullable(value)?),
         MediaSortField::Rating => {

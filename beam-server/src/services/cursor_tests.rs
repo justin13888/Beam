@@ -27,7 +27,8 @@ fn any_order() -> impl Strategy<Value = SortOrder> {
 /// A key of `field`'s kind, over the whole range the store can hold.
 fn any_key(field: MediaSortField) -> BoxedStrategy<SortKey> {
     match field {
-        MediaSortField::Title => ".*".prop_map(SortKey::Title).boxed(),
+        // Postgres text holds any character but NUL.
+        MediaSortField::Title => "[^\\x00]*".prop_map(SortKey::Title).boxed(),
         MediaSortField::Year => proptest::option::of(any::<i32>())
             .prop_map(SortKey::Year)
             .boxed(),
@@ -140,6 +141,14 @@ fn a_cursor_the_server_did_not_write_is_malformed() {
         (
             raw(&format!(
                 r#"{{"v":1,"sort":"title","order":"asc","kind":"movie","id":"{id}","key":"a","extra":1}}"#
+            )),
+            MediaSortField::Title,
+        ),
+        // A title no store holds: binding it would fail the statement, a 500
+        // for the caller's input.
+        (
+            raw(&format!(
+                r#"{{"v":1,"sort":"title","order":"asc","kind":"movie","id":"{id}","key":"a\u0000b"}}"#
             )),
             MediaSortField::Title,
         ),
