@@ -12,6 +12,12 @@
 //! [`open_regular_file`] and reads from that handle alone, so what is checked
 //! is what is read.
 //!
+//! A file that is only stat'ed -- the walk's stat of every entry, the stat a
+//! scan compares with a row -- is not opened at all: [`StatCursor`] resolves
+//! its folder beneath the root with no link followed and stats it with
+//! `fstatat` and `AT_SYMLINK_NOFOLLOW`, so that reads nothing through a link
+//! either. Only a file whose bytes are read is opened.
+//!
 //! The root itself is opened as named: it is the administrator's choice of
 //! folder, and a root that is itself a link is followed like any path they
 //! configure. Everything beneath it is resolved one component at a time with
@@ -22,6 +28,9 @@
 use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
+#[cfg(unix)]
+use std::time::{Duration, UNIX_EPOCH};
 
 /// Why the opener refused a path: no regular file of the library is there.
 /// Carried inside the [`io::Error`] it returns, so [`is_refusal`] tells the
@@ -86,6 +95,238 @@ pub fn open_regular_file(root: &Path, relative: &Path) -> io::Result<(File, Meta
     Ok((file, metadata))
 }
 
+/// What a stat of a regular file of a library says: its size, and its
+/// modification and change times and inode number where the platform has
+/// them. Read from an open handle (`From<&Metadata>`) or, without opening
+/// the file, by a [`StatCursor`] -- the same fields either way, so a stat of
+/// one kind compares with a stat of the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileMeta {
+    size: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    mtime: (i64, u32),
+    #[cfg(unix)]
+    ctime: (i64, u32),
+    #[cfg(not(unix))]
+    modified: Option<SystemTime>,
+}
+
+impl FileMeta {
+    /// The file's size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The file's modification time, as [`Metadata::modified`] reads it.
+    pub fn modified(&self) -> Option<SystemTime> {
+        #[cfg(unix)]
+        {
+            let (secs, nanos) = self.mtime;
+            system_time(secs, nanos)
+        }
+        #[cfg(not(unix))]
+        {
+            self.modified
+        }
+    }
+
+    /// The file's inode number.
+    #[cfg(unix)]
+    pub fn ino(&self) -> u64 {
+        self.ino
+    }
+
+    /// The file's modification time: seconds and nanoseconds since the epoch.
+    #[cfg(unix)]
+    pub fn mtime(&self) -> (i64, u32) {
+        self.mtime
+    }
+
+    /// The file's change time: seconds and nanoseconds since the epoch.
+    #[cfg(unix)]
+    pub fn ctime(&self) -> (i64, u32) {
+        self.ctime
+    }
+
+    /// What a `stat` of a regular file returned.
+    #[cfg(unix)]
+    fn of_stat(stat: &rustix::fs::Stat) -> Self {
+        // `From`, not `as`: the field types differ between targets.
+        #[allow(clippy::useless_conversion)]
+        let (size, ino, mtime, mtime_nsec, ctime, ctime_nsec) = (
+            i64::from(stat.st_size),
+            u64::from(stat.st_ino),
+            i64::from(stat.st_mtime),
+            u64::from(stat.st_mtime_nsec),
+            i64::from(stat.st_ctime),
+            u64::from(stat.st_ctime_nsec),
+        );
+        FileMeta {
+            size: u64::try_from(size).unwrap_or(0),
+            ino,
+            mtime: (mtime, nanos(mtime_nsec)),
+            ctime: (ctime, nanos(ctime_nsec)),
+        }
+    }
+}
+
+impl From<&Metadata> for FileMeta {
+    fn from(meta: &Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            FileMeta {
+                size: meta.len(),
+                ino: meta.ino(),
+                mtime: (meta.mtime(), nanos(meta.mtime_nsec())),
+                ctime: (meta.ctime(), nanos(meta.ctime_nsec())),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            FileMeta {
+                size: meta.len(),
+                modified: meta.modified().ok(),
+            }
+        }
+    }
+}
+
+/// A stat's nanosecond field, which is below a second on any sane
+/// filesystem; anything else reads as the whole second.
+#[cfg(unix)]
+fn nanos(nanos: impl TryInto<u32>) -> u32 {
+    nanos
+        .try_into()
+        .ok()
+        .filter(|nanos| *nanos < 1_000_000_000)
+        .unwrap_or(0)
+}
+
+/// The instant `secs` and `nanos` after the epoch, as the standard library
+/// reads a stat's times; `None` where it cannot be represented.
+#[cfg(unix)]
+fn system_time(secs: i64, nanos: u32) -> Option<SystemTime> {
+    let whole = Duration::from_secs(secs.unsigned_abs());
+    let base = if secs >= 0 {
+        UNIX_EPOCH.checked_add(whole)
+    } else {
+        UNIX_EPOCH.checked_sub(whole)
+    }?;
+    base.checked_add(Duration::from_nanos(u64::from(nanos)))
+}
+
+/// Stat the regular file at `path`, beneath the library `root`, without
+/// opening it and with no link followed: a [`StatCursor`] used once.
+pub fn stat_regular_file(root: &Path, path: &Path) -> io::Result<FileMeta> {
+    StatCursor::new(root).stat(path)
+}
+
+/// Stats files beneath one library root without opening them, following no
+/// link anywhere beneath the root (FR-212, issue #238).
+///
+/// Each folder between the root and a file is opened relative to the one
+/// above it with `O_NOFOLLOW | O_DIRECTORY`, so a folder that is a link
+/// fails to open, and the file itself is stat'ed relative to its folder with
+/// `AT_SYMLINK_NOFOLLOW` and refused unless it is a regular file. The
+/// folders a stat opened are kept for the next: a walk, which stats a
+/// folder's files one after another, opens each folder once and then costs
+/// one `fstatat` per file -- where a path's `lstat` had the kernel resolve
+/// the whole path each time. Only as many folders are held open as the tree
+/// is deep.
+///
+/// A folder held open is the folder that was there when it was opened, as a
+/// walk's own handle on a folder it is listing is. A folder swapped for a
+/// link after that is not followed: a new cursor sees the link and refuses
+/// it.
+pub struct StatCursor {
+    root: PathBuf,
+    #[cfg(unix)]
+    root_fd: Option<rustix::fd::OwnedFd>,
+    /// The folders opened so far, from the root down: each one's name, and
+    /// its handle, opened relative to the one before.
+    #[cfg(unix)]
+    folders: Vec<(std::ffi::OsString, rustix::fd::OwnedFd)>,
+}
+
+impl StatCursor {
+    /// A cursor for files beneath `root`, opened as the administrator named
+    /// it when the first file is stat'ed.
+    pub fn new(root: &Path) -> Self {
+        StatCursor {
+            root: root.to_path_buf(),
+            #[cfg(unix)]
+            root_fd: None,
+            #[cfg(unix)]
+            folders: Vec::new(),
+        }
+    }
+
+    /// Stat `path`, a file beneath the root. A path not beneath the root, a
+    /// link at the file or at a folder above it, and anything but a regular
+    /// file all fail -- [`is_refusal`] tells those apart from a failure that
+    /// says nothing about the file, such as one that is gone.
+    #[cfg(unix)]
+    pub fn stat(&mut self, path: &Path) -> io::Result<FileMeta> {
+        use rustix::fs::{AtFlags, FileType, Mode};
+        let relative = checked_relative(relative_to(&self.root, path)?)?;
+        let names: Vec<&std::ffi::OsStr> = relative.iter().collect();
+        let Some((leaf, folders)) = names.split_last() else {
+            return Err(not_library_file("an empty path names no file"));
+        };
+        if self.root_fd.is_none() {
+            self.root_fd = Some(open_root(&self.root)?);
+        }
+        let Some(root_fd) = &self.root_fd else {
+            return Err(io::Error::other("the root was just opened"));
+        };
+        // The folders already open that lead to this file are kept; the rest
+        // are closed, and the file's own opened beneath the last one kept.
+        let kept = self
+            .folders
+            .iter()
+            .zip(folders)
+            .take_while(|((held, _), name)| held.as_os_str() == **name)
+            .count();
+        self.folders.truncate(kept);
+        for name in &folders[kept..] {
+            let parent = self.folders.last().map_or(root_fd, |(_, fd)| fd);
+            let fd = rustix::fs::openat(parent, *name, folder_flags(), Mode::empty())?;
+            self.folders.push((name.to_os_string(), fd));
+        }
+        let folder = self.folders.last().map_or(root_fd, |(_, fd)| fd);
+        let stat = rustix::fs::statat(folder, *leaf, AtFlags::SYMLINK_NOFOLLOW)?;
+        match FileType::from_raw_mode(stat.st_mode) {
+            FileType::RegularFile => Ok(FileMeta::of_stat(&stat)),
+            FileType::Symlink => Err(not_library_file(format!(
+                "{} is a symbolic link",
+                relative.display()
+            ))),
+            _ => Err(not_library_file(format!(
+                "{} is not a regular file",
+                relative.display()
+            ))),
+        }
+    }
+
+    /// Unix is the only platform Beam serves from; elsewhere the path is
+    /// stat'ed as named, refusing only a link at the file itself.
+    #[cfg(not(unix))]
+    pub fn stat(&mut self, path: &Path) -> io::Result<FileMeta> {
+        let relative = checked_relative(relative_to(&self.root, path)?)?;
+        let meta = std::fs::symlink_metadata(self.root.join(&relative))?;
+        if !meta.is_file() {
+            return Err(not_library_file(format!(
+                "{} is not a regular file",
+                relative.display()
+            )));
+        }
+        Ok(FileMeta::from(&meta))
+    }
+}
+
 /// A file of a library, opened by [`LibraryFile::open`]: the handle, the
 /// metadata read from that handle, and the full path it was indexed under.
 ///
@@ -142,14 +383,15 @@ impl LibraryFile {
     }
 }
 
-/// Whether `err`, from [`LibraryFile::open`], says that no regular file of
-/// the library is at the path: a link at the file or at a folder above it
-/// (`ELOOP`), a folder above it that is no folder any more (`ENOTDIR`), or
-/// -- the opener's own refusals, which it marks as such -- a path not
-/// beneath the root, or a file that is not a regular one. Such a path is no
-/// file of the library, as a walk would not have listed it. Any other
-/// failure -- a file deleted, a permission error, a transient I/O error, an
-/// `EINVAL` from a filesystem -- says nothing about what is there.
+/// Whether `err`, from [`LibraryFile::open`] or a [`StatCursor`], says that
+/// no regular file of the library is at the path: a link at the file or at a
+/// folder above it (`ELOOP`), a folder above it that is no folder any more
+/// (`ENOTDIR`), or -- the opener's own refusals, which it marks as such -- a
+/// path not beneath the root, or a file that is a link or not a regular one.
+/// Such a path is no file of the library, as a walk would not have listed
+/// it. Any other failure -- a file deleted, a permission error, a transient
+/// I/O error, an `EINVAL` from a filesystem -- says nothing about what is
+/// there.
 pub fn is_refusal(err: &io::Error) -> bool {
     if err
         .get_ref()
@@ -190,7 +432,6 @@ fn checked_relative(relative: &Path) -> io::Result<PathBuf> {
             "an empty path names no file beneath a root",
         ));
     }
-
     Ok(names)
 }
 
@@ -235,6 +476,20 @@ fn open_root(root: &Path) -> io::Result<rustix::fd::OwnedFd> {
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )?)
+}
+
+/// The flags a folder beneath the root is opened with to stat a file in it
+/// ([`StatCursor`]): never through a link. On Linux `O_PATH`, which, like the
+/// kernel's own resolution of a path, needs only search permission on the
+/// folder, not read permission.
+#[cfg(unix)]
+fn folder_flags() -> rustix::fs::OFlags {
+    use rustix::fs::OFlags;
+    #[cfg(target_os = "linux")]
+    let access = OFlags::PATH;
+    #[cfg(not(target_os = "linux"))]
+    let access = OFlags::RDONLY;
+    access | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
 }
 
 /// The flags the file itself is opened with, whichever way the path is
@@ -529,6 +784,101 @@ mod tests {
         for (case, err, refusal) in cases {
             assert_eq!(is_refusal(&err), refusal, "{case}");
         }
+    }
+
+    /// A cursor stats each file as the file's own handle does, whatever
+    /// order a walk visits folders in -- down, back up and across -- with the
+    /// folders it keeps open.
+    #[cfg(unix)]
+    #[test]
+    fn a_cursor_stats_each_file_as_its_handle_does() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let files = [
+            "top.mkv",
+            "A/a1.mkv",
+            "A/B/b1.mkv",
+            "A/B/C/c1.mkv",
+            "A/a2.mkv",
+            "A/D/d1.mkv",
+            "E/e1.mkv",
+            "A/B/b2.mkv",
+            "top2.mkv",
+        ];
+        for (index, rel) in files.iter().enumerate() {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x".repeat(index + 1)).unwrap();
+        }
+
+        let mut cursor = StatCursor::new(root);
+        for rel in files {
+            let path = root.join(rel);
+            let stat = cursor
+                .stat(&path)
+                .unwrap_or_else(|err| panic!("{rel}: {err}"));
+            let (_, handle) = open_regular_file(root, Path::new(rel)).unwrap();
+            assert_eq!(stat, FileMeta::from(&handle), "{rel}");
+            assert_eq!(stat.modified(), handle.modified().ok(), "{rel}");
+            assert_eq!(stat, stat_regular_file(root, &path).unwrap(), "{rel}");
+        }
+    }
+
+    /// A cursor refuses what the opener refuses -- a link at the file or at
+    /// a folder above it, a path outside the root, anything but a regular
+    /// file -- and says no more than "gone" of a file that is gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_cursor_refuses_what_the_opener_refuses() {
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir(outside.path().join("Season 01")).unwrap();
+        std::fs::write(outside.path().join("Season 01/E01.mkv"), b"outside").unwrap();
+        let root = TempDir::new().unwrap();
+        let root = root.path();
+        std::fs::create_dir_all(root.join("Show/Extras")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("Season 01"),
+            root.join("Show/Season 01"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("Season 01/E01.mkv"),
+            root.join("E01.mkv"),
+        )
+        .unwrap();
+        std::fs::write(root.join("file"), b"not a folder").unwrap();
+        #[cfg(target_os = "linux")]
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            root.join("fifo.mkv"),
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .unwrap();
+
+        let mut cursor = StatCursor::new(root);
+        let mut refused = |path: &Path| is_refusal(&cursor.stat(path).unwrap_err());
+        assert!(
+            refused(&root.join("Show/Season 01/E01.mkv")),
+            "a folder link"
+        );
+        assert!(refused(&root.join("E01.mkv")), "a file link");
+        assert!(
+            refused(&root.join("file/E01.mkv")),
+            "a file where a folder was"
+        );
+        assert!(refused(&root.join("Show/Extras")), "a folder");
+        #[cfg(target_os = "linux")]
+        assert!(refused(&root.join("fifo.mkv")), "a FIFO");
+        assert!(
+            refused(&outside.path().join("Season 01/E01.mkv")),
+            "outside the root"
+        );
+        assert!(refused(&root.join("Show/../file")), "not a path of names");
+        let gone = StatCursor::new(root)
+            .stat(&root.join("Show/gone.mkv"))
+            .unwrap_err();
+        assert_eq!(gone.kind(), io::ErrorKind::NotFound);
+        assert!(!is_refusal(&gone), "a file that is gone");
     }
 
     #[test]
