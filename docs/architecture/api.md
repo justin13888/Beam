@@ -87,10 +87,36 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
 - **Actions:** operations that don't map to CRUD are sub-resource verbs, not query-string RPC
   flags — e.g. re-enrichment is `POST /v1/admin/media/{id}/refresh`.
 - **Pagination:** `GET /v1/media` uses Relay-style cursor pagination
-  (`first`/`after`/`last`/`before`), returning a connection object with items and page info.
-  Cursors are opaque server-generated tokens; cursor pagination is used because indexing and
-  enrichment continuously mutate the result set, where offset pagination would skip or duplicate
-  items.
+  (`first`/`after`/`last`/`before`), returning a `MediaConnection` of `items` and `page_info`
+  (`has_next_page`, `has_previous_page`, `start_cursor`, `end_cursor`). Cursor pagination is used
+  because indexing and enrichment continuously mutate the result set, where offset pagination
+  would skip or duplicate items. The semantics
+  ([#187](https://github.com/justin13888/beam/issues/187)):
+  - A request pages **forwards** with `first` (default 20) and optionally `after`, or
+    **backwards** with `last` (default 20) and optionally `before`; a page holds 1 to 100 items.
+    Mixing the two directions, or a size outside 1-100, is `400 #invalid-pagination`. A backward
+    page is still returned in display order.
+  - Forwards, `has_next_page` says whether another page follows and `has_previous_page` whether
+    `after` was given; backwards, the mirror. Pass `end_cursor` as `after` for the next page and
+    `start_cursor` as `before` for the previous one.
+  - A cursor is opaque base64url JSON holding the sort it was issued under and the boundary
+    title's sort key and `(kind, id)` (`services/cursor.rs`). It is a **position, not an offset**:
+    a page after a title that has since left the listing starts where that title was. A cursor
+    that is not the server's, or was issued under another `sort_by`/`sort_order`, is
+    `400 #invalid-cursor`. It is unsigned: everything in it is either public or checked.
+  - Every `sort_by` (`title`, `year`, `rating`, `date_added`, `runtime`) orders in the database in
+    both directions, a title with no value for the field sorting **last** either way, ties broken
+    by `(kind, id)`. A show has no runtime and sorts with the films that lack one; `date_added` is
+    when the title was first indexed. Title order is `lower(title)` under the database collation.
+    A `query` keeps the requested sort rather than ranking by relevance.
+  - Filters apply to movies and shows alike, `min_rating` included; `genre` matches by name or
+    slug. Only titles with a present file are listed.
+  - One page is one catalogue statement — a `UNION ALL` over `movies` and `shows` that filters,
+    orders, seeks and limits — plus a fixed number of reads by id to hydrate the page (titles,
+    genres, season and episode counts), whatever the library's size (NFR-301). A browsed show
+    carries `season_count`/`episode_count` and no `seasons`; its detail carries both.
+  - A database failure is `500 #internal`, on browse and on detail — never an empty page, and
+    never a `404` for a title that could not be read.
 - **Errors:** every failure is an **RFC 9457 problem document** — one body shape for every status,
   on every route, including Kynos's own extractor rejections. There is no second envelope and no
   hook to render one, which closed half of [#123](https://github.com/justin13888/beam/issues/123):
