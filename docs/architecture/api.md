@@ -116,10 +116,12 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     (titles, genres, season and episode counts), whatever the library's size (NFR-301). The
     statement is a `UNION ALL` over `movies` and `shows` in which each branch filters, seeks,
     orders and limits itself, and the outer query merges the two. For `title` and `date_added`
-    each branch reads its own index in order (`(lower(title), id)`, `(created_at, id)`) and stops
-    at the page size, checking liveness per row; `year`, `rating` and `runtime` are unindexed and
-    sort every matching title. A browsed show carries `season_count`/`episode_count` and no
-    `seasons`; its detail carries both.
+    each branch reads its own index in order (`(lower(title), id)`, `(created_at, id)`), checking
+    liveness and the filters per row. Unfiltered or filtered only by `media_type`, it stops at the
+    page size. A selective `genre`, `query` or `min_rating` filter can leave most rows it reads
+    unmatched, so such a page may read up to the whole index: its cost is bounded by the catalogue,
+    not the page. `year`, `rating` and `runtime` are unindexed and sort every matching title. A
+    browsed show carries `season_count`/`episode_count` and no `seasons`; its detail carries both.
   - A database failure is `500 #internal`, on browse and on detail — never an empty page, and
     never a `404` for a title that could not be read.
 - **Errors:** every failure is an **RFC 9457 problem document** — one body shape for every status,

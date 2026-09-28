@@ -31,7 +31,10 @@
 //! `idx_movies_title_sort` / `idx_shows_title_sort` (`lower(title), id`) and
 //! `idx_movies_added_sort` / `idx_shows_added_sort` (`created_at, id`), so the
 //! seek is an index condition and the order an index scan, with liveness a
-//! nested-loop `EXISTS` per row read under the limit. A kind in the middle of
+//! nested-loop `EXISTS` per row read under the limit. The filters are checked
+//! per row the same way, so an unfiltered or kind-only page stops at the page
+//! size, while a selective genre, search or rating filter may walk the whole
+//! index before its page fills (NFR-301). A kind in the middle of
 //! the tuple, as it once was, made every page a sequential scan and a sort of
 //! every live title. Year, rating and runtime have no index: their pages are
 //! sorted per branch and still read every matching title.
