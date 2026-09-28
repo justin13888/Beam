@@ -934,6 +934,33 @@ mod tests {
         drop(dir);
     }
 
+    /// A folder a cursor already holds is read as it was when the cursor
+    /// opened it, even once a link has replaced it: nothing is read through
+    /// the link, and a new cursor refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn a_held_folder_is_read_as_it_was_and_a_new_cursor_refuses_the_link() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("library");
+        let folder = root.join("Heat (1995)");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.mkv"), b"inside").unwrap();
+        std::fs::write(folder.join("c.mkv"), b"inside").unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("c.mkv"), b"a longer outside file").unwrap();
+        let before = FileMeta::from(&std::fs::metadata(folder.join("c.mkv")).unwrap());
+
+        let mut cursor = StatCursor::new(&root);
+        cursor.stat(&folder.join("a.mkv")).unwrap();
+        std::fs::rename(&folder, root.join("Heat (1995).old")).unwrap();
+        std::os::unix::fs::symlink(&outside, &folder).unwrap();
+
+        assert_eq!(cursor.stat(&folder.join("c.mkv")).unwrap(), before);
+        let err = stat_regular_file(&root, &folder.join("c.mkv")).unwrap_err();
+        assert!(is_refusal(&err), "{err:?}");
+    }
+
     /// A stat's nanosecond field outside a second is clamped into it, from
     /// either end.
     #[cfg(unix)]

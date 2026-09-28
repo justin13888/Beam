@@ -167,10 +167,15 @@ which on an SMB or NFS library would be a round trip of its own. A video is open
 hashed or probed (`beam_index::library_file::LibraryFile::open`), and everything recorded then
 comes from that handle: its size, modification time and identity from the handle's `fstat`, its
 content hash from the handle's bytes, and its streams from FFmpeg reading the same handle through a
-custom I/O context (`StreamIo`), so FFmpeg never opens the path itself. A link swapped in at the
-file or at any folder above it between the walk and those reads fails to stat or open (`ELOOP`,
-`ENOTDIR`, or the opener's own refusal of a link or a non-regular file), and the path is treated as
-missing, as a link the walk saw is -- nothing is recorded from the file it would have led to. Any
+custom I/O context (`StreamIo`), so FFmpeg never opens the path itself. Nothing is ever recorded
+from a file that a link swapped in at the file or at any folder above it leads to. A stat or open
+that meets such a link fails (`ELOOP`, `ENOTDIR`, or the opener's own refusal of a link or a
+non-regular file), and the path is treated as missing, as a link the walk saw is. A stat or open
+need not meet it, though: a folder the cursor of the current pass already holds, or a file already
+opened, is read as it was when opened -- a folder removed since then fails with `ENOENT`, one
+renamed away still reads its own files -- so for the rest of that pass a row beneath it may stay
+present, with what it had recorded. The next pass opens the folder anew, refuses the link and marks
+the row missing. Any
 other failure to stat or open a file (a permission error, a transient I/O error, an `EINVAL` from a
 filesystem) says nothing about it, and its row is left as it is (issue #179).
 

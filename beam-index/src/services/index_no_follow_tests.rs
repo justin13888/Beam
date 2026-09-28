@@ -472,6 +472,78 @@ async fn an_indexed_file_whose_folder_becomes_a_link_mid_scan_is_marked_missing(
     assert_eq!(after.size_bytes, before.size_bytes);
 }
 
+/// A folder renamed away and replaced by a link while the scan's
+/// file-by-file pass hashes a new file in it. The pass may already hold the
+/// folder open from an earlier file, and then reads the folder's other files
+/// as they were (the renamed folder), so their rows can stay present for this
+/// scan; or it opens the folder anew and refuses the link. Either way nothing
+/// of the outside folder is recorded, and the next scan's walk refuses the
+/// link and marks every row in it missing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_folder_swapped_for_a_link_during_the_pass_records_nothing_from_outside() {
+    let h = Harness::new().await;
+    let anchor = h.root.join("Ronin (1998)/Ronin (1998).mkv");
+    std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+    let mut anchor_bytes = fixture(INSIDE);
+    anchor_bytes.extend_from_slice(b"another film");
+    std::fs::write(&anchor, anchor_bytes).unwrap();
+    let indexed = [
+        h.put_inside("Heat (1995)/a.mkv"),
+        h.put_inside("Heat (1995)/c.mkv"),
+    ];
+    h.scan().await;
+
+    let new = h.put_inside("Heat (1995)/b.mkv");
+    for name in ["a.mkv", "b.mkv", "c.mkv"] {
+        h.put_outside(&format!("Heat (1995)/{name}"));
+    }
+    let folder = h.root.join("Heat (1995)");
+    let (swapped, renamed, outside) = (
+        folder.clone(),
+        h.dir.path().join("renamed away"),
+        h.outside().join("Heat (1995)"),
+    );
+    h.before_the_next_hash(move || {
+        std::fs::rename(&swapped, &renamed).unwrap();
+        std::os::unix::fs::symlink(&outside, &swapped).unwrap();
+    });
+    h.scan().await;
+    assert!(
+        folder.is_symlink(),
+        "the new file was hashed, and the swap ran"
+    );
+
+    let inside_hash = beam_domain::utils::hash::compute_hash(&fixture(INSIDE)[..]).unwrap();
+    let in_folder = [&indexed[0], &new, &indexed[1]];
+    for path in in_folder {
+        let Some(row) = h.row(path).await else {
+            continue;
+        };
+        assert_eq!(row.hash, inside_hash, "{}", path.display());
+        assert_eq!(row.size_bytes, fixture(INSIDE).len() as u64);
+        let streams = h.stream_repo.find_by_file_id(row.id).await.unwrap();
+        assert!(
+            streams.iter().all(|stream| stream.codec == "h264"),
+            "{}",
+            path.display()
+        );
+    }
+
+    h.scan().await;
+
+    for path in &indexed {
+        let row = h.row(path).await.expect("the row is kept");
+        assert!(row.missing_since.is_some(), "{} is missing", path.display());
+        assert_eq!(row.hash, inside_hash);
+    }
+    if let Some(row) = h.row(&new).await {
+        assert!(row.missing_since.is_some(), "the new file is missing");
+    }
+    let anchor_row = h.row(&anchor).await.expect("the other film is indexed");
+    assert!(anchor_row.missing_since.is_none());
+}
+
 /// A video relinked by the watcher drops the record of a subtitle it had
 /// whose folder has since become a link: that path leads to no file of the
 /// library, just as a watcher event on it would find.

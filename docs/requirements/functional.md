@@ -152,10 +152,12 @@ strength. Each requirement is independently testable. See `product.md` for narra
   file itself. The root itself is opened as
   configured, so a root that is itself a link is followed. Delivery serves only a regular file so opened, read from that one handle,
   answering a link at any of those components, or a FIFO or device in the file's place, as
-  `source-file-missing`. The indexer hashes and probes a video from one such handle, so a link
-  swapped in at the file or at any folder above it between the walk and those reads fails to stat
-  or open: nothing is recorded from the file, and the path is treated as missing, as a link the
-  walk saw is.
+  `source-file-missing`. The indexer hashes and probes a video from one such handle, so nothing is
+  ever recorded from a file that a link swapped in at the file or at any folder above it leads to.
+  A stat or open that meets such a link fails, and the path is treated as missing, as a link the
+  walk saw is. A folder, or a file, that the indexer's current pass already holds open is read as
+  it was when opened, so for the rest of that pass its files may still read as present; the next
+  pass meets the link, refuses it and marks the path missing.
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
