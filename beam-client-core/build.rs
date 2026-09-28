@@ -49,11 +49,34 @@ const ARTWORK: [(OmitMethod, &str); 2] = [
     (OmitMethod::Head, "/v1/artwork/{kind}/{id}/{variant}"),
 ];
 
+/// The subtitle operations (issue #189), which this client does not call
+/// either.
+///
+/// A subtitle track carries its `url` and `webvtt_url` the way a source
+/// carries `stream_url`: `ServerRecord::absolute_url` resolves them against the
+/// origin, and the player fetches them itself -- Media3 as a subtitle
+/// configuration, `AVPlayer` as a text track -- so a generated method
+/// returning the file's bytes would have no caller.
+const SUBTITLE_DELIVERY: [(OmitMethod, &str); 2] = [
+    (
+        OmitMethod::Get,
+        "/v1/files/{file_id}/subtitles/{subtitle_id}",
+    ),
+    (
+        OmitMethod::Get,
+        "/v1/files/{file_id}/subtitles/{subtitle_id}/webvtt",
+    ),
+];
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
 
     let mut spec = spargen::Spec::new("api/openapi.json").carve(false);
-    for (method, path) in MEDIA_DELIVERY.into_iter().chain(ARTWORK) {
+    for (method, path) in MEDIA_DELIVERY
+        .into_iter()
+        .chain(ARTWORK)
+        .chain(SUBTITLE_DELIVERY)
+    {
         spec = spec.omit_rule(OmitRule::operation(method, path));
     }
 

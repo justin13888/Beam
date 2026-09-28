@@ -27,8 +27,10 @@ is labelled with its actual resolution and codec, read from the file itself:
 
 A file whose video stream Beam could not probe is listed as **Original**.
 
-One of them is selected for you, but **not the best one** — the sources come back in no
-particular order, so check the picker rather than assuming you got the highest quality.
+Beam lists them best first and marks that one the **primary**: the default edition before a
+named one such as a *Director's Cut*, then the tallest picture, the higher bit rate and the larger
+file. The web player starts with the primary; the Android and Apple apps start with the best source
+your device can actually play.
 
 Switch to a smaller one when your connection cannot keep up: this is how Beam handles constrained
 bandwidth. It has no adaptive streaming and will never switch for you, because there is no
@@ -40,13 +42,19 @@ something an administrator does — see [Managing libraries](/operate/libraries/
 
 ## Subtitles
 
-**Beam does not currently play subtitles.** Beam detects and stores the subtitle tracks inside
-your files, but they are dropped before they reach the player, so there is no track selector and
-no way to turn captions on. Separate subtitle files sitting next to a video — `.srt`, `.ass` and
-the like — are not recognised as subtitles either.
+Beam now knows every subtitle track of a title: the ones inside the video file, with their real
+format, language and flags (forced, SDH), and the subtitle files sitting next to it — `.srt`,
+`.vtt`, `.ass` and `.ssa`. The subtitle files are served to players as they are, and SubRip and
+WebVTT files also as WebVTT, the one format a browser can show.
 
-This is a gap rather than a deliberate exclusion: unlike transcoding, nothing in Beam's design
-rules subtitles out. If you need them today, download the file and play it in a desktop player.
+**The players do not show subtitles yet.** There is no track selector in the web player or the
+apps so far; that is player work still to come. Until then, download the file and play it in a
+desktop player, which picks up the subtitle files beside it if you download those too.
+
+Some subtitles will stay out of a browser's reach even then: a track inside the video file is never
+extracted from it, and ASS, SSA and image subtitles (a Blu-ray's PGS, a DVD's VobSub) are never
+converted. A browser can only show a subtitle track that exists as a `.srt` or `.vtt` file beside
+the video.
 
 ## Your position is saved
 

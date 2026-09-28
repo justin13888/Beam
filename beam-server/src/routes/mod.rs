@@ -14,6 +14,7 @@ pub mod middleware;
 pub mod playback;
 pub mod rate_limit;
 pub mod stream;
+pub mod subtitle;
 pub mod tags;
 
 // No `pub use <module>::*`. Two modules declare a `FilePath` -- `playback` for
@@ -95,6 +96,10 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             stream::head_stream_file,
             stream::download_file,
             stream::head_download_file,
+        ])
+        .mount(kynos::routes![
+            subtitle::get_subtitle,
+            subtitle::get_subtitle_webvtt,
         ])
         .mount(kynos::routes![
             admin::list_libraries,

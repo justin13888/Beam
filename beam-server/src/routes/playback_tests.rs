@@ -62,6 +62,7 @@ fn fixture() -> Fixture {
         hash: base.services.hash.clone(),
         library: base.services.library.clone(),
         metadata: base.services.metadata.clone(),
+        subtitles: base.services.subtitles.clone(),
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: base.services.user_repo.clone(),
@@ -212,7 +213,6 @@ fn seed_movie_file(fixture: &Fixture) -> (uuid::Uuid, uuid::Uuid) {
         library_id: uuid::Uuid::new_v4(),
         movie_id,
         edition: None,
-        is_primary: true,
         created_at: chrono::Utc::now(),
     };
     let entry_id = entry.id;

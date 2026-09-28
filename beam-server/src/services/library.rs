@@ -288,12 +288,16 @@ pub struct LocatedFile {
     pub id: Uuid,
     /// Absolute path of the file on the server's filesystem.
     pub path: PathBuf,
+    /// Root of the library the file was indexed under: delivery opens `path`
+    /// beneath it, following no link on the way (FR-212).
+    pub library_root: PathBuf,
     /// Detected MIME type (e.g. "video/mp4"), if known.
     pub mime_type: Option<String>,
 }
 
-impl From<beam_domain::models::MediaFile> for LocatedFile {
-    fn from(file: beam_domain::models::MediaFile) -> Self {
+impl LocatedFile {
+    /// `file`, found in the library rooted at `library_root`.
+    fn new(file: beam_domain::models::MediaFile, library_root: PathBuf) -> Self {
         let beam_domain::models::MediaFile {
             id,
             library_id: _,
@@ -316,6 +320,7 @@ impl From<beam_domain::models::MediaFile> for LocatedFile {
         LocatedFile {
             id,
             path,
+            library_root,
             mime_type,
         }
     }
@@ -488,8 +493,15 @@ impl LibraryService for LocalLibraryService {
 
     async fn get_file_by_id(&self, file_id: String) -> Result<Option<LocatedFile>, LibraryError> {
         let file_uuid = Uuid::parse_str(&file_id).map_err(|_| LibraryError::InvalidId)?;
-        let file = self.file_repo.find_by_id(file_uuid).await?;
-        Ok(file.map(LocatedFile::from))
+        let Some(file) = self.file_repo.find_by_id(file_uuid).await? else {
+            return Ok(None);
+        };
+        // A library's files go with it, so its library is always there; were
+        // it not, there would be no root to open the file beneath.
+        let Some(library) = self.library_repo.find_by_id(file.library_id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(LocatedFile::new(file, library.root_path)))
     }
 
     async fn create_library(

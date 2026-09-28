@@ -109,7 +109,7 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
     /// The entry for `(library_id, movie_id, edition)`, created if there is
     /// none. Every copy of one edition of a film in a library is a file of one
     /// entry; a second copy never creates a second entry. On a conflict the
-    /// stored entry is returned unchanged (`is_primary` included).
+    /// stored entry is returned unchanged.
     async fn find_or_create_entry(&self, create: CreateMovieEntry) -> Result<MovieEntry, DbErr>;
     async fn find_entries_by_movie_id(&self, movie_id: Uuid) -> Result<Vec<MovieEntry>, DbErr>;
     /// Reverse lookup from a `MediaFileContent::Movie { movie_entry_id }` back
@@ -455,7 +455,6 @@ pub mod in_memory {
                 library_id,
                 movie_id,
                 edition,
-                is_primary,
             } = create;
             // Lookup and insert under one lock, as atomic as `ON CONFLICT`.
             let mut entries = self.entries.lock().unwrap();
@@ -469,7 +468,6 @@ pub mod in_memory {
                 library_id,
                 movie_id,
                 edition,
-                is_primary,
                 created_at: chrono::Utc::now(),
             };
             entries.insert(entry.id, entry.clone());

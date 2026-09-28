@@ -27,6 +27,8 @@ use kynos::response::range::source::ByteSource;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::error;
 
+use beam_index::library_file::{open_regular_file, relative_to};
+
 use crate::routes::api_error::{DeliveryError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::tags::Playback;
@@ -42,27 +44,46 @@ pub struct FilePath {
 
 /// One indexed file on disk, read a span at a time.
 ///
-/// A trait rather than a path is what lets the tests keep a fake filesystem:
-/// `ByteSource` has two methods and neither mentions `std::fs`, so an in-memory
-/// source stands in without special runtime infrastructure. Kynos ships
-/// `InMemory(Bytes)` for exactly that.
+/// Kynos's `Served<S, M>` range engine reads through its [`ByteSource`]; this
+/// is the one Beam serves library files with. It holds an open handle, never
+/// a path, and the delivery tests drive it end to end over real files in a
+/// `TempDir`.
 pub struct FileByteSource {
-    path: PathBuf,
+    /// The one handle every span is read from, so the bytes served are those
+    /// of the file that was opened and statted -- never of whatever the path
+    /// names by the time a span is read.
+    file: tokio::sync::Mutex<tokio::fs::File>,
     length: u64,
 }
 
 impl FileByteSource {
-    /// Reads the file's metadata without reading a byte of its contents.
-    async fn open(path: PathBuf) -> Result<(Self, SystemTime, u64), DeliveryError> {
-        let metadata = tokio::fs::metadata(&path).await.map_err(|err| {
-            error!(?path, ?err, "failed to read source file metadata");
-            DeliveryError::SourceFileMissing("Source video file not found".into())
-        })?;
+    /// Opens the file at `path` in the library rooted at `library_root`, and
+    /// reads its metadata from the handle, without reading a byte of its
+    /// contents.
+    ///
+    /// Opened as every read of a library file is: beneath its root with no
+    /// symbolic link followed -- neither the file nor a folder above it --
+    /// and only a regular file, so a link, FIFO or device put in the path
+    /// since it was indexed fails here (FR-212, [`beam_index::library_file`]).
+    /// Shared with subtitle delivery, which serves a sidecar file the same
+    /// way; each caller says what a file it cannot open means to its client.
+    pub(crate) async fn open(
+        library_root: PathBuf,
+        path: PathBuf,
+    ) -> std::io::Result<(Self, SystemTime, u64)> {
+        let (file, metadata) = tokio::task::spawn_blocking(move || {
+            open_regular_file(&library_root, relative_to(&library_root, &path)?)
+        })
+        .await??;
 
         let length = metadata.len();
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-        Ok((Self { path, length }, modified, length))
+        let source = Self {
+            file: tokio::sync::Mutex::new(tokio::fs::File::from_std(file)),
+            length,
+        };
+        Ok((source, modified, length))
     }
 }
 
@@ -78,7 +99,7 @@ impl ByteSource for FileByteSource {
     /// Reads exactly the span asked for. The whole file is never held: a client
     /// seeking to the two-hour mark of a 40 GiB remux costs one span.
     async fn read_span(&self, first: u64, last: u64) -> Result<Bytes, Self::Error> {
-        let mut file = tokio::fs::File::open(&self.path).await?;
+        let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(first)).await?;
 
         let span = usize::try_from(last - first + 1).unwrap_or(0);
@@ -103,13 +124,17 @@ impl MediaRanges for SourceFileRanges {
 /// A ranged delivery of one indexed source file.
 pub type MediaDelivery = RuntimeDelivery<SourceFileRanges>;
 
-/// Resolve `file_id` to the file's on-disk path and detected content type.
+/// Resolve `file_id` to the file's on-disk path, its library's root and its
+/// detected content type.
 ///
 /// The caller must be signed in via the `beam_session` cookie (ADR-0003) -- a
 /// `<video>` element sends that automatically, so there is no separate
 /// stream-token step. Authentication itself is `SessionAuth` in the handler
 /// signature; this only resolves the file.
-async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String), DeliveryError> {
+async fn locate_file(
+    state: &AppState,
+    file_id: &str,
+) -> Result<(PathBuf, PathBuf, String), DeliveryError> {
     let file = match state
         .services
         .library
@@ -134,18 +159,13 @@ async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String
     let LocatedFile {
         id: _,
         path,
+        library_root,
         mime_type,
     } = file;
-    if !path.exists() {
-        error!(?path, "source video file not found");
-        return Err(DeliveryError::SourceFileMissing(
-            "Source video file not found".into(),
-        ));
-    }
 
     let content_type = mime_type.unwrap_or_else(|| "application/octet-stream".to_owned());
 
-    Ok((path, content_type))
+    Ok((path, library_root, content_type))
 }
 
 /// A validator that changes whenever the bytes do.
@@ -156,10 +176,17 @@ async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String
 /// The previous `"{file_size}"` was neither -- every 4 GiB remux shared it, so
 /// a resumed download could splice bytes from a different file.
 fn validator(modified: SystemTime, length: u64) -> ETag {
+    ETag::strong(validator_tag(modified, length))
+}
+
+/// The opaque part of [`validator`]: `{mtime}-{length}` in hex. Shared with
+/// subtitle delivery, which derives a rendition's validator from the file
+/// it was rendered from.
+pub(crate) fn validator_tag(modified: SystemTime, length: u64) -> String {
     let stamp = modified
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
-    ETag::strong(format!("{stamp:x}-{length:x}"))
+    format!("{stamp:x}-{length:x}")
 }
 
 /// Builds the delivery both endpoints share.
@@ -169,8 +196,15 @@ async fn deliver(
     conditions: &Conditions,
     attachment: bool,
 ) -> Result<MediaDelivery, DeliveryError> {
-    let (path, content_type) = locate_file(state, file_id).await?;
-    let (source, modified, length) = FileByteSource::open(path.clone()).await?;
+    let (path, library_root, content_type) = locate_file(state, file_id).await?;
+    // Missing, or no longer a regular file reached without a link: either
+    // way the file indexed is not there to serve.
+    let (source, modified, length) = FileByteSource::open(library_root, path.clone())
+        .await
+        .map_err(|err| {
+            error!(?path, ?err, "failed to open source file");
+            DeliveryError::SourceFileMissing("Source video file not found".into())
+        })?;
 
     let mut served = Served::<_, AnyMedia>::new(source)
         .etag(validator(modified, length))

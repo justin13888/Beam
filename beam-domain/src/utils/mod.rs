@@ -7,4 +7,6 @@ pub mod media_path;
 pub mod nfo;
 pub mod path_policy;
 pub mod sidecar;
+pub mod source_rank;
+pub mod subtitle;
 pub mod telemetry;

@@ -594,13 +594,13 @@ async fn the_classifier_migration_merges_duplicate_entries_and_constrains_what_i
          ('00000000-0000-0000-0000-00000000000b', 'Movie', 'movie|', now(), now())",
         "INSERT INTO shows (id, title, identity_key, created_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-00000000000c', 'Grey''s Anatomy', 'grey s anatomy|', now(), now())",
-        "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) VALUES \
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, created_at) VALUES \
          ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', \
-          '00000000-0000-0000-0000-00000000000b', NULL, true, now() - interval '2 days'), \
+          '00000000-0000-0000-0000-00000000000b', NULL, now() - interval '2 days'), \
          ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', \
-          '00000000-0000-0000-0000-00000000000b', NULL, true, now() - interval '1 day'), \
+          '00000000-0000-0000-0000-00000000000b', NULL, now() - interval '1 day'), \
          ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', \
-          '00000000-0000-0000-0000-00000000000b', 'Director''s Cut', true, now())",
+          '00000000-0000-0000-0000-00000000000b', 'Director''s Cut', now())",
         "INSERT INTO files (id, movie_entry_id, library_id, file_path, file_size, hash_xxh3, \
                             scanned_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-000000000001', \
@@ -662,9 +662,9 @@ async fn the_classifier_migration_merges_duplicate_entries_and_constrains_what_i
 
     assert!(
         db.execute_unprepared(
-            "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) \
+            "INSERT INTO movie_entries (id, library_id, movie_id, edition, created_at) \
              VALUES (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', \
-                     '00000000-0000-0000-0000-00000000000b', NULL, false, now())",
+                     '00000000-0000-0000-0000-00000000000b', NULL, now())",
         )
         .await
         .is_err(),
@@ -756,11 +756,11 @@ async fn the_classifier_migration_rolls_back_and_reapplies() {
          ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
         "INSERT INTO movies (id, title, created_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-00000000000b', 'Movie', now(), now())",
-        "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) \
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, created_at) \
          VALUES (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', \
-                 '00000000-0000-0000-0000-00000000000b', NULL, true, now()), \
+                 '00000000-0000-0000-0000-00000000000b', NULL, now()), \
                 (gen_random_uuid(), '00000000-0000-0000-0000-00000000000a', \
-                 '00000000-0000-0000-0000-00000000000b', NULL, true, now())",
+                 '00000000-0000-0000-0000-00000000000b', NULL, now())",
     ];
     for sql in seed {
         db.execute_unprepared(sql)
@@ -819,9 +819,9 @@ async fn the_unique_path_migration_merges_duplicate_rows_and_their_progress() {
          ('00000000-0000-0000-0000-0000000000c2', 'two', false, 'iss', 'two', now(), now())",
         "INSERT INTO movies (id, title, identity_key, created_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-00000000000b', 'Movie', 'movie|', now(), now())",
-        "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) \
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, created_at) \
          VALUES ('00000000-0000-0000-0000-00000000000e', '00000000-0000-0000-0000-00000000000a', \
-                 '00000000-0000-0000-0000-00000000000b', NULL, true, now())",
+                 '00000000-0000-0000-0000-00000000000b', NULL, now())",
         "INSERT INTO files (id, movie_entry_id, library_id, file_path, file_size, hash_xxh3, \
                             file_status, missing_since, scanned_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000000e', \
@@ -968,9 +968,9 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
           'nfo', now(), now()), \
          ('00000000-0000-0000-0000-00000000000c', 'Heat', 'heat|1995', NULL, NULL, now(), now()), \
          ('00000000-0000-0000-0000-00000000000d', 'Alien', 'alien|1979', NULL, NULL, now(), now())",
-        "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) VALUES \
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, created_at) VALUES \
          ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', \
-          '00000000-0000-0000-0000-00000000000b', NULL, true, now())",
+          '00000000-0000-0000-0000-00000000000b', NULL, now())",
         "INSERT INTO files (id, movie_entry_id, library_id, file_path, file_size, hash_xxh3, \
                             scanned_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-000000000001', \
@@ -1081,6 +1081,151 @@ async fn the_nfo_sidecar_migration_constrains_what_it_adds_and_reverses() {
         .await
         .is_empty(),
         "down() drops the tables and every column it added"
+    );
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+        .await
+        .expect("the migration reapplies over the rolled-back schema");
+
+    scoped.drop_schema().await.expect("drop schema");
+}
+
+/// Issue #189's migration: every codec the indexer stored in one of its old
+/// spellings reads back as FFmpeg names it, subtitles gain their
+/// hearing-impaired flag, and the never-read `is_primary` columns go --
+/// coming back under `down()` as the indexer wrote them, so `up()` applies
+/// again.
+#[tokio::test]
+async fn the_tracks_migration_renames_codecs_and_reverses() {
+    use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
+
+    let scoped = ScopedSchema::create("tracks_subtitles")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+
+    let this_one = beam_migration::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20261008_000001_tracks_subtitles")
+        .expect("the migration is registered");
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(this_one as u32))
+        .await
+        .expect("every earlier migration applies");
+
+    let seed = [
+        "INSERT INTO libraries (id, name, root_path, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
+        "INSERT INTO movies (id, title, identity_key, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000b', 'Movie', 'movie|', now(), now())",
+        "INSERT INTO movie_entries (id, library_id, movie_id, edition, is_primary, created_at) \
+         VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', \
+                 '00000000-0000-0000-0000-00000000000b', NULL, true, now())",
+        "INSERT INTO files (id, movie_entry_id, library_id, file_path, file_size, hash_xxh3, \
+                            is_primary, scanned_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-000000000001', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/m.mkv', 1, 1, true, now(), now())",
+    ];
+    for sql in seed {
+        db.execute_unprepared(sql).await.expect("seed rows");
+    }
+    // Each spelling the indexer wrote before, beside the FFmpeg name it
+    // becomes: video and audio as FFmpeg's codec id `Debug` name, subtitles
+    // as the prober's display names.
+    let codecs = [
+        ("video", "H264", "h264"),
+        ("video", "HEVC", "hevc"),
+        ("video", "MPEG2VIDEO", "mpeg2video"),
+        ("audio", "EAC3", "eac3"),
+        ("audio", "TRUEHD", "truehd"),
+        ("audio", "PCM_S16LE", "pcm_s16le"),
+        // Two whose `Debug` name lower-cased is not FFmpeg's name.
+        ("video", "XM4", "4xm"),
+        ("audio", "ACELP_KELVIN", "acelp.kelvin"),
+        ("subtitle", "SubRip", "subrip"),
+        ("subtitle", "ASS/SSA", "ass"),
+        ("subtitle", "WebVTT", "webvtt"),
+        (
+            "subtitle",
+            "Other(\"hdmv_pgs_subtitle\")",
+            "hdmv_pgs_subtitle",
+        ),
+        ("subtitle", "Unknown", "none"),
+        ("subtitle", "subrip", "subrip"),
+    ];
+    for (index, (kind, stored, _)) in codecs.iter().enumerate() {
+        db.execute_unprepared(&format!(
+            "INSERT INTO media_streams (id, file_id, stream_index, stream_type, codec, \
+                                        is_default, is_forced) VALUES \
+             (gen_random_uuid(), '00000000-0000-0000-0000-0000000000f1', {index}, '{kind}', \
+              '{stored}', false, false)"
+        ))
+        .await
+        .expect("seed a stream");
+    }
+
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(1))
+        .await
+        .expect("the migration applies");
+
+    let text = |sql: &'static str| async move {
+        db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
+            .await
+            .expect("query")
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "v").expect("a text column v"))
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        text("SELECT codec AS v FROM media_streams ORDER BY stream_index").await,
+        codecs
+            .iter()
+            .map(|(_, _, renamed)| String::from(*renamed))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        text("SELECT DISTINCT is_hearing_impaired::text AS v FROM media_streams").await,
+        vec!["false"],
+        "an existing stream is not hearing-impaired until it is probed again"
+    );
+    let primary_columns = "SELECT (table_name || '.' || column_name)::text AS v \
+                             FROM information_schema.columns \
+                            WHERE table_schema = current_schema() \
+                              AND column_name = 'is_primary' \
+                            ORDER BY 1";
+    assert!(text(primary_columns).await.is_empty(), "is_primary is gone");
+
+    beam_migration::Migrator::down(db, Some(1))
+        .await
+        .expect("the migration rolls back");
+    assert_eq!(
+        text(primary_columns).await,
+        vec!["files.is_primary", "movie_entries.is_primary"]
+    );
+    assert_eq!(
+        text(
+            "SELECT is_primary::text AS v FROM files \
+             UNION ALL SELECT is_primary::text FROM movie_entries"
+        )
+        .await,
+        vec!["true", "true"],
+        "the rows read back as the indexer wrote them"
+    );
+    assert_eq!(
+        text(
+            "SELECT column_default::text AS v FROM information_schema.columns \
+              WHERE table_schema = current_schema() AND column_name = 'is_primary'"
+        )
+        .await,
+        vec!["false", "false"],
+        "under the default they had before"
+    );
+    assert!(
+        text(
+            "SELECT column_name::text AS v FROM information_schema.columns \
+              WHERE table_schema = current_schema() AND column_name = 'is_hearing_impaired'"
+        )
+        .await
+        .is_empty()
     );
     up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
         .await

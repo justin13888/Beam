@@ -29,8 +29,6 @@ pub struct Model {
     pub quality: Option<String>,
     pub release_group: Option<String>,
 
-    pub is_primary: bool,
-
     pub scanned_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
     pub file_status: FileStatus,

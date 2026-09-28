@@ -18,6 +18,9 @@ pub struct Model {
     pub title: Option<String>,
     pub is_default: bool,
     pub is_forced: bool,
+    /// Subtitles for the deaf and hard of hearing: the stream's SDH
+    /// disposition. Always `false` on a video or audio stream.
+    pub is_hearing_impaired: bool,
 
     // Video-specific
     pub width: Option<i32>,

@@ -143,14 +143,41 @@ server-internal type (`LocatedFile`) that cannot be serialized into a response.
 The indexer also *parses* files it did not write: the Kodi `.nfo` files beside the media (FR-219).
 Anyone who can drop a file into a library can hand Beam one, so an NFO is treated as hostile
 input. It is opened read-only, only when it is a regular file (a symbolic link is never followed:
-it is refused at the `lstat`, and on Unix the open itself carries `O_NOFOLLOW`, so a link swapped
-in between the two fails to open; it also carries `O_NONBLOCK`, so a FIFO swapped in opens at once
-and is refused as not a regular file instead of blocking the scan),
+it is refused at the `lstat`, and the open itself follows no link beneath the library root, so a
+link swapped in between the two -- for the NFO or for a folder above it -- fails to open; it also
+carries `O_NONBLOCK`, so a FIFO swapped in opens at once and is refused as not a regular file
+instead of blocking the scan),
 and at most 1 MiB of it is read; bytes that are not UTF-8 are refused rather than guessed at; a
 document type declaration is refused before parsing, so no entity is ever expanded (the billion
 laughs); and the XML parser (`roxmltree`, which resolves no external resources) is capped at
 10 000 nodes. A rejected NFO is logged and ignored: the file is classified by its path. Subtitle
 files are only stat-ed and their names read; their contents are never opened by the indexer.
+The walk never follows a link, and NFO reads and all file delivery open beneath the root with no
+link followed at any component. The indexer's hashing and probing of a video are the exception:
+they open the video's full stored path (`compute_hash`, `ffmpeg::format::input`), so a link swapped
+in at the file or at any folder above it, between the walk and that read, is followed for that read. Its
+hash and stream metadata are recorded, and delivery still refuses the file. This is a known gap,
+tracked in [#238](https://github.com/justin13888/Beam/issues/238).
+
+Delivery reads library files too, and a file can change between the scan that recorded it and the
+request that reads it. Every file the server serves — a video on `/stream` and `/download`, a
+subtitle file as stored or as WebVTT (FR-512) — is opened through the same helper as an NFO
+(`beam_index::library_file::open_regular_file`), which takes the library root and the path
+beneath it and follows no symbolic link anywhere below the root. On Linux the kernel resolves the
+path from the open root with `openat2(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH)`; on other Unix, and
+on a Linux kernel without `openat2`, it is walked from the root one `openat` at a time, each folder
+with `O_NOFOLLOW | O_DIRECTORY` and the file with `O_NOFOLLOW | O_NONBLOCK`. Only plain names are
+accepted beneath the root (no `..`, no absolute path), and the open is refused unless the handle
+`fstat`s as a regular file. The root itself is opened as configured: it is the administrator's
+choice of folder, and one that is itself a link is followed. So a file -- or any folder above it --
+replaced by a symbolic link to something outside the library (`/proc/self/environ`, a secrets
+file), or a file replaced by a FIFO or by a device such as `/dev/zero`, answers
+`#source-file-missing`, as a deleted file does, and is never read. Length,
+modification time and every byte served come from that one handle, never from a second lookup of
+the path. A subtitle is treated as hostile input as an NFO is: the WebVTT rendition reads at most
+8 MiB of it, checked against the handle's size and again against the bytes read, and converts it in
+time linear in its length whatever markup it holds, so a crafted file cannot hold a worker for
+longer than an honest file of the same size.
 
 ## Operational hardening
 

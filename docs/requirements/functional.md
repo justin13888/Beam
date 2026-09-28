@@ -139,8 +139,20 @@ strength. Each requirement is independently testable. See `product.md` for narra
   `library-path-overlaps-data-dir` (400), compared by whole components after canonicalization. At
   startup the server MUST refuse to start if `BEAM_DATA_DIR` overlaps a stored library root, and
   MUST log a warning, not refuse, for stored library roots that overlap each other. The
-  indexer and the watcher MUST NOT follow symbolic links beneath a library root; a link is not a
-  library file, so a row whose path has become one is treated as missing (FR-211).
+  indexer, the watcher and file delivery MUST NOT follow symbolic links beneath a library root,
+  except where the indexer hashes and probes a video, a known gap tracked in
+  [#238](https://github.com/justin13888/Beam/issues/238) and stated at the end of this
+  requirement; a link is not a library file, so a row whose path has become one is treated as
+  missing (FR-211). The walk never follows a link. Every read of a library file's contents that
+  Beam parses or serves -- an NFO read by the indexer, a video or a subtitle file delivered -- MUST
+  open it relative to its library root with no symbolic link followed at any component beneath
+  the root: neither the file nor any folder between it and the root. The root itself is opened as
+  configured, so a root that is itself a link is followed. Delivery serves only a regular file so opened, read from that one handle,
+  answering a link at any of those components, or a FIFO or device in the file's place, as
+  `source-file-missing`. The indexer's hashing and probing of a video open its full stored path, so
+  a link swapped in at the file or at any folder above it, between the walk and that read, is
+  followed for that read. Its hash and stream metadata are recorded, and delivery still refuses
+  the file. This is a known gap, tracked in [#238](https://github.com/justin13888/Beam/issues/238).
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
@@ -175,7 +187,7 @@ strength. Each requirement is independently testable. See `product.md` for narra
   or anything under a hidden folder; NAS and operating-system housekeeping folders (`@eaDir`,
   `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); DVD and Blu-ray disc
   structures (`VIDEO_TS`, `AUDIO_TS`, `BDMV`, `CERTIFICATE`, at any depth: playing one as its title
-  is #189's); extras folders below the top level of a library (`Extras`, `Featurettes`, `Behind The
+  is #234's); extras folders below the top level of a library (`Extras`, `Featurettes`, `Behind The
   Scenes`, `Deleted Scenes`, `Interviews`, `Sample(s)`, `Bonus`), and the extras folder names that
   can also name a category (`Scenes`, `Shorts`, `Trailers`, `Other`) only inside a title's folder --
   one naming a title and year, a season folder, or any folder below the top level of a library;
@@ -268,8 +280,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   A walk that could not read where an NFO lives, or a removal reported while the library root is
   gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a
-  symbolic link, FR-212 -- on Unix with `O_NOFOLLOW`, and `O_NONBLOCK` so a FIFO cannot stall
-  the read) and at most 1 MiB of it; an NFO larger than that, not
+  symbolic link at any component beneath the library root, FR-212 -- and on Unix with
+  `O_NONBLOCK`, so a FIFO cannot stall the read) and at most 1 MiB of it; an NFO larger than
+  that, not
   UTF-8, declaring a document type, or over 10 000 XML nodes MUST be ignored and the file
   classified by its path. Reading these MUST NOT write anything under a library root (FR-202).
 - **FR-220**: A text subtitle file (`.srt`, `.vtt`, `.ass`, `.ssa`) beside an indexed video, named
@@ -283,8 +296,7 @@ strength. Each requirement is independently testable. See `product.md` for narra
   subtitles beside its new path, and no longer those beside its old one: the scan judges subtitles
   and NFOs after its relinks, and the watcher reconciles a relinked video's subtitle rows, and the
   subtitles and NFOs beneath a directory it reconciles. An NFO's record stays keyed by the NFO's own
-  path (FR-219). Image-based subtitles are not indexed. Serving sidecar
-  subtitles is [#189](https://github.com/justin13888/beam/issues/189)'s scope.
+  path (FR-219). Image-based subtitles are not indexed. Serving them is FR-512.
 - **FR-221**: A file's `files` row MUST follow the file's content within its library. A path whose
   content hash (non-zero) and size match a row of the same library whose own content has left its
   path -- the path is gone, the row is marked missing (FR-211) and its path not walked, or the path
@@ -435,10 +447,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   cookie established per FR-103. The server MUST NOT accept a bearer or stream token supplied via URL
   query string.
 - **FR-505**: For a title with multiple indexed file versions, the server MUST expose an endpoint
-  (`/media/{id}/sources`) enumerating the available versions — including real probed per-stream
-  codec information, resolution, container, and size — so the client can present a source-quality
-  picker. The endpoint accepts a movie id or an episode id; a show id is rejected, since shows have
-  no files of their own.
+  (`/media/{id}/sources`) enumerating the available versions — container, size, edition, and each
+  version's video, audio and subtitle tracks, every track tied to its file by its stream index and
+  naming its real codec as FFmpeg does, with language, title and default/forced flags — so the
+  client can present a source-quality picker and choose tracks. A value the file does not state
+  MUST be absent, never a substituted default. A file holding a run of episodes MUST say so. The
+  endpoint accepts a movie id or an episode id; a show id is rejected, since shows have no files of
+  their own.
 - **FR-506**: Switching between file versions during the source-selection scenario MUST result in
   direct-play of the newly selected file; the server MUST NOT perform any transcoding or format
   conversion to service the switch.
@@ -459,6 +474,22 @@ strength. Each requirement is independently testable. See `product.md` for narra
   names (client kind, container, codecs, resolution class, bitrate class), discarding the file and
   the reporting user (NFR-503). A file it cannot resolve MUST be dropped, not refused. When
   telemetry is disabled the endpoint MUST refuse with a distinct 409 so clients stop reporting.
+- **FR-512**: The subtitle files indexed beside a video (FR-220) MUST be listed among its source's
+  subtitle tracks, and the server MUST serve each read-only: as stored, Range-capable, with its
+  format's content type; and, for SubRip and WebVTT files up to 8 MiB, as WebVTT, SubRip converted
+  and WebVTT normalised to UTF-8. Rewriting a text subtitle is not transcoding (FR-501,
+  [ADR-0020](../architecture/decisions/ADR-0020-text-subtitle-delivery.md)). A subtitle stream
+  inside the video MUST NOT be extracted; it is listed with its stream index and no URL. A subtitle
+  of a video that is missing from disk MUST NOT be served. A subtitle file is hostile input: the
+  server MUST open it beneath its library root never through a symbolic link, at the file or at
+  any folder above it, and only as a regular file (FR-212), serving a link there, or a FIFO or
+  device in its place, as missing; MUST serve length and bytes from that one open
+  handle; MUST read no more than 8 MiB of it for conversion, whatever its size claims; and MUST
+  convert it in time linear in its length, whatever markup it holds.
+- **FR-513**: Of a title's file versions, exactly one MUST be marked primary and listed first: the
+  default edition before a named one, then the tallest picture, the highest video bit rate, the
+  largest file, and the lowest file id. The choice MUST be computed from the files when read, and
+  the detail endpoint's `file_id` and duration MUST be the primary's.
 
 ## FR-6xx — Administration
 

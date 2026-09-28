@@ -210,7 +210,9 @@ everyone out of the server.
 
 ### source-file-missing
 
-**404.** The file *is* in the catalogue. The path it names is not on disk.
+**404.** The file *is* in the catalogue. The path it names is not on disk -- or is no longer a
+regular file: a symbolic link, a FIFO or a device in its place -- or a symbolic link in place of any
+folder between it and the library root -- is never followed or read.
 
 **What to do.** This one is an operator's problem, not a viewer's, and no amount of retrying will
 change it: Beam's catalogue and your storage have diverged. A bind mount is missing, the library
@@ -219,6 +221,26 @@ moved, or the file was deleted outside Beam. Check the mount first, then rescan 
 It is deliberately distinct from [`file-not-found`](#file-not-found), which means the catalogue
 never had the file. A client that shows both as "not found" tells the viewer to go looking for
 something they cannot fix.
+
+The subtitle routes answer it too, when the subtitle file beside a video is in the catalogue and
+no longer on disk.
+
+### subtitle-not-found
+
+**404.** The video file exists, and has no subtitle with that id. A subtitle id is only valid
+beside the file whose `subtitle_tracks` listed it: another file's subtitle is not found here.
+
+**What to do.** Fetch the title's sources again and use the `url` or `webvtt_url` a track
+carries. A rescan that finds a subtitle renamed or removed retires its id.
+
+### subtitle-rendition-unavailable
+
+**404.** The subtitle exists, but Beam does not serve it as WebVTT: it is ASS or SSA, whose
+styling and positioning WebVTT cannot carry, or it is larger than 8 MiB.
+
+**What to do.** Fetch the track's `url` instead, which serves the file as stored. A track that
+has a WebVTT rendition says so with a `webvtt_url`; a client that only requests one when it is
+present never sees this code.
 
 ### artwork-not-found
 

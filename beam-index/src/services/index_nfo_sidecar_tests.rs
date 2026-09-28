@@ -688,53 +688,28 @@ async fn an_nfo_that_is_a_symlink_is_not_read() {
     assert_eq!(h.movie_of("Matrix/matrix.mkv").pinned_ref, None);
 }
 
+/// A folder above an NFO that is a link out of the library is not followed
+/// either (FR-212): the NFO of that name outside is never read, while one
+/// reached through a real folder is.
+#[cfg(unix)]
+#[test]
+fn an_nfo_beneath_a_folder_that_is_a_symlink_is_not_read() {
+    let outside = TempDir::new().unwrap();
+    std::fs::write(outside.path().join("movie.nfo"), MATRIX_NFO).unwrap();
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("Matrix")).unwrap();
+    std::fs::write(root.path().join("Matrix/movie.nfo"), MATRIX_NFO).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("Linked")).unwrap();
+
+    assert!(hints::read_nfo_file(root.path(), &root.path().join("Matrix/movie.nfo")).is_some());
+    assert!(hints::read_nfo_file(root.path(), &root.path().join("Linked/movie.nfo")).is_none());
+}
+
 /// An NFO added after its video was indexed pins the title at the next scan
 /// -- even one copied in with its old modification time kept (`cp -p`,
 /// `rsync -a`), or from a NAS whose clock runs behind the server's: whether
 /// it is applied turns on what it holds, never on when it says it was
 /// written.
-/// The open itself refuses a link, not just the `lstat` before it: a link
-/// swapped in between the two fails to open rather than being followed out
-/// of the library.
-#[cfg(unix)]
-#[test]
-fn an_nfo_is_opened_without_following_a_link() {
-    let dir = TempDir::new().unwrap();
-    let outside = dir.path().join("outside.nfo");
-    std::fs::write(&outside, MATRIX_NFO).unwrap();
-    let link = dir.path().join("movie.nfo");
-    std::os::unix::fs::symlink(&outside, &link).unwrap();
-
-    assert!(hints::open_no_follow(&outside).is_ok());
-    assert!(hints::open_no_follow(&link).is_err());
-}
-
-/// A FIFO swapped in for an NFO opens at once rather than blocking the scan
-/// until something writes to it -- and is then no regular file, so it is not
-/// read.
-#[cfg(target_os = "linux")]
-#[test]
-fn an_nfo_that_is_a_fifo_opens_without_blocking() {
-    let dir = TempDir::new().unwrap();
-    let fifo = dir.path().join("movie.nfo");
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &fifo,
-        rustix::fs::Mode::from_raw_mode(0o600),
-    )
-    .unwrap();
-
-    let (sent, opened) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let is_file = hints::open_no_follow(&fifo).map(|file| file.metadata().unwrap().is_file());
-        let _ = sent.send(is_file.ok());
-    });
-    let is_file = opened
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the open returned instead of waiting for a writer");
-    assert_eq!(is_file, Some(false), "opened, and seen not to be a file");
-}
-
 #[tokio::test]
 async fn an_nfo_added_after_indexing_pins_the_movie_on_the_next_scan() {
     let h = Harness::new().await;

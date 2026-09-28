@@ -264,7 +264,6 @@ potentially backed by its own file(s).
 | `library_id` | UUID | no | FK → `libraries.id`, cascade |
 | `movie_id` | UUID | no | FK → `movies.id`, cascade |
 | `edition` | TEXT | yes | e.g. `"Director's Cut"`; NULL for the default edition |
-| `is_primary` | BOOLEAN | no | default `false` |
 | `created_at` | TIMESTAMPTZ | no | |
 
 Unique index `idx_movie_entries_unique` on `(library_id, movie_id, edition)` `NULLS NOT DISTINCT` —
@@ -313,7 +312,6 @@ quality/edition/language rip.
 | `language` | TEXT | yes | primary audio/release language tag |
 | `quality` | TEXT | yes | e.g. `"1080p"` — the human label the client's source picker displays |
 | `release_group` | TEXT | yes | |
-| `is_primary` | BOOLEAN | no | default `false`, but the indexer writes `true` for every file it creates (`SqlFileRepository::create`), and nothing reads it. It does **not** select which of a movie's or episode's files plays by default: `/v1/media/{id}/sources` returns them in no particular order ([#142](https://github.com/justin13888/beam/issues/142)) |
 | `scanned_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 | `file_status` | ENUM (`file_status`) | no | `known` \| `changed` \| `unknown`; default `known` |
@@ -392,11 +390,12 @@ One row per elementary stream (video/audio/subtitle track) within a `files` row,
 | `file_id` | UUID | no | FK → `files.id`, cascade |
 | `stream_index` | INTEGER | no | container stream index |
 | `stream_type` | ENUM (`stream_type`) | no | `video` \| `audio` \| `subtitle` |
-| `codec` | TEXT | no | plain probed codec name (e.g. `"h264"`, `"hevc"`, `"aac"`) — never an FFI type; see [ADR-0004](decisions/ADR-0004-never-transcode.md) |
+| `codec` | TEXT | no | FFmpeg's own codec name, lower case (`"h264"`, `"hevc"`, `"eac3"`, `"truehd"`, `"subrip"`, `"hdmv_pgs_subtitle"`) — never an FFI type; see [ADR-0004](decisions/ADR-0004-never-transcode.md). Rows written before migration `m20261008_000001_tracks_subtitles` held FFmpeg's codec id `Debug` name (`H264`) or the prober's display name (`SubRip`); the migration renamed them ([#189](https://github.com/justin13888/beam/issues/189)) |
 | `language` | TEXT | yes | |
 | `title` | TEXT | yes | |
 | `is_default` | BOOLEAN | no | default `false` |
 | `is_forced` | BOOLEAN | no | default `false` |
+| `is_hearing_impaired` | BOOLEAN | no | default `false`; the SDH/CC disposition, subtitle only. `false` on a row written before [#189](https://github.com/justin13888/beam/issues/189) until its file is probed again |
 | `width` / `height` | INTEGER | yes | video only |
 | `frame_rate` | DOUBLE PRECISION | yes | video only |
 | `bit_rate` | BIGINT | yes | |
@@ -412,8 +411,12 @@ A text subtitle file beside an indexed video, recorded as a subtitle of that vid
 table of its own rather than `media_streams` rows (decision D184-1 on PR #225): `stream_index` is
 the container's own index, unique per file and replaced wholesale when a changed file is re-probed,
 and every current reader of `media_streams` describes what is inside the container. Written by the
-scan and the watcher from what a subtitle's filename says; the file itself is only ever stat-ed.
-Not yet read by any endpoint — serving sidecar subtitles is issue #189's.
+scan and the watcher from what a subtitle's filename says; the file itself is only ever stat-ed by
+the indexer. `GET /v1/media/{id}/sources` lists each row as a subtitle track of its video, and the
+subtitle routes read the file to serve it, as stored or as WebVTT
+([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)); a row whose video is missing is not
+served. Its `format` maps to the FFmpeg codec name `media_streams.codec` uses: `srt` → `subrip`,
+`vtt` → `webvtt`, `ass` → `ass`, `ssa` → `ssa`.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -568,6 +571,12 @@ Indexes: `created_at DESC` (recent-first admin log view), `level`.
   never races itself to the insert.
 - **One entry per `(library_id, movie_id, edition)`:** editions are a per-library, per-movie
   namespace.
+- **The primary source is ranked, not stored:** which of a movie's or an episode's files plays by
+  default is decided when read (`beam_domain::utils::source_rank`) -- the default edition, then the
+  tallest picture, the highest video bit rate, the largest file, the lowest file id -- so no row can
+  hold a stale choice. `files.is_primary` and `movie_entries.is_primary`, which the indexer wrote
+  `true` to every row of and nothing read, were dropped for it
+  ([#189](https://github.com/justin13888/beam/issues/189)).
 - **One title per pin:** `movies.pinned_ref` and `shows.pinned_ref` are unique, so a provider id an
   NFO names pins at most one movie and one show.
 - **One sidecar subtitle per path:** `sidecar_subtitles.path` is unique.

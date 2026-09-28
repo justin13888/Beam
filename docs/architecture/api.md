@@ -27,12 +27,14 @@ role.
 | `/v1/health` | GET | Deep health check (public): probes the database and returns `200` `{status:"healthy"}` or `503` `{status:"degraded"}` with per-dependency `checks` and process `uptime_secs` |
 | `/v1/media` | GET | Browse/search catalog (cursor pagination, filters, sort) |
 | `/v1/media/{id}` | GET | Full metadata for one movie or show |
-| `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, with probed per-stream codecs |
+| `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, primary first, each with its video, audio and subtitle tracks |
 | `/v1/genres` | GET | Every genre in the catalog, for filter chips |
 | `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`; `variant` is `poster`/`backdrop`/`thumbnail` |
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing and contents (file paths are relative to the library root, NFR-108) |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
+| `/v1/files/{fileId}/subtitles/{subtitleId}` | GET | A subtitle file beside the video, as stored, Range-capable; `404` `subtitle-not-found` for an id this file's sources do not list ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)) |
+| `/v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | GET | The same SubRip or WebVTT file as WebVTT, for a browser's `<track>`; `404` `subtitle-rendition-unavailable` for ASS, SSA or a file over 8 MiB |
 | `/v1/files/{fileId}/progress` | PUT | Report playback position |
 | `/v1/continue-watching` | GET | Resume list for the current user |
 | `/v1/history` | GET | Watch history for the current user (limit/offset paged) |
@@ -67,12 +69,27 @@ and `GET /api-doc/openapi.json` (the document). They are described operations ra
 handlers: Kynos routes and describes from one declaration, so the alternative to describing them
 would be waiving the whole document's authority.
 
-`GET /v1/media/{id}/sources` reports the real probed codec of each stream, mapped to API-visible
-values (`hevc`/`h264`/`av1` → `H265`/`H264`/`AV1`; `aac`/`opus`; anything unrecognized is
-`UNKNOWN`). It accepts a movie id or an episode id; a show id is rejected with 400, since shows
-have no files of their own. Episode sources landed in
-[#102](https://github.com/justin13888/beam/pull/102), closing
+`GET /v1/media/{id}/sources` is the one place tracks are described
+([#189](https://github.com/justin13888/beam/issues/189)). It answers a `MediaSourceConnection`
+-- `items` and a `page_info`, the connection shape `GET /v1/media` has, but never paged: `items` is
+every source and neither `has_*_page` flag is ever `true` -- listing a title's sources primary first:
+the default edition, then the tallest picture, the highest video bit rate, the largest file, the
+lowest file id -- ranked when read, not stored. Each source carries `is_primary`, its `edition`, an
+`episode_span` when the file holds a run of episodes (its duration is then the run's), and its
+`video_tracks`, `audio_tracks` and `subtitle_tracks`. Every track has its stream `index` and
+FFmpeg's own `codec` name (`h264`, `hevc`, `eac3`, `truehd`, `subrip`, `hdmv_pgs_subtitle`); a value
+the file does not state -- a frame rate, a bit rate, a sample rate -- is absent rather than a
+default. Subtitle tracks are the file's own, by index, then the subtitle files beside it
+(`origin: sidecar`, a `sidecar_id`, a `url`, and a `webvtt_url` for a SubRip or WebVTT file of at
+most 8 MiB); `is_text` says whether a client can render a track itself. An embedded track has no
+URL: Beam never extracts one ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)). It accepts
+a movie id or an episode id; a show id is rejected with 400, since shows have no files of their
+own. Episode sources landed in [#102](https://github.com/justin13888/beam/pull/102), closing
 [#68](https://github.com/justin13888/beam/issues/68).
+
+`GET /v1/media/{id}` no longer carries tracks: a movie has `file_id` and `duration` from its
+primary source and a `source_count` (absent from browse, which reads no files), and each episode
+the same, its `duration` absent when its primary file spans several episodes.
 
 `GET /v1/artwork/{kind}/{id}/{variant}` is what `poster_url`, `backdrop_url` and `thumbnail_url`
 point at: those fields carry this path, never a provider URL, so a viewer's client never contacts

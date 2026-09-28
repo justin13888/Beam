@@ -771,6 +771,68 @@ pub enum DeliveryError {
     Internal(String),
 }
 
+/// What `/v1/files/{file_id}/subtitles/{subtitle_id}` and its `/webvtt`
+/// rendition can fail with (issue #189).
+///
+/// No 400 for a malformed id: both path parameters are typed `Uuid`, so the
+/// `Path` extractor answers that before the handler runs. The 416 of an
+/// unsatisfiable range is declared on
+/// [`RuntimeDelivery`](crate::routes::delivery::RuntimeDelivery), as for file
+/// delivery.
+///
+/// The three 404s share one declared response. `file-not-found` and
+/// `source-file-missing` mean what they mean for the video itself;
+/// `subtitle-not-found` is its own code because the video exists and the
+/// fault is in the subtitle id; `subtitle-rendition-unavailable` because the
+/// subtitle exists and a client should fetch it as stored instead.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum SubtitleDeliveryError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#file-not-found",
+        title = "File not found"
+    )]
+    FileNotFound(String),
+
+    /// The video file has no subtitle with this id -- including a subtitle
+    /// that belongs to another file.
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#subtitle-not-found",
+        title = "Subtitle not found"
+    )]
+    SubtitleNotFound(String),
+
+    /// The catalogue has the subtitle; the path it names is not on disk.
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#source-file-missing",
+        title = "Source file missing from disk"
+    )]
+    SourceFileMissing(String),
+
+    /// The subtitle is not offered as WebVTT: an ASS or SSA file, whose
+    /// styling WebVTT cannot carry, or one too large to convert.
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#subtitle-rendition-unavailable",
+        title = "Subtitle rendition unavailable"
+    )]
+    RenditionUnavailable(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// What `/v1/artwork/{kind}/{id}/{variant}` can fail with.
 ///
 /// Separate from [`DeliveryError`] even though both deliver bytes through

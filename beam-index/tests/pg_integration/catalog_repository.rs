@@ -158,7 +158,6 @@ impl PgFixture {
                     library_id,
                     movie_id: movie.id,
                     edition: None,
-                    is_primary: true,
                 })
                 .await
                 .unwrap();
@@ -246,8 +245,8 @@ mod plans {
                    FROM generate_series(1, {MOVIES}) g"
             ),
             format!(
-                "INSERT INTO movie_entries (id, library_id, movie_id, is_primary, created_at) \
-                 SELECT gen_random_uuid(), '{library}', id, true, now() FROM movies"
+                "INSERT INTO movie_entries (id, library_id, movie_id, created_at) \
+                 SELECT gen_random_uuid(), '{library}', id, now() FROM movies"
             ),
             "INSERT INTO files (id, movie_entry_id, library_id, file_path, file_size, hash_xxh3, \
                                 scanned_at, updated_at, missing_since) \

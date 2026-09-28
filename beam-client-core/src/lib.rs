@@ -104,7 +104,6 @@ mod tests {
                 "genres": [],
                 "ratings": {},
                 "identifiers": {},
-                "streams": [],
             }
         });
         let show = serde_json::json!({

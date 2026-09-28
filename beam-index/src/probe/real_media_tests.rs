@@ -270,7 +270,7 @@ fn committed_h264_aac_mp4() {
     // Exercise the raw ffmpeg codec-name string path on at least one fixture.
     let idx = meta.best_video_stream.unwrap();
     if let StreamMetadata::Video(v) = &meta.streams[idx] {
-        assert_eq!(v.video.codec_name, "H264");
+        assert_eq!(v.video.codec_name, "h264");
     }
 }
 
@@ -286,10 +286,10 @@ fn committed_h264_mkv() {
 fn committed_hevc_mp4() {
     let meta = probe_committed("hevc.mp4");
     assert_video_fixture(&meta, CodecId::H265);
-    // The raw ffmpeg codec-name string reads "HEVC" (Debug of Id::HEVC).
+    // The recorded codec name is FFmpeg's own, "hevc" (issue #189).
     let idx = meta.best_video_stream.unwrap();
     if let StreamMetadata::Video(v) = &meta.streams[idx] {
-        assert_eq!(v.video.codec_name, "HEVC");
+        assert_eq!(v.video.codec_name, "hevc");
     }
 }
 

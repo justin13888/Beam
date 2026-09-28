@@ -1,3 +1,4 @@
+pub mod library_file;
 pub mod probe;
 pub mod providers;
 pub mod repositories;

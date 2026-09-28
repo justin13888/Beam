@@ -1095,7 +1095,6 @@ mod tests {
         "id":"11111111-1111-4111-8111-111111111111",
         "title":{"original":"Le Samourai","localized":"The Samurai"},
         "genres":["Crime","Drama"],
-        "streams":[],
         "year":1967,
         "runtime":105,
         "duration":6300.0,
@@ -1117,12 +1116,12 @@ mod tests {
         "episode_count":3,
         "seasons":[
             {"id":"5e500001-0000-4000-8000-000000000001","season_number":1,"dates":{},"genres":[],"episodes":[
-                {"id":"e0000001-0000-4000-8000-000000000001","episode_number":1,"title":"Pilot","streams":[],"file_id":"f1f1f1f1-0000-4000-8000-000000000001"},
-                {"id":"e0000002-0000-4000-8000-000000000002","episode_number":2,"title":"Second","streams":[]}
+                {"id":"e0000001-0000-4000-8000-000000000001","episode_number":1,"title":"Pilot","source_count":1,"file_id":"f1f1f1f1-0000-4000-8000-000000000001"},
+                {"id":"e0000002-0000-4000-8000-000000000002","episode_number":2,"title":"Second","source_count":0}
             ]},
             {"id":"5e500002-0000-4000-8000-000000000002","season_number":2,"dates":{},"genres":[],"episode_runtime":52,
              "poster_url":"/artwork/s1/2.jpg","episodes":[
-                {"id":"e0000003-0000-4000-8000-000000000003","episode_number":1,"title":"Return","streams":[],"file_id":"f3f3f3f3-0000-4000-8000-000000000003",
+                {"id":"e0000003-0000-4000-8000-000000000003","episode_number":1,"title":"Return","source_count":1,"file_id":"f3f3f3f3-0000-4000-8000-000000000003",
                  "thumbnail_url":"/artwork/e3.jpg","duration":3120.0,"air_date":"2016-01-01"}
             ]}
         ]

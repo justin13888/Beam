@@ -225,7 +225,6 @@ impl FileRepository for SqlFileRepository {
             language: Set(None),
             quality: Set(None),
             release_group: Set(None),
-            is_primary: Set(true),
             movie_entry_id: Set(movie_entry_id),
             episode_id: Set(episode_id),
             scanned_at: Set(now.into()),

@@ -1,7 +1,25 @@
-/// Tests for DbMetadataService using in-memory repository fakes.
-///
-/// These tests exercise the full metadata service vertical slice without any
-/// external infrastructure. All repositories are stateful in-memory fakes.
+//! Tests for DbMetadataService using in-memory repository fakes.
+//!
+//! These tests exercise the full metadata service vertical slice without any
+//! external infrastructure. All repositories are stateful in-memory fakes.
+
+/// Sources over empty stores, for a service whose test reads none.
+#[cfg(test)]
+fn empty_sources() -> std::sync::Arc<crate::services::sources::SourceCatalog> {
+    use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+    use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
+    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+    use std::sync::Arc;
+
+    Arc::new(crate::services::sources::SourceCatalog::new(
+        Arc::new(InMemoryMovieRepository::default()),
+        Arc::new(InMemoryFileRepository::default()),
+        Arc::new(InMemoryMediaStreamRepository::default()),
+        Arc::new(InMemorySidecarSubtitleRepository::default()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -20,7 +38,10 @@ mod tests {
     use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+    use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
     use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+
+    use crate::services::sources::SourceCatalog;
 
     // ---------------------------------------------------------------------------
     // Helper builders
@@ -92,16 +113,26 @@ mod tests {
         streams: Arc<InMemoryMediaStreamRepository>,
         genres: Arc<InMemoryGenreRepository>,
     ) -> DbMetadataService {
+        service_with_sidecars(movies, shows, files, streams, Arc::default(), genres)
+    }
+
+    fn service_with_sidecars(
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
+        files: Arc<InMemoryFileRepository>,
+        streams: Arc<InMemoryMediaStreamRepository>,
+        sidecars: Arc<InMemorySidecarSubtitleRepository>,
+        genres: Arc<InMemoryGenreRepository>,
+    ) -> DbMetadataService {
         DbMetadataService::new(MetadataRepositories {
             catalog: Arc::new(InMemoryCatalogRepository::new(
                 movies.clone(),
                 shows.clone(),
                 genres.clone(),
             )),
+            sources: Arc::new(SourceCatalog::new(movies.clone(), files, streams, sidecars)),
             movies,
             shows,
-            files,
-            streams,
             genres,
         })
     }
@@ -145,7 +176,6 @@ mod tests {
             library_id,
             movie_id,
             edition: None,
-            is_primary: true,
             created_at: chrono::Utc::now(),
         };
         let entry_id = entry.id;
@@ -355,7 +385,6 @@ mod tests {
             library_id,
             movie_id,
             edition: None,
-            is_primary: true,
             created_at: chrono::Utc::now(),
         };
         let entry_id = entry.id;
@@ -382,7 +411,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].file_id, file_id.to_string());
+        assert_eq!(sources[0].file_id, file_id);
+        assert!(sources[0].is_primary);
         assert_eq!(sources[0].stream_url, format!("/v1/files/{file_id}/stream"));
         assert_eq!(
             sources[0].download_url,
@@ -409,7 +439,6 @@ mod tests {
             library_id,
             movie_id,
             edition: None,
-            is_primary: true,
             created_at: chrono::Utc::now(),
         };
         let content = MediaFileContent::Movie {
@@ -439,8 +468,8 @@ mod tests {
             .get_media_sources(&movie_id.to_string())
             .await
             .unwrap();
-        let ids: Vec<String> = sources.iter().map(|s| s.file_id.clone()).collect();
-        assert_eq!(ids, vec![present_id.to_string()]);
+        let ids: Vec<Uuid> = sources.iter().map(|s| s.file_id).collect();
+        assert_eq!(ids, vec![present_id]);
     }
 
     /// Seeds a show/season/episode and returns the episode id, so the sources
@@ -518,20 +547,19 @@ mod tests {
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let mut sources = service
+        let sources = service
             .get_media_sources(&episode_id.to_string())
             .await
             .unwrap();
         assert_eq!(sources.len(), 2);
 
-        // Order is not guaranteed by the in-memory HashMap; sort by file id so
-        // the mapping assertions are deterministic.
-        sources.sort_by(|a, b| a.file_id.cmp(&b.file_id));
+        // Two files alike in every other way are ranked by id, whatever
+        // order the store returned them in.
         let mut expected = [file_a_id, file_b_id];
         expected.sort();
 
         for (source, id) in sources.iter().zip(expected.iter()) {
-            assert_eq!(source.file_id, id.to_string());
+            assert_eq!(source.file_id, *id);
             assert_eq!(source.stream_url, format!("/v1/files/{id}/stream"));
             assert_eq!(source.download_url, format!("/v1/files/{id}/download"));
         }
@@ -557,62 +585,519 @@ mod tests {
         assert!(sources.is_empty());
     }
 
-    #[test]
-    fn test_stream_metadata_builder_reports_probed_codecs() {
-        use crate::models::{OutputAudioCodec, OutputVideoCodec};
-        use crate::services::metadata::build_media_stream_metadata_from_domain_streams;
-        use beam_domain::models::stream::{
-            AudioStreamMetadata, MediaStream, StreamMetadata, StreamType, VideoStreamMetadata,
-        };
+    // ---------------------------------------------------------------------------
+    // Sources: one track model, ranked (issue #189)
+    // ---------------------------------------------------------------------------
 
-        let file_id = Uuid::new_v4();
-        let video_stream = |codec: &str| MediaStream {
-            id: Uuid::new_v4(),
+    /// A video stream `height` lines tall at `bit_rate`, as the indexer
+    /// records one.
+    fn video_stream(
+        file_id: Uuid,
+        index: u32,
+        codec: &str,
+        height: u32,
+        bit_rate: Option<u64>,
+        frame_rate: Option<f64>,
+    ) -> beam_domain::models::CreateMediaStream {
+        use beam_domain::models::stream::{StreamMetadata, StreamType, VideoStreamMetadata};
+        beam_domain::models::CreateMediaStream {
             file_id,
-            index: 0,
+            index,
             stream_type: StreamType::Video,
             codec: codec.to_string(),
             metadata: StreamMetadata::Video(VideoStreamMetadata {
-                width: 1920,
-                height: 1080,
-                frame_rate: Some(23.976),
-                bit_rate: Some(8_000_000),
+                width: height * 16 / 9,
+                height,
+                frame_rate,
+                bit_rate,
                 color_space: None,
                 color_range: None,
                 hdr_format: None,
             }),
-        };
-        let audio_stream = |codec: &str| MediaStream {
-            id: Uuid::new_v4(),
+        }
+    }
+
+    fn audio_stream(
+        file_id: Uuid,
+        index: u32,
+        codec: &str,
+        sample_rate: u32,
+        is_default: bool,
+    ) -> beam_domain::models::CreateMediaStream {
+        use beam_domain::models::stream::{AudioStreamMetadata, StreamMetadata, StreamType};
+        beam_domain::models::CreateMediaStream {
             file_id,
-            index: 1,
+            index,
             stream_type: StreamType::Audio,
             codec: codec.to_string(),
             metadata: StreamMetadata::Audio(AudioStreamMetadata {
                 language: Some("eng".to_string()),
                 title: None,
-                channels: 6,
-                sample_rate: 48_000,
-                channel_layout: Some("5.1".to_string()),
-                bit_rate: Some(640_000),
-                is_default: true,
+                channels: 8,
+                sample_rate,
+                channel_layout: Some("7.1".to_string()),
+                bit_rate: None,
+                is_default,
                 is_forced: false,
             }),
+        }
+    }
+
+    fn subtitle_stream(
+        file_id: Uuid,
+        index: u32,
+        codec: &str,
+        is_hearing_impaired: bool,
+    ) -> beam_domain::models::CreateMediaStream {
+        use beam_domain::models::stream::{StreamMetadata, StreamType, SubtitleStreamMetadata};
+        beam_domain::models::CreateMediaStream {
+            file_id,
+            index,
+            stream_type: StreamType::Subtitle,
+            codec: codec.to_string(),
+            metadata: StreamMetadata::Subtitle(SubtitleStreamMetadata {
+                language: Some("eng".to_string()),
+                title: None,
+                is_default: false,
+                is_forced: false,
+                is_hearing_impaired,
+            }),
+        }
+    }
+
+    /// A movie entry of `edition` for `movie_id`.
+    fn entry(movie_repo: &InMemoryMovieRepository, movie_id: Uuid, edition: Option<&str>) -> Uuid {
+        let entry = MovieEntry {
+            id: Uuid::new_v4(),
+            library_id: Uuid::new_v4(),
+            movie_id,
+            edition: edition.map(str::to_string),
+            created_at: chrono::Utc::now(),
         };
+        let id = entry.id;
+        movie_repo.entries.lock().unwrap().insert(entry.id, entry);
+        id
+    }
 
-        let metadata = build_media_stream_metadata_from_domain_streams(&[
-            video_stream("hevc"),
-            video_stream("mpeg2video"),
-            audio_stream("opus"),
-            audio_stream("ac3"),
-        ]);
+    /// A file of `content` of `size_bytes` lasting `duration_secs`.
+    fn file_of(
+        file_repo: &InMemoryFileRepository,
+        content: MediaFileContent,
+        size_bytes: u64,
+        duration_secs: u64,
+    ) -> Uuid {
+        let mut file = make_media_file(Uuid::new_v4(), content);
+        file.size_bytes = size_bytes;
+        file.duration = Some(Duration::from_secs(duration_secs));
+        let id = file.id;
+        file_repo.files.lock().unwrap().insert(file.id, file);
+        id
+    }
 
-        assert_eq!(metadata.video_tracks.len(), 2);
-        assert_eq!(metadata.video_tracks[0].codec, OutputVideoCodec::H265);
-        assert_eq!(metadata.video_tracks[1].codec, OutputVideoCodec::UNKNOWN);
-        assert_eq!(metadata.audio_tracks.len(), 2);
-        assert_eq!(metadata.audio_tracks[0].codec, OutputAudioCodec::Opus);
-        assert_eq!(metadata.audio_tracks[1].codec, OutputAudioCodec::Unknown);
+    /// The primary is chosen from what the files are, not the order they
+    /// were found: the default edition over a named one however good, then
+    /// the taller picture over a larger file. The detail route's `file_id`
+    /// and duration are the primary's, and `/sources` lists it first.
+    #[tokio::test]
+    async fn the_tallest_default_edition_file_is_primary_and_listed_first() {
+        use crate::models::MediaMetadata;
+        use beam_domain::repositories::MediaStreamRepository;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let movie = make_movie("Heat", Some(1995));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let directors_cut = entry(&movie_repo, movie_id, Some("Director's Cut"));
+        let content = |movie_entry_id| MediaFileContent::Movie { movie_entry_id };
+        // The 720p file is the largest; the Director's Cut is the tallest
+        // and the highest bit rate.
+        let hd = file_of(&file_repo, content(theatrical), 9_000, 100);
+        let uhd = file_of(&file_repo, content(theatrical), 5_000, 200);
+        let cut = file_of(&file_repo, content(directors_cut), 9_999, 300);
+        stream_repo
+            .insert_streams(vec![
+                video_stream(hd, 0, "h264", 720, Some(4_000_000), Some(23.976)),
+                video_stream(uhd, 0, "hevc", 2160, Some(20_000_000), Some(23.976)),
+                video_stream(cut, 0, "hevc", 2160, Some(60_000_000), Some(23.976)),
+            ])
+            .await
+            .unwrap();
+
+        let service = service(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            stream_repo,
+        );
+
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        let order: Vec<(Uuid, bool, Option<&str>)> = sources
+            .iter()
+            .map(|s| (s.file_id, s.is_primary, s.edition.as_deref()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (uhd, true, None),
+                (hd, false, None),
+                (cut, false, Some("Director's Cut")),
+            ]
+        );
+
+        let Some(MediaMetadata::Movie(detail)) =
+            service.get_media_metadata(movie_id).await.unwrap()
+        else {
+            panic!("the movie resolves");
+        };
+        assert_eq!(detail.file_id, Some(uhd));
+        assert_eq!(detail.duration, Some(200.0));
+        assert_eq!(detail.source_count, Some(3));
+    }
+
+    /// Every track is addressed by its stream index and names its codec as
+    /// FFmpeg does, whatever the codec: E-AC-3 and TrueHD are no longer
+    /// `Unknown`, a PGS subtitle is not `WebVTT`. A value the file does not
+    /// state is absent, never a made-up default.
+    #[tokio::test]
+    async fn tracks_carry_their_index_and_real_codec() {
+        use crate::models::SubtitleOrigin;
+        use beam_domain::repositories::MediaStreamRepository;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let movie = make_movie("Dune", Some(2021));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let file = file_of(
+            &file_repo,
+            MediaFileContent::Movie {
+                movie_entry_id: entry(&movie_repo, movie_id, None),
+            },
+            1,
+            1,
+        );
+        stream_repo
+            .insert_streams(vec![
+                subtitle_stream(file, 4, "subrip", true),
+                audio_stream(file, 2, "truehd", 48_000, true),
+                video_stream(file, 0, "hevc", 2160, Some(0), None),
+                audio_stream(file, 1, "eac3", 0, false),
+                subtitle_stream(file, 3, "hdmv_pgs_subtitle", false),
+            ])
+            .await
+            .unwrap();
+
+        let service = service(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            stream_repo,
+        );
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        let source = &sources[0];
+
+        let video = &source.video_tracks[0];
+        assert_eq!((video.index, video.codec.as_str()), (0, "hevc"));
+        assert_eq!(video.frame_rate, None, "no 29.97 is invented");
+        assert_eq!(video.bit_rate, None, "a zero bit rate is an unknown one");
+
+        let audio: Vec<(u32, &str, Option<u32>, bool)> = source
+            .audio_tracks
+            .iter()
+            .map(|a| (a.index, a.codec.as_str(), a.sample_rate, a.is_default))
+            .collect();
+        assert_eq!(
+            audio,
+            vec![(1, "eac3", None, false), (2, "truehd", Some(48_000), true)]
+        );
+
+        let subtitles: Vec<_> = source
+            .subtitle_tracks
+            .iter()
+            .map(|s| {
+                (
+                    s.origin,
+                    s.index,
+                    s.codec.as_str(),
+                    s.is_text,
+                    s.is_hearing_impaired,
+                    s.url.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            subtitles,
+            vec![
+                (
+                    SubtitleOrigin::Embedded,
+                    Some(3),
+                    "hdmv_pgs_subtitle",
+                    false,
+                    false,
+                    false
+                ),
+                (
+                    SubtitleOrigin::Embedded,
+                    Some(4),
+                    "subrip",
+                    true,
+                    true,
+                    false
+                ),
+            ],
+            "an embedded track is never served on its own"
+        );
+    }
+
+    /// The subtitle files beside a video are its tracks too: after the
+    /// embedded ones, each with where to fetch it, and a WebVTT rendition
+    /// exactly for a SubRip or WebVTT file small enough to convert. Another
+    /// file's subtitles are not this one's.
+    #[tokio::test]
+    async fn sidecar_subtitles_follow_the_embedded_tracks_with_their_urls() {
+        use crate::models::SubtitleOrigin;
+        use crate::services::sources::SUBTITLE_CONVERT_MAX_BYTES;
+        use beam_domain::models::sidecar::{SidecarInfo, SubtitleFormat, UpsertSidecarSubtitle};
+        use beam_domain::repositories::{MediaStreamRepository, SidecarSubtitleRepository};
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let sidecar_repo = Arc::new(InMemorySidecarSubtitleRepository::default());
+        let movie = make_movie("Alien", Some(1979));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let content = MediaFileContent::Movie {
+            movie_entry_id: entry(&movie_repo, movie_id, None),
+        };
+        // The other file is the smaller, so this one is primary and first.
+        let file = file_of(&file_repo, content.clone(), 2, 1);
+        let other = file_of(&file_repo, content, 1, 1);
+        stream_repo
+            .insert_streams(vec![subtitle_stream(file, 2, "subrip", false)])
+            .await
+            .unwrap();
+
+        let sidecar = |file_id, name: &str, format, language: Option<&str>, forced, size| {
+            UpsertSidecarSubtitle {
+                file_id,
+                library_id: Uuid::new_v4(),
+                path: std::path::PathBuf::from(format!("/videos/{name}")),
+                info: SidecarInfo {
+                    format,
+                    language: language.map(str::to_string),
+                    title: None,
+                    is_forced: forced,
+                    is_sdh: name.contains("sdh"),
+                    is_default: false,
+                },
+                size_bytes: size,
+                mtime: None,
+            }
+        };
+        let mut ids = std::collections::HashMap::new();
+        for upsert in [
+            sidecar(file, "Alien.srt", SubtitleFormat::Srt, None, false, 10),
+            sidecar(
+                file,
+                "Alien.fre.ass",
+                SubtitleFormat::Ass,
+                Some("fre"),
+                false,
+                10,
+            ),
+            sidecar(
+                file,
+                "Alien.eng.forced.srt",
+                SubtitleFormat::Srt,
+                Some("eng"),
+                true,
+                10,
+            ),
+            sidecar(
+                file,
+                "Alien.eng.sdh.vtt",
+                SubtitleFormat::Vtt,
+                Some("eng"),
+                false,
+                10,
+            ),
+            sidecar(
+                file,
+                "Alien.spa.srt",
+                SubtitleFormat::Srt,
+                Some("spa"),
+                false,
+                SUBTITLE_CONVERT_MAX_BYTES + 1,
+            ),
+            sidecar(
+                other,
+                "Other.eng.srt",
+                SubtitleFormat::Srt,
+                Some("eng"),
+                false,
+                10,
+            ),
+        ] {
+            let name = upsert
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let row = sidecar_repo.upsert_by_path(upsert).await.unwrap();
+            ids.insert(name, row.id);
+        }
+
+        let service = service_with_sidecars(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            stream_repo,
+            sidecar_repo,
+            Arc::default(),
+        );
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(sources[0].file_id, file);
+        let tracks = &sources[0].subtitle_tracks;
+
+        assert_eq!(tracks[0].origin, SubtitleOrigin::Embedded);
+        let sidecars: Vec<(&str, &str, bool, bool, bool)> = tracks[1..]
+            .iter()
+            .map(|track| {
+                let id = track.sidecar_id.expect("a sidecar has an id");
+                let name = ids
+                    .iter()
+                    .find_map(|(name, row)| (*row == id).then_some(name.as_str()))
+                    .expect("a sidecar of this file");
+                assert_eq!(track.origin, SubtitleOrigin::Sidecar);
+                assert_eq!(track.index, None);
+                assert!(track.is_text);
+                assert_eq!(
+                    track.url.as_deref(),
+                    Some(format!("/v1/files/{file}/subtitles/{id}").as_str())
+                );
+                if let Some(webvtt) = &track.webvtt_url {
+                    assert_eq!(webvtt, &format!("/v1/files/{file}/subtitles/{id}/webvtt"));
+                }
+                (
+                    name,
+                    track.codec.as_str(),
+                    track.is_forced,
+                    track.is_hearing_impaired,
+                    track.webvtt_url.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            sidecars,
+            vec![
+                ("Alien.eng.sdh.vtt", "webvtt", false, true, true),
+                ("Alien.eng.forced.srt", "subrip", true, false, true),
+                ("Alien.fre.ass", "ass", false, false, false),
+                ("Alien.spa.srt", "subrip", false, false, false),
+                ("Alien.srt", "subrip", false, false, true),
+            ],
+            "by language, untagged last, full before forced; ASS and oversized files as stored only"
+        );
+    }
+
+    /// A file holding a run of episodes says so on its source, and its
+    /// duration -- the whole run's -- is not given as the episode's.
+    #[tokio::test]
+    async fn an_episode_file_holding_a_run_says_so_and_lends_no_duration() {
+        use crate::models::MediaMetadata;
+
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let episode_id = seed_episode(&show_repo);
+        let show_id = *show_repo.shows.lock().unwrap().keys().next().unwrap();
+        file_of(
+            &file_repo,
+            MediaFileContent::Episode {
+                episode_id,
+                last_episode_number: Some(3),
+            },
+            1,
+            3 * 45 * 60,
+        );
+
+        let service = service(
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let sources = service
+            .get_media_sources(&episode_id.to_string())
+            .await
+            .unwrap();
+        let span = sources[0].episode_span.expect("the file spans episodes");
+        assert_eq!(
+            (span.first_episode_number, span.last_episode_number),
+            (1, 3)
+        );
+        assert_eq!(sources[0].duration_secs, Some(8100.0));
+
+        let Some(MediaMetadata::Show(show)) = service.get_media_metadata(show_id).await.unwrap()
+        else {
+            panic!("the show resolves");
+        };
+        let episode = &show.seasons[0].episodes[0];
+        assert_eq!(episode.file_id, Some(sources[0].file_id));
+        assert_eq!(episode.duration, None);
+        assert_eq!(episode.source_count, 1);
+    }
+
+    /// A single-episode file spans nothing and lends the episode its
+    /// duration.
+    #[tokio::test]
+    async fn a_single_episode_file_lends_its_duration() {
+        use crate::models::MediaMetadata;
+
+        let show_repo = Arc::new(InMemoryShowRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let episode_id = seed_episode(&show_repo);
+        let show_id = *show_repo.shows.lock().unwrap().keys().next().unwrap();
+        file_of(
+            &file_repo,
+            MediaFileContent::episode(episode_id),
+            1,
+            45 * 60,
+        );
+
+        let service = service(
+            Arc::new(InMemoryMovieRepository::default()),
+            show_repo,
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+        );
+
+        let sources = service
+            .get_media_sources(&episode_id.to_string())
+            .await
+            .unwrap();
+        assert!(sources[0].episode_span.is_none());
+        let Some(MediaMetadata::Show(show)) = service.get_media_metadata(show_id).await.unwrap()
+        else {
+            panic!("the show resolves");
+        };
+        assert_eq!(show.seasons[0].episodes[0].duration, Some(2700.0));
     }
 
     // ---------------------------------------------------------------------------
@@ -935,12 +1420,10 @@ mod browse {
     use beam_domain::providers::enrichment::ShowEnrichment;
     use beam_domain::repositories::catalog::MockCatalogRepository;
     use beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository;
-    use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
     use beam_domain::repositories::movie::MockMovieRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
     use beam_domain::repositories::{
         CatalogRepository, GenreRepository, MovieRepository, ShowRepository,
     };
@@ -985,8 +1468,7 @@ mod browse {
             DbMetadataService::new(MetadataRepositories {
                 movies: self.movies.clone(),
                 shows: self.shows.clone(),
-                files: Arc::new(InMemoryFileRepository::default()),
-                streams: Arc::new(InMemoryMediaStreamRepository::default()),
+                sources: super::empty_sources(),
                 catalog,
                 genres: self.genres.clone(),
             })
@@ -1376,8 +1858,7 @@ mod browse {
             DbMetadataService::new(MetadataRepositories {
                 movies: Arc::new(movies),
                 shows: library.shows.clone(),
-                files: Arc::new(InMemoryFileRepository::default()),
-                streams: Arc::new(InMemoryMediaStreamRepository::default()),
+                sources: super::empty_sources(),
                 catalog: Arc::new(MockCatalogRepository::new()),
                 genres: library.genres.clone(),
             })
@@ -1511,8 +1992,7 @@ mod browse {
             let result = DbMetadataService::new(MetadataRepositories {
                 movies: Arc::new(movies),
                 shows: Arc::new(shows),
-                files: Arc::new(InMemoryFileRepository::default()),
-                streams: Arc::new(InMemoryMediaStreamRepository::default()),
+                sources: super::empty_sources(),
                 catalog: Arc::new(catalog),
                 genres: Arc::new(genres),
             })

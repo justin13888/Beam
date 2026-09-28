@@ -61,6 +61,7 @@ mod tests {
             hash: base.services.hash.clone(),
             library: base.services.library.clone(),
             metadata: base.services.metadata.clone(),
+            subtitles: base.services.subtitles.clone(),
             notification: base.services.notification.clone(),
             admin_log: base.services.admin_log.clone(),
             user_repo: base.services.user_repo.clone(),
@@ -392,8 +393,14 @@ mod tests {
         let metadata = DbMetadataService::new(crate::services::metadata::MetadataRepositories {
             movies: fixture.movies.clone(),
             shows: fixture.shows.clone(),
-            files: Arc::new(InMemoryFileRepository::default()),
-            streams: Arc::new(InMemoryMediaStreamRepository::default()),
+            sources: Arc::new(crate::services::sources::SourceCatalog::new(
+                fixture.movies.clone(),
+                Arc::new(InMemoryFileRepository::default()),
+                Arc::new(InMemoryMediaStreamRepository::default()),
+                Arc::new(
+                    beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
+                ),
+            )),
             catalog: Arc::new(
                 beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository::new(
                     fixture.movies.clone(),

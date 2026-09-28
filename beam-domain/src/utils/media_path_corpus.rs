@@ -604,7 +604,7 @@ fn season_folder_names() {
 /// each file as a film of its own (`VTS 01 1`, `00001`) and merge every
 /// disc's same-numbered file into one, so the path policy keeps them out of
 /// the library before inference is ever asked (playing a disc as its title
-/// is issue #189's).
+/// is issue #234's).
 #[test]
 fn disc_structures_never_reach_inference() {
     use crate::utils::path_policy::{ExclusionReason, PathDisposition, PathPolicy};

@@ -323,6 +323,50 @@ mod tests {
         }
     }
 
+    /// What `m20261008_000001_tracks_subtitles` relies on. Before issue #189
+    /// the indexer stored a video or audio codec as the `Debug` name of
+    /// FFmpeg's codec id, and the migration renames those rows to FFmpeg's
+    /// own name: by lower-casing the `Debug` name, except for the codecs in
+    /// [`beam_migration::RENAMED_FFMPEG_CODECS`], whose `Debug` name
+    /// lower-cased is not their FFmpeg name.
+    ///
+    /// Walks every codec FFmpeg describes, so the table is exactly the codecs
+    /// that need it: one missing leaves its rows under a name the indexer
+    /// never writes, and one extra renames a codec that needed no arm.
+    #[test]
+    fn the_tracks_migration_names_every_codec_lower_casing_would_misname() {
+        use ffmpeg::codec::Id;
+        use std::collections::BTreeMap;
+
+        let mut misnamed = BTreeMap::new();
+        let mut described = 0;
+        let mut descriptor: *const ffmpeg::ffi::AVCodecDescriptor = std::ptr::null();
+        loop {
+            // SAFETY: `avcodec_descriptor_next` takes null or a descriptor it
+            // returned, and returns the next in FFmpeg's static table or null
+            // after the last; each is valid for the life of the process.
+            descriptor = unsafe { ffmpeg::ffi::avcodec_descriptor_next(descriptor) };
+            if descriptor.is_null() {
+                break;
+            }
+            described += 1;
+            // SAFETY: non-null, and so a descriptor in FFmpeg's static table.
+            let id = Id::from(unsafe { (*descriptor).id });
+            let stored = format!("{id:?}");
+            if stored.to_lowercase() != id.name() {
+                misnamed.insert(stored, id.name().to_owned());
+            }
+        }
+        assert!(described > 400, "FFmpeg describes its codecs");
+
+        let table: BTreeMap<String, String> = beam_migration::RENAMED_FFMPEG_CODECS
+            .iter()
+            .map(|(stored, name)| ((*stored).to_owned(), (*name).to_owned()))
+            .collect();
+        assert_eq!(table.len(), beam_migration::RENAMED_FFMPEG_CODECS.len());
+        assert_eq!(table, misnamed);
+    }
+
     #[test]
     fn hevc_and_its_h265_alias_are_the_same_codec() {
         // ffmpeg-next maps AV_CODEC_ID_HEVC to `Id::HEVC`; missing the alias

@@ -47,7 +47,6 @@ pub struct MovieEntry {
     pub library_id: Uuid,
     pub movie_id: Uuid,
     pub edition: Option<String>,
-    pub is_primary: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -84,7 +83,6 @@ pub struct CreateMovieEntry {
     pub library_id: Uuid,
     pub movie_id: Uuid,
     pub edition: Option<String>,
-    pub is_primary: bool,
 }
 
 #[cfg(feature = "entity")]
@@ -128,7 +126,6 @@ impl From<beam_entity::movie_entry::Model> for MovieEntry {
             library_id: model.library_id,
             movie_id: model.movie_id,
             edition: model.edition,
-            is_primary: model.is_primary,
             created_at: model.created_at.with_timezone(&Utc),
         }
     }
