@@ -82,8 +82,9 @@ public protocol PlaybackRepository: Sendable {
     func pendingProgressCount() async throws -> UInt32
     /// Titles this person is part way through.
     func continueWatching(limit: UInt32?) async throws -> [ContinueWatchingEntry]
-    /// One page of watch history.
-    func history(limit: UInt32?, offset: UInt32?) async throws -> HistoryPage
+    /// One page of watch history: `first` rows after the page whose end
+    /// cursor is `after`.
+    func history(first: UInt32?, after: String?) async throws -> HistoryPage
 }
 
 /// The signed-in person's own sessions across their devices.

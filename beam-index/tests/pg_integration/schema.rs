@@ -24,7 +24,7 @@ async fn migrations_apply_and_fully_reverse() {
         .await
         .expect("list tables");
     assert!(
-        after_up.contains(&"playback_progress".to_string()),
+        after_up.contains(&"watch_state".to_string()),
         "expected the migrated schema to contain the application tables, got {after_up:?}"
     );
 
@@ -42,51 +42,48 @@ async fn migrations_apply_and_fully_reverse() {
     scoped.drop_schema().await.expect("drop schema");
 }
 
+/// A movie's watched state for one user is one row (issue #188): without
+/// the unique index `record_progress`'s ON CONFLICT target would not exist.
 #[tokio::test]
-async fn playback_progress_enforces_one_row_per_user_and_file() {
+async fn watch_state_enforces_one_row_per_user_and_title() {
     let db = connection().await;
     let db = db.as_ref();
     let user = beam_test_support::seed::user(db).await.unwrap();
-    let file = beam_test_support::seed::file(db).await.unwrap();
+    let movie = beam_test_support::seed::movie(db).await.unwrap();
 
     let insert = |id: uuid::Uuid| {
         Statement::from_sql_and_values(
             db.get_database_backend(),
-            "INSERT INTO playback_progress \
-             (id, user_id, file_id, position_secs, duration_secs, completed, updated_at) \
-             VALUES ($1, $2, $3, 1.0, 100.0, false, now())",
-            [id.into(), user.into(), file.into()],
+            "INSERT INTO watch_state (id, user_id, movie_id, last_played_at) \
+             VALUES ($1, $2, $3, now())",
+            [id.into(), user.into(), movie.into()],
         )
     };
 
     db.execute_raw(insert(uuid::Uuid::new_v4()))
         .await
-        .expect("the first row for a (user, file) pair inserts");
-    let second = db.execute_raw(insert(uuid::Uuid::new_v4())).await;
-
+        .expect("the first row for a (user, movie) pair inserts");
     assert!(
-        second.is_err(),
-        "the unique index on (user_id, file_id) must reject a second row; \
-         without it `upsert`'s ON CONFLICT target would not exist"
+        db.execute_raw(insert(uuid::Uuid::new_v4())).await.is_err(),
+        "the unique index on (user_id, movie_id) must reject a second row"
     );
 }
 
 #[tokio::test]
-async fn playback_progress_rows_are_removed_with_their_user() {
+async fn watch_state_rows_are_removed_with_their_user() {
     let db = connection().await;
     let db = db.as_ref();
     let user = beam_test_support::seed::user(db).await.unwrap();
-    let file = beam_test_support::seed::file(db).await.unwrap();
+    let movie = beam_test_support::seed::movie(db).await.unwrap();
 
     db.execute_raw(Statement::from_sql_and_values(
         db.get_database_backend(),
-        "INSERT INTO playback_progress \
-         (id, user_id, file_id, position_secs, duration_secs, completed, updated_at) \
-         VALUES ($1, $2, $3, 1.0, 100.0, false, now())",
-        [uuid::Uuid::new_v4().into(), user.into(), file.into()],
+        "INSERT INTO watch_state (id, user_id, movie_id, last_played_at) \
+         VALUES ($1, $2, $3, now())",
+        [uuid::Uuid::new_v4().into(), user.into(), movie.into()],
     ))
     .await
-    .expect("insert progress");
+    .expect("insert watched state");
 
     db.execute_raw(Statement::from_sql_and_values(
         db.get_database_backend(),
@@ -99,15 +96,15 @@ async fn playback_progress_rows_are_removed_with_their_user() {
     let remaining = db
         .query_all_raw(Statement::from_sql_and_values(
             db.get_database_backend(),
-            "SELECT id FROM playback_progress WHERE user_id = $1",
+            "SELECT id FROM watch_state WHERE user_id = $1",
             [user.into()],
         ))
         .await
-        .expect("query progress");
+        .expect("query watched state");
 
     assert!(
         remaining.is_empty(),
-        "a deleted user must not leave orphaned playback rows"
+        "a deleted user must not leave orphaned watched state"
     );
 }
 

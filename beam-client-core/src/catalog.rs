@@ -340,6 +340,10 @@ pub struct HistoryPage {
     pub items: Vec<HistoryEntry>,
     /// Total rows across every page, for a count in the UI.
     pub total: u64,
+    /// Pass as `after` for the next page; `None` on an empty page.
+    pub end_cursor: Option<String>,
+    /// Whether a page follows this one.
+    pub has_next_page: bool,
 }
 
 /// A signed-in device, as the profile screen lists it.
@@ -772,16 +776,11 @@ impl DeviceSession {
     }
 }
 
-/// Map the server's `media_type` string onto the core's own enum.
-///
-/// The playback endpoints type this as a bare string rather than an enum, so
-/// anything unrecognised is treated as a film: a film is the shape with no
-/// episode, which is exactly how an entry with no `episode_id` renders.
-fn kind_from_str(raw: &str) -> MediaKind {
-    if raw.eq_ignore_ascii_case("show") || raw.eq_ignore_ascii_case("episode") {
-        MediaKind::Show
-    } else {
-        MediaKind::Movie
+/// Map the server's `media_type` onto the core's own enum.
+fn kind_from_wire(media_type: wire::MediaTypeFilter) -> MediaKind {
+    match media_type {
+        wire::MediaTypeFilter::Movie => MediaKind::Movie,
+        wire::MediaTypeFilter::Show => MediaKind::Show,
     }
 }
 
@@ -789,6 +788,9 @@ impl ContinueWatchingEntry {
     /// Normalise a generated continue-watching row, before hydration.
     #[must_use]
     pub fn from_generated(item: wire::ContinueWatchingItem) -> Self {
+        // The server now sends each row's title, artwork and episode numbers
+        // (issue #188); the core still hydrates rows from its own cache, and
+        // moving it onto these fields is a follow-up.
         let wire::ContinueWatchingItem {
             duration_secs,
             episode_id,
@@ -796,17 +798,25 @@ impl ContinueWatchingEntry {
             media_id,
             media_type,
             position_secs,
-            updated_at,
+            last_played_at,
+            reason: _,
+            title: _,
+            poster_url: _,
+            backdrop_url: _,
+            season_number: _,
+            episode_number: _,
+            episode_title: _,
+            thumbnail_url: _,
         } = item;
         Self {
-            media_id,
-            episode_id,
-            file_id,
-            kind: kind_from_str(&media_type),
+            media_id: media_id.to_string(),
+            episode_id: episode_id.map(|id| id.to_string()),
+            file_id: file_id.to_string(),
+            kind: kind_from_wire(media_type),
             position_secs,
             duration_secs,
             progress_fraction: progress_fraction(position_secs, duration_secs),
-            updated_at_unix: updated_at.0.unix_timestamp(),
+            updated_at_unix: last_played_at.0.unix_timestamp(),
             media: None,
             episode: None,
         }
@@ -818,25 +828,33 @@ impl HistoryEntry {
     #[must_use]
     pub fn from_generated(item: wire::HistoryItem) -> Self {
         let wire::HistoryItem {
-            completed,
+            played,
             duration_secs,
             episode_id,
             file_id,
             media_id,
             media_type,
             position_secs,
-            updated_at,
+            last_played_at,
+            play_count: _,
+            title: _,
+            poster_url: _,
+            backdrop_url: _,
+            season_number: _,
+            episode_number: _,
+            episode_title: _,
+            thumbnail_url: _,
         } = item;
         Self {
-            media_id,
-            episode_id,
-            file_id,
-            kind: kind_from_str(&media_type),
+            media_id: media_id.to_string(),
+            episode_id: episode_id.map(|id| id.to_string()),
+            file_id: file_id.to_string(),
+            kind: kind_from_wire(media_type),
             position_secs,
             duration_secs,
             progress_fraction: progress_fraction(position_secs, duration_secs),
-            completed,
-            updated_at_unix: updated_at.0.unix_timestamp(),
+            completed: played,
+            updated_at_unix: last_played_at.0.unix_timestamp(),
             media: None,
             episode: None,
         }
@@ -1102,7 +1120,8 @@ mod tests {
         "poster_url":"/artwork/m1/poster.jpg",
         "backdrop_url":"/artwork/m1/backdrop.jpg",
         "file_id":"f1f1f1f1-0000-4000-8000-000000000001",
-        "ratings":{"tmdb":81}
+        "ratings":{"tmdb":81},
+        "user_state":{"played":false,"position_secs":0.0,"play_count":0}
     }}"#;
 
     const SHOW: &str = r#"{"Show":{
@@ -1116,12 +1135,12 @@ mod tests {
         "episode_count":3,
         "seasons":[
             {"id":"5e500001-0000-4000-8000-000000000001","season_number":1,"dates":{},"genres":[],"episodes":[
-                {"id":"e0000001-0000-4000-8000-000000000001","episode_number":1,"title":"Pilot","source_count":1,"file_id":"f1f1f1f1-0000-4000-8000-000000000001"},
-                {"id":"e0000002-0000-4000-8000-000000000002","episode_number":2,"title":"Second","source_count":0}
+                {"id":"e0000001-0000-4000-8000-000000000001","episode_number":1,"title":"Pilot","source_count":1,"user_state":{"played":false,"position_secs":0.0,"play_count":0},"file_id":"f1f1f1f1-0000-4000-8000-000000000001"},
+                {"id":"e0000002-0000-4000-8000-000000000002","episode_number":2,"title":"Second","source_count":0,"user_state":{"played":false,"position_secs":0.0,"play_count":0}}
             ]},
             {"id":"5e500002-0000-4000-8000-000000000002","season_number":2,"dates":{},"genres":[],"episode_runtime":52,
              "poster_url":"/artwork/s1/2.jpg","episodes":[
-                {"id":"e0000003-0000-4000-8000-000000000003","episode_number":1,"title":"Return","source_count":1,"file_id":"f3f3f3f3-0000-4000-8000-000000000003",
+                {"id":"e0000003-0000-4000-8000-000000000003","episode_number":1,"title":"Return","source_count":1,"user_state":{"played":false,"position_secs":0.0,"play_count":0},"file_id":"f3f3f3f3-0000-4000-8000-000000000003",
                  "thumbnail_url":"/artwork/e3.jpg","duration":3120.0,"air_date":"2016-01-01"}
             ]}
         ]
@@ -1316,50 +1335,61 @@ mod tests {
         assert_eq!(progress_fraction(-5.0, Some(120.0)), Some(0.0));
     }
 
+    /// A continue-watching row as the server sends one: a movie to
+    /// resume, or an episode of a show.
+    fn continue_json(media_type: &str, episode_id: Option<&str>) -> String {
+        let episode = episode_id.map_or("null".to_string(), |id| format!(r#""{id}""#));
+        format!(
+            r#"{{"reason":"resume","file_id":"00000000-0000-0000-0000-0000000000f1",
+                 "media_id":"00000000-0000-0000-0000-0000000000a1",
+                 "media_type":"{media_type}","episode_id":{episode},
+                 "position_secs":30.0,"duration_secs":120.0,
+                 "last_played_at":"2026-01-01T00:00:00Z","title":"Heat"}}"#
+        )
+    }
+
     #[test]
-    fn continue_watching_classifies_by_media_type_and_defaults_to_a_film() {
+    fn continue_watching_classifies_by_media_type() {
         let make = |media_type: &str| {
-            let json = format!(
-                r#"{{"file_id":"f1","media_id":"m1","media_type":"{media_type}",
-                     "position_secs":30.0,"duration_secs":120.0,
-                     "updated_at":"2026-01-01T00:00:00Z"}}"#
-            );
             let item: wire::ContinueWatchingItem =
-                serde_json::from_str(&json).expect("a valid item");
+                serde_json::from_str(&continue_json(media_type, None)).expect("a valid item");
             ContinueWatchingEntry::from_generated(item)
         };
         assert_eq!(make("show").kind, MediaKind::Show);
-        assert_eq!(make("episode").kind, MediaKind::Show);
         assert_eq!(make("movie").kind, MediaKind::Movie);
-        // The field is an untyped string in the contract, so anything else is
-        // treated as the shape with no episode rather than failing the row.
-        assert_eq!(make("something-new").kind, MediaKind::Movie);
     }
 
     #[test]
     fn a_continue_watching_row_starts_unhydrated_and_carries_its_progress() {
-        let json = r#"{"file_id":"f1","media_id":"m1","media_type":"movie",
-                       "position_secs":30.0,"duration_secs":120.0,
-                       "updated_at":"2026-01-01T00:00:00Z"}"#;
-        let item: wire::ContinueWatchingItem = serde_json::from_str(json).expect("a valid item");
+        let json = continue_json("show", Some("00000000-0000-0000-0000-0000000000e1"));
+        let item: wire::ContinueWatchingItem = serde_json::from_str(&json).expect("a valid item");
         let entry = ContinueWatchingEntry::from_generated(item);
         assert_eq!(entry.progress_fraction, Some(0.25));
         assert_eq!(entry.updated_at_unix, 1_767_225_600);
+        assert_eq!(entry.media_id, "00000000-0000-0000-0000-0000000000a1");
+        assert_eq!(
+            entry.episode_id.as_deref(),
+            Some("00000000-0000-0000-0000-0000000000e1")
+        );
         assert!(entry.media.is_none(), "hydration is the client's job");
         assert!(entry.episode.is_none());
     }
 
     #[test]
-    fn a_history_row_carries_its_completion_flag() {
-        let json = r#"{"file_id":"f1","media_id":"m1","media_type":"show",
-                       "episode_id":"e1","completed":true,
-                       "position_secs":120.0,"duration_secs":120.0,
-                       "updated_at":"2026-01-01T00:00:00Z"}"#;
+    fn a_history_row_carries_whether_it_was_played() {
+        let json = r#"{"file_id":"00000000-0000-0000-0000-0000000000f1",
+                       "media_id":"00000000-0000-0000-0000-0000000000a1","media_type":"show",
+                       "episode_id":"00000000-0000-0000-0000-0000000000e1","played":true,
+                       "play_count":2,"position_secs":0.0,"duration_secs":120.0,
+                       "last_played_at":"2026-01-01T00:00:00Z","title":"Dark"}"#;
         let item: wire::HistoryItem = serde_json::from_str(json).expect("a valid item");
         let entry = HistoryEntry::from_generated(item);
         assert!(entry.completed);
-        assert_eq!(entry.episode_id.as_deref(), Some("e1"));
-        assert_eq!(entry.progress_fraction, Some(1.0));
+        assert_eq!(
+            entry.episode_id.as_deref(),
+            Some("00000000-0000-0000-0000-0000000000e1")
+        );
+        assert_eq!(entry.progress_fraction, Some(0.0));
     }
 
     #[test]

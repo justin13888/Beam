@@ -75,6 +75,8 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
         .mount(kynos::routes![
             media::get_media_detail,
             media::get_media_sources,
+            media::get_episode_detail,
+            media::get_season_detail,
         ])
         // `browse_media` fans out into metadata queries, so it is the most
         // expensive read path and the one worth a budget. Its own group: two
@@ -87,7 +89,12 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
         )
         .mount(kynos::routes![
             playback::report_playback_progress,
+            playback::get_title_progress,
+            playback::clear_title_progress,
+            playback::mark_watched,
+            playback::mark_unwatched,
             playback::get_continue_watching,
+            playback::dismiss_continue_watching,
             playback::get_history,
             playback::report_playback_telemetry,
         ])

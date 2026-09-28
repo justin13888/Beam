@@ -37,7 +37,7 @@ use crate::{
         library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
         notification::{LocalNotificationService, NotificationService},
-        playback::{DbPlaybackService, PlaybackService},
+        playback::{DbPlaybackService, PlaybackRepositories, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
         sources::SourceCatalog,
         subtitle::{DbSubtitleService, SubtitleService},
@@ -261,8 +261,12 @@ impl AppServices {
         let genre_repo: Arc<dyn beam_domain::repositories::GenreRepository> = Arc::new(
             beam_index::repositories::SqlGenreRepository::new(db.clone()),
         );
-        let playback_repo: Arc<dyn beam_domain::repositories::PlaybackProgressRepository> =
-            Arc::new(beam_index::repositories::SqlPlaybackProgressRepository::new(db.clone()));
+        let watch_state_repo: Arc<dyn beam_domain::repositories::WatchStateRepository> = Arc::new(
+            beam_index::repositories::SqlWatchStateRepository::with_clock(
+                db.clone(),
+                clock.clone(),
+            ),
+        );
         let playback_telemetry_repo: Arc<
             dyn beam_domain::repositories::PlaybackTelemetryRepository,
         > = Arc::new(beam_index::repositories::SqlPlaybackTelemetryRepository::new(db.clone()));
@@ -344,7 +348,7 @@ impl AppServices {
                 media_info_service.clone(),
                 notification_service.clone(),
                 admin_log_service.clone(),
-                playback_repo.clone(),
+                watch_state_repo.clone(),
             )
             .with_clock(clock.clone())
             .with_path_policy(config.scan_path_policy()?)
@@ -387,12 +391,21 @@ impl AppServices {
             worker: enrichment_service.notify_handle(),
         }));
 
-        let playback_service = Arc::new(DbPlaybackService::new(
-            playback_repo,
-            file_repo.clone(),
+        // One catalogue of a title's ranked files, so the detail's primary
+        // source and the source continue-watching falls back to are one.
+        let sources = Arc::new(SourceCatalog::new(
             movie_repo.clone(),
-            show_repo.clone(),
+            file_repo.clone(),
+            stream_repo.clone(),
+            sidecar_repo.clone(),
         ));
+        let playback_service = Arc::new(DbPlaybackService::new(PlaybackRepositories {
+            watch_state: watch_state_repo,
+            files: file_repo.clone(),
+            movies: movie_repo.clone(),
+            shows: show_repo.clone(),
+            sources: sources.clone(),
+        }));
 
         // Artwork is served by Beam, not by a provider CDN (ADR-0015). The
         // cache lives beside the rest of the server's state and is restored
@@ -457,12 +470,7 @@ impl AppServices {
             metadata: Arc::new(DbMetadataService::new(MetadataRepositories {
                 movies: movie_repo.clone(),
                 shows: show_repo.clone(),
-                sources: Arc::new(SourceCatalog::new(
-                    movie_repo.clone(),
-                    file_repo.clone(),
-                    stream_repo,
-                    sidecar_repo.clone(),
-                )),
+                sources,
                 catalog: Arc::new(beam_index::repositories::SqlCatalogRepository::new(
                     db.clone(),
                 )),

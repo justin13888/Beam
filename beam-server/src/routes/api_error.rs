@@ -74,9 +74,8 @@ pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 
 /// A read whose only failure is infrastructural.
 ///
-/// `GET /v1/genres`, `GET /v1/libraries`, `GET /v1/continue-watching`,
-/// `GET /v1/history`, the admin read endpoints, and the three session
-/// operations that only ever fail on the store.
+/// `GET /v1/genres`, `GET /v1/libraries`, the admin read endpoints, and the
+/// three session operations that only ever fail on the store.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum InternalError {
     #[error("{0}")]
@@ -617,6 +616,10 @@ pub enum AdminUserError {
 ///
 /// The path parameter is typed `Uuid`, so a malformed id is Kynos's
 /// `PathRejection` rather than anything this type carries.
+///
+/// A file that belongs to no movie or episode is the same 404 as one that
+/// does not exist: there is no title to keep the progress for, and the detail
+/// says which.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum ProgressError {
     #[error("{0}")]
@@ -626,7 +629,119 @@ pub enum ProgressError {
         title = "File not found"
     )]
     FileNotFound(String),
+    /// The position is negative or past the end, or the duration is not
+    /// positive (issue #188): each broken rule is one entry of `errors`.
+    #[error("the request body breaks {} rule(s)", errors.len())]
+    #[problem(
+        status = 422,
+        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
+        title = "Validation failed"
+    )]
+    ValidationFailed {
+        // kynos gap: as for `PlaybackTelemetryError::ValidationFailed`;
+        // tracked in #223.
+        #[problem(extension)]
+        errors: Vec<crate::models::FieldError>,
+    },
 
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET` and `DELETE /v1/media/{id}/progress` (issue #188).
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum TitleProgressError {
+    /// A show or a season has no resume position of its own; the caller
+    /// wants an episode id.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#progress-not-available-for-show",
+        title = "Progress is not available at the show level"
+    )]
+    ProgressNotAvailableForShow(String),
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
+    )]
+    MediaNotFound(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `PUT` and `DELETE /v1/media/{id}/watched`, `DELETE
+/// /v1/continue-watching/{id}`, `GET /v1/episodes/{id}` and `GET
+/// /v1/seasons/{id}` (issue #188): an id that names nothing, or a store
+/// that failed.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum MediaRefLookupError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
+    )]
+    MediaNotFound(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/continue-watching`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum ContinueWatchingError {
+    /// `first` is outside 1-50.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/history`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum HistoryError {
+    /// `after` is not a cursor the history list issued.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        title = "Invalid cursor"
+    )]
+    InvalidCursor(String),
+    /// `first` is outside 1-100.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
     #[error("{0}")]
     #[problem(
         status = 500,

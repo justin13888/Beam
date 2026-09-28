@@ -128,8 +128,9 @@ pub struct PrimarySource {
     pub file_id: Option<Uuid>,
     /// The primary source's duration in seconds: every part's, together.
     pub duration_secs: Option<f64>,
-    /// Whether the primary file holds a run of episodes.
-    pub spans_episodes: bool,
+    /// The last episode of the run the primary file holds, when it holds
+    /// more than the one episode.
+    pub last_episode_number: Option<u32>,
     pub source_count: u32,
 }
 
@@ -226,6 +227,37 @@ impl SourceCatalog {
         ))
     }
 
+    /// Whether `file_id` plays the end of the movie's source it belongs to:
+    /// a whole file does, and of a multi-part movie only the last part --
+    /// the others end where the next one starts. A file in none of the
+    /// movie's sources is taken as whole.
+    pub async fn plays_movie_end(&self, movie_id: Uuid, file_id: Uuid) -> Result<bool, DbErr> {
+        Ok(self
+            .ranked_movie_sources(movie_id)
+            .await?
+            .iter()
+            .find(|source| source.parts.iter().any(|part| part.file.id == file_id))
+            .is_none_or(|source| {
+                source
+                    .parts
+                    .last()
+                    .is_some_and(|last| last.file.id == file_id)
+            }))
+    }
+
+    /// The movie's present files, the primary first.
+    pub async fn movie_files(&self, movie_id: Uuid) -> Result<Vec<PlayableFile>, DbErr> {
+        Ok(playable(&self.ranked_movie_sources(movie_id).await?, None))
+    }
+
+    /// The episode's present files, the primary first.
+    pub async fn episode_files(&self, episode: &Episode) -> Result<Vec<PlayableFile>, DbErr> {
+        Ok(playable(
+            &self.ranked_episode_sources(episode.id).await?,
+            Some(episode.episode_number),
+        ))
+    }
+
     async fn build_all(
         &self,
         ranked: Vec<RankedSource>,
@@ -243,13 +275,51 @@ impl SourceCatalog {
     }
 }
 
+/// One present file of a title, as continue-watching and history pick the
+/// one to play.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayableFile {
+    pub file_id: Uuid,
+    /// This file's own duration: one part's, for a part of a multi-part
+    /// movie, since a position is kept within the part it was reported in.
+    pub duration_secs: Option<f64>,
+    /// The file holds a run of episodes, so its duration is not one
+    /// episode's.
+    pub spans_episodes: bool,
+}
+
+impl PlayableFile {
+    /// The file to play of `files` (primary first): `last` -- the one the
+    /// viewer last played -- while it is still among them, else the primary.
+    pub fn pick(files: &[Self], last: Option<Uuid>) -> Option<&Self> {
+        last.and_then(|last| files.iter().find(|file| file.file_id == last))
+            .or_else(|| files.first())
+    }
+}
+
+/// Every file of every source, in rank order, a multi-part source's parts in
+/// the order they play: the primary source's first file comes first, and a
+/// viewer who stopped in part 2 is sent back to part 2.
+fn playable(ranked: &[RankedSource], episode_number: Option<u32>) -> Vec<PlayableFile> {
+    ranked
+        .iter()
+        .flat_map(|source| source.parts.iter())
+        .map(|part| PlayableFile {
+            file_id: part.file.id,
+            duration_secs: part.file.duration.map(|d| d.as_secs_f64()),
+            spans_episodes: episode_span(&part.file, episode_number).is_some(),
+        })
+        .collect()
+}
+
 fn primary(ranked: &[RankedSource], episode_number: Option<u32>) -> PrimarySource {
     let first = ranked.first();
     PrimarySource {
         file_id: first.map(|source| source.lead().file.id),
         duration_secs: first.and_then(RankedSource::duration_secs),
-        spans_episodes: first
-            .is_some_and(|source| episode_span(&source.lead().file, episode_number).is_some()),
+        last_episode_number: first
+            .and_then(|source| episode_span(&source.lead().file, episode_number))
+            .map(|span| span.last_episode_number),
         source_count: u32::try_from(ranked.len()).unwrap_or(u32::MAX),
     }
 }

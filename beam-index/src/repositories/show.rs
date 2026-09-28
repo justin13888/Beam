@@ -11,6 +11,7 @@ use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show};
 use beam_domain::models::{FieldLocks, MetadataField, PinSource, ProviderPin};
 use beam_domain::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 use beam_domain::repositories::ShowRepository;
+use beam_domain::utils::next_up::OutlineEpisode;
 
 /// SQL-based implementation of the ShowRepository trait.
 #[derive(Debug, Clone)]
@@ -560,6 +561,69 @@ impl ShowRepository for SqlShowRepository {
             .one(self.db.as_ref())
             .await?;
         Ok(model.map(Season::from))
+    }
+
+    async fn episode_outline(&self, show_id: Uuid) -> Result<Vec<OutlineEpisode>, DbErr> {
+        Ok(self
+            .episode_outlines(&[show_id])
+            .await?
+            .remove(&show_id)
+            .unwrap_or_default())
+    }
+
+    async fn episode_outlines(
+        &self,
+        show_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<OutlineEpisode>>, DbErr> {
+        use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
+
+        #[derive(Debug, FromQueryResult)]
+        struct Outlined {
+            show_id: Uuid,
+            episode_id: Uuid,
+            season_number: i32,
+            episode_number: i32,
+            playable: bool,
+        }
+
+        if show_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = (1..=show_ids.len())
+            .map(|n| format!("${n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = Outlined::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "SELECT se.show_id, e.id AS episode_id, se.season_number, e.episode_number, \
+                        EXISTS (SELECT 1 FROM files f \
+                                 WHERE f.episode_id = e.id AND f.missing_since IS NULL) AS playable \
+                   FROM episodes e JOIN seasons se ON se.id = e.season_id \
+                  WHERE se.show_id IN ({placeholders}) \
+                  ORDER BY se.show_id, se.season_number, e.episode_number"
+            ),
+            show_ids.iter().map(|id| Value::from(*id)).collect::<Vec<_>>(),
+        ))
+        .all(self.db.as_ref())
+        .await?;
+        let mut outlines: HashMap<Uuid, Vec<OutlineEpisode>> = HashMap::new();
+        for Outlined {
+            show_id,
+            episode_id,
+            season_number,
+            episode_number,
+            playable,
+        } in rows
+        {
+            outlines.entry(show_id).or_default().push(OutlineEpisode {
+                episode_id,
+                season_number: u32::try_from(season_number).unwrap_or(0),
+                episode_number: u32::try_from(episode_number).unwrap_or(0),
+                playable,
+            });
+        }
+        Ok(outlines)
     }
 
     async fn apply_enrichment(

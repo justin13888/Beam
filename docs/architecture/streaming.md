@@ -38,11 +38,12 @@ Android's ExoPlayer as consecutive `MediaItem`s, a browser by moving to the next
 one ends. No current client does so yet: the web player and the Android app start a multi-part
 source at its first part and stop there, and advancing through the parts is the client-playback
 work split from #233. Either way every request is still a direct play of one file: the server
-never concatenates or remuxes parts, which would be the transcoding ADR-0004 rules out. Playback progress stays per file, so resuming a multi-part movie
-resumes the part that was playing. Continue-watching reads those per-file rows, so a movie with
-progress on two of its parts is listed once per part. Once the title-level watch state of
-[#188](https://github.com/justin13888/beam/issues/188) lands, it resolves that, and counts a stacked
-movie as played only when the report is on its last part.
+never concatenates or remuxes parts, which would be the transcoding ADR-0004 rules out. Watch
+state is kept per title ([#188](https://github.com/justin13888/beam/issues/188)) with the file last
+played, so a multi-part movie is one continue-watching row, and resuming it resumes the part that
+was playing at the position within that part. A report's position is held to the reported part's
+own duration, and only its last part can mark the movie played: 95% of an earlier part records the
+position and marks nothing, since that part's end is only where the next one starts.
 
 A DVD or Blu-ray folder rip ([#234](https://github.com/justin13888/beam/issues/234), FR-222) is a
 source of its film the same way: its `parts` are the stream files the disc's main title plays --

@@ -17,8 +17,8 @@ The single deployable backend binary
 
 - The HTTP API (Kynos) under `/v1`, REST/OpenAPI-only
   ([ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md)): media browse/search/detail,
-  playback-progress/continue-watching, admin-gated library CRUD, operational logs, and an SSE
-  endpoint for scan/enrichment progress. `create_router` is walked once to dispatch and once to emit
+  per-title watched state, continue-watching with server-side next-up, admin-gated library CRUD,
+  operational logs, and an SSE endpoint for scan/enrichment progress. `create_router` is walked once to dispatch and once to emit
   the OpenAPI 3.2 document, so the served surface and its description cannot disagree; a router that
   cannot describe itself fails at startup rather than at a listener.
 - Auth wiring: owns the OIDC BFF endpoints (`routes/auth.rs`) over `beam-auth`'s
@@ -197,11 +197,11 @@ This crate is what lets services be tested purely against in-memory fakes.
 ### Module layout
 
 - `models/` — plain domain structs (`movie.rs`, `show.rs`, `file.rs`, `library.rs`, `stream.rs`,
-  `genre.rs`, `enrichment.rs`, `playback_progress.rs`, `search.rs`, `admin_log.rs`) with
+  `genre.rs`, `enrichment.rs`, `watch_state.rs`, `search.rs`, `admin_log.rs`) with
   `#[cfg(feature = "entity")] impl From<beam_entity::X::Model>` conversions — the `entity` feature
   is optional so the crate compiles and tests without `sea-orm`.
 - `repositories/` — one trait per aggregate (movie, show, file, library, stream, sidecar subtitle,
-  genre, enrichment, playback-progress, admin-log, library-shape), each with an `InMemory*` fake and, behind
+  genre, enrichment, watch-state, admin-log, library-shape), each with an `InMemory*` fake and, behind
   `test-utils`, a `mockall` mock for strict contract tests.
 - `providers/` — `EnrichmentProvider`: search/get movie and show metadata by external ID, resolve
   image URLs. Ships `InMemoryEnrichmentProvider` (test-utils) and `NoopEnrichmentProvider` (a

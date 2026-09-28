@@ -15,15 +15,16 @@ use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
 use crate::services::hash::{HashConfig, LocalHashService};
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::CreateLibrary;
-use beam_domain::models::playback_progress::UpsertPlaybackProgress;
+use beam_domain::models::watch_state::{RecordProgress, WatchTarget};
 use beam_domain::repositories::AdminLogRepository;
+use beam_domain::repositories::WatchStateRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use beam_domain::services::TestClock;
 use tempfile::TempDir;
 
@@ -70,7 +71,7 @@ struct Harness {
     file_repo: Arc<InMemoryFileRepository>,
     movie_repo: Arc<InMemoryMovieRepository>,
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
-    progress: Arc<InMemoryPlaybackProgressRepository>,
+    progress: Arc<InMemoryWatchStateRepository>,
     prober: Arc<CountingProber>,
     service: LocalIndexService,
 }
@@ -90,10 +91,7 @@ impl Harness {
         let clock = Arc::new(TestClock::starting_at(
             DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         ));
-        let progress = Arc::new(InMemoryPlaybackProgressRepository::new(
-            clock.clone(),
-            file_repo.clone(),
-        ));
+        let progress = Arc::new(InMemoryWatchStateRepository::new(clock.clone()));
         let library = library_repo
             .create(CreateLibrary {
                 name: "Discs".to_string(),
@@ -368,12 +366,17 @@ async fn a_disc_moved_as_a_folder_relinks() {
     h.scan().await.expect("the scan runs");
     let before = h.rows();
     let user_id = Uuid::new_v4();
+    let target = WatchTarget::Movie {
+        movie_id: h.movie_repo.find_all().await.unwrap()[0].id,
+    };
     h.progress
-        .upsert(UpsertPlaybackProgress {
+        .record_progress(RecordProgress {
             user_id,
+            target,
             file_id: before[1].id,
             position_secs: 600.0,
             duration_secs: Some(2700.0),
+            finishes_title: false,
         })
         .await
         .unwrap();
@@ -406,13 +409,14 @@ async fn a_disc_moved_as_a_folder_relinks() {
         probes,
         "nothing probed"
     );
-    assert!(
+    assert_eq!(
         h.progress
-            .find_by_user_and_file(user_id, before[1].id)
+            .find(user_id, target)
             .await
             .unwrap()
-            .is_some(),
-        "progress follows the part it was on"
+            .and_then(|state| state.last_file_id),
+        Some(before[1].id),
+        "the watch state still names the part it was on"
     );
 }
 

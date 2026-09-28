@@ -983,7 +983,7 @@ impl BeamClient {
     ) -> Result<Vec<ContinueWatchingEntry>, BeamError> {
         let (server_id, client, record) = self.active_context()?;
         let params = crate::api::GetContinueWatchingParams {
-            limit: limit.map(i64::from),
+            first: limit.map(i64::from),
             origin: None,
             referer: None,
         };
@@ -993,6 +993,7 @@ impl BeamClient {
 
         let mut entries: Vec<ContinueWatchingEntry> = response
             .into_inner()
+            .items
             .into_iter()
             .map(ContinueWatchingEntry::from_generated)
             .collect();
@@ -1012,7 +1013,8 @@ impl BeamClient {
         Ok(entries)
     }
 
-    /// One page of watch history, newest first.
+    /// One page of watch history, newest first: `first` rows, after the
+    /// page whose `end_cursor` is `after`, or from the start.
     ///
     /// Hydrated the same way as [`Self::continue_watching`].
     ///
@@ -1021,13 +1023,13 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn history(
         &self,
-        limit: Option<u32>,
-        offset: Option<u32>,
+        first: Option<u32>,
+        after: Option<String>,
     ) -> Result<HistoryPage, BeamError> {
         let (server_id, client, record) = self.active_context()?;
         let params = crate::api::GetHistoryParams {
-            limit: limit.map(i64::from),
-            offset: offset.map(i64::from),
+            first: first.map(i64::from),
+            after,
             origin: None,
             referer: None,
         };
@@ -1037,6 +1039,8 @@ impl BeamClient {
             .into_inner();
 
         let total = u64::try_from(response.total).unwrap_or(0);
+        let end_cursor = response.page_info.end_cursor;
+        let has_next_page = response.page_info.has_next_page;
         let mut items: Vec<HistoryEntry> = response
             .items
             .into_iter()
@@ -1055,7 +1059,12 @@ impl BeamClient {
                     .and_then(|id| find_episode(detail, id));
             }
         }
-        Ok(HistoryPage { items, total })
+        Ok(HistoryPage {
+            items,
+            total,
+            end_cursor,
+            has_next_page,
+        })
     }
 
     /// Report where the viewer is in a file.

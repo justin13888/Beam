@@ -919,7 +919,7 @@ mod local_index_service_adapter {
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ))
     }
 
@@ -1028,7 +1028,7 @@ mod local_index_service_adapter {
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let watcher = Arc::new(InMemoryFsWatcher::new());
         let clock = Arc::new(TestClock::new());
@@ -1105,7 +1105,7 @@ mod local_index_service_adapter {
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let old = temp.path().join("Movie.2019.mkv");
         std::fs::write(&old, b"not really a movie").unwrap();
@@ -1213,7 +1213,7 @@ mod local_index_service_adapter {
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let indexer: Arc<dyn BackgroundIndexer> = index_service;
 

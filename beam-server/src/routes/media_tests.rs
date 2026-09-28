@@ -75,6 +75,20 @@ impl MetadataService for StubMetadataService {
             .cloned()
             .ok_or(MetadataError::MediaNotFound)
     }
+
+    async fn get_episode_detail(
+        &self,
+        _episode_id: uuid::Uuid,
+    ) -> Result<Option<crate::models::EpisodeDetail>, MetadataError> {
+        Ok(None)
+    }
+
+    async fn get_season_detail(
+        &self,
+        _season_id: uuid::Uuid,
+    ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
+        Ok(None)
+    }
 }
 
 /// `test_support`'s state with the metadata service swapped for the one this
@@ -181,6 +195,7 @@ fn movie_metadata(id: &str, title: &str) -> MediaMetadata {
         identifiers: None,
         file_id: None,
         source_count: None,
+        user_state: crate::models::UserTitleState::default(),
     })
 }
 

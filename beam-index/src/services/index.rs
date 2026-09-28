@@ -35,11 +35,12 @@ use beam_domain::models::file::{
 };
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode, Show};
+use beam_domain::models::watch_state::WatchTarget;
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
     AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
-    MediaStreamRepository, MovieRepository, PlaybackProgressRepository, ShowRepository,
-    SidecarSubtitleRepository,
+    MediaStreamRepository, MovieRepository, ShowRepository, SidecarSubtitleRepository,
+    WatchStateRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_domain::utils::classification::{Classification, ContainerTags, Hints, classify};
@@ -745,8 +746,8 @@ struct ContentMoves {
 
 /// Which rows follow their content to another path (issue #180): a move or
 /// a rename, two files swapping names, a rotation, a file renamed onto the
-/// path of a row already missing. Each row keeps its id, and so its playback
-/// progress, its title and its streams.
+/// path of a row already missing. Each row keeps its id, and so its title,
+/// its streams, and its place as the file a viewer's watch state last played.
 ///
 /// Every path gets at most one row and every row at most one path. The
 /// pairings are taken best first -- by [`relink_preference`], then by path --
@@ -1266,7 +1267,7 @@ pub struct LocalIndexService {
     admin_log: Arc<dyn AdminLogService>,
     /// Asked when each candidate row was last played, to break a tie
     /// between identical copies of a moved file (issue #180).
-    progress_repo: Arc<dyn PlaybackProgressRepository>,
+    progress_repo: Arc<dyn WatchStateRepository>,
     path_policy: PathPolicy,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
     sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
@@ -1303,7 +1304,7 @@ impl LocalIndexService {
         media_info_service: Arc<dyn MediaInfoService>,
         notification_service: Arc<dyn NotificationService>,
         admin_log: Arc<dyn AdminLogService>,
-        progress_repo: Arc<dyn PlaybackProgressRepository>,
+        progress_repo: Arc<dyn WatchStateRepository>,
     ) -> Self {
         Self {
             progress_repo,
@@ -1791,11 +1792,11 @@ impl LocalIndexService {
     /// Bring a row classified by older rules up to [`CLASSIFIER_VERSION`]:
     /// reclassify it from its path, the NFOs beside it and the container tags
     /// its last probe stored, attaching it to the title the current rules
-    /// name, and stamp the version. The row keeps its id -- and so its
-    /// playback progress -- its hash and its probe results; nothing is
-    /// re-probed. A title the move leaves with no file (a show a legacy
-    /// build named after a `Season 01` folder) is retired by the scan's
-    /// orphan cleanup.
+    /// name, and stamp the version. The row keeps its id -- and so stays the
+    /// file a viewer's watch state last played -- its hash and its probe
+    /// results; nothing is re-probed. A title the move leaves with no file (a
+    /// show a legacy build named after a `Season 01` folder) is retired by
+    /// the scan's orphan cleanup.
     ///
     /// Only a row that was probed is reclassified: one whose probe failed has
     /// no runtime and was never classified.
@@ -2044,9 +2045,9 @@ impl LocalIndexService {
     }
 
     /// Clear `missing_since` on a row whose path is back on disk, returning
-    /// whether it had been missing. The row keeps its id, so its playback
-    /// progress is still attached (issue #179). Shared by the full scan and
-    /// single-path watcher events.
+    /// whether it had been missing. The row keeps its id, so a viewer's watch
+    /// state that last played it resumes on it again (issue #179). Shared by
+    /// the full scan and single-path watcher events.
     async fn restore_if_missing(&self, existing: &MediaFile) -> Result<bool, IndexError> {
         if existing.missing_since.is_none() {
             return Ok(false);
@@ -2079,11 +2080,11 @@ impl LocalIndexService {
     /// swapped to, as found there, and move each of `displaced` aside as
     /// missing -- in one step, so rows can trade paths (issue #180).
     ///
-    /// A relinked row keeps its id, and so its playback progress, its movie
-    /// or episode, and its streams; a missing row is visible again. Nothing
-    /// is probed or classified: the content is the content the row already
-    /// describes. Each move, and each displaced row, is told to the
-    /// administrator.
+    /// A relinked row keeps its id, and so its movie or episode, its streams,
+    /// and its place as the file a viewer's watch state last played; a
+    /// missing row is visible again. Nothing is probed or classified: the
+    /// content is the content the row already describes. Each move, and each
+    /// displaced row, is told to the administrator.
     async fn relink_files(
         &self,
         relinks: &[(MediaFile, PathBuf, Fingerprint)],
@@ -3381,6 +3382,14 @@ impl LocalIndexService {
                 }
                 entry_files.entry(target.id).or_default().extend(moved);
             }
+            // The retired movie's viewers keep their place on the survivor;
+            // left behind, it would go when the retired movie does.
+            self.progress_repo
+                .carry(
+                    WatchTarget::Movie { movie_id: loser },
+                    WatchTarget::Movie { movie_id: survivor },
+                )
+                .await?;
             let (kept, retired) = if survivor == movie.id {
                 (&movie, &holder)
             } else {
@@ -3553,6 +3562,18 @@ impl LocalIndexService {
                         .await?;
                     }
                     episode_files.entry(target.id).or_default().extend(moved);
+                    self.progress_repo
+                        .carry(
+                            WatchTarget::Episode {
+                                episode_id,
+                                show_id: loser,
+                            },
+                            WatchTarget::Episode {
+                                episode_id: target.id,
+                                show_id: survivor,
+                            },
+                        )
+                        .await?;
                 }
             }
             let (kept, retired) = if survivor == show.id {
@@ -5356,7 +5377,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
         (service, movie_repo, show_repo)
     }
@@ -5374,7 +5395,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         )
     }
 
@@ -5943,7 +5964,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let file_id = Uuid::new_v4();
@@ -6173,7 +6194,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         )
     }
 
@@ -6596,7 +6617,7 @@ mod tests {
             Arc::new(mock_media_info_service),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service
@@ -6766,7 +6787,7 @@ mod tests {
             Arc::new(mock_media_info_service),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service
@@ -6798,7 +6819,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let err = service
@@ -6849,7 +6870,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let err = service
@@ -6918,7 +6939,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -6966,7 +6987,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -7008,7 +7029,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -7055,7 +7076,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -7125,7 +7146,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -7193,7 +7214,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -7304,7 +7325,7 @@ mod tests {
             Arc::new(LocalAdminLogService::new(
                 admin_log_repo.clone() as Arc<dyn AdminLogRepository>
             )),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
         IndexedLibraryHarness {
             library,
@@ -7606,7 +7627,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             notification_svc.clone(),
             admin_log_svc,
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -7684,7 +7705,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let err = service
@@ -7738,7 +7759,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -7781,7 +7802,7 @@ mod tests {
             Arc::new(crate::services::media_info::LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let result = service.scan_library(library.id.to_string()).await;
@@ -7829,7 +7850,7 @@ mod tests {
             Arc::new(mock_media_info),
             notification_svc.clone(),
             admin_log_svc,
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         // Scan should succeed overall; the failing file is not counted
@@ -7876,7 +7897,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -7907,7 +7928,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             notification_svc.clone(),
             admin_log_svc,
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -8022,7 +8043,7 @@ mod tests {
             Arc::new(failing_probe),
             Arc::new(InMemoryNotificationService::new()),
             admin_log_svc,
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let added = service.scan_library(library.id.to_string()).await.unwrap();
@@ -8097,7 +8118,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -8163,7 +8184,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()), // no expectation: ffmpeg must NOT be called
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -8232,7 +8253,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -8304,7 +8325,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service
@@ -8362,7 +8383,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service
@@ -8409,7 +8430,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service
@@ -8438,7 +8459,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         // No library matches this id; reconcile_path must be a no-op.
@@ -8491,7 +8512,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             admin_log_svc,
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         service.scan_library(library.id.to_string()).await.unwrap();
@@ -8539,7 +8560,7 @@ mod tests {
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
         let total = service
@@ -8571,7 +8592,7 @@ mod tests {
             Arc::new(MockMediaInfoService::new()),
             notification,
             admin_log,
-            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         )
     }
 
