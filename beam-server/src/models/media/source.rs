@@ -2,6 +2,8 @@ use kynos::Schema;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::models::search::PageInfo;
+
 /// One playable/downloadable version of a media item. Beam models multiple
 /// deliverable qualities/editions as distinct source files rather than
 /// transcoding on demand (see ADR-0004: never live-transcode); this is how a
@@ -39,6 +41,36 @@ pub struct MediaSource {
     pub stream_url: String,
     /// Download URL for this file (Range-request capable, `Content-Disposition: attachment`).
     pub download_url: String,
+}
+
+/// Every source of a movie or an episode, primary first: what
+/// `GET /v1/media/{id}/sources` returns.
+///
+/// A connection, as `GET /v1/media` answers, though a title's sources
+/// are few enough that it is never paged: `items` is the whole list, both of
+/// `page_info`'s `has_*_page` flags are `false`, and it carries no cursors.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+pub struct MediaSourceConnection {
+    /// The title's sources, primary first. Empty for an episode with no
+    /// file yet.
+    pub items: Vec<MediaSource>,
+    /// Always a single, complete page.
+    pub page_info: PageInfo,
+}
+
+impl MediaSourceConnection {
+    /// All of `sources`, as the one page they fill.
+    pub fn complete(sources: Vec<MediaSource>) -> Self {
+        Self {
+            items: sources,
+            page_info: PageInfo {
+                has_next_page: false,
+                has_previous_page: false,
+                start_cursor: None,
+                end_cursor: None,
+            },
+        }
+    }
 }
 
 /// The episodes one file holds, first and last inclusive.

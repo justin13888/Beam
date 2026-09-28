@@ -33,7 +33,8 @@ has to complete a browser sign-in and hold the resulting cookie.
 
 ## Sources, tracks and subtitles
 
-`GET /v1/media/{id}/sources` is where a movie's or an episode's files are described: primary first,
+`GET /v1/media/{id}/sources` is where a movie's or an episode's files are described, as the `items`
+of a single, complete page: primary first,
 each with its video, audio and subtitle tracks by stream index and with FFmpeg's own codec names
 (`h264`, `eac3`, `subrip`, `hdmv_pgs_subtitle`). Subtitle files beside a video appear as tracks
 with a `url` to fetch them as stored and, for SubRip and WebVTT, a `webvtt_url` to fetch them as

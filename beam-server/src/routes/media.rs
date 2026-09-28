@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::search::{MediaConnection, MediaSortField, MediaTypeFilter, SortOrder};
-use crate::models::{MediaMetadata, MediaSource};
+use crate::models::{MediaMetadata, MediaSourceConnection};
 use crate::routes::api_error::{
     MediaBrowseError, MediaLookupError, MediaSourcesError, SessionAuth,
 };
@@ -175,15 +175,17 @@ pub async fn get_media_detail(
 /// Accepts a movie id or an episode id (both are "playable" ids). A show id is
 /// rejected with 400 -- shows have no files of their own, so callers request
 /// sources for the show's individual episode ids instead. An episode with no
-/// files yet returns an empty array (a valid, "not yet playable" response).
+/// files yet returns an empty list (a valid, "not yet playable" response).
+/// The list is a connection, but never paged: `items` is
+/// every source, primary first.
 #[kynos::get("/media/{id}/sources", tag = Media, operation_id = "getMediaSources")]
 pub async fn get_media_sources(
     _auth: SessionAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<MediaSource>>, MediaSourcesError> {
+) -> Result<Json<MediaSourceConnection>, MediaSourcesError> {
     match state.services.metadata.get_media_sources(&path.id).await {
-        Ok(sources) => Ok(Json(sources)),
+        Ok(sources) => Ok(Json(MediaSourceConnection::complete(sources))),
         Err(MetadataError::InvalidId) => Err(MediaSourcesError::InvalidMediaId(format!(
             "media id {} is not a valid identifier",
             path.id

@@ -740,7 +740,7 @@ impl MetadataService for DbMetadataService {
         // Episodes are playable ids too: an episode id resolves to its own
         // files, giving series content the same multi-rendition selection as
         // movies. An episode with no files yet is a well-formed empty list
-        // (the client treats an empty `sources` array as "unplayable"), which
+        // (the client treats no sources as "unplayable"), which
         // is distinct from a genuinely unknown id (`MediaNotFound` below).
         if let Some(episode) = self
             .show_repo

@@ -1045,7 +1045,7 @@
           "media"
         ],
         "summary": "List the playable/downloadable source files for a playable media id.",
-        "description": "Accepts a movie id or an episode id (both are \"playable\" ids). A show id is\nrejected with 400 -- shows have no files of their own, so callers request\nsources for the show's individual episode ids instead. An episode with no\nfiles yet returns an empty array (a valid, \"not yet playable\" response).",
+        "description": "Accepts a movie id or an episode id (both are \"playable\" ids). A show id is\nrejected with 400 -- shows have no files of their own, so callers request\nsources for the show's individual episode ids instead. An episode with no\nfiles yet returns an empty list (a valid, \"not yet playable\" response).\nThe list is a connection, but never paged: `items` is\nevery source, primary first.",
         "operationId": "getMediaSources",
         "parameters": [
           {
@@ -1176,10 +1176,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/MediaSource"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/MediaSourceConnection"
                 }
               }
             }
@@ -10936,33 +10933,6 @@
         ],
         "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.\n\nThe one track model Beam has (issue #189): every video, audio and\nsubtitle track here is tied to this file, addressed by its stream index,\nand names its codec as FFmpeg does (`h264`, `eac3`, `subrip`)."
       },
-      "MediaSortField": {
-        "type": "string",
-        "enum": [
-          "title",
-          "year",
-          "rating",
-          "date_added",
-          "runtime"
-        ],
-        "description": "Sort field options for media search."
-      },
-      "SortOrder": {
-        "type": "string",
-        "enum": [
-          "asc",
-          "desc"
-        ],
-        "description": "Sort order."
-      },
-      "MediaTypeFilter": {
-        "type": "string",
-        "enum": [
-          "movie",
-          "show"
-        ],
-        "description": "Media type filter."
-      },
       "PageInfo": {
         "properties": {
           "has_next_page": {
@@ -10994,6 +10964,54 @@
           "has_previous_page"
         ],
         "description": "Where a page sits in the whole listing."
+      },
+      "MediaSourceConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MediaSource"
+            },
+            "type": "array",
+            "description": "The title's sources, primary first. Empty for an episode with no\nfile yet."
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Always a single, complete page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "description": "Every source of a movie or an episode, primary first: what\n`GET /v1/media/{id}/sources` returns.\n\nA connection, as `GET /v1/media` answers, though a title's sources\nare few enough that it is never paged: `items` is the whole list, both of\n`page_info`'s `has_*_page` flags are `false`, and it carries no cursors."
+      },
+      "MediaSortField": {
+        "type": "string",
+        "enum": [
+          "title",
+          "year",
+          "rating",
+          "date_added",
+          "runtime"
+        ],
+        "description": "Sort field options for media search."
+      },
+      "SortOrder": {
+        "type": "string",
+        "enum": [
+          "asc",
+          "desc"
+        ],
+        "description": "Sort order."
+      },
+      "MediaTypeFilter": {
+        "type": "string",
+        "enum": [
+          "movie",
+          "show"
+        ],
+        "description": "Media type filter."
       },
       "MediaConnection": {
         "properties": {

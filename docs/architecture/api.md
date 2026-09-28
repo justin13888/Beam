@@ -64,7 +64,9 @@ handlers: Kynos routes and describes from one declaration, so the alternative to
 would be waiving the whole document's authority.
 
 `GET /v1/media/{id}/sources` is the one place tracks are described
-([#189](https://github.com/justin13888/beam/issues/189)). It lists a title's sources primary first:
+([#189](https://github.com/justin13888/beam/issues/189)). It answers a `MediaSourceConnection`
+-- `items` and a `page_info`, the connection shape `GET /v1/media` has, but never paged: `items` is
+every source and neither `has_*_page` flag is ever `true` -- listing a title's sources primary first:
 the default edition, then the tallest picture, the highest video bit rate, the largest file, the
 lowest file id -- ranked when read, not stored. Each source carries `is_primary`, its `edition`, an
 `episode_span` when the file holds a run of episodes (its duration is then the run's), and its

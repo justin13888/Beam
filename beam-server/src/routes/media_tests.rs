@@ -14,7 +14,7 @@ use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
 
-use crate::models::{MediaMetadata, MediaSource, MovieMetadata, Title};
+use crate::models::{MediaMetadata, MediaSource, MediaSourceConnection, MovieMetadata, Title};
 use crate::routes::media::{browse_media, get_media_detail, get_media_sources};
 use crate::routes::test_support::make_app_state;
 use crate::services::metadata::{
@@ -741,13 +741,16 @@ async fn a_playable_id_yields_its_stream_and_download_urls() {
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body: Vec<MediaSource> = response.json();
-    assert_eq!(body.len(), 1);
-    assert_eq!(body[0].stream_url, format!("/v1/files/{FILE_ID}/stream"));
+    let MediaSourceConnection { items, page_info } = response.json();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].stream_url, format!("/v1/files/{FILE_ID}/stream"));
     assert_eq!(
-        body[0].download_url,
+        items[0].download_url,
         format!("/v1/files/{FILE_ID}/download")
     );
+    // One complete page: nothing before it, nothing after.
+    assert!(!page_info.has_next_page);
+    assert!(!page_info.has_previous_page);
 }
 
 /// What a player reads off the wire (issue #189): each source says whether
@@ -809,7 +812,16 @@ async fn sources_carry_their_tracks_and_the_subtitle_files_beside_them() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = response.json();
-    let source = &body[0];
+    assert_eq!(
+        body["page_info"],
+        serde_json::json!({
+            "has_next_page": false,
+            "has_previous_page": false,
+            "start_cursor": null,
+            "end_cursor": null,
+        })
+    );
+    let source = &body["items"][0];
     assert_eq!(source["file_id"], file.to_string());
     assert_eq!(source["is_primary"], true);
     assert_eq!(source["edition"], serde_json::Value::Null);

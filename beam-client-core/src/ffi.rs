@@ -638,6 +638,7 @@ impl BeamClient {
 
         response
             .into_inner()
+            .items
             .into_iter()
             .map(|source| to_view(source, &record))
             .collect()
@@ -2421,6 +2422,9 @@ mod tests {
     /// What `GET /v1/me` answers for the signed-in user in these tests.
     const ME: &str = r#"{"id":"u-1","display_name":"Ada","is_admin":false}"#;
 
+    /// What `GET /v1/media/{id}/sources` answers for a title with no file.
+    const NO_SOURCES: &str = r#"{"items":[],"page_info":{"has_next_page":false,"has_previous_page":false,"start_cursor":null,"end_cursor":null}}"#;
+
     /// Sign in to a registered server against a canned `/v1/me`, through the
     /// production path: `complete_login` registers the cookie with the client
     /// and verifies it with the one secured request the flow makes.
@@ -2574,7 +2578,7 @@ mod tests {
     /// server's order, and the URLs resolved against the server.
     #[tokio::test]
     async fn sources_become_views_of_their_first_video_track() {
-        const SOURCES: &str = r#"[
+        const SOURCES: &str = r#"{"items":[
             {"file_id":"f1f1f1f1-0000-4000-8000-000000000001","is_primary":true,
              "edition":null,"episode_span":null,"size_bytes":4000,
              "mime_type":"video/x-matroska","container_format":"matroska",
@@ -2607,7 +2611,9 @@ mod tests {
              "video_tracks":[],"audio_tracks":[],"subtitle_tracks":[],
              "stream_url":"/v1/files/f2f2f2f2-0000-4000-8000-000000000002/stream",
              "download_url":"/v1/files/f2f2f2f2-0000-4000-8000-000000000002/download"}
-        ]"#;
+        ],
+        "page_info":{"has_next_page":false,"has_previous_page":false,
+                     "start_cursor":null,"end_cursor":null}}"#;
         let (client, id, _) = signed_in_client().await;
         let backend = Arc::new(CannedBackend::answering(200, "application/json", SOURCES));
         client
@@ -2667,7 +2673,11 @@ mod tests {
 
         let second = BeamClient::new(storage as Arc<dyn KeyValueStore>);
         second.restore().await.expect("restored");
-        let backend = Arc::new(CannedBackend::answering(200, "application/json", "[]"));
+        let backend = Arc::new(CannedBackend::answering(
+            200,
+            "application/json",
+            NO_SOURCES,
+        ));
         second
             .use_transport(
                 &summary.id,
@@ -3062,7 +3072,11 @@ mod tests {
 
         // `install` put a real transport under the rebuilt client; the canned
         // one goes back in the way production swaps nothing else.
-        let backend = Arc::new(CannedBackend::answering(200, "application/json", "[]"));
+        let backend = Arc::new(CannedBackend::answering(
+            200,
+            "application/json",
+            NO_SOURCES,
+        ));
         client
             .use_transport(
                 &id,
