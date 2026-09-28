@@ -127,6 +127,7 @@ fn build(
         hash: base.services.hash.clone(),
         library: base.services.library.clone(),
         metadata: base.services.metadata.clone(),
+        subtitles: base.services.subtitles.clone(),
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: users_dyn,

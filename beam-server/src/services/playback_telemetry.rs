@@ -144,9 +144,9 @@ pub fn validate_batch(batch: &PlaybackTelemetryBatch) -> Vec<FieldError> {
 
 // ── Resolving a file to its dimensions ──────────────────────────────────────
 //
-// The one place that reads the stream model. Issue #189 replaces the stream
-// model; when it lands, `ResolvedFile::of` and `PlaybackTelemetryService::
-// resolve` are what change, and nothing that counts.
+// The one place that reads the stream model: `ResolvedFile::of` and
+// `PlaybackTelemetryService::resolve` change with it, and nothing that
+// counts does.
 
 /// The dimensions a file is counted under, with the file id already gone.
 #[derive(Debug, Clone, PartialEq, Eq)]

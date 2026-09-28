@@ -1,5 +1,3 @@
-use crate::models::MediaStreamMetadata;
-
 use super::{ExternalIdentifiers, Ratings, Title};
 use chrono::{DateTime, Utc};
 use kynos::Schema;
@@ -20,7 +18,7 @@ pub struct MovieMetadata {
     pub release_date: Option<DateTime<Utc>>,
     /// Runtime of the movie in minutes
     pub runtime: Option<u32>,
-    /// Duration of the video file in seconds
+    /// Duration of the primary source's file in seconds
     pub duration: Option<f64>,
     /// Optional URL to the movie's poster image
     pub poster_url: Option<String>,
@@ -33,12 +31,13 @@ pub struct MovieMetadata {
     /// External identifiers to movie
     pub identifiers: Option<ExternalIdentifiers>,
 
-    /// List of unique streams associated with this movie. Empty in a browse
-    /// result, which does not read files; the detail route fills it.
-    pub streams: Vec<MediaStreamMetadata>,
-    /// Identifier of the primary streamable file, if any. Absent in a browse
-    /// result, as `streams` is empty there.
+    /// Identifier of the primary source's file -- the one
+    /// `GET /v1/media/{id}/sources` lists first -- if the movie has any.
+    /// Absent in a browse result, which does not read files.
     pub file_id: Option<Uuid>,
+    /// How many sources the movie has. Absent in a browse result, which does
+    /// not read files; their tracks are on `GET /v1/media/{id}/sources`.
+    pub source_count: Option<u32>,
     //
     // TODO: Add people involved (cast, crew, directors, writers, etc.)
 }

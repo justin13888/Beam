@@ -225,6 +225,7 @@ fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
         hash: Arc::new(StubHashService),
         library: Arc::new(StubLibraryService::new(files)),
         metadata: Arc::new(StubMetadataService),
+        subtitles: crate::routes::test_support::idle_subtitles(),
         notification,
         admin_log,
         user_repo: user_repo.clone(),

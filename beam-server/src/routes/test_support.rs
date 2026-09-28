@@ -280,6 +280,16 @@ pub(crate) fn make_app_state_with_telemetry(
     )
 }
 
+/// Subtitle delivery over an empty index: every lookup is a miss.
+pub(crate) fn idle_subtitles() -> Arc<dyn crate::services::subtitle::SubtitleService> {
+    Arc::new(crate::services::subtitle::DbSubtitleService::new(
+        Arc::new(InMemoryFileRepository::default()),
+        Arc::new(
+            beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
+        ),
+    ))
+}
+
 /// Every seam, both telemetry services included.
 fn make_app_state_with_services(
     adjust: impl FnOnce(&mut crate::config::ServerConfig),
@@ -313,6 +323,7 @@ fn make_app_state_with_services(
         hash: Arc::new(StubHashService),
         library: Arc::new(StubLibraryService),
         metadata: Arc::new(StubMetadataService),
+        subtitles: idle_subtitles(),
         notification,
         admin_log,
         user_repo: Arc::new(InMemoryUserRepository::default()),

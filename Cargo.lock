@@ -747,7 +747,6 @@ dependencies = [
  "mutants",
  "proptest",
  "rand 0.10.2",
- "rust_decimal",
  "sea-orm",
  "serde",
  "serde_json",

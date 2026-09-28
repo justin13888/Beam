@@ -9,6 +9,8 @@ pub mod metadata;
 pub mod notification;
 pub mod playback;
 pub mod playback_telemetry;
+pub mod sources;
+pub mod subtitle;
 pub mod telemetry;
 
 // Re-export IndexService from beam-index (LocalIndexService now runs

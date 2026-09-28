@@ -2056,9 +2056,13 @@ fn to_view(
     // widening the core's own types keeps "a size cannot be negative" true in
     // the one place that reasons about sizes; a nonsensical negative is
     // treated as absent rather than wrapping into an enormous positive.
-    let video = source.video;
+    //
+    // The view describes one picture: the source's first video track, which
+    // the server lists by stream index. The server lists sources primary
+    // first, and this keeps that order.
+    let video = source.video_tracks.into_iter().next();
     Ok(MediaSourceView {
-        file_id: source.file_id,
+        file_id: source.file_id.to_string(),
         size_bytes: u64::try_from(source.size_bytes).unwrap_or(0),
         duration_secs: source.duration_secs,
         container: source.container_format,
@@ -2562,6 +2566,84 @@ mod tests {
         assert_eq!(error, BeamError::SessionExpired);
         assert!(!error.is_permanent(), "{error:?}");
         assert_eq!(backend.recorded().len(), sent_before);
+    }
+
+    /// The server's one track model (issue #189) reaches the platform as the
+    /// view it already knew: the picture from the first video track, every
+    /// audio track, the codecs as the server named them, the sources in the
+    /// server's order, and the URLs resolved against the server.
+    #[tokio::test]
+    async fn sources_become_views_of_their_first_video_track() {
+        const SOURCES: &str = r#"[
+            {"file_id":"f1f1f1f1-0000-4000-8000-000000000001","is_primary":true,
+             "edition":null,"episode_span":null,"size_bytes":4000,
+             "mime_type":"video/x-matroska","container_format":"matroska",
+             "duration_secs":6300.0,
+             "video_tracks":[
+                {"index":0,"codec":"hevc","width":3840,"height":2160,
+                 "frame_rate":null,"bit_rate":20000000,"hdr_format":"HDR10"},
+                {"index":3,"codec":"mjpeg","width":600,"height":900,
+                 "frame_rate":null,"bit_rate":null,"hdr_format":null}],
+             "audio_tracks":[
+                {"index":1,"codec":"truehd","language":"eng","title":null,
+                 "channels":8,"channel_layout":"7.1","sample_rate":48000,
+                 "bit_rate":null,"is_default":true,"is_forced":false},
+                {"index":2,"codec":"eac3","language":"fre","title":null,
+                 "channels":6,"channel_layout":null,"sample_rate":null,
+                 "bit_rate":null,"is_default":false,"is_forced":false}],
+             "subtitle_tracks":[
+                {"origin":"sidecar","index":null,
+                 "sidecar_id":"5c5c5c5c-0000-4000-8000-000000000001",
+                 "codec":"subrip","language":"eng","title":null,
+                 "is_default":false,"is_forced":false,"is_hearing_impaired":true,
+                 "is_text":true,
+                 "url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/subtitles/5c5c5c5c-0000-4000-8000-000000000001",
+                 "webvtt_url":null}],
+             "stream_url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/stream",
+             "download_url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/download"},
+            {"file_id":"f2f2f2f2-0000-4000-8000-000000000002","is_primary":false,
+             "edition":"Director's Cut","episode_span":null,"size_bytes":1000,
+             "mime_type":null,"container_format":null,"duration_secs":null,
+             "video_tracks":[],"audio_tracks":[],"subtitle_tracks":[],
+             "stream_url":"/v1/files/f2f2f2f2-0000-4000-8000-000000000002/stream",
+             "download_url":"/v1/files/f2f2f2f2-0000-4000-8000-000000000002/download"}
+        ]"#;
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering(200, "application/json", SOURCES));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        let views = client
+            .media_sources("7".to_owned())
+            .await
+            .expect("the sources decode");
+
+        assert_eq!(views.len(), 2);
+        let primary = &views[0];
+        assert_eq!(primary.file_id, "f1f1f1f1-0000-4000-8000-000000000001");
+        assert_eq!(primary.video_codec.as_deref(), Some("hevc"));
+        assert_eq!((primary.width, primary.height), (Some(3840), Some(2160)));
+        assert_eq!(primary.bit_rate, Some(20_000_000));
+        assert_eq!(primary.hdr_format.as_deref(), Some("HDR10"));
+        let audio: Vec<(&str, u16, bool)> = primary
+            .audio_tracks
+            .iter()
+            .map(|a| (a.codec.as_str(), a.channels, a.is_default))
+            .collect();
+        assert_eq!(audio, vec![("truehd", 8, true), ("eac3", 6, false)]);
+        assert_eq!(
+            primary.stream_url,
+            "https://beam.test/v1/files/f1f1f1f1-0000-4000-8000-000000000001/stream"
+        );
+
+        let other = &views[1];
+        assert_eq!(other.file_id, "f2f2f2f2-0000-4000-8000-000000000002");
+        assert_eq!(other.video_codec, None, "no video track, no picture");
+        assert_eq!((other.width, other.height), (None, None));
     }
 
     /// A cookie found in secret storage at startup is registered with the

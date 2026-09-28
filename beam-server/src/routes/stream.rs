@@ -53,11 +53,11 @@ pub struct FileByteSource {
 
 impl FileByteSource {
     /// Reads the file's metadata without reading a byte of its contents.
-    async fn open(path: PathBuf) -> Result<(Self, SystemTime, u64), DeliveryError> {
-        let metadata = tokio::fs::metadata(&path).await.map_err(|err| {
-            error!(?path, ?err, "failed to read source file metadata");
-            DeliveryError::SourceFileMissing("Source video file not found".into())
-        })?;
+    ///
+    /// Shared with subtitle delivery, which serves a sidecar file the same
+    /// way; each caller says what a file it cannot open means to its client.
+    pub(crate) async fn open(path: PathBuf) -> std::io::Result<(Self, SystemTime, u64)> {
+        let metadata = tokio::fs::metadata(&path).await?;
 
         let length = metadata.len();
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -156,10 +156,17 @@ async fn locate_file(state: &AppState, file_id: &str) -> Result<(PathBuf, String
 /// The previous `"{file_size}"` was neither -- every 4 GiB remux shared it, so
 /// a resumed download could splice bytes from a different file.
 fn validator(modified: SystemTime, length: u64) -> ETag {
+    ETag::strong(validator_tag(modified, length))
+}
+
+/// The opaque part of [`validator`]: `{mtime}-{length}` in hex. Shared with
+/// subtitle delivery, which derives a rendition's validator from the file
+/// it was rendered from.
+pub(crate) fn validator_tag(modified: SystemTime, length: u64) -> String {
     let stamp = modified
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
-    ETag::strong(format!("{stamp:x}-{length:x}"))
+    format!("{stamp:x}-{length:x}")
 }
 
 /// Builds the delivery both endpoints share.
@@ -170,7 +177,10 @@ async fn deliver(
     attachment: bool,
 ) -> Result<MediaDelivery, DeliveryError> {
     let (path, content_type) = locate_file(state, file_id).await?;
-    let (source, modified, length) = FileByteSource::open(path.clone()).await?;
+    let (source, modified, length) = FileByteSource::open(path.clone()).await.map_err(|err| {
+        error!(?path, ?err, "failed to read source file metadata");
+        DeliveryError::SourceFileMissing("Source video file not found".into())
+    })?;
 
     let mut served = Served::<_, AnyMedia>::new(source)
         .etag(validator(modified, length))

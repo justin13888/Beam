@@ -1,5 +1,3 @@
-use crate::models::MediaStreamMetadata;
-
 use super::{ExternalIdentifiers, Ratings};
 
 use super::Title;
@@ -89,11 +87,16 @@ pub struct EpisodeMetadata {
     /// Optional URL to the episode's thumbnail image
     pub thumbnail_url: Option<String>,
 
+    /// Duration of the primary source's file in seconds. Absent when that
+    /// file holds a run of episodes, whose duration is not this one's.
     pub duration: Option<f64>,
 
-    /// List of unique streams associated with this episode
-    pub streams: Vec<MediaStreamMetadata>,
-    /// Identifier of the streamable file backing this episode, if any.
+    /// Identifier of the primary source's file -- the one
+    /// `GET /v1/media/{id}/sources` lists first for this episode's id -- if
+    /// the episode has any.
     pub file_id: Option<Uuid>,
+    /// How many sources the episode has; their tracks are on
+    /// `GET /v1/media/{id}/sources`.
+    pub source_count: u32,
 }
 // TODO: detect discrepancy in video file length to detected episode length

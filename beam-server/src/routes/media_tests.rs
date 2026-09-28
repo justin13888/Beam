@@ -95,6 +95,7 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
         hash: base.services.hash.clone(),
         library: base.services.library.clone(),
         metadata,
+        subtitles: crate::routes::test_support::idle_subtitles(),
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: base.services.user_repo.clone(),
@@ -181,20 +182,24 @@ fn movie_metadata(id: &str, title: &str) -> MediaMetadata {
         genres: vec![],
         ratings: None,
         identifiers: None,
-        streams: vec![],
         file_id: None,
+        source_count: None,
     })
 }
 
 fn movie_source(file_id: &str) -> MediaSource {
     MediaSource {
-        file_id: file_id.to_owned(),
+        file_id: uuid::Uuid::parse_str(file_id).expect("a UUID"),
+        is_primary: true,
+        edition: None,
+        episode_span: None,
         size_bytes: 1_000_000,
         mime_type: Some("video/mp4".to_owned()),
         container_format: Some("mp4".to_owned()),
         duration_secs: Some(8160.0),
-        video: None,
+        video_tracks: vec![],
         audio_tracks: vec![],
+        subtitle_tracks: vec![],
         stream_url: format!("/v1/files/{file_id}/stream"),
         download_url: format!("/v1/files/{file_id}/download"),
     }
@@ -373,6 +378,8 @@ async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_re
         movies: movies.clone(),
         shows: Arc::new(InMemoryShowRepository::with_files(files.clone())),
         genres: Arc::default(),
+        streams: Arc::default(),
+        sidecars: Arc::default(),
         files: files.clone(),
     }));
     let token = seed_session(&state).await;
@@ -417,6 +424,10 @@ struct Library {
     movies: Arc<beam_domain::repositories::movie::in_memory::InMemoryMovieRepository>,
     shows: Arc<beam_domain::repositories::show::in_memory::InMemoryShowRepository>,
     genres: Arc<beam_domain::repositories::genre::in_memory::InMemoryGenreRepository>,
+    streams: Arc<beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository>,
+    sidecars: Arc<
+        beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository,
+    >,
 }
 
 impl Library {
@@ -435,6 +446,8 @@ impl Library {
                 ),
             ),
             genres: Arc::default(),
+            streams: Arc::default(),
+            sidecars: Arc::default(),
             files,
         }
     }
@@ -525,12 +538,14 @@ fn real_service_over(
     movies: Arc<dyn beam_domain::repositories::MovieRepository>,
 ) -> Arc<dyn MetadataService> {
     Arc::new(DbMetadataService::new(MetadataRepositories {
+        sources: Arc::new(crate::services::sources::SourceCatalog::new(
+            movies.clone(),
+            library.files.clone(),
+            library.streams.clone(),
+            library.sidecars.clone(),
+        )),
         movies,
         shows: library.shows.clone(),
-        files: library.files.clone(),
-        streams: Arc::new(
-            beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository::default(),
-        ),
         catalog,
         genres: library.genres.clone(),
     }))
@@ -732,6 +747,107 @@ async fn a_playable_id_yields_its_stream_and_download_urls() {
     assert_eq!(
         body[0].download_url,
         format!("/v1/files/{FILE_ID}/download")
+    );
+}
+
+/// What a player reads off the wire (issue #189): each source says whether
+/// it is the primary, and carries its tracks -- the subtitle files beside it
+/// among them, with where to fetch each -- in the JSON a generated client
+/// reads. Real metadata service; the tracks come from the index doubles.
+#[tokio::test]
+async fn sources_carry_their_tracks_and_the_subtitle_files_beside_them() {
+    use beam_domain::models::CreateMediaStream;
+    use beam_domain::models::sidecar::{SidecarInfo, SubtitleFormat, UpsertSidecarSubtitle};
+    use beam_domain::models::stream::{StreamMetadata, StreamType, SubtitleStreamMetadata};
+    use beam_domain::repositories::{MediaStreamRepository, SidecarSubtitleRepository};
+
+    let library = Library::new();
+    let (movie, file) = indexed_movie(&library.movies, &library.files, "Arrival").await;
+    library
+        .streams
+        .insert_streams(vec![CreateMediaStream {
+            file_id: file,
+            index: 2,
+            stream_type: StreamType::Subtitle,
+            codec: "hdmv_pgs_subtitle".to_string(),
+            metadata: StreamMetadata::Subtitle(SubtitleStreamMetadata {
+                language: Some("eng".to_string()),
+                title: None,
+                is_default: false,
+                is_forced: false,
+                is_hearing_impaired: false,
+            }),
+        }])
+        .await
+        .unwrap();
+    let sidecar = library
+        .sidecars
+        .upsert_by_path(UpsertSidecarSubtitle {
+            file_id: file,
+            library_id: uuid::Uuid::new_v4(),
+            path: std::path::PathBuf::from("/videos/Arrival.en.sdh.srt"),
+            info: SidecarInfo {
+                format: SubtitleFormat::Srt,
+                language: Some("eng".to_string()),
+                title: None,
+                is_forced: false,
+                is_sdh: true,
+                is_default: false,
+            },
+            size_bytes: 40_000,
+            mtime: None,
+        })
+        .await
+        .unwrap();
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    let response = client
+        .get(&format!("/v1/media/{movie}/sources"))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json();
+    let source = &body[0];
+    assert_eq!(source["file_id"], file.to_string());
+    assert_eq!(source["is_primary"], true);
+    assert_eq!(source["edition"], serde_json::Value::Null);
+    let subtitles = source["subtitle_tracks"].as_array().expect("an array");
+    assert_eq!(
+        subtitles[0],
+        serde_json::json!({
+            "origin": "embedded",
+            "index": 2,
+            "sidecar_id": null,
+            "codec": "hdmv_pgs_subtitle",
+            "language": "eng",
+            "title": null,
+            "is_default": false,
+            "is_forced": false,
+            "is_hearing_impaired": false,
+            "is_text": false,
+            "url": null,
+            "webvtt_url": null,
+        })
+    );
+    let id = sidecar.id;
+    assert_eq!(
+        subtitles[1],
+        serde_json::json!({
+            "origin": "sidecar",
+            "index": null,
+            "sidecar_id": id.to_string(),
+            "codec": "subrip",
+            "language": "eng",
+            "title": null,
+            "is_default": false,
+            "is_forced": false,
+            "is_hearing_impaired": true,
+            "is_text": true,
+            "url": format!("/v1/files/{file}/subtitles/{id}"),
+            "webvtt_url": format!("/v1/files/{file}/subtitles/{id}/webvtt"),
+        })
     );
 }
 

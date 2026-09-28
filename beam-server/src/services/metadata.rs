@@ -7,11 +7,11 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::models::{
-    ArtworkKind, ArtworkVariant, AudioSourceInfo, EpisodeMetadata, ExternalIdentifiers,
-    MediaMetadata, MediaSource, MovieMetadata, Ratings, SeasonMetadata, ShowDates, ShowMetadata,
-    Title, VideoSourceInfo, artwork_path,
+    ArtworkKind, ArtworkVariant, EpisodeMetadata, ExternalIdentifiers, MediaMetadata, MediaSource,
+    MovieMetadata, Ratings, SeasonMetadata, ShowDates, ShowMetadata, Title, artwork_path,
 };
 use crate::services::cursor;
+use crate::services::sources::{PrimarySource, SourceCatalog};
 use beam_domain::models::catalog::{
     CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     ShowChildCounts, SortDirection, TitleKind,
@@ -19,8 +19,7 @@ use beam_domain::models::catalog::{
 use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
-    CatalogRepository, EnrichmentStateRepository, FileRepository, GenreRepository,
-    MediaStreamRepository, MovieRepository, ShowRepository,
+    CatalogRepository, EnrichmentStateRepository, GenreRepository, MovieRepository, ShowRepository,
 };
 
 #[async_trait::async_trait]
@@ -45,10 +44,11 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     /// Refresh metadata for by media filter
     async fn refresh_metadata(&self, filter: MediaFilter) -> Result<(), MetadataError>;
 
-    /// List the playable/downloadable source files for a playable media id.
-    /// Movie ids and episode ids are both accepted (a show id is not -- it has
-    /// no files of its own; callers use its episode ids instead). An episode
-    /// with no files yet resolves to an empty list rather than an error.
+    /// List the playable/downloadable source files for a playable media id,
+    /// the primary first. Movie ids and episode ids are both accepted (a show
+    /// id is not -- it has no files of its own; callers use its episode ids
+    /// instead). An episode with no files yet resolves to an empty list
+    /// rather than an error.
     ///
     /// A `media_id` that is not a UUID is [`MetadataError::InvalidId`], kept
     /// distinct from `MediaNotFound` because the routes answer them 400 and
@@ -136,8 +136,7 @@ impl PageRequest {
 pub struct DbMetadataService {
     movie_repo: Arc<dyn MovieRepository>,
     show_repo: Arc<dyn ShowRepository>,
-    file_repo: Arc<dyn FileRepository>,
-    stream_repo: Arc<dyn MediaStreamRepository>,
+    sources: Arc<SourceCatalog>,
     catalog_repo: Arc<dyn CatalogRepository>,
     genre_repo: Arc<dyn GenreRepository>,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
@@ -148,8 +147,8 @@ pub struct DbMetadataService {
 pub struct MetadataRepositories {
     pub movies: Arc<dyn MovieRepository>,
     pub shows: Arc<dyn ShowRepository>,
-    pub files: Arc<dyn FileRepository>,
-    pub streams: Arc<dyn MediaStreamRepository>,
+    /// A title's files, ranked, with their tracks.
+    pub sources: Arc<SourceCatalog>,
     pub catalog: Arc<dyn CatalogRepository>,
     pub genres: Arc<dyn GenreRepository>,
 }
@@ -188,9 +187,25 @@ fn midnight(date: chrono::NaiveDate) -> chrono::DateTime<chrono::Utc> {
 /// not read.
 #[derive(Debug, Default)]
 struct MovieFiles {
-    streams: Vec<crate::models::MediaStreamMetadata>,
     duration: Option<f64>,
     file_id: Option<Uuid>,
+    source_count: Option<u32>,
+}
+
+impl From<PrimarySource> for MovieFiles {
+    fn from(primary: PrimarySource) -> Self {
+        let PrimarySource {
+            file_id,
+            duration_secs,
+            spans_episodes: _,
+            source_count,
+        } = primary;
+        Self {
+            duration: duration_secs,
+            file_id,
+            source_count: Some(source_count),
+        }
+    }
 }
 
 fn movie_metadata(
@@ -221,9 +236,9 @@ fn movie_metadata(
         updated_at: _,
     } = movie;
     let MovieFiles {
-        streams,
         duration,
         file_id,
+        source_count,
     } = files;
     MediaMetadata::Movie(MovieMetadata {
         id,
@@ -244,8 +259,8 @@ fn movie_metadata(
         genres,
         ratings: ratings(rating_tmdb),
         identifiers: identifiers(imdb_id, tmdb_id, tvdb_id),
-        streams,
         file_id,
+        source_count,
     })
 }
 
@@ -304,16 +319,14 @@ impl DbMetadataService {
         let MetadataRepositories {
             movies,
             shows,
-            files,
-            streams,
+            sources,
             catalog,
             genres,
         } = repositories;
         Self {
             movie_repo: movies,
             show_repo: shows,
-            file_repo: files,
-            stream_repo: streams,
+            sources,
             catalog_repo: catalog,
             genre_repo: genres,
             enrichment_repo: None,
@@ -334,46 +347,12 @@ impl DbMetadataService {
         &self,
         movie: beam_domain::models::Movie,
     ) -> Result<MediaMetadata, MetadataError> {
-        // Get all movie entries, then files for each, then streams
-        let entries = self
-            .movie_repo
-            .find_entries_by_movie_id(movie.id)
-            .await
-            .map_err(internal)?;
-
-        let mut files = MovieFiles::default();
-        for entry in &entries {
-            let entry_files = self
-                .file_repo
-                .find_by_movie_entry_id(entry.id)
+        let files = MovieFiles::from(
+            self.sources
+                .movie_primary(movie.id)
                 .await
-                .map_err(internal)?;
-
-            for file in &entry_files {
-                // The first file is the movie's streamable handle, and its
-                // duration the movie's.
-                if files.file_id.is_none() {
-                    files.file_id = Some(file.id);
-                }
-                if files.duration.is_none() {
-                    files.duration = file.duration.map(|d| d.as_secs_f64());
-                }
-
-                let file_streams = self
-                    .stream_repo
-                    .find_by_file_id(file.id)
-                    .await
-                    .map_err(internal)?;
-
-                if !file_streams.is_empty() {
-                    files
-                        .streams
-                        .push(build_media_stream_metadata_from_domain_streams(
-                            &file_streams,
-                        ));
-                }
-            }
-        }
+                .map_err(internal)?,
+        );
 
         let genres = self
             .genre_repo
@@ -407,30 +386,15 @@ impl DbMetadataService {
 
             let mut episodes = Vec::new();
             for ep in episodes_domain {
-                let files = self
-                    .file_repo
-                    .find_by_episode_id(ep.id)
-                    .await
-                    .map_err(internal)?;
-
-                let duration = files
-                    .first()
-                    .and_then(|f| f.duration.map(|d| d.as_secs_f64()));
-                let file_id = files.first().map(|f| f.id);
-
-                let mut ep_streams = Vec::new();
-                for file in &files {
-                    let file_streams = self
-                        .stream_repo
-                        .find_by_file_id(file.id)
-                        .await
-                        .map_err(internal)?;
-                    if !file_streams.is_empty() {
-                        ep_streams.push(build_media_stream_metadata_from_domain_streams(
-                            &file_streams,
-                        ));
-                    }
-                }
+                let PrimarySource {
+                    file_id,
+                    duration_secs,
+                    spans_episodes,
+                    source_count,
+                } = self.sources.episode_primary(&ep).await.map_err(internal)?;
+                // A file holding a run of episodes lasts the whole run, which
+                // is not this episode's duration.
+                let duration = duration_secs.filter(|_| !spans_episodes);
 
                 episodes.push(EpisodeMetadata {
                     id: ep.id,
@@ -442,8 +406,8 @@ impl DbMetadataService {
                         artwork_path(ArtworkKind::Episode, ep.id, ArtworkVariant::Thumbnail)
                     }),
                     duration,
-                    streams: ep_streams,
                     file_id,
+                    source_count,
                 });
             }
             episode_count += episodes.len() as u32;
@@ -626,70 +590,6 @@ impl From<MediaSearchFilters> for CatalogFilters {
     }
 }
 
-/// Build a `MediaStreamMetadata` from domain `MediaStream` records
-fn build_media_stream_metadata_from_domain_streams(
-    streams: &[beam_domain::models::MediaStream],
-) -> crate::models::MediaStreamMetadata {
-    use crate::models::{AudioTrack, MediaStreamMetadata, SubtitleTrack, VideoTrack};
-    use crate::models::{OutputAudioCodec, OutputSubtitleCodec, OutputVideoCodec, Resolution};
-    use beam_domain::models::stream::StreamMetadata;
-    use rust_decimal::Decimal;
-
-    let mut video_tracks = Vec::new();
-    let mut audio_tracks = Vec::new();
-    let mut subtitle_tracks = Vec::new();
-
-    for stream in streams {
-        match &stream.metadata {
-            StreamMetadata::Video(v) => {
-                video_tracks.push(VideoTrack {
-                    codec: OutputVideoCodec::from_probe_str(&stream.codec),
-                    max_rate: v.bit_rate.unwrap_or(0),
-                    bit_rate: v.bit_rate.unwrap_or(0),
-                    resolution: Resolution {
-                        width: v.width,
-                        height: v.height,
-                    },
-                    frame_rate: v
-                        .frame_rate
-                        .map(|f| Decimal::from_f64_retain(f).unwrap_or(Decimal::new(2997, 2)))
-                        .unwrap_or(Decimal::new(2997, 2)),
-                });
-            }
-            StreamMetadata::Audio(a) => {
-                audio_tracks.push(AudioTrack {
-                    codec: OutputAudioCodec::from_probe_str(&stream.codec),
-                    language: a.language.clone(),
-                    title: a.title.clone().unwrap_or_else(|| "Unknown".to_string()),
-                    channel_layout: a.channel_layout.clone(),
-                    is_default: a.is_default,
-                    is_autoselect: a.is_default,
-                });
-            }
-            StreamMetadata::Subtitle(s) => {
-                subtitle_tracks.push(SubtitleTrack {
-                    // The API subtitle-codec enum has a single variant;
-                    // representing source subtitle formats faithfully is
-                    // tracked with the transcode-era codec scaffolding
-                    // removal (see docs/architecture/decisions/ADR-0004).
-                    codec: OutputSubtitleCodec::WebVTT,
-                    language: s.language.clone(),
-                    title: s.title.clone(),
-                    is_default: s.is_default,
-                    is_autoselect: s.is_default,
-                    is_forced: s.is_forced,
-                });
-            }
-        }
-    }
-
-    MediaStreamMetadata {
-        video_tracks,
-        audio_tracks,
-        subtitle_tracks,
-    }
-}
-
 #[async_trait::async_trait]
 impl MetadataService for DbMetadataService {
     async fn get_media_metadata(&self, id: Uuid) -> Result<Option<MediaMetadata>, MetadataError> {
@@ -834,24 +734,7 @@ impl MetadataService for DbMetadataService {
             .map_err(internal)?
             .is_some()
         {
-            let entries = self
-                .movie_repo
-                .find_entries_by_movie_id(id)
-                .await
-                .map_err(internal)?;
-
-            let mut sources = Vec::new();
-            for entry in entries {
-                let files = self
-                    .file_repo
-                    .find_by_movie_entry_id(entry.id)
-                    .await
-                    .map_err(internal)?;
-                for file in files {
-                    sources.push(self.build_source(file).await?);
-                }
-            }
-            return Ok(sources);
+            return self.sources.movie_sources(id).await.map_err(internal);
         }
 
         // Episodes are playable ids too: an episode id resolves to its own
@@ -859,24 +742,17 @@ impl MetadataService for DbMetadataService {
         // movies. An episode with no files yet is a well-formed empty list
         // (the client treats an empty `sources` array as "unplayable"), which
         // is distinct from a genuinely unknown id (`MediaNotFound` below).
-        if self
+        if let Some(episode) = self
             .show_repo
             .find_episode_by_id(id)
             .await
             .map_err(internal)?
-            .is_some()
         {
-            let files = self
-                .file_repo
-                .find_by_episode_id(id)
+            return self
+                .sources
+                .episode_sources(&episode)
                 .await
-                .map_err(internal)?;
-
-            let mut sources = Vec::new();
-            for file in files {
-                sources.push(self.build_source(file).await?);
-            }
-            return Ok(sources);
+                .map_err(internal);
         }
 
         if self
@@ -892,56 +768,6 @@ impl MetadataService for DbMetadataService {
         }
 
         Err(MetadataError::MediaNotFound)
-    }
-}
-
-impl DbMetadataService {
-    async fn build_source(
-        &self,
-        file: beam_domain::models::MediaFile,
-    ) -> Result<MediaSource, MetadataError> {
-        let streams = self
-            .stream_repo
-            .find_by_file_id(file.id)
-            .await
-            .map_err(internal)?;
-
-        let mut video = None;
-        let mut audio_tracks = Vec::new();
-        for stream in &streams {
-            match &stream.metadata {
-                beam_domain::models::StreamMetadata::Video(v) => {
-                    video = Some(VideoSourceInfo {
-                        codec: stream.codec.clone(),
-                        width: v.width,
-                        height: v.height,
-                        bit_rate: v.bit_rate,
-                        hdr_format: v.hdr_format.clone(),
-                    });
-                }
-                beam_domain::models::StreamMetadata::Audio(a) => {
-                    audio_tracks.push(AudioSourceInfo {
-                        codec: stream.codec.clone(),
-                        language: a.language.clone(),
-                        channels: a.channels,
-                        is_default: a.is_default,
-                    });
-                }
-                beam_domain::models::StreamMetadata::Subtitle(_) => {}
-            }
-        }
-
-        Ok(MediaSource {
-            file_id: file.id.to_string(),
-            size_bytes: file.size_bytes,
-            mime_type: file.mime_type,
-            container_format: file.container_format,
-            duration_secs: file.duration.map(|d| d.as_secs_f64()),
-            video,
-            audio_tracks,
-            stream_url: format!("/v1/files/{}/stream", file.id),
-            download_url: format!("/v1/files/{}/download", file.id),
-        })
     }
 }
 

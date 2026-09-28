@@ -33,7 +33,6 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 mutants = { workspace = true }
 rand = { workspace = true }
-rust_decimal = "1.42.1"
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

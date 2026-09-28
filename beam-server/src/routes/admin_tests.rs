@@ -367,6 +367,7 @@ fn build_fixture(
         hash: Arc::new(StubHashService),
         library,
         metadata: Arc::new(StubMetadataService),
+        subtitles: crate::routes::test_support::idle_subtitles(),
         notification: notification.clone(),
         admin_log,
         user_repo: user_repo.clone(),

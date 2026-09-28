@@ -35,6 +35,8 @@ use crate::{
         notification::{LocalNotificationService, NotificationService},
         playback::{DbPlaybackService, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
+        sources::SourceCatalog,
+        subtitle::{DbSubtitleService, SubtitleService},
         telemetry::LibraryReportService,
     },
 };
@@ -132,6 +134,8 @@ pub struct AppServices {
     pub hash: Arc<dyn HashService>,
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
+    /// Sidecar subtitle delivery, as stored and as WebVTT (issue #189).
+    pub subtitles: Arc<dyn SubtitleService>,
     pub notification: Arc<dyn NotificationService>,
     pub admin_log: Arc<dyn AdminLogService>,
     pub user_repo: Arc<dyn UserRepository>,
@@ -317,6 +321,11 @@ impl AppServices {
         let admin_log_service: Arc<dyn AdminLogService> =
             Arc::new(LocalAdminLogService::new(admin_log_repo.clone()));
 
+        // Written by the indexer, read by the sources and subtitle routes.
+        let sidecar_repo: Arc<dyn beam_domain::repositories::SidecarSubtitleRepository> = Arc::new(
+            beam_index::repositories::SqlSidecarSubtitleRepository::new(db.clone()),
+        );
+
         let index_service = Arc::new(
             LocalIndexService::new(
                 library_repo.clone(),
@@ -335,10 +344,7 @@ impl AppServices {
             .with_missing_file_grace(config.missing_file_grace())
             .with_settle_window(Duration::from_secs(config.scan_settle_secs))
             .with_enrichment_repo(enrichment_repo.clone())
-            // Sidecar subtitles are indexed but not yet served: issue #189.
-            .with_sidecar_repo(Arc::new(
-                beam_index::repositories::SqlSidecarSubtitleRepository::new(db.clone()),
-            ))
+            .with_sidecar_repo(sidecar_repo.clone())
             .with_applied_nfo_repo(Arc::new(
                 beam_index::repositories::SqlAppliedNfoRepository::new(db.clone()),
             )),
@@ -434,8 +440,12 @@ impl AppServices {
                 DbMetadataService::new(MetadataRepositories {
                     movies: movie_repo.clone(),
                     shows: show_repo.clone(),
-                    files: file_repo.clone(),
-                    streams: stream_repo,
+                    sources: Arc::new(SourceCatalog::new(
+                        movie_repo.clone(),
+                        file_repo.clone(),
+                        stream_repo,
+                        sidecar_repo.clone(),
+                    )),
                     catalog: Arc::new(beam_index::repositories::SqlCatalogRepository::new(
                         db.clone(),
                     )),
@@ -443,6 +453,7 @@ impl AppServices {
                 })
                 .with_enrichment_repo(enrichment_repo.clone()),
             ),
+            subtitles: Arc::new(DbSubtitleService::new(file_repo.clone(), sidecar_repo)),
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
