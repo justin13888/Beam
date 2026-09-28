@@ -209,6 +209,10 @@ enum Resolved {
 const MAX_CANDIDATE_PAGES: u64 = 5;
 
 /// What a continue-watching or history row displays of its title.
+///
+/// The title is the one browse lists the title by: `title_localized` holds
+/// the provider's original-language title, which the detail carries beside
+/// it.
 #[derive(Debug, Default)]
 struct Display {
     title: String,
@@ -222,10 +226,7 @@ struct Display {
 
 fn movie_display(movie: &Movie) -> Display {
     Display {
-        title: movie
-            .title_localized
-            .clone()
-            .unwrap_or_else(|| movie.title.clone()),
+        title: movie.title.clone(),
         poster_url: movie
             .poster_url
             .as_ref()
@@ -248,10 +249,7 @@ fn episode_display(show: &Show, season: &Season, episode: &Episode) -> Display {
         .as_ref()
         .map(|_| artwork_path(ArtworkKind::Season, season.id, ArtworkVariant::Poster));
     Display {
-        title: show
-            .title_localized
-            .clone()
-            .unwrap_or_else(|| show.title.clone()),
+        title: show.title.clone(),
         poster_url: show_poster.or(season_poster),
         backdrop_url: show
             .backdrop_url
