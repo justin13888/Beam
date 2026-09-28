@@ -4448,6 +4448,27 @@ macro_rules! catalog_repository_contract {
             );
         }
 
+        /// The minimum rating compares in the precision a rating is stored
+        /// and shown in: a 7.2 is 72 per cent, not 71.99..., for either kind.
+        #[tokio::test]
+        async fn a_rating_exactly_at_a_fractional_minimum_is_kept() {
+            let fixture = $setup().await;
+            let made = vec![
+                (movie(&fixture, "lima", None, None, Some(7.2), true).await.id, "lima"),
+                (show(&fixture, "mike", None, Some(7.2), 1, true).await.0, "mike"),
+                (movie(&fixture, "november", None, None, Some(7.1), true).await.id, "november"),
+            ];
+            assert_eq!(
+                listed_names(
+                    &fixture,
+                    &made,
+                    CatalogFilters { min_rating: Some(72), ..Default::default() },
+                )
+                .await,
+                ["lima", "mike"]
+            );
+        }
+
         /// Only titles with a present file are browsable or searchable
         /// (issues #179, #183): a title that never had a file, or whose files
         /// are all missing, is on no page and matches no filter -- and comes
