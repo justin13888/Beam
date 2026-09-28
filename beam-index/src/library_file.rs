@@ -23,15 +23,36 @@ use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+/// Why the opener refused a path: no regular file of the library is there.
+/// Carried inside the [`io::Error`] it returns, so [`is_refusal`] tells the
+/// opener's own refusals from an error a kernel or a filesystem returned
+/// with the same [`io::ErrorKind`].
+#[derive(Debug)]
+struct NotLibraryFile(String);
+
+impl std::fmt::Display for NotLibraryFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotLibraryFile {}
+
+/// A refusal: [`io::ErrorKind::InvalidInput`], marked as the opener's own.
+fn not_library_file(why: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, NotLibraryFile(why.into()))
+}
+
 /// `path` relative to the library `root` it was indexed under: what
 /// [`open_regular_file`] takes. A path not beneath `root` fails with
 /// [`io::ErrorKind::InvalidInput`] -- it is no file of that library.
 pub fn relative_to<'a>(root: &Path, path: &'a Path) -> io::Result<&'a Path> {
     path.strip_prefix(root).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is not beneath {}", path.display(), root.display()),
-        )
+        not_library_file(format!(
+            "{} is not beneath {}",
+            path.display(),
+            root.display()
+        ))
     })
 }
 
@@ -57,10 +78,10 @@ pub fn open_regular_file(root: &Path, relative: &Path) -> io::Result<(File, Meta
     let file = open_beneath(root, &relative)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is not a regular file", relative.display()),
-        ));
+        return Err(not_library_file(format!(
+            "{} is not a regular file",
+            relative.display()
+        )));
     }
     Ok((file, metadata))
 }
@@ -123,13 +144,17 @@ impl LibraryFile {
 
 /// Whether `err`, from [`LibraryFile::open`], says that no regular file of
 /// the library is at the path: a link at the file or at a folder above it
-/// (`ELOOP`), a folder above it that is no folder any more (`ENOTDIR`), a
-/// path not beneath the root, or a file that is not a regular one. Such a
-/// path is no file of the library, as a walk would not have listed it. Any
-/// other failure -- a file deleted, a permission error, a transient I/O error
-/// -- says nothing about what is there.
+/// (`ELOOP`), a folder above it that is no folder any more (`ENOTDIR`), or
+/// -- the opener's own refusals, which it marks as such -- a path not
+/// beneath the root, or a file that is not a regular one. Such a path is no
+/// file of the library, as a walk would not have listed it. Any other
+/// failure -- a file deleted, a permission error, a transient I/O error, an
+/// `EINVAL` from a filesystem -- says nothing about what is there.
 pub fn is_refusal(err: &io::Error) -> bool {
-    if err.kind() == io::ErrorKind::InvalidInput {
+    if err
+        .get_ref()
+        .is_some_and(|inner| inner.is::<NotLibraryFile>())
+    {
         return true;
     }
     #[cfg(unix)]
@@ -153,19 +178,19 @@ fn checked_relative(relative: &Path) -> io::Result<PathBuf> {
             Component::Normal(name) => names.push(name),
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("{} does not name a path beneath a root", relative.display()),
-                ));
+                return Err(not_library_file(format!(
+                    "{} does not name a path beneath a root",
+                    relative.display()
+                )));
             }
         }
     }
     if names.as_os_str().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(not_library_file(
             "an empty path names no file beneath a root",
         ));
     }
+
     Ok(names)
 }
 
@@ -245,7 +270,7 @@ fn open_beneath_by_walk(root: rustix::fd::OwnedFd, relative: &Path) -> io::Resul
     use rustix::fs::{Mode, OFlags};
     let names: Vec<_> = relative.components().collect();
     let Some((leaf, folders)) = names.split_last() else {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        return Err(not_library_file("an empty path names no file"));
     };
     let mut dir = root;
     for folder in folders {
@@ -474,6 +499,36 @@ mod tests {
             LibraryFile::open(outside.path(), &outside.path().join("Season 01/E01.mkv")).unwrap();
         assert_eq!(opened.path(), outside.path().join("Season 01/E01.mkv"));
         assert_eq!(opened.metadata().len(), 7);
+    }
+
+    /// A refusal is the opener's own, or a link or a non-folder met on the
+    /// way down; an error that merely shares a kind with a refusal -- an
+    /// `EINVAL` a filesystem returned -- says nothing about the file.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_openers_own_refusals_and_links_are_refusals() {
+        use rustix::io::Errno;
+        let cases: [(&str, io::Error, bool); 8] = [
+            ("the opener's refusal", not_library_file("no"), true),
+            ("ELOOP", io::Error::from(Errno::LOOP), true),
+            ("ENOTDIR", io::Error::from(Errno::NOTDIR), true),
+            (
+                "a filesystem's EINVAL",
+                io::Error::from(Errno::INVAL),
+                false,
+            ),
+            (
+                "another InvalidInput",
+                io::Error::new(io::ErrorKind::InvalidInput, "bad flag"),
+                false,
+            ),
+            ("ENOENT", io::Error::from(Errno::NOENT), false),
+            ("EACCES", io::Error::from(Errno::ACCESS), false),
+            ("EIO", io::Error::from(Errno::IO), false),
+        ];
+        for (case, err, refusal) in cases {
+            assert_eq!(is_refusal(&err), refusal, "{case}");
+        }
     }
 
     #[test]
