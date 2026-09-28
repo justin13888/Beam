@@ -516,6 +516,63 @@ async fn a_disc_with_no_title_folder_is_indexed_without_a_title() {
     );
 }
 
+/// A one-disc DVD in `folder` whose main title is `VTS_01_1.VOB`, of `size`
+/// bytes.
+fn one_disc(folder: &Path, size: usize) -> PathBuf {
+    write_dvd(
+        folder,
+        &[TitleSet {
+            set: 1,
+            parts: &[size],
+            duration: Some(90 * MINUTE),
+        }],
+    )
+}
+
+/// The most common multi-disc and box-set layouts: a film's discs in bare
+/// `Disc N` folders are that film's, never a film called "Disc 1" that every
+/// such disc shares, and a show's discs under a season folder -- however far
+/// below it -- are indexed without a title rather than as a film.
+#[tokio::test]
+async fn discs_in_disc_folders_are_their_films_and_a_shows_are_untitled() {
+    let h = Harness::new().await;
+    one_disc(&h.root.join("Heat (1995)/Disc 1"), 2000);
+    one_disc(&h.root.join("Heat (1995)/Disc 2"), 2100);
+    one_disc(&h.root.join("Ronin (1998)/Disc 1"), 2200);
+    write_blu_ray(
+        &h.root.join("Collateral (2004)/DISC1"),
+        &[("00001", 2300)],
+        &[("00001.mpls", mpls(&[("00001", 0, ticks(6000))]))],
+    );
+    one_disc(&h.root.join("Show/Season 1/Disc 1"), 2400);
+    one_disc(&h.root.join("Other Show/Season 1/Disc 1"), 2500);
+
+    h.scan().await.expect("the scan runs");
+
+    assert_eq!(
+        h.movies().await,
+        [
+            ("Collateral".to_string(), Some(2004)),
+            ("Heat".to_string(), Some(1995)),
+            ("Ronin".to_string(), Some(1998)),
+        ]
+    );
+    let untitled: Vec<PathBuf> = h
+        .rows()
+        .into_iter()
+        .filter(|row| row.content.is_none())
+        .map(|row| row.path.strip_prefix(&h.root).unwrap().to_path_buf())
+        .collect();
+    assert_eq!(
+        untitled,
+        [
+            PathBuf::from("Other Show/Season 1/Disc 1/VIDEO_TS/VTS_01_1.VOB"),
+            PathBuf::from("Show/Season 1/Disc 1/VIDEO_TS/VTS_01_1.VOB"),
+        ]
+    );
+    assert_eq!(h.entries().len(), 3, "one entry per film");
+}
+
 /// A rekey reads no disc, so a disc's stream file keeps the part it was
 /// given; any other file takes the part its name reads.
 #[test]

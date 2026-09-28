@@ -207,6 +207,11 @@ static SEASON_EPISODE_DIGITS_REGEX: LazyLock<Regex> =
 static YEAR_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:19|20)\d{2}$").expect("valid regex"));
 
+/// A folder named for nothing but one disc of a set: `Disc 1`, `DISC1`,
+/// `CD2`, `Disk_2`.
+static BARE_DISC_FOLDER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(?:cd|disc|disk)[ ._-]?(\d{1,2})$").expect("valid regex"));
+
 /// A season folder: which season it designates, and the text before its
 /// season token (`The.Office.US.` in `The.Office.US.S02.1080p`), which may
 /// name the show.
@@ -548,29 +553,47 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
 
 /// What a file inside a disc structure is (issue #234), given the folders
 /// above the disc's root (`VIDEO_TS/`, `BDMV/`), root first: the movie the
-/// folder enclosing the disc names -- `Heat (1995)/VIDEO_TS` is *Heat* --
-/// read as a filename would be, and completed from the folder above it the
-/// same way. No file inside a disc is named for its title, so its own name
-/// is never read.
+/// nearest of them that names one names -- `Heat (1995)/VIDEO_TS` is *Heat*
+/// -- read as a filename would be, and completed from the folder above it
+/// the same way. A folder that says only which disc of a set it is (`Disc
+/// 1`, `CD2`), or is nothing but release noise (`DVD9`), names no film, so
+/// `Heat (1995)/Disc 1/VIDEO_TS` is *Heat* too. No file inside a disc is
+/// named for its title, so its own name is never read.
 ///
 /// Its part is not a path's to say either: which of the disc's files its
 /// main title plays, and in what order, is read from the disc itself. A disc
 /// structure is always a movie: a show's disc holds its episodes in title
-/// sets no path tells apart, so one in a season folder, like one with no
-/// folder around it at all, names no title.
+/// sets no path tells apart, so one with a season folder anywhere above it
+/// (`Show/Season 1/Disc 1/VIDEO_TS`), like one with no folder naming a film
+/// around it at all, names no title.
 fn disc_title(enclosing: &[String]) -> MediaInference {
-    let Some((folder, above)) = enclosing.split_last() else {
-        return MediaInference::Unclassifiable(UnclassifiableReason::DiscWithoutTitleFolder);
-    };
-    if season_folder(folder).is_some() || is_bare_season_range(folder) {
-        return MediaInference::Unclassifiable(UnclassifiableReason::DiscWithoutTitleFolder);
+    let untitled = MediaInference::Unclassifiable(UnclassifiableReason::DiscWithoutTitleFolder);
+    if enclosing
+        .iter()
+        .any(|folder| season_folder(folder).is_some() || is_bare_season_range(folder))
+    {
+        return untitled;
     }
-    let parent = above.last().map(String::as_str);
+    let names_a_film = |folder: &String| {
+        bare_disc_number(folder).is_none()
+            && title_of(folder).is_some_and(|guess| !is_noise_only(&guess.title))
+    };
+    let Some(at) = enclosing.iter().rposition(names_a_film) else {
+        return untitled;
+    };
+    let folder = &enclosing[at];
+    let parent = at.checked_sub(1).map(|above| enclosing[above].as_str());
     let movie = movie_of(parse_media_filename(folder), folder.clone(), parent);
     MediaInference::Movie(MovieInference {
         part_number: None,
         ..movie
     })
+}
+
+/// The disc a folder's name is nothing but: `Disc 2` is disc 2.
+fn bare_disc_number(name: &str) -> Option<u32> {
+    let caps = BARE_DISC_FOLDER_REGEX.captures(name.trim())?;
+    caps[1].parse().ok().filter(|disc| *disc >= 1)
 }
 
 /// The movie a filename parse names, completed from its parent folder.

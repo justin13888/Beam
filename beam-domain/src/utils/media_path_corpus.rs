@@ -736,10 +736,60 @@ const CORPUS: &[(&str, &str)] = &[
     // A folder of release noise takes its title from the folder above.
     ("Heat (1995)/DVD9/VIDEO_TS/VTS_01_1.VOB", "movie Heat|1995"),
     ("Ronin (1998)/video_ts/vts_01_1.vob", "movie Ronin|1998"),
+    // So does a folder that says only which disc of a set it is.
+    (
+        "Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    (
+        "Heat (1995)/Disc 2/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    ("Heat (1995)/CD2/VIDEO_TS/VTS_01_1.VOB", "movie Heat|1995"),
+    (
+        "Heat (1995)/DISC1/BDMV/STREAM/00001.m2ts",
+        "movie Heat|1995",
+    ),
+    (
+        "Heat (1995)/disc_2/BDMV/STREAM/00001.m2ts",
+        "movie Heat|1995",
+    ),
+    (
+        "Movies/Heat.1995.PAL.DVD9-GRP/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    (
+        "Heat (1995)/DVD9/Disc 2/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    (
+        "Heat (1995) {edition-Director's Cut}/Disc 1/BDMV/STREAM/00800.m2ts",
+        "movie Heat|1995 ed=Director's Cut",
+    ),
     // A disc no folder names a film for.
     ("VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
     ("BDMV/STREAM/00001.m2ts", "unclassifiable disc"),
+    ("Disc 1/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
+    ("DVD9/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
+    // A show's disc, with a season folder anywhere above it: its title sets
+    // are episodes no path tells apart.
     ("Show/Season 1/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
+    (
+        "Show/Season 1/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+        "unclassifiable disc",
+    ),
+    (
+        "TV/Firefly (2002)/Season 01/Firefly S01 Disc 2/BDMV/STREAM/00001.m2ts",
+        "unclassifiable disc",
+    ),
+    (
+        "The.Office.US.S02.1080p.BluRay-GRP/Disc 3/BDMV/STREAM/00001.m2ts",
+        "unclassifiable disc",
+    ),
+    (
+        "Breaking Bad/Season 1-5/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+        "unclassifiable disc",
+    ),
 ];
 
 #[test]
@@ -809,9 +859,28 @@ fn two_discs_with_same_named_files_key_apart() {
             "Heat (1995)/BDMV/STREAM/00001.m2ts",
             "Ronin (1998)/BDMV/STREAM/00001.m2ts",
         ),
+        // A disc folder named only for its place in a set is every film's
+        // `Disc 1`: the film is the folder above it.
+        (
+            "Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+            "Ronin (1998)/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+        ),
+        (
+            "Heat (1995)/DISC1/BDMV/STREAM/00001.m2ts",
+            "Ronin (1998)/DISC1/BDMV/STREAM/00001.m2ts",
+        ),
+        (
+            "Heat (1995)/CD2/VIDEO_TS/VTS_01_1.VOB",
+            "Ronin (1998)/CD2/VIDEO_TS/VTS_01_1.VOB",
+        ),
     ] {
         assert_ne!(key(a), key(b), "{a} and {b}");
     }
+    // The discs of one film's set are that film.
+    assert_eq!(
+        key("Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB"),
+        key("Heat (1995)/Disc 2/BDMV/STREAM/00001.m2ts")
+    );
     // And a disc keys as the same film in any other layout does.
     assert_eq!(
         key("Heat (1995)/VIDEO_TS/VTS_01_1.VOB"),
