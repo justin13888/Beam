@@ -139,17 +139,20 @@ strength. Each requirement is independently testable. See `product.md` for narra
   `library-path-overlaps-data-dir` (400), compared by whole components after canonicalization. At
   startup the server MUST refuse to start if `BEAM_DATA_DIR` overlaps a stored library root, and
   MUST log a warning, not refuse, for stored library roots that overlap each other. The
-  indexer, the watcher and file delivery MUST NOT follow symbolic links beneath a library root; a
-  link is not a library file, so a row whose path has become one is treated as missing (FR-211).
-  Every read of a library file's contents that Beam parses or serves -- an NFO read by the
-  indexer, a video or a subtitle file delivered -- MUST open it relative to its library root with
-  no symbolic link followed at any component beneath the root: neither the file nor any folder
-  between it and the root. The root itself is opened as configured, so a root that is itself a
-  link is followed. Delivery serves only a regular file so opened, read from that one handle,
+  indexer, the watcher and file delivery MUST NOT follow symbolic links beneath a library root,
+  except where the indexer hashes and probes a video, a known gap tracked in
+  [#238](https://github.com/justin13888/Beam/issues/238) and stated at the end of this
+  requirement; a link is not a library file, so a row whose path has become one is treated as
+  missing (FR-211). The walk never follows a link. Every read of a library file's contents that
+  Beam parses or serves -- an NFO read by the indexer, a video or a subtitle file delivered -- MUST
+  open it relative to its library root with no symbolic link followed at any component beneath
+  the root: neither the file nor any folder between it and the root. The root itself is opened as
+  configured, so a root that is itself a link is followed. Delivery serves only a regular file so opened, read from that one handle,
   answering a link at any of those components, or a FIFO or device in the file's place, as
-  `source-file-missing`. The indexer's hashing and probing of a video still open its full stored
-  path, which resolves a link at a folder above it; this is a known gap, tracked in
-  [#238](https://github.com/justin13888/beam/issues/238).
+  `source-file-missing`. The indexer's hashing and probing of a video open its full stored path, so
+  a link swapped in at the file or at any folder above it, between the walk and that read, is
+  followed for that read. Its hash and stream metadata are recorded, and delivery still refuses
+  the file. This is a known gap, tracked in [#238](https://github.com/justin13888/Beam/issues/238).
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
