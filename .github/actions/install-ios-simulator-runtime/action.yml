@@ -1,0 +1,58 @@
+name: Install the iOS simulator runtime
+description: >
+  Downloads the iOS simulator runtime for the selected Xcode, retrying a bounded
+  number of times and restarting CoreSimulatorService between attempts, then
+  lists the available devices. Shared by every Apple job that needs an iOS
+  destination.
+
+runs:
+  using: composite
+  steps:
+    # The macOS runner image ships Xcode with the macOS platform only: every
+    # other destination reports "iOS 26.0 is not installed" and `xcodebuild`'s
+    # available-destinations list comes back empty. `-downloadPlatform iOS`
+    # fetches the runtime, and is a no-op when it is already present.
+    #
+    # Why the retry (#211): on hosted runners the command intermittently prints
+    # "Finding content...", waits about 20 s, then fails with "Unable to connect
+    # to simulator." and exit 70. It fails before the architecture is resolved
+    # and before a byte is downloaded, so the failure is xcodebuild's connection
+    # to CoreSimulatorService, not the download. The service is a per-user
+    # launchd agent that respawns on demand; killing it makes the next client
+    # start a fresh one bound to the Xcode that setup-xcode selected. A real
+    # failure (no such runtime, no network) still fails the step, after the
+    # last attempt, with xcodebuild's own exit status.
+    - name: Install the iOS simulator runtime
+      shell: bash
+      run: |
+        max_attempts=3
+        attempt=1
+        while :; do
+          echo "::group::xcodebuild -downloadPlatform iOS (attempt ${attempt}/${max_attempts})"
+          status=0
+          xcodebuild -downloadPlatform iOS || status=$?
+          echo "::endgroup::"
+          if [ "$status" -eq 0 ]; then
+            echo "iOS simulator runtime installed on attempt ${attempt}/${max_attempts}."
+            break
+          fi
+          if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "::error::xcodebuild -downloadPlatform iOS failed on all ${max_attempts} attempts (last exit ${status})"
+            exit "$status"
+          fi
+          delay=$((attempt * 15))
+          echo "::warning::xcodebuild -downloadPlatform iOS failed (exit ${status}) on attempt ${attempt}/${max_attempts}; restarting CoreSimulatorService and retrying in ${delay}s"
+          # Each of these talks to, or is, the service being recovered, so a
+          # failure here is expected and must not end the step: the next
+          # attempt is the check that matters.
+          xcrun simctl shutdown all || true
+          killall -9 com.apple.CoreSimulator.CoreSimulatorService || true
+          sleep "$delay"
+          # Relaunches the service ahead of the next attempt, and logs which
+          # runtimes it can see.
+          xcrun simctl list runtimes || true
+          attempt=$((attempt + 1))
+        done
+        # Printed so that if the pinned device name ever stops existing, the
+        # log says what does rather than only that nothing matched.
+        xcrun simctl list devices available
