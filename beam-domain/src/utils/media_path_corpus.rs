@@ -578,10 +578,77 @@ const CORPUS: &[(&str, &str)] = &[
         "movie Movie|2019 part=1",
     ),
     ("Movie (2019)/Movie - CD2.avi", "movie Movie|2019 part=2"),
-    // `part` with no year before it: a part only where the folder names the
-    // title the rest of the name spells (D233-2).
+    // `part` or `pt` with no year before it: a part only where the name has
+    // no year and its folder carries one and names the title the rest of the
+    // name spells (D233-2).
     ("Movie (2019)/Movie - Part 1.mkv", "movie Movie|2019 part=1"),
+    ("Movie (2019)/Movie Pt 2.mkv", "movie Movie|2019 part=2"),
     ("Movies/Movie - Part 1.mkv", "movie Movie - Part 1|-"),
+    ("Movies/Movie - pt1.mkv", "movie Movie - pt1|-"),
+    // A year-less folder is as often a franchise's or a collection's: its
+    // films' `Part N` is their title's own, so no two of them are one film.
+    ("The Godfather/The Godfather.mkv", "movie The Godfather|-"),
+    (
+        "The Godfather/The Godfather Part 2.mkv",
+        "movie The Godfather Part 2|-",
+    ),
+    (
+        "The Godfather/The Godfather Part 3.mkv",
+        "movie The Godfather Part 3|-",
+    ),
+    (
+        "The Godfather/The Godfather Part 2 (1974).mkv",
+        "movie The Godfather Part 2|1974",
+    ),
+    (
+        "Back to the Future/Back to the Future Part 2.mkv",
+        "movie Back to the Future Part 2|-",
+    ),
+    (
+        "Back to the Future/Back to the Future Part 3.mkv",
+        "movie Back to the Future Part 3|-",
+    ),
+    (
+        "Friday the 13th/Friday the 13th Part 2.mkv",
+        "movie Friday the 13th Part 2|-",
+    ),
+    (
+        "Friday the 13th/Friday the 13th Part 3.mkv",
+        "movie Friday the 13th Part 3|-",
+    ),
+    (
+        "Harry Potter and the Deathly Hallows/Harry Potter and the Deathly Hallows Part 1.mkv",
+        "movie Harry Potter and the Deathly Hallows Part 1|-",
+    ),
+    (
+        "Harry Potter and the Deathly Hallows/Harry Potter and the Deathly Hallows Part 2.mkv",
+        "movie Harry Potter and the Deathly Hallows Part 2|-",
+    ),
+    // `pt` abbreviates a title's `Part N` as often as it numbers a file.
+    (
+        "The Hunger Games Mockingjay Pt 1.mkv",
+        "movie The Hunger Games Mockingjay Pt 1|-",
+    ),
+    (
+        "The Hunger Games Mockingjay Pt 2.mkv",
+        "movie The Hunger Games Mockingjay Pt 2|-",
+    ),
+    (
+        "Harry Potter and the Deathly Hallows Pt 1.mkv",
+        "movie Harry Potter and the Deathly Hallows Pt 1|-",
+    ),
+    (
+        "Harry Potter and the Deathly Hallows Pt 2.mkv",
+        "movie Harry Potter and the Deathly Hallows Pt 2|-",
+    ),
+    (
+        "Harry Potter and the Deathly Hallows Pt.1 (2010).mkv",
+        "movie Harry Potter and the Deathly Hallows Pt 1|2010",
+    ),
+    (
+        "Harry Potter and the Deathly Hallows (2010)/Harry Potter and the Deathly Hallows Pt.1 (2010).mkv",
+        "movie Harry Potter and the Deathly Hallows Pt 1|2010",
+    ),
     // A part and an edition are independent.
     (
         "Movie (2019)/Movie (2019) {edition-Director's Cut} - CD2.mkv",

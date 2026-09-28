@@ -458,11 +458,13 @@ pub(crate) struct PartToken {
     pub stripped: String,
     pub number: u32,
     /// Whether the name alone says the token is a part. `part` and a number
-    /// is also how a title names one half of a story (`Harry Potter and the
-    /// Deathly Hallows Part 1 (2010)`), so it is a part on its own only after
-    /// the release year (`Movie (2019) - Part 1`); anywhere else only a
-    /// folder naming the same title confirms it. `cd`, `disc`, `disk` and
-    /// `pt` never end a title, so they need nothing more.
+    /// -- and `pt`, its abbreviation -- is also how a title names one film of
+    /// a pair (`Harry Potter and the Deathly Hallows Part 1 (2010)`, `The
+    /// Hunger Games Mockingjay Pt 1`), so either is a part on its own only
+    /// after the release year (`Movie (2019) - Part 1`); anywhere else only a
+    /// year-bearing folder naming the same title confirms it (decision
+    /// D233-2). `cd`, `disc` and `disk` number the pieces of one rip, so they
+    /// need nothing more.
     pub confirmed: bool,
 }
 
@@ -494,8 +496,10 @@ pub(crate) fn part_token(stem: &str) -> Option<PartToken> {
         {
             continue;
         }
-        let confirmed =
-            !word.as_str().eq_ignore_ascii_case("part") || parse_stem(prefix, false).year.is_some();
+        let names_a_piece = ["cd", "disc", "disk"]
+            .iter()
+            .any(|piece| word.as_str().eq_ignore_ascii_case(piece));
+        let confirmed = names_a_piece || parse_stem(prefix, false).year.is_some();
         // A release group glued to the token goes with it: kept, it would
         // read as a title word after a parenthesised year.
         let tail = if group_tail { "" } else { tail };
@@ -1121,7 +1125,8 @@ mod tests {
             ("Movie.2019.CD2.DivX-GRP", "Movie", Some(2019), 2),
             ("Movie (2019) - CD1 [1080p]", "Movie", Some(2019), 1),
             ("Movie CD1 (2019)", "Movie", Some(2019), 1),
-            // `cd`, `disc`, `disk` and `pt` need no year: no title ends so.
+            // `cd`, `disc` and `disk` need no year: they number the pieces
+            // of one rip.
             ("Movie - CD1", "Movie", None, 1),
             ("Movie disc 2", "Movie", None, 2),
             // Of two candidates, the one the name ends with.
@@ -1179,6 +1184,18 @@ mod tests {
                 Some(2010),
             ),
             ("The Godfather Part 2", "The Godfather Part 2", None),
+            // `pt` abbreviates `part`, and is read as it is (D233-2).
+            (
+                "The Hunger Games Mockingjay Pt 1",
+                "The Hunger Games Mockingjay Pt 1",
+                None,
+            ),
+            (
+                "Harry Potter and the Deathly Hallows Pt.1 (2010)",
+                "Harry Potter and the Deathly Hallows Pt 1",
+                Some(2010),
+            ),
+            ("Movie - pt2", "Movie - pt2", None),
             // Title words after the token.
             (
                 "Movie (2019) - Part 1 Behind the Scenes",

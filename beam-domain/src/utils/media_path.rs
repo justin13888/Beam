@@ -532,14 +532,19 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
 /// The movie a filename parse names, completed from its parent folder.
 fn movie_of(parsed: ParsedFilename, stem: String, parent: Option<&str>) -> MovieInference {
     let folder = parent.and_then(title_of);
-    // A `part` token the name alone does not confirm is a part when the
-    // folder names the title the rest of the name spells (decision D233-2):
-    // `Movie (2019)/Movie - Part 1.mkv` is part 1 of *Movie*, but `Harry
-    // Potter and the Deathly Hallows Part 1 (2010)/...Part 1.mkv` is a film.
+    // A `part` or `pt` token the name alone does not confirm is a part when
+    // the name carries no year and its folder is the film's own: it carries
+    // the year, and names the title the rest of the name spells (decision
+    // D233-2). `Movie (2019)/Movie - Part 1.mkv` is part 1 of *Movie*. A
+    // year-less folder is as often a franchise's or a collection's --
+    // `The Godfather/The Godfather Part 2.mkv` is a film -- and a year in the
+    // name after the token (`Movie Pt 1 (2010)`) makes the token the title's.
     let parsed = match (&parsed.part, &folder) {
-        (None, Some(folder)) => parse_as_part(&stem, false)
-            .filter(|part| same_title(&part.title, &folder.title))
-            .unwrap_or(parsed),
+        (None, Some(folder)) if folder.year.is_some() && parsed.year.is_none() => {
+            parse_as_part(&stem, false)
+                .filter(|part| same_title(&part.title, &folder.title))
+                .unwrap_or(parsed)
+        }
         _ => parsed,
     };
     let ParsedFilename {
