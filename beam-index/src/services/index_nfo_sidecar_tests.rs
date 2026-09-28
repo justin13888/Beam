@@ -141,6 +141,9 @@ enum Probe {
     Double,
     /// The real FFmpeg prober and hasher, over real containers.
     Real,
+    /// The double prober with the real hasher, so a moved file's content
+    /// matches its row and it is relinked (issue #180).
+    ContentHashed,
 }
 
 struct Harness {
@@ -235,6 +238,7 @@ impl Harness {
 
         let (hasher, prober): (Arc<dyn HashService>, Arc<dyn MediaInfoService>) = match probe {
             Probe::Double => (Arc::new(hasher), Arc::new(prober)),
+            Probe::ContentHashed => (Arc::new(LocalHashService::default()), Arc::new(prober)),
             Probe::Real => (
                 Arc::new(LocalHashService::default()),
                 Arc::new(LocalMediaInfoService::default()),
@@ -1892,4 +1896,138 @@ async fn a_kept_nfo_deleted_and_recreated_repins_its_title() {
         .await;
 
     assert_eq!(h.movie_pins(), vec![Some("tmdb:1".to_string())]);
+}
+
+/// Move `from` to `to` beneath the harness's library root, creating the
+/// folders `to` needs.
+fn move_file(h: &Harness, from: &str, to: &str) {
+    let to = h.root.join(to);
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    std::fs::rename(h.root.join(from), to).unwrap();
+}
+
+/// A movie folder -- video, subtitle and NFO -- indexed, then moved to a new
+/// folder.
+async fn a_moved_movie_folder() -> (Harness, Uuid) {
+    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    h.video("Heat/Heat.mkv");
+    h.write("Heat/Heat.en.srt", "1");
+    h.write("Heat/Heat.nfo", &tmdb_movie(949));
+    h.scan().await;
+    let id = h.file("Heat/Heat.mkv").id;
+    assert_eq!(h.subtitles_of("Heat/Heat.mkv").await.len(), 1);
+    assert!(h.applied("Heat/Heat.nfo").await.is_some());
+
+    for name in ["Heat.mkv", "Heat.en.srt", "Heat.nfo"] {
+        move_file(&h, &format!("Heat/{name}"), &format!("Heat (1995)/{name}"));
+    }
+    (h, id)
+}
+
+/// A scan relinks a moved video to its row (issue #180) before it judges
+/// what sits beside the media: the row's subtitles are those beside its new
+/// path, and its NFO's record moves with the NFO, the title keeping its pin.
+#[tokio::test]
+async fn a_scan_relinks_a_moved_video_with_its_subtitles_and_nfo_by_path() {
+    let (h, id) = a_moved_movie_folder().await;
+
+    h.scan().await;
+
+    assert_eq!(
+        h.file("Heat (1995)/Heat.mkv").id,
+        id,
+        "relinked, not re-added"
+    );
+    let subtitles: Vec<PathBuf> = h
+        .subtitles_of("Heat (1995)/Heat.mkv")
+        .await
+        .into_iter()
+        .map(|row| row.path)
+        .collect();
+    assert_eq!(subtitles, vec![h.root.join("Heat (1995)/Heat.en.srt")]);
+    assert!(
+        h.applied("Heat/Heat.nfo").await.is_none(),
+        "the old NFO is gone"
+    );
+    assert!(h.applied("Heat (1995)/Heat.nfo").await.is_some());
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+}
+
+/// The watcher relinking a moved video, before it hears of the subtitle that
+/// moved with it, records the subtitle beside the video's new path and
+/// forgets the row of the one no longer beside it; the subtitle's and the
+/// NFO's own events then change nothing further, and the title keeps its
+/// pin.
+#[tokio::test]
+async fn the_watcher_relinks_a_moved_video_with_the_subtitles_beside_its_new_path() {
+    let (h, id) = a_moved_movie_folder().await;
+
+    h.event("Heat (1995)/Heat.mkv", FsEventKind::Created).await;
+
+    assert_eq!(
+        h.file("Heat (1995)/Heat.mkv").id,
+        id,
+        "relinked, not re-added"
+    );
+    let subtitle_paths = || async {
+        h.subtitles_of("Heat (1995)/Heat.mkv")
+            .await
+            .into_iter()
+            .map(|row| row.path)
+            .collect::<Vec<PathBuf>>()
+    };
+    assert_eq!(
+        subtitle_paths().await,
+        vec![h.root.join("Heat (1995)/Heat.en.srt")],
+        "the subtitle beside the new path, and not the one gone from the old"
+    );
+
+    h.event("Heat/Heat.en.srt", FsEventKind::Removed).await;
+    h.event("Heat (1995)/Heat.en.srt", FsEventKind::Created)
+        .await;
+    h.event("Heat/Heat.nfo", FsEventKind::Removed).await;
+    h.event("Heat (1995)/Heat.nfo", FsEventKind::Created).await;
+
+    assert_eq!(
+        subtitle_paths().await,
+        vec![h.root.join("Heat (1995)/Heat.en.srt")]
+    );
+    assert!(h.applied("Heat/Heat.nfo").await.is_none());
+    assert!(h.applied("Heat (1995)/Heat.nfo").await.is_some());
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+}
+
+/// A movie folder renamed whole, which the watcher reports as the directory
+/// alone: its event relinks the video, records the subtitle beside it in
+/// place of the one at the old path, and applies the NFO it holds, the title
+/// keeping its pin.
+#[tokio::test]
+async fn a_renamed_movie_folders_event_carries_its_subtitles_and_nfo_along() {
+    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    h.video("Heat/Heat.mkv");
+    h.write("Heat/Heat.en.srt", "1");
+    h.write("Heat/Heat.nfo", &tmdb_movie(949));
+    h.scan().await;
+    let id = h.file("Heat/Heat.mkv").id;
+
+    std::fs::rename(h.root.join("Heat"), h.root.join("Heat (1995)")).unwrap();
+    h.event("Heat (1995)", FsEventKind::Created).await;
+
+    assert_eq!(
+        h.file("Heat (1995)/Heat.mkv").id,
+        id,
+        "relinked, not re-added"
+    );
+    let subtitles: Vec<PathBuf> = h
+        .subtitles_of("Heat (1995)/Heat.mkv")
+        .await
+        .into_iter()
+        .map(|row| row.path)
+        .collect();
+    assert_eq!(subtitles, vec![h.root.join("Heat (1995)/Heat.en.srt")]);
+    assert!(
+        h.applied("Heat (1995)/Heat.nfo").await.is_some(),
+        "the NFO inside is applied by the directory's event"
+    );
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
 }

@@ -3180,9 +3180,19 @@ impl LocalIndexService {
                 let outcome = self
                     .process_new_file(path, library, RelinkSource::Repository, None)
                     .await?;
-                if outcome == FileOutcome::Added {
-                    record_file_outcome("new");
-                    self.attach_adjacent_sidecars(library, path).await?;
+                match outcome {
+                    FileOutcome::Added => {
+                        record_file_outcome("new");
+                        self.attach_adjacent_sidecars(library, path).await?;
+                    }
+                    // A moved video's subtitles are those beside it now
+                    // (issue #184); its NFOs are applied by their own events.
+                    FileOutcome::Relinked => self.relink_sidecars(library, path).await?,
+                    FileOutcome::Changed
+                    | FileOutcome::Unchanged
+                    | FileOutcome::Deferred(_)
+                    | FileOutcome::LeftToScan
+                    | FileOutcome::Failed => {}
                 }
                 Ok(outcome)
             }
@@ -3293,8 +3303,8 @@ impl LocalIndexService {
             excluded: _,
             failed_subtrees,
             unscoped_failure,
-            subtitles: _,
-            nfos: _,
+            subtitles,
+            nfos,
         } = if self
             .path_policy
             .excludes_directory(relative_to(&library.root_path, dir))
@@ -3325,6 +3335,25 @@ impl LocalIndexService {
             };
             if let FileOutcome::Deferred(after) = outcome {
                 retry_after = Some(retry_after.map_or(after, |before| before.min(after)));
+            }
+        }
+
+        // What sits beside the media beneath it (issue #184), once its videos
+        // are at their paths: each subtitle is recorded against the video
+        // that owns it, and each NFO applied as its own event would apply it
+        // -- a watcher that reports a renamed directory reports nothing of
+        // the files inside it.
+        for subtitle in &subtitles {
+            if let Err(e) = self
+                .reconcile_sidecar_event(library, &subtitle.path, true)
+                .await
+            {
+                warn!(path = %subtitle.path.display(), error = %e, "failed to reconcile a subtitle of a changed directory");
+            }
+        }
+        for nfo in &nfos {
+            if let Err(e) = self.reconcile_nfo_event(library, &nfo.path, true).await {
+                warn!(path = %nfo.path.display(), error = %e, "failed to reconcile an NFO of a changed directory");
             }
         }
 

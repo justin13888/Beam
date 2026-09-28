@@ -252,7 +252,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   record new and changed subtitles, writing only what changed, and delete the rows of subtitles no
   longer found or no longer owned by an indexed video -- except beneath a path the walk could not
   read (FR-211); the watcher MUST do the same for a single subtitle, and a video it indexes MUST
-  pick up the subtitles already beside it. Image-based subtitles are not indexed. Serving sidecar
+  pick up the subtitles already beside it. A video relinked to its row (FR-221) MUST own the
+  subtitles beside its new path, and no longer those beside its old one: the scan judges subtitles
+  and NFOs after its relinks, and the watcher reconciles a relinked video's subtitle rows, and the
+  subtitles and NFOs beneath a directory it reconciles. An NFO's record stays keyed by the NFO's own
+  path (FR-219). Image-based subtitles are not indexed. Serving sidecar
   subtitles is [#189](https://github.com/justin13888/beam/issues/189)'s scope.
 - **FR-221**: A file's `files` row MUST follow the file's content within its library. A path whose
   content hash (non-zero) and size match a row of the same library whose own content has left its

@@ -236,21 +236,15 @@ impl LocalIndexService {
         Ok(())
     }
 
-    /// Record the subtitles beside a video the watcher just indexed: those in
-    /// its folder, and in a `Subs/` or `Subtitles/` folder beside it.
-    pub(super) async fn attach_adjacent_sidecars(
-        &self,
-        library: &Library,
-        video: &Path,
-    ) -> Result<(), IndexError> {
-        if self.sidecar_repo.is_none() {
-            return Ok(());
-        }
+    /// The text subtitles beside `video` -- in its folder, and in a `Subs/`
+    /// or `Subtitles/` folder beside it -- that the path policy calls
+    /// sidecars: every subtitle that video could own.
+    fn adjacent_subtitles(&self, library: &Library, video: &Path) -> Vec<PathBuf> {
         let Some(dir) = video.parent() else {
-            return Ok(());
+            return Vec::new();
         };
         let Ok(entries) = std::fs::read_dir(dir) else {
-            return Ok(());
+            return Vec::new();
         };
         let mut subtitles = Vec::new();
         for entry in entries.flatten() {
@@ -273,15 +267,64 @@ impl LocalIndexService {
                 );
             }
         }
-        for subtitle in subtitles {
-            if self
-                .path_policy
-                .disposition(relative_to(&library.root_path, &subtitle))
+        subtitles.retain(|subtitle| {
+            self.path_policy
+                .disposition(relative_to(&library.root_path, subtitle))
                 == PathDisposition::Sidecar
-            {
-                self.reconcile_sidecar_event(library, &subtitle, true)
-                    .await?;
+        });
+        subtitles
+    }
+
+    /// Record the subtitles beside a video the watcher just indexed: those in
+    /// its folder, and in a `Subs/` or `Subtitles/` folder beside it.
+    pub(super) async fn attach_adjacent_sidecars(
+        &self,
+        library: &Library,
+        video: &Path,
+    ) -> Result<(), IndexError> {
+        if self.sidecar_repo.is_none() {
+            return Ok(());
+        }
+        for subtitle in self.adjacent_subtitles(library, video) {
+            self.reconcile_sidecar_event(library, &subtitle, true)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Bring the subtitles of a video the watcher just relinked to `video`
+    /// (issue #180) in line with its new path: a subtitle is owned by path,
+    /// so each of its rows for a subtitle not beside `video` is reconciled
+    /// again -- deleted when the subtitle is gone or no video owns it, moved
+    /// to the video beside it that does -- and the subtitles beside `video`
+    /// are recorded against it.
+    pub(super) async fn relink_sidecars(
+        &self,
+        library: &Library,
+        video: &Path,
+    ) -> Result<(), IndexError> {
+        let Some(repo) = &self.sidecar_repo else {
+            return Ok(());
+        };
+        let Some(file) = self
+            .file_repo
+            .find_by_path(&video.to_string_lossy())
+            .await?
+        else {
+            return Ok(());
+        };
+        let adjacent = self.adjacent_subtitles(library, video);
+        for row in repo.find_by_file_id(file.id).await? {
+            if adjacent.contains(&row.path) {
+                continue;
             }
+            let is_file = std::fs::symlink_metadata(&row.path).is_ok_and(|meta| meta.is_file());
+            self.reconcile_sidecar_event(library, &row.path, is_file)
+                .await?;
+        }
+        for subtitle in adjacent {
+            self.reconcile_sidecar_event(library, &subtitle, true)
+                .await?;
         }
         Ok(())
     }

@@ -175,7 +175,9 @@ Rename a file, move it to another folder, or rename a whole folder — a season 
 keeps the same record, so everyone's resume point, its place in its movie or show, and its audio
 and subtitle tracks all follow it, and it is not probed again. This works whether the watcher sees
 the move as it happens or the next scan finds it, and for a file moved out of the library and back
-in, as long as it comes back within the grace period.
+in, as long as it comes back within the grace period. Subtitle files and NFOs beside it are matched
+by where they are now: a moved video has the subtitles beside its new name, and an NFO moved with it
+keeps pinning its title to the same id.
 
 The same holds when files trade names. Swap two files' names, rotate three, or rename a file onto
 the name of one you deleted earlier, and each record follows its file's contents rather than its

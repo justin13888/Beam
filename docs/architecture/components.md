@@ -107,7 +107,9 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   text subtitles beside indexed videos as `sidecar_subtitles`, from the scan's walk and from
   watcher events), both child modules of `index.rs` (FR-219, FR-220). Both run inside the
   library's lock: a scan re-pins and reconciles subtitles as a phase of its job, after every file
-  has been settled, hashed and probed, and a watcher event for an NFO or a subtitle is handed back
+  has been settled, hashed, probed and relinked (FR-221), so a moved video's subtitles are those
+  beside its new path; the watcher reconciles a relinked video's subtitle rows, and the subtitles
+  and NFOs beneath a directory event; and a watcher event for an NFO or a subtitle is handed back
   `Deferred` while the library is held, like any other (FR-218);
   `watcher.rs`
   (`FsWatcher` trait, production `NotifyFsWatcher` — inotify on Linux, with a manual-mode
