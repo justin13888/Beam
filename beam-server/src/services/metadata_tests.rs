@@ -749,6 +749,143 @@ mod tests {
         assert_eq!(detail.source_count, Some(3));
     }
 
+    /// The parts of a multi-part movie (issue #233) are one source that plays
+    /// them in part order, whatever order they were found in: ranked as one
+    /// file by its first part's picture, sized and timed as all of them, and
+    /// each part with its own URLs and subtitle files. A part in another
+    /// folder is another copy's, so it is not stacked with them.
+    #[tokio::test]
+    async fn the_parts_of_a_movie_are_one_source_played_in_order() {
+        use crate::models::MediaMetadata;
+        use beam_domain::models::sidecar::{SidecarInfo, SubtitleFormat, UpsertSidecarSubtitle};
+        use beam_domain::repositories::{MediaStreamRepository, SidecarSubtitleRepository};
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let sidecar_repo = Arc::new(InMemorySidecarSubtitleRepository::default());
+        let movie = make_movie("Movie", Some(2019));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let file = |path: &str, part_number: Option<u32>, size_bytes: u64, secs: u64| {
+            let id = file_of(
+                &file_repo,
+                MediaFileContent::Movie {
+                    movie_entry_id: theatrical,
+                    part_number,
+                },
+                size_bytes,
+                secs,
+            );
+            file_repo.files.lock().unwrap().get_mut(&id).unwrap().path = path.into();
+            id
+        };
+        // Found part 2 first.
+        let cd2 = file("/m/Movie (2019)/Movie (2019) - CD2.avi", Some(2), 600, 3000);
+        let cd1 = file("/m/Movie (2019)/Movie (2019) - CD1.avi", Some(1), 700, 2800);
+        let whole = file("/m/Movie (2019)/Movie (2019).mkv", None, 9_000, 5800);
+        let elsewhere = file("/m/Other/Movie (2019) - CD1.avi", Some(1), 1, 2800);
+        stream_repo
+            .insert_streams(vec![
+                video_stream(cd1, 0, "hevc", 2160, None, None),
+                video_stream(cd2, 0, "hevc", 2160, None, None),
+                video_stream(whole, 0, "h264", 1080, None, None),
+            ])
+            .await
+            .unwrap();
+        let sidecar = sidecar_repo
+            .upsert_by_path(UpsertSidecarSubtitle {
+                file_id: cd2,
+                library_id: Uuid::new_v4(),
+                path: "/m/Movie (2019)/Movie (2019) - CD2.srt".into(),
+                info: SidecarInfo {
+                    format: SubtitleFormat::Srt,
+                    language: None,
+                    title: None,
+                    is_forced: false,
+                    is_sdh: false,
+                    is_default: false,
+                },
+                size_bytes: 10,
+                mtime: None,
+            })
+            .await
+            .unwrap();
+
+        let service = service_with_sidecars(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            stream_repo,
+            sidecar_repo,
+            Arc::default(),
+        );
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+
+        /// A source's first file, whether it is primary, and its parts.
+        type Shape = (Uuid, bool, Vec<(Uuid, Option<u32>)>);
+        let shape: Vec<Shape> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.file_id,
+                    s.is_primary,
+                    s.parts.iter().map(|p| (p.file_id, p.part_number)).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (cd1, true, vec![(cd1, Some(1)), (cd2, Some(2))]),
+                (whole, false, vec![(whole, None)]),
+                (elsewhere, false, vec![(elsewhere, Some(1))]),
+            ]
+        );
+        let stack = &sources[0];
+        assert_eq!(
+            (stack.size_bytes, stack.duration_secs),
+            (1300, Some(5800.0)),
+            "all the parts, together"
+        );
+        assert_eq!(stack.stream_url, format!("/v1/files/{cd1}/stream"));
+        assert_eq!(
+            stack
+                .parts
+                .iter()
+                .map(|p| (p.stream_url.clone(), p.duration_secs))
+                .collect::<Vec<_>>(),
+            vec![
+                (format!("/v1/files/{cd1}/stream"), Some(2800.0)),
+                (format!("/v1/files/{cd2}/stream"), Some(3000.0)),
+            ]
+        );
+        assert!(stack.parts[0].subtitle_tracks.is_empty());
+        assert_eq!(
+            stack.parts[1]
+                .subtitle_tracks
+                .iter()
+                .map(|t| t.sidecar_id)
+                .collect::<Vec<_>>(),
+            vec![Some(sidecar.id)],
+            "a part's subtitle file is that part's"
+        );
+
+        let Some(MediaMetadata::Movie(detail)) =
+            service.get_media_metadata(movie_id).await.unwrap()
+        else {
+            panic!("the movie resolves");
+        };
+        assert_eq!(
+            (detail.file_id, detail.duration, detail.source_count),
+            (Some(cd1), Some(5800.0), Some(3))
+        );
+    }
+
     /// Every track is addressed by its stream index and names its codec as
     /// FFmpeg does, whatever the codec: E-AC-3 and TrueHD are no longer
     /// `Unknown`, a PGS subtitle is not `WebVTT`. A value the file does not
