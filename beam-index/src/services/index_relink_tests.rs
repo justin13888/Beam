@@ -998,6 +998,38 @@ async fn a_watcher_event_for_a_copy_indexes_a_new_row() {
     assert_eq!(h.present(&original).await.id, before.id);
 }
 
+/// A row read back at microsecond precision still matches its file when the
+/// filesystem keeps nanoseconds: the original has not moved, so the
+/// watcher indexes a copy of it rather than leaving the copy to the scan
+/// (issue #229).
+#[tokio::test]
+async fn a_row_at_microsecond_precision_still_matches_its_file_for_the_watcher() {
+    let h = Harness::new().await;
+    let original = h.write("Heat (1995).mkv", "heat");
+    std::fs::File::options()
+        .write(true)
+        .open(&original)
+        .unwrap()
+        .set_modified(std::time::SystemTime::from(
+            instant(-60) + chrono::TimeDelta::nanoseconds(802_029_432),
+        ))
+        .unwrap();
+    h.scan().await;
+    let before = h.present(&original).await;
+    assert_eq!(
+        before.mtime,
+        Some(instant(-60) + chrono::TimeDelta::microseconds(802_029)),
+        "the row keeps microseconds"
+    );
+
+    let copy = h.write("Heat (1995) copy.mkv", "heat");
+    let outcome = h.reconcile(&copy, FsEventKind::Created).await;
+
+    assert_eq!(outcome, ReconcileOutcome::Done);
+    assert_ne!(h.present(&copy).await.id, before.id, "indexed as a new row");
+    assert_eq!(h.present(&original).await.id, before.id);
+}
+
 /// A renamed season folder arrives as an event for each directory name. In
 /// either order every episode keeps its row, and nothing is left missing.
 #[tokio::test]
@@ -1156,7 +1188,9 @@ async fn a_directory_event_for_the_library_root_marks_nothing_missing() {
 /// settled; the files that had settled are reconciled meanwhile.
 #[tokio::test]
 async fn a_directory_event_with_a_file_still_being_written_is_deferred() {
-    let now = Utc::now();
+    // A whole second: an mtime is read at a row's microsecond precision, so
+    // a clock with nanoseconds would read the file as a fraction older.
+    let now = instant(0);
     let window = Duration::from_secs(60);
     let h = Harness::with_service(|service| {
         service

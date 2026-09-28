@@ -687,6 +687,81 @@ macro_rules! file_repository_contract {
             assert_eq!(stored.hash, first.hash);
         }
 
+        /// An mtime is kept in whole microseconds, as `files.mtime`'s
+        /// `TIMESTAMPTZ` is, and reads back as [`mtime_as_stored`] says --
+        /// the precision the indexer brings a file's mtime to before
+        /// comparing it with its row (issue #229). Whichever way it is
+        /// written: created, updated, or relinked.
+        #[tokio::test]
+        async fn an_mtime_reads_back_in_whole_microseconds_as_mtime_as_stored_says() {
+            use $crate::models::file::mtime_as_stored;
+            let instant = |secs: i64, nanos: u32| {
+                DateTime::from_timestamp(secs, nanos).expect("valid instant")
+            };
+            // (written, read back): what ext4 or btrfs reports, and what a
+            // row holds for it.
+            let cases = [
+                // After 2000-01-01, the sub-microsecond part is dropped.
+                (instant(1_790_000_341, 802_029_432), instant(1_790_000_341, 802_029_000)),
+                (instant(1_790_000_341, 999_999_999), instant(1_790_000_341, 999_999_000)),
+                // Before it, the driver truncates toward that epoch: up.
+                (instant(946_684_799, 500), instant(946_684_799, 1_000)),
+                // Whole microseconds are kept as they are.
+                (instant(1_790_000_341, 802_029_000), instant(1_790_000_341, 802_029_000)),
+            ];
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+
+            for (written, read_back) in cases {
+                assert_eq!(mtime_as_stored(written), read_back, "{written}");
+
+                let movie_entry_id = fixture.new_movie_entry(library).await;
+                let created = repo
+                    .create(CreateMediaFile {
+                        library_id: library,
+                        path: PathBuf::from(format!("/videos/{library}/{}.mkv", Uuid::new_v4())),
+                        hash: (Uuid::new_v4().as_u128() as u64) >> 1,
+                        size_bytes: 1024,
+                        mtime: Some(written),
+                        mime_type: None,
+                        duration: None,
+                        container_format: None,
+                        content: Some(MediaFileContent::Movie { movie_entry_id }),
+                        status: FileStatus::Known,
+                        classifier_version: 0,
+                    })
+                    .await
+                    .expect("create a file");
+                let stored = repo.find_by_id(created.id).await.unwrap().expect("stored");
+                assert_eq!(stored.mtime, Some(read_back), "created at {written}");
+
+                let untouched = movie_file(&fixture, library).await;
+                repo.update(UpdateMediaFile {
+                    id: untouched.id,
+                    hash: None,
+                    size_bytes: None,
+                    mtime: Some(written),
+                    probe: ProbeUpdate::Keep,
+                    content: None,
+                    status: None,
+                })
+                .await
+                .expect("update the file");
+                let stored = repo.find_by_id(untouched.id).await.unwrap().expect("stored");
+                assert_eq!(stored.mtime, Some(read_back), "updated to {written}");
+
+                let moving = movie_file(&fixture, library).await;
+                let moved_to =
+                    PathBuf::from(format!("/videos/{library}/moved/{}.mkv", Uuid::new_v4()));
+                repo.relink(vec![to(&moving, &moved_to, 1024, Some(written))], Vec::new(), at(0))
+                    .await
+                    .expect("relink the file");
+                let stored = repo.find_by_id(moving.id).await.unwrap().expect("stored");
+                assert_eq!(stored.mtime, Some(read_back), "relinked at {written}");
+            }
+        }
+
         #[tokio::test]
         async fn a_multi_episode_range_is_stored_with_its_first_episode() {
             let fixture = $setup().await;
