@@ -430,3 +430,135 @@ fn only_a_folder_the_main_title_needs_can_fail_a_disc() {
         lock(&blu_ray.join(companion), 0o755);
     }
 }
+
+/// A one-disc DVD of `size` bytes in `folder`, playing `VTS_01_1.VOB`.
+fn one_disc(folder: &Path, size: usize) -> PathBuf {
+    write_dvd(
+        folder,
+        &[TitleSet {
+            set: 1,
+            parts: &[size],
+            duration: Some(90 * MINUTE),
+        }],
+    )
+}
+
+fn source(root: &Path, disc: &Path, kind: DiscKind) -> SourceRead {
+    read_source(root, disc, kind, &PathPolicy::default())
+}
+
+/// The discs of a set of one film are one source (decision D234-7): each
+/// disc's main title in disc order, whichever disc is read, and whatever
+/// kind each disc is.
+#[test]
+fn the_discs_of_a_set_are_one_source_in_disc_order() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let heat = root.join("Heat (1995)");
+    let disc_2 = write_dvd(
+        &heat.join("Disc 2"),
+        &[TitleSet {
+            set: 1,
+            parts: &[1000, 500],
+            duration: Some(80 * MINUTE),
+        }],
+    );
+    let disc_1 = write_blu_ray(
+        &heat.join("DISC1"),
+        &[("00800", 4000)],
+        &[("00800.mpls", mpls(&[("00800", 0, ticks(5000))]))],
+    );
+    // Another film's discs, beside and inside, are none of it.
+    one_disc(&root.join("Ronin (1998)/Disc 1"), 800);
+    one_disc(&heat.join("Extras Disc"), 800);
+
+    let expected = [
+        disc_1.join("STREAM/00800.m2ts"),
+        disc_2.join("VTS_01_1.VOB"),
+        disc_2.join("VTS_01_2.VOB"),
+    ];
+    for (disc, kind) in [(&disc_1, DiscKind::BluRay), (&disc_2, DiscKind::Dvd)] {
+        assert_eq!(
+            source(root, disc, kind),
+            SourceRead {
+                files: expected.to_vec(),
+                failed: false,
+            },
+            "{}",
+            disc.display()
+        );
+    }
+    assert_eq!(part_in(&expected, &disc_2.join("VTS_01_1.VOB")), Some(2));
+}
+
+/// A set that is not a whole run from disc 1 -- a disc missing, two discs
+/// claiming one number -- is not one film told whole, so each disc is its own
+/// source; a disc folder whose disc plays nothing is no disc of it.
+#[test]
+fn a_set_missing_a_disc_or_repeating_one_is_a_source_per_disc() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    let gapped = root.join("Heat (1995)");
+    let first = one_disc(&gapped.join("Disc 1"), 1000);
+    let third = one_disc(&gapped.join("Disc 3"), 1000);
+    assert_eq!(
+        source(root, &third, DiscKind::Dvd).files,
+        [third.join("VTS_01_1.VOB")]
+    );
+    assert_eq!(
+        source(root, &first, DiscKind::Dvd).files,
+        [first.join("VTS_01_1.VOB")]
+    );
+    // A second disc with nothing to play does not fill the gap.
+    std::fs::create_dir_all(gapped.join("Disc 2/VIDEO_TS")).unwrap();
+    assert_eq!(
+        source(root, &third, DiscKind::Dvd).files,
+        [third.join("VTS_01_1.VOB")]
+    );
+    // One that plays does.
+    let second = one_disc(&gapped.join("Disc 2"), 1000);
+    assert_eq!(source(root, &third, DiscKind::Dvd).files.len(), 3);
+    assert_eq!(
+        source(root, &second, DiscKind::Dvd).files[1],
+        second.join("VTS_01_1.VOB")
+    );
+
+    let repeated = root.join("Ronin (1998)");
+    let disc = one_disc(&repeated.join("Disc 1"), 1000);
+    one_disc(&repeated.join("CD1"), 1000);
+    one_disc(&repeated.join("Disc 2"), 1000);
+    assert_eq!(
+        source(root, &disc, DiscKind::Dvd).files,
+        [disc.join("VTS_01_1.VOB")]
+    );
+}
+
+/// A set whose folder cannot be listed, or one of whose discs cannot be
+/// read, is not read: which part each file is depends on every disc before
+/// it.
+#[cfg(unix)]
+#[test]
+fn a_set_one_of_whose_discs_cannot_be_read_is_not_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let heat = root.join("Heat (1995)");
+    let first = one_disc(&heat.join("Disc 1"), 1000);
+    let second = one_disc(&heat.join("Disc 2"), 1000);
+    std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&second).is_ok() {
+        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: running as root, which ignores file permissions");
+        return;
+    }
+    let found = source(root, &first, DiscKind::Dvd);
+    std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        found,
+        SourceRead {
+            files: Vec::new(),
+            failed: true
+        }
+    );
+}

@@ -8,8 +8,13 @@
 //! choice with it and no row can go stale.
 
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
+
+use crate::utils::media_path::disc_set_place;
+use crate::utils::path_policy::{DiscKind, disc_stream_kind};
 
 /// What a source is ranked by, most significant first. A multi-part movie's
 /// parts are one source ([`stack_parts`]), ranked by its first part's picture
@@ -97,6 +102,70 @@ pub fn stack_parts<T, S: Ord>(
         }
     }
     sources
+}
+
+/// Which stack a part of one edition of a movie belongs to, for
+/// [`stack_parts`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StackKey {
+    /// The parts in one folder (issue #233), and a disc's main title
+    /// (issue #234).
+    Folder(PathBuf),
+    /// The discs of a set of one film (decision D234-7): the folder their
+    /// disc folders are in, and what those folders' names share.
+    DiscSet { container: PathBuf, name: String },
+}
+
+/// The stack each of `paths` -- the files of one edition of a movie -- is a
+/// part of: its folder, unless it is a stream file of a disc of a set of
+/// discs ([`disc_set_place`]) whose every disc from 1 to its last is among
+/// `paths` once, with none missing and none repeated. That set is one stack,
+/// played disc by disc, as the indexer numbers it. Any other set's discs are
+/// each their own, as the indexer numbers them too.
+pub fn stack_keys(paths: &[&Path]) -> Vec<StackKey> {
+    let folder =
+        |path: &Path| StackKey::Folder(path.parent().map(PathBuf::from).unwrap_or_default());
+    let placed: Vec<Option<(PathBuf, StackKey, u32)>> = paths
+        .iter()
+        .map(|path| {
+            let disc_root = match disc_stream_kind(path)? {
+                DiscKind::Dvd => path.parent()?,
+                DiscKind::BluRay => path.parent()?.parent()?,
+            };
+            let place = disc_set_place(disc_root)?;
+            let set = StackKey::DiscSet {
+                container: place.container,
+                name: place.name,
+            };
+            Some((disc_root.to_path_buf(), set, place.disc))
+        })
+        .collect();
+    let mut sets: BTreeMap<&StackKey, BTreeMap<u32, BTreeSet<&Path>>> = BTreeMap::new();
+    for (disc_root, set, disc) in placed.iter().flatten() {
+        sets.entry(set)
+            .or_default()
+            .entry(*disc)
+            .or_default()
+            .insert(disc_root.as_path());
+    }
+    let whole: BTreeSet<&StackKey> = sets
+        .into_iter()
+        .filter(|(_, discs)| {
+            discs
+                .iter()
+                .zip(1_u32..)
+                .all(|((disc, roots), expected)| *disc == expected && roots.len() == 1)
+        })
+        .map(|(set, _)| set)
+        .collect();
+    paths
+        .iter()
+        .zip(&placed)
+        .map(|(path, placed)| match placed {
+            Some((_, set, _)) if whole.contains(set) => set.clone(),
+            _ => folder(path),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -205,6 +274,77 @@ mod tests {
     /// A stack that does not start at part 1, or skips a number, is missing
     /// a part or is not one film: every file of it is a source of its own,
     /// and other stacks are untouched.
+    /// A set of discs is one stack only when the edition holds each of its
+    /// discs from 1 once; a gap or a repeat leaves each disc its own stack,
+    /// and a file of no set is its folder's.
+    #[test]
+    fn a_set_of_discs_is_one_stack_only_when_whole() {
+        let set = StackKey::DiscSet {
+            container: PathBuf::from("/m/Heat (1995)"),
+            name: String::new(),
+        };
+        let folder = |path: &str| StackKey::Folder(PathBuf::from(path));
+        let cases: [(&str, Vec<&str>, Vec<StackKey>); 5] = [
+            (
+                "two discs of a set",
+                vec![
+                    "/m/Heat (1995)/Disc 2/VIDEO_TS/VTS_01_1.VOB",
+                    "/m/Heat (1995)/Disc 1/BDMV/STREAM/00001.m2ts",
+                ],
+                vec![set.clone(), set.clone()],
+            ),
+            (
+                "disc 2 missing",
+                vec![
+                    "/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+                    "/m/Heat (1995)/Disc 3/VIDEO_TS/VTS_01_1.VOB",
+                ],
+                vec![
+                    folder("/m/Heat (1995)/Disc 1/VIDEO_TS"),
+                    folder("/m/Heat (1995)/Disc 3/VIDEO_TS"),
+                ],
+            ),
+            (
+                "two discs claiming disc 1",
+                vec![
+                    "/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+                    "/m/Heat (1995)/CD1/VIDEO_TS/VTS_01_1.VOB",
+                ],
+                vec![
+                    folder("/m/Heat (1995)/Disc 1/VIDEO_TS"),
+                    folder("/m/Heat (1995)/CD1/VIDEO_TS"),
+                ],
+            ),
+            (
+                "one disc's several files, and a named set",
+                vec![
+                    "/m/Heat (1995) - Disc 1/VIDEO_TS/VTS_01_1.VOB",
+                    "/m/Heat (1995) - Disc 1/VIDEO_TS/VTS_01_2.VOB",
+                    "/m/Heat.1995.DISC2/BDMV/STREAM/00001.m2ts",
+                ],
+                vec![
+                    StackKey::DiscSet {
+                        container: PathBuf::from("/m"),
+                        name: "heat 1995".to_string(),
+                    };
+                    3
+                ],
+            ),
+            (
+                "a disc in no set, and a file",
+                vec![
+                    "/m/Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+                    "/m/Heat (1995)/Heat (1995) - CD1.avi",
+                ],
+                vec![folder("/m/Heat (1995)/VIDEO_TS"), folder("/m/Heat (1995)")],
+            ),
+        ];
+        for (name, paths, expected) in cases {
+            let paths: Vec<&Path> = paths.iter().map(Path::new).collect();
+            assert_eq!(stack_keys(&paths), expected, "{name}");
+        }
+    }
+
     #[test]
     fn a_stack_missing_a_part_is_not_stacked() {
         assert_eq!(

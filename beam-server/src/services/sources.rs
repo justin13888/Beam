@@ -9,9 +9,10 @@
 //! (`Movie (2019) - CD1.avi`, `- CD2.avi`, issue #233) are one source that
 //! plays them in order: the parts of one edition in one folder, stacked by
 //! [`stack_parts`]. So are the stream files a DVD or Blu-ray folder rip's
-//! main title plays (issue #234), which the indexer numbers as parts.
+//! main title plays (issue #234), which the indexer numbers as parts -- and
+//! across the discs of a set of one film, disc by disc ([`stack_keys`]).
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use sea_orm::DbErr;
@@ -23,7 +24,9 @@ use beam_domain::repositories::{
     FileRepository, MediaStreamRepository, MovieRepository, SidecarSubtitleRepository,
 };
 use beam_domain::utils::path_policy::{DiscKind, disc_stream_kind};
-use beam_domain::utils::source_rank::{SourceRankKey, rank_sources, stack_parts};
+use beam_domain::utils::source_rank::{
+    SourceRankKey, StackKey, rank_sources, stack_keys, stack_parts,
+};
 use beam_domain::utils::subtitle::is_text_subtitle_codec;
 
 use crate::models::{
@@ -173,15 +176,19 @@ impl SourceCatalog {
             for file in self.files.find_by_movie_entry_id(entry.id).await? {
                 files.push(self.part_file(file).await?);
             }
-            // The entry is the edition, so only the folder tells two
-            // stacks of one edition apart.
-            let stacks = stack_parts(files, |part| {
-                let folder: PathBuf = part.file.path.parent().map(PathBuf::from)?;
-                part.part_number().map(|number| (folder, number))
+            // The entry is the edition, so only the folder -- or the set of
+            // discs -- tells two stacks of one edition apart.
+            let keys = {
+                let paths: Vec<&Path> = files.iter().map(|part| part.file.path.as_path()).collect();
+                stack_keys(&paths)
+            };
+            let keyed: Vec<(StackKey, PartFile)> = keys.into_iter().zip(files).collect();
+            let stacks = stack_parts(keyed, |(key, part)| {
+                part.part_number().map(|number| (key.clone(), number))
             });
             ranked.extend(stacks.into_iter().map(|parts| RankedSource {
                 edition: entry.edition.clone(),
-                parts,
+                parts: parts.into_iter().map(|(_, part)| part).collect(),
             }));
         }
         rank_sources(&mut ranked, RankedSource::rank_key);

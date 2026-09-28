@@ -21,6 +21,11 @@
 //! in is not read; a `BACKUP/`, `JAR/` or `AUXDATA/` folder is never looked
 //! into, so one that cannot be read changes nothing.
 //!
+//! The discs of a set of one film -- `Heat (1995)/Disc 1/VIDEO_TS` and
+//! `Disc 2/VIDEO_TS` beside it (decision D234-7) -- are one source
+//! ([`read_source`]): each disc's main title in disc order, as one run of
+//! parts.
+//!
 //! Everything here reads, and nothing writes: a disc is listed with no link
 //! followed, its stream files are stat'ed with a [`StatCursor`], and an IFO
 //! or a playlist is read through the no-follow opener ([`LibraryFile`]).
@@ -34,6 +39,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
+use beam_domain::utils::media_path::{DiscSetPlace, disc_set_member, disc_set_place};
 use beam_domain::utils::path_policy::{
     DiscKind, PathDisposition, PathPolicy, disc_stream_kind, dvd_title_file,
 };
@@ -78,6 +84,134 @@ pub(crate) fn part_in(title: &[PathBuf], path: &Path) -> Option<u32> {
     }
     let at = title.iter().position(|file| file == path)?;
     u32::try_from(at + 1).ok()
+}
+
+/// What reading the source a disc is part of found: the disc alone, or
+/// the set of discs of one film it is one of.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SourceRead {
+    /// The stream files the source plays, in the order it plays them: each
+    /// disc's main title in turn. Empty when it could not be read whole.
+    pub files: Vec<PathBuf>,
+    /// Whether some disc of the source, or the folder its set is in, could
+    /// not be read. `files` is then empty: which part a file is depends on
+    /// every disc before it.
+    pub failed: bool,
+}
+
+/// The source the disc structure of `kind` rooted at `disc`, beneath the
+/// library `root`, is part of, and the files it plays.
+///
+/// A disc whose folder numbers it within a set ([`disc_set_place`]) is one
+/// disc of a film told across several (decision D234-7): the discs of its
+/// set whose main titles play something are one source when their numbers
+/// run from 1 with no gap and no repeat, playing each disc's main title in
+/// disc order. Any other set is not a whole film -- a disc is missing, or
+/// two claim one number -- so its disc is a source of its own, as a stack of
+/// parts is (issue #233). A disc in no set is its own source.
+pub(crate) fn read_source(
+    root: &Path,
+    disc: &Path,
+    kind: DiscKind,
+    policy: &PathPolicy,
+) -> SourceRead {
+    let own = || {
+        let read = read_disc(root, disc, kind, policy);
+        SourceRead {
+            files: read.title,
+            failed: read.failed,
+        }
+    };
+    let Some(place) = disc_set_place(disc.strip_prefix(root).unwrap_or(disc)) else {
+        return own();
+    };
+    let Ok(members) = set_members(root, &place, policy) else {
+        return SourceRead {
+            files: Vec::new(),
+            failed: true,
+        };
+    };
+    let mut titles: Vec<(u32, Vec<PathBuf>)> = Vec::new();
+    for (number, member, member_kind) in members {
+        let read = read_disc(root, &member, member_kind, policy);
+        if read.failed {
+            return SourceRead {
+                files: Vec::new(),
+                failed: true,
+            };
+        }
+        if !read.title.is_empty() {
+            titles.push((number, read.title));
+        }
+    }
+    titles.sort_by_key(|(number, _)| *number);
+    let whole_run = titles
+        .iter()
+        .zip(1_u32..)
+        .all(|((number, _), expected)| *number == expected);
+    if !whole_run {
+        return own();
+    }
+    SourceRead {
+        files: titles.into_iter().flat_map(|(_, title)| title).collect(),
+        failed: false,
+    }
+}
+
+/// The discs of the set `place` names, beneath the library `root`: each
+/// folder beside the set's disc folders whose name puts it in the same set,
+/// and the disc structure directly in it that the policy does not exclude,
+/// with its number and kind. A folder holding two discs is listed twice, as
+/// two discs claiming one number. An error when a folder could not be
+/// listed.
+pub(crate) fn set_members(
+    root: &Path,
+    place: &DiscSetPlace,
+    policy: &PathPolicy,
+) -> std::io::Result<Vec<(u32, PathBuf, DiscKind)>> {
+    let container = root.join(&place.container);
+    let mut members = Vec::new();
+    for folder in list_folders(&container)? {
+        let rel = folder.strip_prefix(root).unwrap_or(&folder);
+        let Some(member) = disc_set_member(rel) else {
+            continue;
+        };
+        if member.container != place.container || member.name != place.name {
+            continue;
+        }
+        for disc in list_folders(&folder)? {
+            let rel = disc.strip_prefix(root).unwrap_or(&disc);
+            if let Some((disc_root, kind)) = policy.disc_root(rel)
+                && disc_root == rel
+            {
+                members.push((member.disc, disc, kind));
+            }
+        }
+    }
+    Ok(members)
+}
+
+/// The folders directly in `folder`, no link followed: a link is no folder
+/// of the library, whatever it points at.
+fn list_folders(folder: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut folders = Vec::new();
+    let walk = WalkDir::new(folder)
+        .follow_links(false)
+        .follow_root_links(false)
+        .min_depth(1)
+        .max_depth(1)
+        .sort_by_file_name();
+    for entry in walk {
+        match entry {
+            Ok(entry) if entry.file_type().is_dir() => folders.push(entry.into_path()),
+            Ok(_) => {}
+            Err(err) => {
+                warn!(folder = %folder.display(), error = %err, "could not list the folder of a set of discs");
+                return Err(err.into());
+            }
+        }
+    }
+    Ok(folders)
 }
 
 /// A stream file of a disc, and its size.

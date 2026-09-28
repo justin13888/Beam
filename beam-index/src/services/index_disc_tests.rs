@@ -573,6 +573,49 @@ async fn discs_in_disc_folders_are_their_films_and_a_shows_are_untitled() {
     assert_eq!(h.entries().len(), 3, "one entry per film");
 }
 
+/// The discs of a set of one film are one source (decision D234-7): each
+/// disc's main title in disc order, numbered as one run of parts, whatever
+/// kind each disc is.
+#[tokio::test]
+async fn a_two_disc_set_is_one_source_playing_disc_1_then_disc_2() {
+    let h = Harness::new().await;
+    write_blu_ray(
+        &h.root.join("Heat (1995)/Disc 2"),
+        &[("00800", 3000)],
+        &[("00800.mpls", mpls(&[("00800", 0, ticks(4000))]))],
+    );
+    write_dvd(
+        &h.root.join("Heat (1995)/Disc 1"),
+        &[TitleSet {
+            set: 1,
+            parts: &[2000, 900],
+            duration: Some(80 * MINUTE),
+        }],
+    );
+
+    h.scan().await.expect("the scan runs");
+
+    assert_eq!(h.movies().await, [("Heat".to_string(), Some(1995))]);
+    assert_eq!(
+        h.present(),
+        [
+            (
+                "Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB".to_string(),
+                Some(1)
+            ),
+            (
+                "Heat (1995)/Disc 1/VIDEO_TS/VTS_01_2.VOB".to_string(),
+                Some(2)
+            ),
+            (
+                "Heat (1995)/Disc 2/BDMV/STREAM/00800.m2ts".to_string(),
+                Some(3)
+            ),
+        ]
+    );
+    assert_eq!(h.entries().len(), 1);
+}
+
 /// A disc file's part follows its disc's main title whenever the disc is
 /// read, not only when its row is first made: a missing VOB restored makes
 /// the one-file title a run of three, and each file takes its place in it.
@@ -644,6 +687,49 @@ async fn a_disc_files_part_follows_a_one_file_title_grown_to_two() {
             ("Heat (1995)/BDMV/STREAM/00802.m2ts".to_string(), Some(2)),
         ]
     );
+}
+
+/// A disc of a set arriving or leaving renumbers the set's other discs: with
+/// disc 2 missing each disc is a source of its own, disc 2 copied in makes
+/// the three one run, and disc 2 taken away again parts them.
+#[tokio::test]
+async fn a_disc_arriving_or_leaving_renumbers_its_set() {
+    let h = Harness::new().await;
+    let heat = h.root.join("Heat (1995)");
+    one_disc(&heat.join("Disc 1"), 2000);
+    one_disc(&heat.join("Disc 3"), 2100);
+    h.scan().await.expect("the scan runs");
+    let apart = [
+        ("Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+        ("Heat (1995)/Disc 3/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+    ];
+    assert_eq!(h.present(), apart);
+
+    one_disc(&heat.join("Disc 2"), 2200);
+    h.reconcile(&heat.join("Disc 2"), FsEventKind::Created)
+        .await;
+    assert_eq!(
+        h.present(),
+        [
+            (
+                "Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB".to_string(),
+                Some(1)
+            ),
+            (
+                "Heat (1995)/Disc 2/VIDEO_TS/VTS_01_1.VOB".to_string(),
+                Some(2)
+            ),
+            (
+                "Heat (1995)/Disc 3/VIDEO_TS/VTS_01_1.VOB".to_string(),
+                Some(3)
+            ),
+        ]
+    );
+
+    std::fs::remove_dir_all(heat.join("Disc 2")).unwrap();
+    h.reconcile(&heat.join("Disc 2"), FsEventKind::Removed)
+        .await;
+    assert_eq!(h.present(), apart);
 }
 
 /// A disc that cannot be read whole leaves its rows exactly as they were

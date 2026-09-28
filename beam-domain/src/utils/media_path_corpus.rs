@@ -5,7 +5,7 @@
 //! one-line description of the expected inference. The description format is
 //! the test's own, so a row reads as the answer a person would give.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::*;
 
@@ -1018,4 +1018,50 @@ mod properties {
             }
         }
     }
+}
+
+/// Where a disc folder sits in a set of discs (decision D234-7): its disc
+/// number, and what the discs of its set share -- the folder they are in and
+/// what their names say besides the number.
+#[test]
+fn a_disc_folders_place_in_its_set() {
+    let place = |container: &str, name: &str, disc: u32| {
+        Some(DiscSetPlace {
+            container: PathBuf::from(container),
+            name: name.to_string(),
+            disc,
+        })
+    };
+    let cases = [
+        ("Heat (1995)/Disc 1", place("Heat (1995)", "", 1)),
+        ("Heat (1995)/DISC2", place("Heat (1995)", "", 2)),
+        ("Heat (1995)/cd_3", place("Heat (1995)", "", 3)),
+        ("Heat (1995)/Disk 12", place("Heat (1995)", "", 12)),
+        (
+            "Movies/Heat (1995) - Disc 2",
+            place("Movies", "heat 1995", 2),
+        ),
+        ("Movies/Heat.1995.DISC1", place("Movies", "heat 1995", 1)),
+        ("Movies/Heat (1995) CD1", place("Movies", "heat 1995", 1)),
+        // `part` numbers a piece of a film only after its year (D233-2).
+        (
+            "Movies/Heat (1995) - Part 2",
+            place("Movies", "heat 1995", 2),
+        ),
+        ("Movies/Che Part 2", None),
+        // Not a disc of a set.
+        ("Heat (1995)", None),
+        ("Heat (1995)/DVD9", None),
+        ("Heat (1995)/Disc 0", None),
+        ("Heat (1995)/Disc", None),
+        ("Heat (1995)/Discovery", None),
+        ("Disc 1", place("", "", 1)),
+    ];
+    for (folder, expected) in cases {
+        assert_eq!(disc_set_member(Path::new(folder)), expected, "{folder}");
+    }
+    assert_eq!(
+        disc_set_place(Path::new("Heat (1995)/Disc 2/VIDEO_TS")),
+        place("Heat (1995)", "", 2)
+    );
 }

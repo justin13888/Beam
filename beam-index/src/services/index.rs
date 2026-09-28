@@ -48,7 +48,7 @@ use beam_domain::utils::filename::{ParsedFilename, parse_media_filename};
 use beam_domain::utils::identity::title_identity_key;
 use beam_domain::utils::media_path::{
     CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, TitleGuess,
-    UnclassifiableReason, infer_media, season_folder_number,
+    UnclassifiableReason, disc_set_member, disc_set_place, infer_media, season_folder_number,
 };
 use beam_domain::utils::path_policy::{
     DiscKind, PathDisposition, PathPolicy, disc_stream_kind, is_video_path,
@@ -1674,23 +1674,26 @@ impl LocalIndexService {
         }
     }
 
-    /// The part of its disc's main title the disc stream file at `path` is,
-    /// read from the disc ([`disc::part_in`]): `None` for a title of one
-    /// file, or for a file the title does not play.
+    /// The part the disc stream file at `path` is of the source its disc is
+    /// part of, read from the disc -- and from the other discs of its set,
+    /// if it is one of a set ([`disc::read_source`]) -- by [`disc::part_in`]:
+    /// `None` for a source of one file, for a file the source does not play,
+    /// or when the source could not be read whole.
     fn disc_part(&self, library: &Library, path: &Path) -> Option<u32> {
         let root = library.root_path.as_path();
         let (disc_root, kind) = self.path_policy.disc_root(relative_to(root, path))?;
-        let read = disc::read_disc(root, &root.join(disc_root), kind, &self.path_policy);
-        disc::part_in(&read.title, path)
+        let read = disc::read_source(root, &root.join(disc_root), kind, &self.path_policy);
+        disc::part_in(&read.files, path)
     }
 
-    /// Give each file of the main titles of the disc structures rooted at
-    /// `discs` the part its place in its title makes it, where its row holds
-    /// another (issue #234). A row keeps its part until something reads its
-    /// disc again, and a disc's main title can change under rows that are
-    /// otherwise unchanged -- a missing VOB restored, a one-file title grown
-    /// to two -- so every walk that reads a disc re-derives its parts. A disc
-    /// that could not be read whole changes no part.
+    /// Give each file of the sources the disc structures rooted at `discs`
+    /// are part of the part its place in its source makes it, where its row
+    /// holds another (issue #234). A row keeps its part until something
+    /// reads its disc again, and a disc's main title can change under rows
+    /// that are otherwise unchanged -- a missing VOB restored, a one-file
+    /// title grown to two, a disc of a set arriving or leaving -- so every
+    /// walk that reads a disc re-derives the parts of its whole source. A
+    /// source that could not be read whole changes no part.
     async fn rederive_disc_parts(&self, library: &Library, discs: &[PathBuf]) -> Result<(), DbErr> {
         let root = library.root_path.as_path();
         let mut done: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
@@ -1698,11 +1701,8 @@ impl LocalIndexService {
             let Some((rel, kind)) = self.path_policy.disc_root(relative_to(root, disc_root)) else {
                 continue;
             };
-            let DiscRead {
-                title: files,
-                streams: _,
-                failed,
-            } = disc::read_disc(root, &root.join(rel), kind, &self.path_policy);
+            let disc::SourceRead { files, failed } =
+                disc::read_source(root, &root.join(rel), kind, &self.path_policy);
             if failed {
                 continue;
             }
@@ -1724,7 +1724,7 @@ impl LocalIndexService {
                 if part == part_number {
                     continue;
                 }
-                debug!(path = %path.display(), from = ?part_number, to = ?part, "a disc file's place in its main title changed");
+                debug!(path = %path.display(), from = ?part_number, to = ?part, "a disc file's place in its source changed");
                 self.move_file(
                     &file,
                     MediaFileContent::Movie {
@@ -1736,6 +1736,26 @@ impl LocalIndexService {
             }
         }
         Ok(())
+    }
+
+    /// Re-derive the parts of the set of discs that `path` -- a path just
+    /// gone -- was a disc of, or a disc folder of ([`Self::rederive_disc_parts`]):
+    /// the discs left in the set may now be a whole run, or no longer one.
+    async fn rederive_disc_set_of(&self, library: &Library, path: &Path) -> Result<(), DbErr> {
+        let root = library.root_path.as_path();
+        let rel = relative_to(root, path);
+        let place = match self.path_policy.disc_root(rel) {
+            Some((disc_root, _)) => disc_set_place(&disc_root),
+            None => disc_set_member(rel),
+        };
+        let Some(place) = place else {
+            return Ok(());
+        };
+        let Ok(members) = disc::set_members(root, &place, &self.path_policy) else {
+            return Ok(());
+        };
+        let discs: Vec<PathBuf> = members.into_iter().map(|(_, disc, _)| disc).collect();
+        self.rederive_disc_parts(library, &discs).await
     }
 
     /// Tell the administrator a file was indexed without a title, and why.
@@ -4118,10 +4138,12 @@ impl LocalIndexService {
                 }
                 Ok(_) => {
                     self.reconcile_gone(&disc_root, &library).await?;
+                    self.rederive_disc_set_of(&library, &disc_root).await?;
                     Ok(ReconcileOutcome::Done)
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                     self.reconcile_gone(&disc_root, &library).await?;
+                    self.rederive_disc_set_of(&library, &disc_root).await?;
                     Ok(ReconcileOutcome::Done)
                 }
                 Err(err) => {
@@ -4165,6 +4187,9 @@ impl LocalIndexService {
             }
             _ => {
                 self.reconcile_gone(&path, &library).await?;
+                // A disc folder of a set gone takes its disc out of the set
+                // (issue #234).
+                self.rederive_disc_set_of(&library, &path).await?;
                 return Ok(ReconcileOutcome::Done);
             }
         };

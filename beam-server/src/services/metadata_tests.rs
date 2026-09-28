@@ -949,6 +949,81 @@ mod tests {
         assert_eq!(sources, expected);
     }
 
+    /// The discs of a set of one film are one source (decision D234-7),
+    /// playing disc 1's main title and then disc 2's as the indexer numbers
+    /// them; a set missing a disc is a source per disc.
+    #[tokio::test]
+    async fn a_multi_disc_set_is_one_source_in_disc_order() {
+        use crate::models::DiscStructure;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie = make_movie("Heat", Some(1995));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let file = |path: &str, part_number: Option<u32>| {
+            let id = file_of(
+                &file_repo,
+                MediaFileContent::Movie {
+                    movie_entry_id: theatrical,
+                    part_number,
+                },
+                9_000,
+                3000,
+            );
+            file_repo.files.lock().unwrap().get_mut(&id).unwrap().path = path.into();
+            id
+        };
+        // Disc 2 is the larger, so were the discs two sources it could rank
+        // first and the play button would start the film's second half.
+        let second = file("/m/Heat (1995)/Disc 2/VIDEO_TS/VTS_01_1.VOB", Some(3));
+        let first_b = file("/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_2.VOB", Some(2));
+        let first_a = file("/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB", Some(1));
+        // Another release, missing its disc 2: each disc its own.
+        let lone_1 = file("/m/Heat.1995.PAL - CD1/VIDEO_TS/VTS_01_1.VOB", None);
+        let lone_3 = file("/m/Heat.1995.PAL - CD3/VIDEO_TS/VTS_01_1.VOB", None);
+
+        let service = service_with_sidecars(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(InMemorySidecarSubtitleRepository::default()),
+            Arc::default(),
+        );
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        let mut found: Vec<(Option<DiscStructure>, Vec<Uuid>)> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.disc_structure,
+                    s.parts.iter().map(|p| p.file_id).collect(),
+                )
+            })
+            .collect();
+        found.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut expected = vec![
+            (Some(DiscStructure::Dvd), vec![first_a, first_b, second]),
+            (Some(DiscStructure::Dvd), vec![lone_1]),
+            (Some(DiscStructure::Dvd), vec![lone_3]),
+        ];
+        expected.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(found, expected);
+        assert_eq!(
+            sources[0]
+                .parts
+                .iter()
+                .map(|p| p.file_id)
+                .collect::<Vec<_>>(),
+            [first_a, first_b, second],
+            "the whole set ranks first and starts at disc 1"
+        );
+    }
+
     /// A folder's parts are one source only as the whole run 1..n (C2 of
     /// the #233 review): parts 2 and 3 with no part 1, or 1 and 3 with no
     /// part 2, are missing a part -- or are two films whose names end alike
