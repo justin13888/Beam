@@ -20,17 +20,17 @@
     "og:build": "bun run scripts/build-og-image.mjs"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^14.2.5",
-    "@astrojs/starlight": "^0.41.10",
+    "@astrojs/cloudflare": "^14.3.3",
+    "@astrojs/starlight": "^0.42.4",
     "@tailwindcss/vite": "^4.3.3",
-    "astro": "^7.2.9",
+    "astro": "^7.3.5",
     "sharp": "^0.35.4",
     "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.10",
-    "@types/node": "^26.4.0",
+    "@types/node": "^26.6.2",
     "typescript": "^5.7.2",
-    "wrangler": "^4.127.1"
+    "wrangler": "^4.139.0"
   }
 }
