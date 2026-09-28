@@ -678,6 +678,36 @@ async fn stream_file_serves_the_requested_span() {
         .assert_header("content-length", "100");
 }
 
+/// A span longer than one read is served read by read from the one handle,
+/// each read at its own offset: every octet of a file whose bytes differ by
+/// position arrives where it belongs, across read boundaries that fall at
+/// unaligned offsets of the range.
+#[tokio::test]
+async fn a_range_spanning_several_reads_encloses_each_octet_at_its_offset() {
+    // Four-byte little-endian counters: no two aligned words are equal, so a
+    // read from the wrong offset cannot go unnoticed. Several times Kynos's
+    // 64 KiB read.
+    let contents: Vec<u8> = (0u32..65_000).flat_map(u32::to_le_bytes).collect();
+    let length = contents.len() as u64;
+    let served = serve("video.mkv", &contents).await;
+
+    for (first, last) in [(0, length - 1), (65_530, 196_620), (3, length - 7)] {
+        let response = served
+            .client
+            .get(STREAM)
+            .cookie("beam_session", &served.token)
+            .header("Range", &format!("bytes={first}-{last}"))
+            .send()
+            .await;
+        response.assert_part(first, last, length);
+        let (first, last) = (first as usize, last as usize);
+        assert!(
+            response.bytes().as_ref() == &contents[first..=last],
+            "bytes {first}-{last} differ from the file's"
+        );
+    }
+}
+
 /// A suffix range serves the last N octets of the file. The old hand-rolled
 /// parser had a property test for this; the guarantee that matters is that the
 /// octets sent are the *last* ones, which only an end-to-end read can show.
