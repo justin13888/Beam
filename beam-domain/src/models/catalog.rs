@@ -7,7 +7,7 @@
 //! question once so the store can answer it with one ordered, limited query.
 //!
 //! A page boundary is a [`CatalogPosition`]: the sort key of a row plus its
-//! `(kind, id)` tie-break. Positions are values, not offsets, so a page after
+//! `(id, kind)` tie-break. Positions are values, not offsets, so a page after
 //! a position still starts in the right place when rows before it have been
 //! added or removed since -- including the row the position was taken from.
 
@@ -20,7 +20,8 @@ use uuid::Uuid;
 /// Whether a catalogue entry is a film or a series.
 ///
 /// Ordered `Movie` before `Show`, the order their lowercase names sort in, so
-/// the in-memory ordering and the SQL `kind` text column agree on ties.
+/// the in-memory ordering and the SQL `kind` text column agree on the last
+/// tie-break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TitleKind {
     Movie,
@@ -71,8 +72,11 @@ pub enum SortDirection {
 }
 
 /// A complete ordering: the field, its direction, and -- implicitly -- the
-/// `(kind, id)` tie-break in the same direction, so no two titles are ever
+/// `(id, kind)` tie-break in the same direction, so no two titles are ever
 /// equal and a page boundary is always exact.
+///
+/// The id breaks ties before the kind so that, within one kind's table, the
+/// order is `(key, id)` -- the shape of the index a page is read through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CatalogSort {
     pub field: CatalogSortField,
@@ -120,7 +124,7 @@ pub struct CatalogPosition {
 impl CatalogPosition {
     /// Where `self` falls relative to `other` in `direction`'s display order:
     /// the key first, a missing value after every present one whichever way
-    /// the sort runs, then `(kind, id)`.
+    /// the sort runs, then `(id, kind)`.
     ///
     /// Keys of different fields never meet in one ordering; if they do, they
     /// compare by field so the result is still a total order.
@@ -154,7 +158,7 @@ impl CatalogPosition {
             }
             (a, b) => (a.field() as u8).cmp(&(b.field() as u8)),
         };
-        key.then_with(|| directed((self.kind, self.id).cmp(&(other.kind, other.id))))
+        key.then_with(|| directed((self.id, self.kind).cmp(&(other.id, other.kind))))
     }
 }
 
@@ -227,7 +231,7 @@ mod tests {
     }
 
     /// A missing value sorts after every present one in both directions;
-    /// present values follow the direction; ties fall to `(kind, id)` in the
+    /// present values follow the direction; ties fall to `(id, kind)` in the
     /// direction too.
     #[test]
     fn display_order_puts_missing_values_last_either_way() {
@@ -251,20 +255,23 @@ mod tests {
     }
 
     #[test]
-    fn equal_keys_fall_to_kind_then_id_in_the_sort_direction() {
+    fn equal_keys_fall_to_id_then_kind_in_the_sort_direction() {
+        // The id decides before the kind: a show with the lower id sorts
+        // first ascending although `Movie` sorts before `Show`.
         let movie = at(TitleKind::Movie, 9, SortKey::Year(None));
         let show = at(TitleKind::Show, 1, SortKey::Year(None));
-        assert_eq!(movie.display_cmp(&show, SortDirection::Asc), Ordering::Less);
+        assert_eq!(show.display_cmp(&movie, SortDirection::Asc), Ordering::Less);
         assert_eq!(
-            movie.display_cmp(&show, SortDirection::Desc),
+            show.display_cmp(&movie, SortDirection::Desc),
             Ordering::Greater
         );
 
-        let low = at(TitleKind::Show, 1, SortKey::Title("same".into()));
-        let high = at(TitleKind::Show, 2, SortKey::Title("same".into()));
-        assert_eq!(low.display_cmp(&high, SortDirection::Asc), Ordering::Less);
+        // Only a shared id falls to the kind, in the direction too.
+        let movie = at(TitleKind::Movie, 1, SortKey::Title("same".into()));
+        let show = at(TitleKind::Show, 1, SortKey::Title("same".into()));
+        assert_eq!(movie.display_cmp(&show, SortDirection::Asc), Ordering::Less);
         assert_eq!(
-            low.display_cmp(&high, SortDirection::Desc),
+            movie.display_cmp(&show, SortDirection::Desc),
             Ordering::Greater
         );
     }

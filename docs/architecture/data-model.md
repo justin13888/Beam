@@ -123,9 +123,11 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `updated_at` | TIMESTAMPTZ | no | |
 
 A trigram GIN index on `title` (via the `pg_trgm` extension) backs catalog search; `shows.title`
-has the same. `idx_movies_title_sort` on `(lower(title), id)` is the default browse order's
-keyset, which each branch of the catalogue query reads in order; `idx_shows_title_sort` is the
-same on `shows`.
+has the same. `idx_movies_title_sort` on `(lower(title), id)` serves the default browse order and
+`idx_movies_added_sort` on `(created_at, id)` the `date_added` one: each branch of the catalogue
+query orders and seeks on exactly those columns, so it reads the index in order and stops at the
+page size. `idx_shows_title_sort` and `idx_shows_added_sort` are the same on `shows`. Year,
+rating and runtime sorts have no index.
 
 ### `shows`
 Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `identity_key` (unique,

@@ -100,21 +100,25 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     `after` was given; backwards, the mirror. Pass `end_cursor` as `after` for the next page and
     `start_cursor` as `before` for the previous one.
   - A cursor is opaque base64url JSON holding the sort it was issued under and the boundary
-    title's sort key and `(kind, id)` (`services/cursor.rs`). It is a **position, not an offset**:
+    title's sort key, kind and id (`services/cursor.rs`). It is a **position, not an offset**:
     a page after a title that has since left the listing starts where that title was. A cursor
     that is not the server's, or was issued under another `sort_by`/`sort_order`, is
     `400 #invalid-cursor`. It is unsigned: everything in it is either public or checked.
   - Every `sort_by` (`title`, `year`, `rating`, `date_added`, `runtime`) orders in the database in
     both directions, a title with no value for the field sorting **last** either way, ties broken
-    by `(kind, id)`. A show has no runtime and sorts with the films that lack one; `date_added` is
+    by id, then kind. A show has no runtime and sorts with the films that lack one; `date_added` is
     when the title was first indexed. Title order is `lower(title)` under the database collation.
     A `query` keeps the requested sort rather than ranking by relevance.
   - Filters apply to movies and shows alike, `min_rating` included; `genre` matches by name or
     slug. Only titles with a present file are listed.
-  - One page is one catalogue statement — a `UNION ALL` over `movies` and `shows` that filters,
-    orders, seeks and limits — plus a fixed number of reads by id to hydrate the page (titles,
-    genres, season and episode counts), whatever the library's size (NFR-301). A browsed show
-    carries `season_count`/`episode_count` and no `seasons`; its detail carries both.
+  - One page is one catalogue statement plus a fixed number of reads by id to hydrate the page
+    (titles, genres, season and episode counts), whatever the library's size (NFR-301). The
+    statement is a `UNION ALL` over `movies` and `shows` in which each branch filters, seeks,
+    orders and limits itself, and the outer query merges the two. For `title` and `date_added`
+    each branch reads its own index in order (`(lower(title), id)`, `(created_at, id)`) and stops
+    at the page size, checking liveness per row; `year`, `rating` and `runtime` are unindexed and
+    sort every matching title. A browsed show carries `season_count`/`episode_count` and no
+    `seasons`; its detail carries both.
   - A database failure is `500 #internal`, on browse and on detail — never an empty page, and
     never a `404` for a title that could not be read.
 - **Errors:** every failure is an **RFC 9457 problem document** — one body shape for every status,

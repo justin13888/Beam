@@ -19,7 +19,7 @@ use proptest::prelude::*;
 use sea_orm::{DatabaseConnection, DbBackend, MockDatabase, Statement, Value};
 use uuid::Uuid;
 
-use super::{Binds, KeysetSql, SqlCatalogRepository, browse_statement, keyset_sql};
+use super::{Binds, SqlCatalogRepository, browse_statement, keyset, sort_tuple};
 use crate::repositories::{SqlGenreRepository, SqlMovieRepository, SqlShowRepository};
 
 fn empty_mock() -> MockDatabase {
@@ -248,27 +248,103 @@ fn a_page_scans_in_the_display_direction_and_backwards_against_it() {
         } else {
             Seek::Forward(Some(position.clone()))
         };
-        let KeysetSql {
-            order_by,
-            predicate,
-        } = keyset_sql(
-            by(CatalogSortField::Title, direction),
-            &seek,
-            &mut Binds::default(),
-        )
-        .expect("a keyset");
-        let predicate = predicate.expect("a position seeks");
+        let sort = by(CatalogSortField::Title, direction);
+        let scan = keyset(sort, &seek, &mut Binds::default()).expect("a keyset");
+        let tuple = sort_tuple(sort, "lower(movies.title)", "movies.id");
+        // The position's own kind: an equal row is not past it, so strict.
+        let predicate = scan
+            .branch_predicate(TitleKind::Movie, &tuple)
+            .expect("a position seeks");
         assert!(
             predicate.contains(comparison),
             "{direction:?} backward={backward}: {predicate}"
         );
+        let order_by = scan.order_by(&tuple);
         let terms: Vec<&str> = order_by.split(", ").collect();
-        assert_eq!(terms.len(), 3, "title, kind, id: {order_by}");
+        assert_eq!(terms.len(), 2, "title, id: {order_by}");
         assert!(
             terms.iter().all(|term| term.ends_with(order)),
             "{direction:?} backward={backward}: {order_by}"
         );
     }
+}
+
+/// The order is `(key, id, kind)`, and a branch compares only `(key, id)`: a
+/// row whose key and id equal the position's is past it exactly when its kind
+/// sorts after the position's in the scan, so that branch alone compares
+/// inclusively.
+#[test]
+fn only_the_branch_whose_kind_sorts_after_the_position_includes_an_equal_row() {
+    let tuple = ["k".to_string(), "id".to_string()];
+    for (from, direction, backward, movie, show) in [
+        (TitleKind::Movie, SortDirection::Asc, false, " > ", " >= "),
+        (TitleKind::Show, SortDirection::Asc, false, " > ", " > "),
+        (TitleKind::Movie, SortDirection::Desc, false, " < ", " < "),
+        (TitleKind::Show, SortDirection::Desc, false, " <= ", " < "),
+        (TitleKind::Movie, SortDirection::Asc, true, " < ", " < "),
+        (TitleKind::Show, SortDirection::Asc, true, " <= ", " < "),
+    ] {
+        let position = CatalogPosition {
+            kind: from,
+            id: Uuid::from_u128(1),
+            key: SortKey::Title("m".to_string()),
+        };
+        let seek = if backward {
+            Seek::Backward(Some(position))
+        } else {
+            Seek::Forward(Some(position))
+        };
+        let scan = keyset(
+            by(CatalogSortField::Title, direction),
+            &seek,
+            &mut Binds::default(),
+        )
+        .expect("a keyset");
+        for (kind, comparison) in [(TitleKind::Movie, movie), (TitleKind::Show, show)] {
+            let predicate = scan
+                .branch_predicate(kind, &tuple)
+                .expect("a position seeks");
+            assert_eq!(
+                predicate,
+                format!("(k, id){comparison}($1, $2)"),
+                "{kind:?} branch from a {from:?}, {direction:?} backward={backward}"
+            );
+        }
+    }
+}
+
+/// Each branch seeks, orders and limits itself on the columns the title index
+/// covers -- `lower(title)` then the id, the kind nowhere in them -- which is
+/// what lets it read that index in order; the outer query merges the branches
+/// on the same tuple with the kind last.
+#[tokio::test]
+async fn each_branch_seeks_orders_and_limits_itself_on_its_index_columns() {
+    let statement = sent(query(
+        CatalogFilters::default(),
+        by(CatalogSortField::Title, SortDirection::Asc),
+        Seek::Forward(Some(CatalogPosition {
+            kind: TitleKind::Movie,
+            id: Uuid::from_u128(5),
+            key: SortKey::Title("m".to_string()),
+        })),
+        20,
+    ))
+    .await;
+    let sql = &statement.sql;
+    let limit = format!("LIMIT ${}", values(&statement).len());
+    for (table, comparison) in [("movies", ">"), ("shows", ">=")] {
+        let branch = format!(
+            "(lower({table}.title), {table}.id) {comparison} ($1, $2) \
+             ORDER BY lower({table}.title) ASC, {table}.id ASC {limit})"
+        );
+        assert!(sql.contains(&branch), "{branch} in {sql}");
+    }
+    assert!(
+        sql.ends_with(&format!(
+            ") AS t ORDER BY t.title_key ASC, t.id ASC, t.kind ASC {limit}"
+        )),
+        "{sql}"
+    );
 }
 
 /// A nullable field sorts on a flag that puts missing values last in both
@@ -287,11 +363,9 @@ fn a_nullable_key_seeks_on_a_flag_that_keeps_missing_values_last() {
         (SortDirection::Desc, "(t.year IS NOT NULL)", None, false),
     ] {
         let mut binds = Binds::default();
-        let KeysetSql {
-            order_by,
-            predicate,
-        } = keyset_sql(
-            by(CatalogSortField::Year, direction),
+        let sort = by(CatalogSortField::Year, direction);
+        let scan = keyset(
+            sort,
             &Seek::Forward(Some(CatalogPosition {
                 kind: TitleKind::Show,
                 id: Uuid::from_u128(3),
@@ -300,9 +374,13 @@ fn a_nullable_key_seeks_on_a_flag_that_keeps_missing_values_last() {
             &mut binds,
         )
         .expect("a keyset");
-        assert!(order_by.starts_with(flag), "{direction:?}: {order_by}");
+        let tuple = sort_tuple(sort, "t.year", "t.id");
         assert!(
-            predicate
+            scan.order_by(&tuple).starts_with(flag),
+            "{direction:?}: {tuple:?}"
+        );
+        assert!(
+            scan.branch_predicate(TitleKind::Show, &tuple)
                 .expect("a position seeks")
                 .starts_with(&format!("({flag}"))
         );
@@ -312,8 +390,8 @@ fn a_nullable_key_seeks_on_a_flag_that_keeps_missing_values_last() {
             "{direction:?} {key:?}"
         );
         assert_eq!(binds.values[1], Value::from(key.unwrap_or(0)));
-        assert_eq!(binds.values[2], Value::from("show"));
-        assert_eq!(binds.values[3], Value::from(Uuid::from_u128(3)));
+        assert_eq!(binds.values[2], Value::from(Uuid::from_u128(3)));
+        assert_eq!(binds.values.len(), 3, "the kind is decided, not bound");
     }
 }
 

@@ -1,7 +1,7 @@
 //! The browse cursor: an opaque token naming a page boundary (issue #187).
 //!
 //! A cursor is a [`CatalogPosition`] -- the sort key of the title a page ended
-//! (or started) on, and that title's `(kind, id)` -- plus the sort it was
+//! (or started) on, and that title's kind and id -- plus the sort it was
 //! taken under, as base64url JSON:
 //!
 //! ```json

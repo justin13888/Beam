@@ -11,7 +11,7 @@ use crate::models::catalog::{CatalogPosition, CatalogQuery};
 /// missing, or that never had one, is absent from every page and every filter,
 /// though a read by id through its own repository still resolves it.
 ///
-/// A page is ordered by `query.sort` with the `(kind, id)` tie-break, a missing
+/// A page is ordered by `query.sort` with the `(id, kind)` tie-break, a missing
 /// value after every present one in both directions (see
 /// [`CatalogPosition::display_cmp`]). It is returned in that display order
 /// whichever way `query.seek` runs, and holds at most `query.limit` rows: the

@@ -4172,29 +4172,31 @@ macro_rules! catalog_repository_contract {
             let fixture = $setup().await;
             let made = seed(&fixture).await;
 
+            // A group is one key: its titles tie, and the id -- not the kind
+            // -- orders them (strict order is the next test's to check).
             assert_grouped(
                 &order_of(&fixture, &made, Year, Asc).await,
-                &[&["charlie"], &["golf"], &["alpha", "Echo"], &["delta"], &["Bravo"], &["Foxtrot"]],
+                &[&["charlie", "golf"], &["alpha", "Echo"], &["delta"], &["Bravo", "Foxtrot"]],
             );
             assert_grouped(
                 &order_of(&fixture, &made, Year, Desc).await,
-                &[&["delta"], &["alpha", "Echo"], &["golf"], &["charlie"], &["Foxtrot"], &["Bravo"]],
+                &[&["delta"], &["alpha", "Echo"], &["charlie", "golf"], &["Bravo", "Foxtrot"]],
             );
             assert_grouped(
                 &order_of(&fixture, &made, Rating, Asc).await,
-                &[&["Echo"], &["golf"], &["alpha"], &["delta"], &["Bravo", "charlie"], &["Foxtrot"]],
+                &[&["Echo", "golf"], &["alpha"], &["delta"], &["Bravo", "charlie", "Foxtrot"]],
             );
             assert_grouped(
                 &order_of(&fixture, &made, Rating, Desc).await,
-                &[&["delta"], &["alpha"], &["golf"], &["Echo"], &["Foxtrot"], &["Bravo", "charlie"]],
+                &[&["delta"], &["alpha"], &["Echo", "golf"], &["Bravo", "charlie", "Foxtrot"]],
             );
             assert_grouped(
                 &order_of(&fixture, &made, Runtime, Asc).await,
-                &[&["charlie"], &["alpha"], &["Bravo", "Echo"], &["delta", "Foxtrot", "golf"]],
+                &[&["charlie"], &["alpha"], &["Bravo", "delta", "Echo", "Foxtrot", "golf"]],
             );
             assert_grouped(
                 &order_of(&fixture, &made, Runtime, Desc).await,
-                &[&["alpha"], &["charlie"], &["delta", "Foxtrot", "golf"], &["Bravo", "Echo"]],
+                &[&["alpha"], &["charlie"], &["Bravo", "delta", "Echo", "Foxtrot", "golf"]],
             );
             let created: Vec<&str> = made.iter().map(|(_, name)| *name).collect();
             assert_eq!(order_of(&fixture, &made, DateAdded, Asc).await, created);
@@ -4205,7 +4207,7 @@ macro_rules! catalog_repository_contract {
 
         /// Whatever the sort, every row carries the key its title really has,
         /// and each row sorts strictly after the one before it -- ties
-        /// included, which only the `(kind, id)` tie-break can separate.
+        /// included, which only the `(id, kind)` tie-break can separate.
         #[tokio::test]
         async fn every_row_carries_its_own_key_in_strict_display_order() {
             let fixture = $setup().await;
