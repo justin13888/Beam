@@ -150,6 +150,15 @@ pub enum MediaBrowseError {
     )]
     InvalidPagination(String),
 
+    /// `query` holds a NUL character, which no title can contain.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-search-query",
+        title = "Invalid search query"
+    )]
+    InvalidSearchQuery(String),
+
     #[error("{0}")]
     #[problem(
         status = 500,

@@ -130,6 +130,9 @@ pub async fn browse_media(
         Err(MetadataError::InvalidPagination(detail)) => {
             Err(MediaBrowseError::InvalidPagination(detail))
         }
+        Err(MetadataError::InvalidSearchQuery(detail)) => {
+            Err(MediaBrowseError::InvalidSearchQuery(detail))
+        }
         Err(
             err @ (MetadataError::InternalError(_)
             | MetadataError::InvalidId
@@ -192,11 +195,13 @@ pub async fn get_media_sources(
         Err(MetadataError::Unsupported(msg)) => {
             Err(MediaSourcesError::SourcesNotAvailableForShow(msg))
         }
-        // Sources are not paged: a cursor or page error cannot arise here.
+        // Sources are neither paged nor searched: a cursor, page or search
+        // error cannot arise here.
         Err(
             MetadataError::InternalError(msg)
             | MetadataError::InvalidCursor(msg)
-            | MetadataError::InvalidPagination(msg),
+            | MetadataError::InvalidPagination(msg)
+            | MetadataError::InvalidSearchQuery(msg),
         ) => Err(MediaSourcesError::Internal(msg)),
     }
 }

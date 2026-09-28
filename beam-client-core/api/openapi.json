@@ -1488,7 +1488,7 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid cursor; Invalid pagination",
+            "description": "Bad Request; Invalid cursor; Invalid pagination; Invalid search query",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1539,6 +1539,22 @@
                         }
                       ],
                       "title": "Invalid pagination"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-search-query"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid search query"
                     }
                   ]
                 }

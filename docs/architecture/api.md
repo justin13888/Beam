@@ -108,7 +108,8 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     both directions, a title with no value for the field sorting **last** either way, ties broken
     by id, then kind. A show has no runtime and sorts with the films that lack one; `date_added` is
     when the title was first indexed. Title order is `lower(title)` under the database collation.
-    A `query` keeps the requested sort rather than ranking by relevance.
+    A `query` keeps the requested sort rather than ranking by relevance. A `query` holding a NUL
+    character, which no title can contain, is `400 #invalid-search-query`.
   - Filters apply to movies and shows alike, `min_rating` included; `genre` matches by name or
     slug. Only titles with a present file are listed.
   - One page is one catalogue statement plus a fixed number of reads by id to hydrate the page

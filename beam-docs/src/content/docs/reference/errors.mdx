@@ -86,6 +86,13 @@ backward one (`last`, `before`).
 **What to do.** Page forwards with `first` and `after`, or backwards with `last` and `before`, at
 most 100 items at a time.
 
+### invalid-search-query
+
+**400.** From `GET /v1/media`. The `query` text holds a NUL character (`%00` in the URL). No title
+can contain one, so the search is refused rather than run.
+
+**What to do.** Strip control characters from the search text before sending it.
+
 ### library-not-found
 
 **404.** No library has this id.

@@ -1323,6 +1323,46 @@ mod browse {
         );
     }
 
+    /// A NUL cannot be bound into a Postgres text parameter, so a search for
+    /// one failed the statement and answered caller input with a 500. It is
+    /// refused before the store is asked; any other text still searches.
+    #[tokio::test]
+    async fn a_search_text_holding_nul_is_refused_before_the_store() {
+        for text in ["\0", "a\0b"] {
+            let mut catalog = MockCatalogRepository::new();
+            catalog.expect_browse().never();
+            let result = Library::new()
+                .service_over(Arc::new(catalog))
+                .search_media(BrowseRequest {
+                    filters: MediaSearchFilters {
+                        query: Some(text.to_string()),
+                        ..Default::default()
+                    },
+                    ..request(None, None)
+                })
+                .await;
+            assert!(
+                matches!(result, Err(MetadataError::InvalidSearchQuery(_))),
+                "{text:?}: {result:?}"
+            );
+        }
+
+        let library = Library::new();
+        library.movie("Alpha").await;
+        let page = library
+            .service()
+            .search_media(BrowseRequest {
+                filters: MediaSearchFilters {
+                    query: Some("alph".to_string()),
+                    ..Default::default()
+                },
+                ..request(None, None)
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1, "{page:?}");
+    }
+
     /// NFR-205: a database failure while browsing is an error the route turns
     /// into a 500 -- it used to become an empty page, which says the library
     /// has nothing.

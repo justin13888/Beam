@@ -597,6 +597,25 @@ async fn a_cursor_the_server_did_not_issue_is_a_400_invalid_cursor() {
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
 }
 
+/// Kynos percent-decodes `%00` into a NUL, which Postgres cannot bind as
+/// text: it used to fail the catalogue statement and answer 500 `#internal`.
+#[tokio::test]
+async fn a_search_text_holding_nul_is_a_400_invalid_search_query() {
+    let (client, token) = signed_in_to(real_service(Library::new())).await;
+
+    for query in ["query=%00", "query=a%00b"] {
+        client
+            .get(&format!("/v1/media?{query}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#invalid-search-query",
+            );
+    }
+}
+
 #[tokio::test]
 async fn a_page_the_server_does_not_answer_is_a_400_invalid_pagination() {
     let (client, token) = signed_in_to(real_service(Library::new())).await;

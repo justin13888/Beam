@@ -36,8 +36,10 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     ///
     /// Fails with [`MetadataError::InvalidPagination`] for a page request the
     /// server does not answer, [`MetadataError::InvalidCursor`] for a cursor
-    /// it did not issue for this sort, and [`MetadataError::InternalError`]
-    /// when the store fails -- never with an empty page.
+    /// it did not issue for this sort, [`MetadataError::InvalidSearchQuery`]
+    /// for a search text no title can contain, and
+    /// [`MetadataError::InternalError`] when the store fails -- never with an
+    /// empty page.
     async fn search_media(&self, request: BrowseRequest) -> Result<MediaConnection, MetadataError>;
 
     /// Refresh metadata for by media filter
@@ -717,6 +719,19 @@ impl MetadataService for DbMetadataService {
             .transpose()
             .map_err(|e| MetadataError::InvalidCursor(e.to_string()))?;
         let has_cursor = position.is_some();
+        // Postgres text cannot hold a NUL, so no title contains one and the
+        // store cannot even bind it: it fails the statement (22021), which
+        // would answer caller input with a 500. `genre` needs no such check:
+        // it is slugified, which drops every NUL.
+        if filters
+            .query
+            .as_deref()
+            .is_some_and(|query| query.contains('\0'))
+        {
+            return Err(MetadataError::InvalidSearchQuery(
+                "query must not contain a NUL character".to_string(),
+            ));
+        }
 
         // One row past the page says whether another page lies that way.
         let size_usize = size.get() as usize;
@@ -947,6 +962,9 @@ pub enum MetadataError {
     /// outside `1..=MAX_PAGE_SIZE`.
     #[error("invalid pagination: {0}")]
     InvalidPagination(String),
+    /// A search text no title can contain: one holding a NUL character.
+    #[error("invalid search query: {0}")]
+    InvalidSearchQuery(String),
     /// The request was well-formed and the target exists, but this operation
     /// doesn't apply to it (e.g. requesting sources for a show id).
     #[error("unsupported operation: {0}")]
