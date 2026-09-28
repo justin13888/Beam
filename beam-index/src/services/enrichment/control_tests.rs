@@ -14,7 +14,7 @@ use beam_domain::models::catalog::TitleKind;
 use beam_domain::models::{AdminLog, CreateLibrary, CreateMovie, CreateShow};
 use beam_domain::providers::enrichment::test_utils::InMemoryEnrichmentProvider;
 use beam_domain::providers::enrichment::{
-    ExternalMediaRef, MovieEnrichment, MovieSearchHit, ShowSearchHit,
+    ExternalMediaRef, MovieEnrichment, MovieSearchHit, ShowEnrichment, ShowSearchHit,
 };
 use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
@@ -498,6 +498,62 @@ async fn locks_are_set_whole_and_the_sweep_leaves_them_alone() {
     );
     assert!(
         genres.genres_for_movie(id).is_empty(),
+        "the locked genres stand"
+    );
+}
+
+/// As for a movie: the sweep writes a show's unlocked fields and leaves its
+/// locked ones -- columns and genres -- as they are.
+#[tokio::test]
+async fn a_shows_locks_hold_through_the_sweep() {
+    let hit = ShowSearchHit {
+        external_ref: ExternalMediaRef::new("tmdb", "126308"),
+        title: "Shogun".to_string(),
+        original_title: None,
+        year: None,
+        popularity: None,
+        vote_average: None,
+    };
+    let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+        .with_show_search("Shogun", vec![hit])
+        .with_show_enrichment(
+            ExternalMediaRef::new("tmdb", "126308"),
+            ShowEnrichment {
+                tmdb_id: Some(126_308),
+                title: "Shogun (Provider)".to_string(),
+                description: Some("Feudal Japan.".to_string()),
+                genres: vec!["Drama".to_string()],
+                ..Default::default()
+            },
+        );
+    let h = Harness::new(provider);
+    let id = h.show("Shogun").await;
+    h.control
+        .set_locks(id, &[MetadataField::Title, MetadataField::Genres], ADMIN)
+        .await
+        .unwrap();
+
+    let genres = Arc::new(InMemoryGenreRepository::default());
+    let sweep = MetadataEnrichmentService::new(
+        h.states.clone(),
+        h.movies.clone(),
+        h.shows.clone(),
+        genres.clone(),
+        h.provider.clone(),
+        Arc::new(LocalAdminLogService::new(Arc::new(
+            InMemoryAdminLogRepository::default(),
+        ))),
+        Arc::new(InMemoryNotificationService::new()),
+        Arc::new(TestClock::new()),
+    );
+    assert_eq!(sweep.sweep_once().await.enriched, 1);
+
+    let show = h.shows.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(show.title, "Shogun", "the locked title stands");
+    assert_eq!(show.description.as_deref(), Some("Feudal Japan."));
+    assert_eq!(show.tmdb_id, Some(126_308), "the match is always written");
+    assert!(
+        genres.genres_for_show(id).is_empty(),
         "the locked genres stand"
     );
 }
