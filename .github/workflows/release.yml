@@ -63,7 +63,7 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
 
@@ -96,7 +96,7 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/install-rust-build-deps
@@ -228,7 +228,7 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
