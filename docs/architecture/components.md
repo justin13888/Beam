@@ -151,9 +151,9 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   `PLAYLIST/` and `STREAM/`. `read_source` joins the discs of a set of one film (`Disc 1`, `Disc 2`)
   into one run of parts in disc order. The walk reads a `VIDEO_TS/` or `BDMV/` folder whole through
   it rather than descending it, classification numbers a source's files as parts from it, every
-  scan or reconcile that reads a disc re-derives its source's parts, and a watcher event anywhere
-  in a disc reconciles the disc whole. Read-only, with no
-  link followed: listed with `walkdir`, stat'ed with `StatCursor`, and read through
+  scan or reconcile that reads a disc re-derives the parts of its source and of every other disc of
+  its set, and a watcher event anywhere in a disc reconciles the disc whole. Read-only, with no link
+  followed: listed with `walkdir`, stat'ed with `StatCursor`, and read through
   `library_file`'s no-follow opener. Tested over `TempDir` discs of minimal IFOs and playlists
   (`disc_fixtures.rs`), with properties that the parsers stay in bounds on pointers near and past
   the end of their bytes.

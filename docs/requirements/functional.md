@@ -383,9 +383,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   something run from 1 with no gap or repeat, playing each disc's main title in disc order as one
   run of parts; any other set leaves each disc a source of its own. A file's part is its place in
   that source: it MUST be kept when a rekey re-derives its title from its path (FR-214), and MUST
-  be re-derived whenever a scan or a watcher event reads its disc, so that a main title that changes
-  under unchanged files -- a missing file restored, a disc of a set arriving or leaving -- numbers
-  them anew. Reading a disc MUST follow no link (FR-212), MUST NOT write anything, and MUST list only
+  be re-derived whenever a scan or a watcher event reads its disc or any other disc of its set, so
+  that a main title that changes under unchanged files -- a missing file restored, a disc of a set
+  arriving, leaving, emptied in place or claiming a number another disc has -- numbers them anew. Reading a disc MUST follow no link (FR-212), MUST NOT write anything, and MUST list only
   the folders its main title needs (`VIDEO_TS`, or a Blu-ray's `PLAYLIST` and `STREAM`); a disc
   that cannot be read whole MUST NOT change its rows, as beneath a folder the walk could not read
   (FR-211), and neither MUST a set one of whose discs cannot be. A watcher event at or inside a disc

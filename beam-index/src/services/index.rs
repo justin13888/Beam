@@ -47,7 +47,7 @@ use beam_domain::utils::classification::{Classification, ContainerTags, Hints, c
 use beam_domain::utils::filename::{ParsedFilename, parse_media_filename};
 use beam_domain::utils::identity::title_identity_key;
 use beam_domain::utils::media_path::{
-    CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, TitleGuess,
+    CLASSIFIER_VERSION, DiscSetPlace, EpisodeInference, MediaInference, MovieInference, TitleGuess,
     UnclassifiableReason, disc_set_member, disc_set_place, infer_media, season_folder_number,
 };
 use beam_domain::utils::path_policy::{
@@ -1694,10 +1694,42 @@ impl LocalIndexService {
     /// title grown to two, a disc of a set arriving or leaving -- so every
     /// walk that reads a disc re-derives the parts of its whole source. A
     /// source that could not be read whole changes no part.
+    ///
+    /// A disc of a set is read with every other disc of its set
+    /// ([`disc::set_members`]), whether or not they are one source: a disc
+    /// read may have made its set whole or broken it -- arrived, emptied in
+    /// place, or claimed a number another disc has -- and every other disc
+    /// of the set is then a source of its own, or part of the one run, where
+    /// it was not before.
     async fn rederive_disc_parts(&self, library: &Library, discs: &[PathBuf]) -> Result<(), DbErr> {
         let root = library.root_path.as_path();
-        let mut done: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut discs_and_sets: Vec<PathBuf> = Vec::with_capacity(discs.len());
+        let mut sets_read: std::collections::HashSet<DiscSetPlace> =
+            std::collections::HashSet::new();
         for disc_root in discs {
+            discs_and_sets.push(disc_root.clone());
+            let Some((rel, _)) = self.path_policy.disc_root(relative_to(root, disc_root)) else {
+                continue;
+            };
+            let Some(place) = disc_set_place(&rel) else {
+                continue;
+            };
+            if !sets_read.insert(place.clone()) {
+                continue;
+            }
+            // A set whose folder cannot be listed is read by `read_source`
+            // below as a source that could not be read, which changes no
+            // part.
+            if let Ok(members) = disc::set_members(root, &place, &self.path_policy) {
+                discs_and_sets.extend(members.into_iter().map(|(_, member, _)| member));
+            }
+        }
+        let mut done: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut discs_read: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+        for disc_root in &discs_and_sets {
+            if !discs_read.insert(disc_root.as_path()) {
+                continue;
+            }
             let Some((rel, kind)) = self.path_policy.disc_root(relative_to(root, disc_root)) else {
                 continue;
             };

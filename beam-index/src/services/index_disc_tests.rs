@@ -767,6 +767,98 @@ async fn a_disc_arriving_or_leaving_renumbers_its_set() {
     assert_eq!(h.present(), apart);
 }
 
+/// `Heat (1995)/Disc 1..3`, scanned into one run of three parts.
+async fn a_whole_three_disc_set() -> (Harness, PathBuf) {
+    let h = Harness::new().await;
+    let heat = h.root.join("Heat (1995)");
+    one_disc(&heat.join("Disc 1"), 2000);
+    one_disc(&heat.join("Disc 2"), 2100);
+    one_disc(&heat.join("Disc 3"), 2200);
+    h.scan().await.expect("the scan runs");
+    assert_eq!(
+        h.present(),
+        [
+            (
+                "Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB".to_string(),
+                Some(1)
+            ),
+            (
+                "Heat (1995)/Disc 2/VIDEO_TS/VTS_01_1.VOB".to_string(),
+                Some(2)
+            ),
+            (
+                "Heat (1995)/Disc 3/VIDEO_TS/VTS_01_1.VOB".to_string(),
+                Some(3)
+            ),
+        ]
+    );
+    (h, heat)
+}
+
+/// A disc arriving that claims a number another disc of the set has breaks
+/// the set (FR-222): every disc of it is then a source of its own, as a
+/// rescan would make it, not only the disc that arrived.
+#[tokio::test]
+async fn a_disc_arriving_with_a_taken_number_breaks_its_set() {
+    let (h, heat) = a_whole_three_disc_set().await;
+
+    one_disc(&heat.join("CD2"), 2300);
+    h.reconcile(&heat.join("CD2"), FsEventKind::Created).await;
+
+    let apart = [
+        ("Heat (1995)/CD2/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+        ("Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+        ("Heat (1995)/Disc 2/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+        ("Heat (1995)/Disc 3/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+    ];
+    assert_eq!(h.present(), apart);
+    h.scan().await.expect("the rescan runs");
+    assert_eq!(h.present(), apart, "as a rescan leaves them");
+}
+
+/// A disc of a set whose main title empties in place -- its only VOB gone,
+/// its folder and IFOs left -- plays nothing, so the discs left are no
+/// longer a whole run and each becomes a source of its own.
+#[tokio::test]
+async fn a_disc_of_a_set_emptied_in_place_parts_the_set() {
+    let (h, heat) = a_whole_three_disc_set().await;
+
+    let vob = heat.join("Disc 2/VIDEO_TS/VTS_01_1.VOB");
+    std::fs::remove_file(&vob).unwrap();
+    h.reconcile(&vob, FsEventKind::Removed).await;
+
+    assert_eq!(
+        h.present(),
+        [
+            ("Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+            ("Heat (1995)/Disc 3/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+        ]
+    );
+}
+
+/// A disc structure removed from its disc folder, the folder left behind,
+/// takes its disc out of the set just as the folder's removal would.
+#[tokio::test]
+async fn a_disc_structure_removed_from_its_folder_parts_the_set() {
+    let (h, heat) = a_whole_three_disc_set().await;
+
+    let disc_root = heat.join("Disc 2/VIDEO_TS");
+    std::fs::remove_dir_all(&disc_root).unwrap();
+    h.reconcile(&disc_root, FsEventKind::Removed).await;
+
+    assert_eq!(
+        h.present(),
+        [
+            ("Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+            ("Heat (1995)/Disc 3/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+        ]
+    );
+    assert!(
+        heat.join("Disc 2").is_dir(),
+        "the disc folder is still there"
+    );
+}
+
 /// A disc that cannot be read whole leaves its rows exactly as they were
 /// (FR-222): a VOB gone meanwhile is not marked missing and no part moves,
 /// since a title chosen from part of a disc may not be its main title.
