@@ -195,14 +195,12 @@ impl From<&Metadata> for FileMeta {
 }
 
 /// A stat's nanosecond field, which is below a second on any sane
-/// filesystem; anything else reads as the whole second.
+/// filesystem; one out of range is clamped into it, as the indexer always
+/// read it.
 #[cfg(unix)]
-fn nanos(nanos: impl TryInto<u32>) -> u32 {
-    nanos
-        .try_into()
-        .ok()
-        .filter(|nanos| *nanos < 1_000_000_000)
-        .unwrap_or(0)
+fn nanos(nanos: impl Into<i128>) -> u32 {
+    // In range after the clamp, so the cast cannot truncate.
+    nanos.into().clamp(0, 999_999_999) as u32
 }
 
 /// The instant `secs` and `nanos` after the epoch, as the standard library
@@ -934,5 +932,23 @@ mod tests {
             .expect("the open returned instead of waiting for a writer");
         assert_eq!(result, Err(io::ErrorKind::InvalidInput));
         drop(dir);
+    }
+
+    /// A stat's nanosecond field outside a second is clamped into it, from
+    /// either end.
+    #[cfg(unix)]
+    #[test]
+    fn an_out_of_range_nanosecond_field_is_clamped_into_the_second() {
+        let cases: [(i128, u32); 6] = [
+            (i128::from(i64::MIN), 0),
+            (-1, 0),
+            (0, 0),
+            (999_999_999, 999_999_999),
+            (1_000_000_000, 999_999_999),
+            (i128::from(u64::MAX), 999_999_999),
+        ];
+        for (field, expected) in cases {
+            assert_eq!(nanos(field), expected, "{field}");
+        }
     }
 }
