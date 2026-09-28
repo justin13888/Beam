@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicUsize;
 use super::*;
 use crate::probe::metadata::MetadataError;
 use crate::services::admin_log::LocalAdminLogService;
+use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
 use crate::services::hash::{HashConfig, LocalHashService};
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::CreateLibrary;
@@ -46,6 +47,7 @@ fn candidate(id: u128, path: &str, missing_since: Option<DateTime<Utc>>) -> Medi
         hash: 77,
         size_bytes: 1000,
         mtime: None,
+        identity: None,
         mime_type: None,
         duration: None,
         container_format: None,
@@ -228,6 +230,8 @@ fn found(hash: u64) -> Fingerprint {
     Fingerprint {
         size: 1000,
         mtime: None,
+        identity: None,
+        inodes: Inodes::Stable,
         hash,
     }
 }
@@ -675,7 +679,10 @@ impl Harness {
             )),
             progress.clone(),
         )
-        .with_clock(clock);
+        .with_clock(clock)
+        // A local filesystem, whatever the temporary directory is on: its
+        // inode numbers are compared unless `configure` says otherwise.
+        .with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Local)));
         let service = configure(service);
         Self {
             dir,
@@ -1162,6 +1169,65 @@ async fn an_unprobed_file_touched_is_hashed_once_not_on_every_visit() {
     assert_eq!(h.probes(), 3, "while the probe is still retried");
 }
 
+/// The same for a file whose identity alone moved: a `chmod` leaves its
+/// size and mtime as recorded but moves its ctime. The file is hashed once
+/// and its new identity recorded, so the next visit -- which probes it
+/// again -- does not hash it again (issue #228).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unprobed_file_chmodded_is_hashed_once_not_on_every_visit() {
+    let h = Harness::new().await;
+    h.prober.fails.store(true, Ordering::SeqCst);
+    let path = h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    let before = h.present(&path).await;
+    assert_eq!(before.duration, None, "the probe failed");
+    let hashes = h.hashes();
+
+    chmod_until_ctime_moves(&path, before.identity.expect("recorded").ctime);
+    h.scan().await;
+    assert_eq!(h.hashes(), hashes + 1, "a moved ctime is hashed once");
+    let after = h.present(&path).await;
+    assert_eq!((after.id, after.hash), (before.id, before.hash));
+    assert_eq!(
+        after.identity,
+        read_stat(&path, Inodes::Stable).unwrap().identity,
+        "and the identity found is recorded"
+    );
+
+    h.scan().await;
+    assert_eq!(h.hashes(), hashes + 1, "and not again");
+    assert_eq!(h.probes(), 3, "while the probe is still retried");
+}
+
+/// An unprobed row recorded before identities were is given its file's
+/// identity by the next visit, which probes it again and fails, without a
+/// hash -- so a same-size, same-mtime swap involving it can be seen from
+/// then on (issue #228).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unprobed_row_without_an_identity_is_given_one_without_a_hash() {
+    let h = Harness::new().await;
+    h.prober.fails.store(true, Ordering::SeqCst);
+    let path = h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    for row in h.file_repo.files.lock().unwrap().values_mut() {
+        row.identity = None;
+    }
+    let before = h.present(&path).await;
+    assert_eq!(before.duration, None, "the probe failed");
+    let hashes = h.hashes();
+
+    h.scan().await;
+
+    assert_eq!(h.hashes(), hashes, "nothing is hashed");
+    let after = h.present(&path).await;
+    assert_eq!((after.id, after.hash), (before.id, before.hash));
+    let found = read_stat(&path, Inodes::Stable).unwrap().identity;
+    assert!(found.is_some(), "a Unix file has an identity");
+    assert_eq!(after.identity, found, "and the identity found is recorded");
+}
+
 /// An event for the library root itself is left to the scan: a root that
 /// reads as empty may be a volume that is not mounted, and only the scan's
 /// empty-root guard can tell. Nothing beneath it is marked missing.
@@ -1379,6 +1445,386 @@ async fn three_files_rotated_among_their_names_keep_their_own_rows() {
     assert_eq!(h.present(&c).await.id, ids[1]);
     assert_eq!(h.present(&a).await.id, ids[2]);
     assert_eq!(h.row_count().await, 3);
+}
+
+// ─── same size, same mtime (issue #228) ──────────────────────────────────────
+
+/// Set `path`'s modification time to `at`, as `cp -p` or `rsync -a` would
+/// keep it from a source.
+fn set_mtime(path: &Path, at: DateTime<Utc>) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::from(at))
+        .unwrap();
+}
+
+/// Write each of `names` under the root with its own content, all of one
+/// size and one modification time, and scan them in.
+async fn same_size_same_mtime(h: &Harness, names: &[&str]) -> Vec<(PathBuf, Uuid)> {
+    let mut files = Vec::new();
+    for (n, name) in names.iter().enumerate() {
+        let path = h.write(name, &format!("content number {n}"));
+        set_mtime(&path, instant(-60));
+        files.push(path);
+    }
+    h.scan().await;
+    let mut rows = Vec::new();
+    for path in files {
+        let id = h.present(&path).await.id;
+        rows.push((path, id));
+    }
+    rows
+}
+
+/// Every path a size and an mtime alone would call unchanged: each still
+/// has the size and the mtime its own row recorded.
+async fn assert_size_and_mtime_match_every_row(h: &Harness, paths: &[&PathBuf]) {
+    for path in paths {
+        let row = h.present(path).await;
+        assert_eq!(
+            read_fs_meta(path).unwrap(),
+            (row.size_bytes, row.mtime),
+            "{} looks unchanged by size and mtime",
+            path.display()
+        );
+    }
+}
+
+/// Two files of one size and one mtime that swap names each keep their own
+/// row, though each path still has its row's size and mtime: the swap moved
+/// each path's inode. A file the swap did not touch is not hashed again.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_same_size_same_mtime_swap_keeps_each_row_on_its_content() {
+    let h = Harness::new().await;
+    let files = same_size_same_mtime(&h, &["Heat (1995).mkv", "Ronin (1998).mkv"]).await;
+    let (heat, heat_id) = files[0].clone();
+    let (ronin, ronin_id) = files[1].clone();
+    let untouched = h.write("Alien (1979).mkv", "an untouched film");
+    h.scan().await;
+    let (hashes, probes) = (h.hashes(), h.probes());
+
+    let tmp = h.mv(&heat, "tmp.mkv");
+    h.mv(&ronin, "Heat (1995).mkv");
+    h.mv(&tmp, "Ronin (1998).mkv");
+    assert_size_and_mtime_match_every_row(&h, &[&heat, &ronin]).await;
+    let progress = h.scan().await;
+
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        h.present(&ronin).await.id,
+        heat_id,
+        "Heat's row is at its bytes"
+    );
+    assert_eq!(h.present(&heat).await.id, ronin_id);
+    assert_eq!(h.hashes(), hashes + 2, "only the swapped paths are hashed");
+    assert_eq!(h.probes(), probes, "nothing was probed");
+    h.present(&untouched).await;
+
+    h.scan().await;
+    assert_eq!(
+        h.hashes(),
+        hashes + 2,
+        "the relinked rows record what they were found at"
+    );
+}
+
+/// Three files of one size and one mtime rotated among their names each
+/// keep their own row.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_same_size_same_mtime_rotation_keeps_each_row_on_its_content() {
+    let h = Harness::new().await;
+    let files = same_size_same_mtime(&h, &["A.mkv", "B.mkv", "C.mkv"]).await;
+    let [(a, a_id), (b, b_id), (c, c_id)] = [files[0].clone(), files[1].clone(), files[2].clone()];
+
+    let tmp = h.mv(&a, "tmp.mkv");
+    h.mv(&c, "A.mkv");
+    h.mv(&b, "C.mkv");
+    h.mv(&tmp, "B.mkv");
+    assert_size_and_mtime_match_every_row(&h, &[&a, &b, &c]).await;
+    let progress = h.scan().await;
+
+    assert_eq!((progress.relinked, progress.changed), (3, 0));
+    assert_eq!(h.present(&b).await.id, a_id);
+    assert_eq!(h.present(&c).await.id, b_id);
+    assert_eq!(h.present(&a).await.id, c_id);
+    assert_eq!(h.row_count().await, 3);
+}
+
+/// A row recorded before identities were -- none of its own -- is given
+/// its file's by the next scan that finds the file at its size and mtime,
+/// without hashing it; from then on a same-size, same-mtime swap is seen.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_row_without_an_identity_is_given_one_without_a_hash() {
+    let h = Harness::new().await;
+    let files = same_size_same_mtime(&h, &["Heat (1995).mkv", "Ronin (1998).mkv"]).await;
+    let (heat, heat_id) = files[0].clone();
+    let (ronin, ronin_id) = files[1].clone();
+    for row in h.file_repo.files.lock().unwrap().values_mut() {
+        row.identity = None;
+    }
+    let hashes = h.hashes();
+
+    h.scan().await;
+
+    assert_eq!(h.hashes(), hashes, "nothing is hashed");
+    for path in [&heat, &ronin] {
+        let found = read_stat(path, Inodes::Stable).unwrap().identity;
+        assert!(found.is_some(), "a Unix file has an identity");
+        assert_eq!(h.present(path).await.identity, found, "{}", path.display());
+    }
+
+    let tmp = h.mv(&heat, "tmp.mkv");
+    h.mv(&ronin, "Heat (1995).mkv");
+    h.mv(&tmp, "Ronin (1998).mkv");
+    let progress = h.scan().await;
+
+    assert_eq!(progress.relinked, 2);
+    assert_eq!(h.present(&ronin).await.id, heat_id);
+    assert_eq!(h.present(&heat).await.id, ronin_id);
+}
+
+/// The watcher's side of a same-size, same-mtime swap (issue #228). Each
+/// path's new content is the other row's, and by size and mtime alone that
+/// row's path still holds it; its identity says it does not. So both events
+/// are left to the scan, not read as content changes, and the scan gives
+/// each row back its content.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_same_size_same_mtime_swap_seen_by_the_watcher_is_left_to_the_scan() {
+    let h = Harness::new().await;
+    let files = same_size_same_mtime(&h, &["Heat (1995).mkv", "Ronin (1998).mkv"]).await;
+    let (heat, heat_id) = files[0].clone();
+    let (ronin, ronin_id) = files[1].clone();
+    let before = [h.present(&heat).await, h.present(&ronin).await];
+
+    let tmp = h.mv(&heat, "tmp.mkv");
+    h.mv(&ronin, "Heat (1995).mkv");
+    h.mv(&tmp, "Ronin (1998).mkv");
+    assert_size_and_mtime_match_every_row(&h, &[&heat, &ronin]).await;
+    for (path, kind) in [
+        (&heat, FsEventKind::Modified),
+        (&ronin, FsEventKind::Modified),
+        (&tmp, FsEventKind::Removed),
+    ] {
+        assert_eq!(h.reconcile(path, kind).await, ReconcileOutcome::Done);
+    }
+
+    for row in &before {
+        let now = h.present(&row.path).await;
+        assert_eq!(
+            (now.id, now.hash, now.identity),
+            (row.id, row.hash, row.identity),
+            "{} is left exactly as it was",
+            row.path.display()
+        );
+    }
+    let progress = h.scan().await;
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (2, 0, 0)
+    );
+    assert_eq!(h.present(&ronin).await.id, heat_id);
+    assert_eq!(h.present(&heat).await.id, ronin_id);
+}
+
+/// A file replaced by a rename over its path, keeping its length and its
+/// mtime, is a content change the scan records: its new inode is enough to
+/// hash it, though its size and mtime are its row's. No row holds the new
+/// content, so the row stays, with its id and the new hash.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_renamed_over_at_its_size_and_mtime_is_a_content_change() {
+    let h = Harness::new().await;
+    let path = h.write("Heat (1995).mkv", "heat, cut one");
+    h.scan().await;
+    let before = h.present(&path).await;
+
+    // Written outside the library, so no scan sees it under another name.
+    let replacement = h.dir.path().join("outside").join("replacement.mkv");
+    std::fs::write(&replacement, "heat, cut two").unwrap();
+    set_mtime(&replacement, before.mtime.expect("a file has an mtime"));
+    std::fs::rename(&replacement, &path).unwrap();
+    assert_size_and_mtime_match_every_row(&h, &[&path]).await;
+    let progress = h.scan().await;
+
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (0, 1, 0)
+    );
+    let after = h.present(&path).await;
+    assert_eq!(after.id, before.id, "the row keeps its id");
+    assert_ne!(after.hash, before.hash, "and records the new content");
+    assert_eq!(h.row_count().await, 1);
+}
+
+/// Change `path`'s ctime and nothing else, as a `chmod` does, from
+/// `recorded`. The kernel stamps a ctime at its clock tick, so a chmod in the
+/// tick `recorded` was stamped in leaves it as it was: the mode is toggled
+/// until the ctime moves, which it does within one tick.
+#[cfg(unix)]
+fn chmod_until_ctime_moves(path: &Path, recorded: DateTime<Utc>) {
+    use std::os::unix::fs::PermissionsExt;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    for mode in [0o600, 0o644].into_iter().cycle() {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let identity = read_stat(path, Inodes::Stable).unwrap().identity;
+        if identity.expect("a Unix file has an identity").ctime != recorded {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the ctime of {} never moved",
+            path.display()
+        );
+    }
+}
+
+/// A `chmod` moves a file's ctime but not its content: the next scan hashes
+/// it once, finds the content unchanged and records the new identity, and
+/// the scan after hashes nothing. The same holds on a filesystem whose
+/// inodes are not compared, since its ctime still is.
+#[cfg(unix)]
+async fn a_chmod_costs_one_hash(kind: FilesystemKind) {
+    let h = Harness::with_service(|service| {
+        service.with_filesystem_probe(Arc::new(FixedFilesystemProbe(kind)))
+    })
+    .await;
+    let path = h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    let before = h.present(&path).await;
+    let hashes = h.hashes();
+
+    chmod_until_ctime_moves(&path, before.identity.expect("recorded").ctime);
+    let progress = h.scan().await;
+
+    assert_eq!(h.hashes(), hashes + 1, "a moved ctime is hashed once");
+    assert_eq!((progress.relinked, progress.changed), (0, 0));
+    let after = h.present(&path).await;
+    assert_eq!((after.id, after.hash), (before.id, before.hash));
+    assert_eq!(
+        after.identity,
+        read_stat(&path, Inodes::Stable).unwrap().identity,
+        "and the identity found is recorded"
+    );
+
+    h.scan().await;
+    assert_eq!(h.hashes(), hashes + 1, "so the next scan hashes nothing");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_chmod_on_a_local_library_costs_one_hash() {
+    a_chmod_costs_one_hash(FilesystemKind::Local).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_chmod_on_a_network_library_costs_one_hash() {
+    a_chmod_costs_one_hash(FilesystemKind::Network).await;
+}
+
+/// Give every row an inode number its file does not have, keeping its
+/// ctime -- as a network or FUSE filesystem can renumber a file after a
+/// remount or a cache eviction, while the file itself is untouched.
+#[cfg(unix)]
+fn renumber_recorded_inodes(h: &Harness) {
+    for row in h.file_repo.files.lock().unwrap().values_mut() {
+        let identity = row.identity.as_mut().expect("a Unix file has an identity");
+        identity.inode = !identity.inode;
+    }
+}
+
+/// A library on a network or FUSE filesystem is compared by size, mtime and
+/// ctime, never by inode: its inode numbers can change between scans (an
+/// rclone mount after a remount, SMB with `noserverino`), and comparing them
+/// would hash the whole library on every periodic scan.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_network_library_whose_inodes_are_renumbered_is_not_hashed_again() {
+    let h = Harness::with_service(|service| {
+        service.with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Network)))
+    })
+    .await;
+    let heat = h.write("Heat (1995).mkv", "heat");
+    let ronin = h.write("Ronin (1998).mkv", "ronin");
+    h.scan().await;
+    let before = [h.present(&heat).await, h.present(&ronin).await];
+    let hashes = h.hashes();
+
+    renumber_recorded_inodes(&h);
+    let progress = h.scan().await;
+
+    assert_eq!(h.hashes(), hashes, "nothing is hashed");
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (0, 0, 0)
+    );
+    for row in &before {
+        let now = h.present(&row.path).await;
+        assert_eq!((now.id, now.hash), (row.id, row.hash));
+    }
+}
+
+/// On a local filesystem an inode number is stable, so a different one is a
+/// different file -- which is how a same-tick swap is seen. Each file whose
+/// recorded inode is not its own is hashed once, found unchanged, and given
+/// its identity; the next scan hashes nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_local_library_whose_inodes_differ_hashes_each_file_once() {
+    let h = Harness::new().await;
+    let heat = h.write("Heat (1995).mkv", "heat");
+    let ronin = h.write("Ronin (1998).mkv", "ronin");
+    h.scan().await;
+    let before = [h.present(&heat).await, h.present(&ronin).await];
+    let hashes = h.hashes();
+
+    renumber_recorded_inodes(&h);
+    let progress = h.scan().await;
+
+    assert_eq!(h.hashes(), hashes + 2, "each file is hashed");
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (0, 0, 0)
+    );
+    for row in &before {
+        let now = h.present(&row.path).await;
+        assert_eq!(
+            (now.id, now.hash, now.identity),
+            (row.id, row.hash, row.identity)
+        );
+    }
+    h.scan().await;
+    assert_eq!(h.hashes(), hashes + 2, "once");
+}
+
+/// A library whose filesystem cannot be classified is taken as local, as
+/// the watcher takes it: its inode numbers are compared. At worst that
+/// hashes a file that did not change; not comparing them could miss a swap.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_library_whose_filesystem_cannot_be_classified_compares_inodes() {
+    use crate::services::filesystem_probe::FailingFilesystemProbe;
+    let h = Harness::with_service(|service| {
+        service.with_filesystem_probe(Arc::new(FailingFilesystemProbe))
+    })
+    .await;
+    h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    let hashes = h.hashes();
+
+    renumber_recorded_inodes(&h);
+    h.scan().await;
+
+    assert_eq!(h.hashes(), hashes + 1, "the renumbered file is hashed");
 }
 
 /// A file renamed onto the path of a file deleted earlier, whose row is

@@ -167,6 +167,7 @@ fn media_file(container: Option<&str>, size_bytes: u64, duration: Option<Duratio
         hash: 0,
         size_bytes,
         mtime: None,
+        identity: None,
         mime_type: None,
         duration,
         container_format: container.map(str::to_owned),

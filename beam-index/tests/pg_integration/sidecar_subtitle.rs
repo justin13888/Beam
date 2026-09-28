@@ -30,6 +30,7 @@ async fn video_file(db: &Arc<DatabaseConnection>, library_id: Uuid) -> Uuid {
             hash: (unique.as_u128() as u64) >> 1,
             size_bytes: 1024,
             mtime: None,
+            identity: None,
             mime_type: None,
             duration: None,
             container_format: None,

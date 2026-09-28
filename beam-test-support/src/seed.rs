@@ -125,6 +125,8 @@ pub async fn file(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         updated_at: Set(now()),
         file_status: Set(beam_entity::files::FileStatus::Known),
         mtime: Set(None),
+        inode: Set(None),
+        ctime: Set(None),
         missing_since: Set(None),
         last_episode_number: Set(None),
         classifier_version: Set(0),

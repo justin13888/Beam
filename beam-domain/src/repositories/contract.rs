@@ -676,6 +676,7 @@ macro_rules! file_repository_contract {
                     hash: (unique.as_u128() as u64) >> 1,
                     size_bytes: 1024,
                     mtime: None,
+                    identity: None,
                     mime_type: Some("video/x-matroska".to_string()),
                     duration: None,
                     container_format: Some("matroska".to_string()),
@@ -749,6 +750,7 @@ macro_rules! file_repository_contract {
                         hash: (unique.as_u128() as u64) >> 1,
                         size_bytes: 1024,
                         mtime: None,
+                        identity: None,
                         mime_type: None,
                         duration: None,
                         container_format: None,
@@ -812,6 +814,7 @@ macro_rules! file_repository_contract {
                     hash: first.hash ^ 1,
                     size_bytes: 2048,
                     mtime: None,
+                    identity: None,
                     mime_type: None,
                     duration: None,
                     container_format: None,
@@ -872,6 +875,7 @@ macro_rules! file_repository_contract {
                         hash: (Uuid::new_v4().as_u128() as u64) >> 1,
                         size_bytes: 1024,
                         mtime: Some(written),
+                        identity: None,
                         mime_type: None,
                         duration: None,
                         container_format: None,
@@ -891,6 +895,7 @@ macro_rules! file_repository_contract {
                     hash: None,
                     size_bytes: None,
                     mtime: Some(written),
+                    identity: None,
                     probe: ProbeUpdate::Keep,
                     content: None,
                     status: None,
@@ -908,6 +913,109 @@ macro_rules! file_repository_contract {
                     .expect("relink the file");
                 let stored = repo.find_by_id(moving.id).await.unwrap().expect("stored");
                 assert_eq!(stored.mtime, Some(read_back), "relinked at {written}");
+            }
+        }
+
+        /// A file's identity -- its inode and ctime (issue #228) -- is kept
+        /// whichever way it is written: created, updated, or relinked. The
+        /// inode keeps all 64 bits, past `i64::MAX` too, and the ctime reads
+        /// back as [`FileIdentity::as_stored`] says, as an mtime does. An
+        /// update that names none leaves the row's as it was, and a row
+        /// written without one reads back without one.
+        #[tokio::test]
+        async fn an_identity_reads_back_as_stored_however_it_is_written() {
+            use $crate::models::file::FileIdentity;
+            let instant = |secs: i64, nanos: u32| {
+                DateTime::from_timestamp(secs, nanos).expect("valid instant")
+            };
+            // (written, the ctime it reads back with): nanoseconds as ext4 or
+            // btrfs reports them, and whole microseconds as a row keeps them.
+            let identities = [
+                (
+                    FileIdentity { inode: 42, ctime: instant(1_790_000_341, 802_029_432) },
+                    instant(1_790_000_341, 802_029_000),
+                ),
+                (
+                    FileIdentity { inode: u64::MAX, ctime: instant(1_790_000_341, 999_999_999) },
+                    instant(1_790_000_341, 999_999_000),
+                ),
+                (FileIdentity { inode: 1 << 63, ctime: at(5) }, at(5)),
+            ];
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+
+            let without = movie_file(&fixture, library).await;
+            let stored = repo.find_by_id(without.id).await.unwrap().expect("stored");
+            assert_eq!(stored.identity, None, "created without one");
+
+            for (written, ctime) in identities {
+                let read_back = Some(FileIdentity { inode: written.inode, ctime });
+                assert_eq!(Some(written.as_stored()), read_back, "{written:?}");
+
+                let movie_entry_id = fixture.new_movie_entry(library).await;
+                let created = repo
+                    .create(CreateMediaFile {
+                        library_id: library,
+                        path: PathBuf::from(format!("/videos/{library}/{}.mkv", Uuid::new_v4())),
+                        hash: (Uuid::new_v4().as_u128() as u64) >> 1,
+                        size_bytes: 1024,
+                        mtime: None,
+                        identity: Some(written),
+                        mime_type: None,
+                        duration: None,
+                        container_format: None,
+                        content: Some(MediaFileContent::Movie { movie_entry_id }),
+                        status: FileStatus::Known,
+                        classifier_version: 0,
+                        container_tags: None,
+                    })
+                    .await
+                    .expect("create a file");
+                let stored = repo.find_by_id(created.id).await.unwrap().expect("stored");
+                assert_eq!(stored.identity, read_back, "created with {written:?}");
+
+                let untouched = movie_file(&fixture, library).await;
+                let update = |identity: Option<FileIdentity>| UpdateMediaFile {
+                    id: untouched.id,
+                    hash: None,
+                    size_bytes: None,
+                    mtime: None,
+                    identity,
+                    probe: ProbeUpdate::Keep,
+                    content: None,
+                    status: None,
+                };
+                repo.update(update(Some(written))).await.expect("update the file");
+                let stored = repo.find_by_id(untouched.id).await.unwrap().expect("stored");
+                assert_eq!(stored.identity, read_back, "updated to {written:?}");
+                repo.update(update(None)).await.expect("update the file");
+                let stored = repo.find_by_id(untouched.id).await.unwrap().expect("stored");
+                assert_eq!(stored.identity, read_back, "an update naming none keeps it");
+
+                let moving = movie_file(&fixture, library).await;
+                let moved_to =
+                    PathBuf::from(format!("/videos/{library}/moved/{}.mkv", Uuid::new_v4()));
+                let relink = FileRelink {
+                    identity: Some(written),
+                    ..to(&moving, &moved_to, 1024, None)
+                };
+                repo.relink(vec![relink], Vec::new(), at(0))
+                    .await
+                    .expect("relink the file");
+                let stored = repo.find_by_id(moving.id).await.unwrap().expect("stored");
+                assert_eq!(stored.identity, read_back, "relinked at {written:?}");
+
+                // A relink records what the file was found at, so one found
+                // with no identity -- a platform without them -- clears the
+                // identity the row had, unlike an update naming none.
+                let moved_again =
+                    PathBuf::from(format!("/videos/{library}/again/{}.mkv", Uuid::new_v4()));
+                repo.relink(vec![to(&stored, &moved_again, 1024, None)], Vec::new(), at(1))
+                    .await
+                    .expect("relink the file again");
+                let stored = repo.find_by_id(moving.id).await.unwrap().expect("stored");
+                assert_eq!(stored.identity, None, "relinked from {written:?} with none");
             }
         }
 
@@ -1018,6 +1126,7 @@ macro_rules! file_repository_contract {
                     hash: (unique.as_u128() as u64) >> 1,
                     size_bytes: 1024,
                     mtime: None,
+                    identity: None,
                     mime_type: None,
                     duration: None,
                     container_format: None,
@@ -1045,6 +1154,7 @@ macro_rules! file_repository_contract {
                         hash: Some(unknown.hash + 1),
                         size_bytes: Some(2048),
                         mtime: None,
+                        identity: None,
                         probe: ProbeUpdate::Keep,
                         content: None,
                         status: Some(status),
@@ -1091,6 +1201,7 @@ macro_rules! file_repository_contract {
                 hash: None,
                 size_bytes: None,
                 mtime: None,
+                identity: None,
                 probe,
                 content: None,
                 status: None,
@@ -1398,6 +1509,7 @@ macro_rules! file_repository_contract {
                     hash,
                     size_bytes: 1024,
                     mtime: None,
+                    identity: None,
                     mime_type: None,
                     duration: None,
                     container_format: None,
@@ -1422,6 +1534,7 @@ macro_rules! file_repository_contract {
                 path: path.to_path_buf(),
                 size_bytes,
                 mtime,
+                identity: None,
             }
         }
 
@@ -1684,6 +1797,7 @@ macro_rules! file_repository_contract {
                     hash: 1,
                     size_bytes: 1024,
                     mtime: None,
+                    identity: None,
                     mime_type: None,
                     duration: None,
                     container_format: None,
@@ -1799,6 +1913,7 @@ macro_rules! show_repository_contract {
                     hash: (unique.as_u128() as u64) >> 1,
                     size_bytes: 1024,
                     mtime: None,
+                    identity: None,
                     mime_type: Some("video/x-matroska".to_string()),
                     duration: None,
                     container_format: Some("matroska".to_string()),
@@ -2836,6 +2951,7 @@ macro_rules! movie_repository_contract {
                         hash: (unique.as_u128() as u64) >> 1,
                         size_bytes: 1024,
                         mtime: None,
+                        identity: None,
                         mime_type: Some("video/x-matroska".to_string()),
                         duration: None,
                         container_format: Some("matroska".to_string()),
@@ -3782,6 +3898,7 @@ macro_rules! library_shape_repository_contract {
                     hash: (unique.as_u128() as u64) >> 1,
                     size_bytes,
                     mtime: None,
+                    identity: None,
                     mime_type: None,
                     duration: None,
                     container_format: container.map(str::to_string),
@@ -4922,6 +5039,7 @@ macro_rules! catalog_repository_contract {
                     hash: (unique.as_u128() as u64) >> 1,
                     size_bytes: 1024,
                     mtime: None,
+                    identity: None,
                     mime_type: Some("video/x-matroska".to_string()),
                     duration: None,
                     container_format: Some("matroska".to_string()),

@@ -500,7 +500,10 @@ impl LocalIndexService {
         if left_to_scan
             .iter()
             .any(|video| hints::may_describe(path, video))
-            || candidates.iter().any(|file| may_have_moved(file))
+            || {
+                let inodes = self.inodes_of(library);
+                candidates.iter().any(|file| may_have_moved(file, inodes))
+            }
         {
             return Ok(true);
         }

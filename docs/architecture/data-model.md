@@ -314,6 +314,8 @@ quality/edition/language rip.
 | `updated_at` | TIMESTAMPTZ | no | |
 | `file_status` | ENUM (`file_status`) | no | `known` \| `changed` \| `unknown`; default `known` |
 | `mtime` | TIMESTAMPTZ | yes | filesystem mtime; cheap change-detection gate (with `file_size`) before an XXH3 rehash. The column keeps whole microseconds and a filesystem reports nanoseconds, so the indexer brings a file's mtime to the stored precision (`beam_domain::models::file::mtime_as_stored`) before comparing it with its row ([#229](https://github.com/justin13888/beam/issues/229)); NULL rows are treated as "suspected changed" |
+| `inode` | BIGINT | yes | the file's inode (its 64 bits, as `hash_xxh3`'s) when last recorded; with `ctime`, what a rename or a replace always changes, so a path whose inode or ctime is not its row's is hashed even when `file_size` and `mtime` match -- a same-size, same-mtime swap or rotation ([#228](https://github.com/justin13888/beam/issues/228)). NULL off Unix, and for rows recorded before `m20261007_000001_files_change_identity`; the next scan that finds such a file at its `file_size` and `mtime` records both without hashing it. Never compared for a library whose root is on a network or FUSE filesystem (the watcher's classification), whose inode numbers may change between scans: there only `ctime` is |
+| `ctime` | TIMESTAMPTZ | yes | the file's change time when last recorded, at `mtime`'s stored precision; set by the kernel on every rename and write, and never kept by a copy tool. A `CHECK` (`chk_files_identity_whole`) holds `inode` and `ctime` NULL or set together |
 | `missing_since` | TIMESTAMPTZ | yes | soft-delete stamp: NULL while the file is on disk; the instant the indexer first found it gone otherwise (FR-211) |
 | `last_episode_number` | INTEGER | yes | the last episode of a multi-episode file (`S01E01E02`); the file's `episode_id` is its first. A `CHECK` (`files_last_episode_requires_episode`) allows it only alongside `episode_id` |
 | `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, the NFOs beside it and its `container_tags`, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |
@@ -353,7 +355,7 @@ by the liveness check above, and retired once its last file is purged.
 rename, two files swapping names, a rotation, or a rename onto the path of a row already missing. A
 path whose content hash (never the unhashed `0`) and `file_size` match a row of the same library
 whose own content has left its `file_path` is that row. `FileRepository::relink` takes every such
-move of one scan at once, in one transaction: it rewrites `file_path`, `file_size` and `mtime` and
+move of one scan at once, in one transaction: it rewrites `file_path`, `file_size`, `mtime`, `inode` and `ctime` and
 clears `missing_since`, so `id`, and with it `playback_progress`, `movie_entry_id`/`episode_id` and
 `media_streams`, is kept, and the file is not probed or classified again. Because
 `idx_files_path_unique` is checked per statement, each relinked row first steps aside to
