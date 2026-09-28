@@ -152,6 +152,11 @@ document type declaration is refused before parsing, so no entity is ever expand
 laughs); and the XML parser (`roxmltree`, which resolves no external resources) is capped at
 10 000 nodes. A rejected NFO is logged and ignored: the file is classified by its path. Subtitle
 files are only stat-ed and their names read; their contents are never opened by the indexer.
+The indexer's hashing and probing of a video are the exception to the no-follow open: both still
+open the video's full stored path (`compute_hash`, `ffmpeg::format::input`), so a folder above it
+swapped for a link between the walk listing the file and that read is followed, and the outside
+file's hash and stream metadata are recorded. Nothing is disclosed -- delivery then refuses the
+file -- but it is a known gap, tracked in [#238](https://github.com/justin13888/beam/issues/238).
 
 Delivery reads library files too, and a file can change between the scan that recorded it and the
 request that reads it. Every file the server serves — a video on `/stream` and `/download`, a

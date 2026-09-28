@@ -89,8 +89,11 @@ scans, when the watcher reports a change, or when it polls. A link is simply not
 library: a symlinked video is not indexed, and a symlinked folder is not descended into. Nor is a
 link followed when Beam later reads a file -- an NFO, a video it streams, a subtitle it serves: a
 file, or a folder above it, replaced by a link since the scan is treated as missing. This keeps
-every file Beam reads inside the root you registered (the root itself may be a link) and rules out
-link cycles.
+every file Beam parses or serves inside the root you registered (the root itself may be a link) and
+rules out link cycles. One gap remains: when the indexer hashes and probes a video it still opens
+the file's full path, so a folder above it swapped for a link in the moment between the scan
+listing the file and reading it would be followed for that read. Delivery still refuses the file
+afterwards. This is tracked in [#238](https://github.com/justin13888/beam/issues/238).
 
 If you relied on symlinks before, a file that was indexed through a link is now
 [missing](#when-files-go-missing): hidden, with its progress kept, until the grace period ends. To
