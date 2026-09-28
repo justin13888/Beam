@@ -386,7 +386,7 @@ One row per elementary stream (video/audio/subtitle track) within a `files` row,
 | `file_id` | UUID | no | FK → `files.id`, cascade |
 | `stream_index` | INTEGER | no | container stream index |
 | `stream_type` | ENUM (`stream_type`) | no | `video` \| `audio` \| `subtitle` |
-| `codec` | TEXT | no | FFmpeg's own codec name, lower case (`"h264"`, `"hevc"`, `"eac3"`, `"truehd"`, `"subrip"`, `"hdmv_pgs_subtitle"`) — never an FFI type; see [ADR-0004](decisions/ADR-0004-never-transcode.md). Rows written before migration `m20261006_000001_tracks_subtitles` held FFmpeg's codec id `Debug` name (`H264`) or the prober's display name (`SubRip`); the migration renamed them ([#189](https://github.com/justin13888/beam/issues/189)) |
+| `codec` | TEXT | no | FFmpeg's own codec name, lower case (`"h264"`, `"hevc"`, `"eac3"`, `"truehd"`, `"subrip"`, `"hdmv_pgs_subtitle"`) — never an FFI type; see [ADR-0004](decisions/ADR-0004-never-transcode.md). Rows written before migration `m20261008_000001_tracks_subtitles` held FFmpeg's codec id `Debug` name (`H264`) or the prober's display name (`SubRip`); the migration renamed them ([#189](https://github.com/justin13888/beam/issues/189)) |
 | `language` | TEXT | yes | |
 | `title` | TEXT | yes | |
 | `is_default` | BOOLEAN | no | default `false` |

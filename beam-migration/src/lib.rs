@@ -26,10 +26,10 @@ mod m20260930_000001_playback_telemetry;
 mod m20261001_000001_files_unique_path;
 mod m20261002_000001_nfo_sidecars;
 mod m20261003_000001_catalogue_browse;
-mod m20261006_000001_tracks_subtitles;
 mod m20261007_000001_files_change_identity;
+mod m20261008_000001_tracks_subtitles;
 
-pub use m20261006_000001_tracks_subtitles::RENAMED_FFMPEG_CODECS;
+pub use m20261008_000001_tracks_subtitles::RENAMED_FFMPEG_CODECS;
 
 pub struct Migrator;
 
@@ -60,8 +60,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20261001_000001_files_unique_path::Migration),
             Box::new(m20261002_000001_nfo_sidecars::Migration),
             Box::new(m20261003_000001_catalogue_browse::Migration),
-            Box::new(m20261006_000001_tracks_subtitles::Migration),
             Box::new(m20261007_000001_files_change_identity::Migration),
+            Box::new(m20261008_000001_tracks_subtitles::Migration),
         ]
     }
 }

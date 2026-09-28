@@ -1106,7 +1106,7 @@ async fn the_tracks_migration_renames_codecs_and_reverses() {
 
     let this_one = beam_migration::Migrator::migrations()
         .iter()
-        .position(|m| m.name() == "m20261006_000001_tracks_subtitles")
+        .position(|m| m.name() == "m20261008_000001_tracks_subtitles")
         .expect("the migration is registered");
     up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(this_one as u32))
         .await

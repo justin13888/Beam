@@ -323,7 +323,7 @@ mod tests {
         }
     }
 
-    /// What `m20261006_000001_tracks_subtitles` relies on. Before issue #189
+    /// What `m20261008_000001_tracks_subtitles` relies on. Before issue #189
     /// the indexer stored a video or audio codec as the `Debug` name of
     /// FFmpeg's codec id, and the migration renames those rows to FFmpeg's
     /// own name: by lower-casing the `Debug` name, except for the codecs in
