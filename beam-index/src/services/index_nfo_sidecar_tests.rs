@@ -2281,12 +2281,15 @@ async fn a_video_moved_away_from_an_nfo_that_stays_keeps_the_pin() {
 /// A copy of Heat with its own NFO in each of `folders`, each indexed by a
 /// scan of its own in turn: the first folder's NFO, naming tmdb:949, pins
 /// the movie, and every later one -- naming tmdb:1, tmdb:2, ... -- is kept
-/// against it and recorded as applied (FR-219).
+/// against it and recorded as applied (FR-219). Each copy has its own size:
+/// two same-size copies written within one filesystem timestamp tick would
+/// stat alike, and a scan does not re-hash a file whose size and
+/// modification time match its row.
 async fn kept_conflicting_nfos_in(folders: &[&str]) -> Harness {
     let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
     for (i, folder) in folders.iter().enumerate() {
         let id = if i == 0 { 949 } else { i as u32 };
-        h.video(&format!("{folder}/Heat (1995).mkv"));
+        h.write(&format!("{folder}/Heat (1995).mkv"), &"v".repeat(16 + i));
         h.write(&format!("{folder}/Heat (1995).nfo"), &tmdb_movie(id));
         h.scan().await;
     }
