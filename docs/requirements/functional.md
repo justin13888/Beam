@@ -457,15 +457,27 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-506**: Switching between file versions during the source-selection scenario MUST result in
   direct-play of the newly selected file; the server MUST NOT perform any transcoding or format
   conversion to service the switch.
-- **FR-507**: The server MUST track and persist per-user, per-file playback position ("resume point")
-  as the client reports progress during playback.
-- **FR-508**: The server MUST expose an endpoint returning the current user's in-progress items
-  ordered by most-recently-watched, to back a "continue watching" feature.
+- **FR-507**: The server MUST track and persist each user's playback position ("resume point") per
+  title -- a movie or an episode -- as the client reports progress in any of the title's files, so
+  that switching to another source of the title resumes from the same place; it MUST remember the
+  file last played. A report reaching 95% of the duration MUST mark the title played, count a play
+  and return the position to the start; a later report short of the end MUST NOT unmark it. The
+  server MUST refuse (422) a negative or non-finite position, a non-positive duration, and a
+  position past the end -- the reported duration, else the file's probed one -- by more than 2
+  seconds or 1% of it, whichever is larger, taking a position within that as the end.
+- **FR-508**: The server MUST expose an endpoint returning the current user's continue-watching
+  rows, most recently played first: one per movie with a resume position, and one per show at the
+  episode to watch next -- the episode last touched if it has a position, else the first later
+  episode in (season, episode) order, across seasons, that has a present file and is not played --
+  omitting a show with no such episode and a title with no present file. Each row MUST carry what a
+  client displays (title, artwork, season and episode numbers and title) and the file to play: the
+  one last played while present, else the title's primary (FR-513).
 - **FR-509**: The web client's player (Vidstack-based) MUST support seeking, keyboard shortcuts,
   visible buffering state, fullscreen, and Picture-in-Picture.
 - **FR-510**: On resuming a previously started title, the web client MUST seek playback to the
   last-reported resume position (per FR-507) rather than starting from the beginning, subject to user
-  override.
+  override. The server MUST expose the current user's resume position and played state for a movie
+  or an episode by its id, and let the user clear the position.
 - **FR-511**: When the operator enables playback telemetry (`BEAM_PLAYBACK_TELEMETRY_ENABLED`), the
   server MUST accept authenticated batches of playback starts, start failures (with a reason --
   container, video codec, audio codec, network, other -- and a stage -- preflight or playback),
@@ -490,6 +502,12 @@ strength. Each requirement is independently testable. See `product.md` for narra
   default edition before a named one, then the tallest picture, the highest video bit rate, the
   largest file, and the lowest file id. The choice MUST be computed from the files when read, and
   the detail endpoint's `file_id` and duration MUST be the primary's.
+- **FR-514**: The server MUST let a user mark a movie, an episode, a season or a whole show watched
+  -- a season or show marking each of its episodes, idempotently -- or unwatched, forgetting its
+  played state and position; and MUST carry the user's state on detail payloads: played, position
+  and play count for a movie and each episode, and how many episodes are played for each season and
+  show. It MUST expose an episode's detail (with its season, its show and the episodes either side
+  of it) and a season's detail by id.
 
 ## FR-6xx — Administration
 
@@ -523,7 +541,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
 
 - **FR-701**: The web client MUST display a "continue watching" row on the home page, populated from
   the endpoint in FR-508, and MUST omit items that have been completed or explicitly cleared by the
-  user.
+  user. The server MUST let a user remove a title from continue-watching, keeping its progress, until
+  the user next plays it.
 - **FR-702**: The web client MUST periodically report playback position to the server during active
   playback (per FR-507) at a bounded interval, so that resume state survives a browser refresh or
   crash without an explicit "save" action.

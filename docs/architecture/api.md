@@ -35,9 +35,13 @@ role.
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
 | `/v1/files/{fileId}/subtitles/{subtitleId}` | GET | A subtitle file beside the video, as stored, Range-capable; `404` `subtitle-not-found` for an id this file's sources do not list ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)) |
 | `/v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | GET | The same SubRip or WebVTT file as WebVTT, for a browser's `<track>`; `404` `subtitle-rendition-unavailable` for ASS, SSA or a file over 8 MiB |
-| `/v1/files/{fileId}/progress` | PUT | Report playback position |
-| `/v1/continue-watching` | GET | Resume list for the current user |
-| `/v1/history` | GET | Watch history for the current user (limit/offset paged) |
+| `/v1/media/{id}/progress` | GET, DELETE | The caller's state for a movie or an episode (`UserTitleState`; all zeros if never played) / forget its resume position, keeping it played. `400` `progress-not-available-for-show` for a show or season id |
+| `/v1/media/{id}/watched` | PUT, DELETE | Mark a movie, episode, season or show watched (each episode of a season or show, idempotently) / unwatched (forgotten entirely); `204` |
+| `/v1/episodes/{id}`, `/v1/seasons/{id}` | GET | One episode (`EpisodeDetail`: its season, show and the episodes either side in `(season, episode)` order) or one season (`SeasonDetail`), with the caller's state |
+| `/v1/files/{fileId}/progress` | PUT | Report playback position; kept for the file's title and answered as its `UserTitleState`. `404` `file-not-found` for a file that is no title's, `422` `validation-failed` for a negative position, a non-positive duration or a position past the end (FR-507) |
+| `/v1/continue-watching` | GET | One row per movie to resume and per show at its next-up episode, newest first, with display fields: a `ContinueWatchingConnection` of at most `first` (1-50, default 20) rows, never paged (FR-508) |
+| `/v1/continue-watching/{id}` | DELETE | Hide a title (an episode or season id hides its show) until it is next played (FR-701); `204` |
+| `/v1/history` | GET | Every movie and episode the caller played or marked, newest first: a `HistoryConnection` paged by `first`/`after` with `total` |
 | `/v1/telemetry/playback` | POST | Report a batch of playback starts, start failures, rebuffers and source switches (at most 50 events). Counted as daily aggregates under the named files' coarse dimensions, never the file or the user; `409` `playback-telemetry-disabled` unless the operator enabled it, `422` `validation-failed` with per-pointer `errors` ([ADR-0019](decisions/ADR-0019-telemetry-posture.md)) |
 | `/v1/auth/login`, `/v1/auth/callback` | GET | OIDC login redirect and callback |
 | `/v1/auth/device` | POST | Start a device login (RFC 8628) for a client with no browser: user code, verification URI, opaque device handle. `501` when the IdP does not offer the grant ([ADR-0017](decisions/ADR-0017-device-authorization-grant.md)) |

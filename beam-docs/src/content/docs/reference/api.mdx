@@ -41,6 +41,23 @@ with a `url` to fetch them as stored and, for SubRip and WebVTT, a `webvtt_url` 
 WebVTT. Every URL in a source is relative to the server and authenticated by the session cookie
 like any other request.
 
+## Watched state
+
+Progress is kept per movie and per episode, not per file. `PUT /v1/files/{file_id}/progress`
+reports a position in whichever file is playing, and the answer is the title's state: `played`,
+`position_secs` (where to resume; `0` once watched to the end), `play_count`, `last_played_at`, and
+the `last_file_id` last played. `GET /v1/media/{id}/progress` reads the same for a movie or an
+episode, and `DELETE` clears the position. `PUT` and `DELETE /v1/media/{id}/watched` mark a movie,
+an episode, a season or a whole show watched or unwatched.
+
+`GET /v1/continue-watching` returns one row per movie and one per show — a show's row being the
+episode to resume or start next — and `GET /v1/history` pages through everything watched, newest
+first, with `first` and `after`. Both carry each row's title, artwork and episode numbers, and the
+`file_id` to play. `DELETE /v1/continue-watching/{id}` takes a title off the row until it is next
+played. Detail responses carry a `user_state` for the movie, or for the show and each season and
+episode; `GET /v1/episodes/{id}` and `GET /v1/seasons/{id}` describe one episode (with its show and
+the episodes either side) or one season.
+
 ## Real-time updates
 
 Administrative events — scan progress, enrichment outcomes — are delivered over **Server-Sent
