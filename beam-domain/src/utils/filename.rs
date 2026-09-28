@@ -188,6 +188,10 @@ const EDITION_WORDS: &[(&str, &[&[&str]])] = &[
     ("Anniversary", &[&["anniversary"]]),
 ];
 
+/// Words an edition's name is written with beside its edition words:
+/// `Extended Edition`, `Theatrical Cut`, `Unrated Version`.
+const EDITION_FILLER_WORDS: &[&str] = &["edition", "cut", "version"];
+
 /// Lowercases a token and strips everything but ASCII alphanumerics, so
 /// noise-token matching is insensitive to hyphens/punctuation (e.g.
 /// `"x265-GROUP"` and `"WEB-DL"` both compare cleanly).
@@ -429,6 +433,49 @@ fn edition_from_tail(tail: &[&str]) -> Option<String> {
         .map(|(name, _)| *name)
         .collect();
     (!found.is_empty()).then(|| found.join(", "))
+}
+
+/// Whether `name` is nothing but an edition's name -- `Theatrical`,
+/// `Director's Cut`, `Extended Edition`, `Special Edition` -- with at most
+/// release noise beside it: the name of one edition's folder within a
+/// film's, which names no film of its own. The editions are
+/// [`EDITION_WORDS`], so a name is edition-only exactly when every word of
+/// it is one of theirs, a word an edition is written with, or noise. A name
+/// with a year names a film, however it is spelled: `Final Cut (2022)`.
+pub(crate) fn is_edition_only(name: &str) -> bool {
+    if parse_media_filename(name).year.is_some() {
+        return false;
+    }
+    let words: Vec<String> = normalized_stem(name)
+        .split_whitespace()
+        .flat_map(|t| t.split(['-', '\'']))
+        .map(clean_token)
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut at = 0;
+    let mut names_an_edition = false;
+    while let Some(rest) = words.get(at..).filter(|rest| !rest.is_empty()) {
+        let spelled = EDITION_WORDS
+            .iter()
+            .flat_map(|(_, spellings)| spellings.iter())
+            .filter(|spelling| {
+                rest.len() >= spelling.len()
+                    && rest.iter().zip(spelling.iter()).all(|(a, b)| a == b)
+            })
+            .map(|spelling| spelling.len())
+            .max();
+        if let Some(len) = spelled {
+            names_an_edition = true;
+            at += len;
+            continue;
+        }
+        let word = rest[0].as_str();
+        if !(EDITION_FILLER_WORDS.contains(&word) || is_noise_token(word)) {
+            return false;
+        }
+        at += 1;
+    }
+    names_an_edition
 }
 
 /// The title tokens before an episode marker or air date, and the show year
@@ -1022,6 +1069,37 @@ mod tests {
         let result = parse_media_filename("Show.S01E02.2024.03.01");
         assert_eq!((result.season, result.episode), (Some(1), Some(2)));
         assert_eq!(result.air_date, None);
+    }
+
+    /// A name is edition-only when every word of it belongs to an edition's
+    /// name or is release noise, it names at least one edition, and it has
+    /// no year.
+    #[test]
+    fn edition_only_names() {
+        let cases = [
+            ("Theatrical", true),
+            ("Theatrical Cut", true),
+            ("Director's Cut", true),
+            ("Directors.Cut", true),
+            ("Extended Edition", true),
+            ("Extended", true),
+            ("Unrated Version", true),
+            // A name with a year names a film.
+            ("Special Edition (2003)", false),
+            ("Final Cut (2022)", false),
+            ("Theatrical.2019", false),
+            ("Final Cut 1080p", true),
+            ("Edition", false),
+            ("Cut", false),
+            ("1080p", false),
+            ("", false),
+            ("Uncut Gems", false),
+            ("The Final Cut", false),
+            ("Heat Extended", false),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(is_edition_only(name), expected, "{name}");
+        }
     }
 
     #[test]

@@ -8,9 +8,11 @@
 //! A source is usually one file. The parts of a multi-part movie
 //! (`Movie (2019) - CD1.avi`, `- CD2.avi`, issue #233) are one source that
 //! plays them in order: the parts of one edition in one folder, stacked by
-//! [`stack_parts`].
+//! [`stack_parts`]. So are the stream files a DVD or Blu-ray folder rip's
+//! main title plays (issue #234), which the indexer numbers as parts -- and
+//! across the discs of a set of one film, disc by disc ([`stack_keys`]).
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use sea_orm::DbErr;
@@ -21,11 +23,15 @@ use beam_domain::models::{Episode, MediaFile, MediaFileContent, MediaStream, Str
 use beam_domain::repositories::{
     FileRepository, MediaStreamRepository, MovieRepository, SidecarSubtitleRepository,
 };
-use beam_domain::utils::source_rank::{SourceRankKey, rank_sources, stack_parts};
+use beam_domain::utils::path_policy::{DiscKind, disc_stream_kind};
+use beam_domain::utils::source_rank::{
+    SourceRankKey, StackKey, rank_sources, stack_keys, stack_parts,
+};
 use beam_domain::utils::subtitle::is_text_subtitle_codec;
 
 use crate::models::{
-    AudioTrack, EpisodeSpan, MediaSource, SourcePart, SubtitleOrigin, SubtitleTrack, VideoTrack,
+    AudioTrack, DiscStructure, EpisodeSpan, MediaSource, SourcePart, SubtitleOrigin, SubtitleTrack,
+    VideoTrack,
 };
 
 /// The largest subtitle file Beam converts to WebVTT: 8 MiB, about a hundred
@@ -170,15 +176,19 @@ impl SourceCatalog {
             for file in self.files.find_by_movie_entry_id(entry.id).await? {
                 files.push(self.part_file(file).await?);
             }
-            // The entry is the edition, so only the folder tells two
-            // stacks of one edition apart.
-            let stacks = stack_parts(files, |part| {
-                let folder: PathBuf = part.file.path.parent().map(PathBuf::from)?;
-                part.part_number().map(|number| (folder, number))
+            // The entry is the edition, so only the folder -- or the set of
+            // discs -- tells two stacks of one edition apart.
+            let keys = {
+                let paths: Vec<&Path> = files.iter().map(|part| part.file.path.as_path()).collect();
+                stack_keys(&paths)
+            };
+            let keyed: Vec<(StackKey, PartFile)> = keys.into_iter().zip(files).collect();
+            let stacks = stack_parts(keyed, |(key, part)| {
+                part.part_number().map(|number| (key.clone(), number))
             });
             ranked.extend(stacks.into_iter().map(|parts| RankedSource {
                 edition: entry.edition.clone(),
-                parts,
+                parts: parts.into_iter().map(|(_, part)| part).collect(),
             }));
         }
         rank_sources(&mut ranked, RankedSource::rank_key);
@@ -351,6 +361,15 @@ fn build_source(
     let episode_span = parts
         .first()
         .and_then(|lead| episode_span(&lead.file, episode_number));
+    // A disc's main title is its stream files, all of one disc; its first
+    // says which kind (issue #234).
+    let disc_structure = parts
+        .first()
+        .and_then(|lead| disc_stream_kind(&lead.file.path))
+        .map(|kind| match kind {
+            DiscKind::Dvd => DiscStructure::Dvd,
+            DiscKind::BluRay => DiscStructure::BluRay,
+        });
 
     let mut lead = None;
     let mut source_parts = Vec::with_capacity(parts.len());
@@ -392,6 +411,7 @@ fn build_source(
         is_primary,
         edition,
         episode_span,
+        disc_structure,
         parts: source_parts,
         size_bytes,
         mime_type,

@@ -171,8 +171,9 @@ Two things never count as a file going missing:
 - **The whole library went away.** A watcher event while the library root is unavailable changes
   nothing, and a root that holds **no video files at all** — none with an extension listed
   [below](#which-files-get-indexed), counting files Beam skips by their name (samples, trailers,
-  your ignore patterns) — while the library still has video files indexed is refused outright.
-  Files inside a folder Beam skips wholesale (a hidden or housekeeping folder, a disc structure, an
+  your ignore patterns, and counting a DVD's or Blu-ray's stream files) — while the library still
+  has video files indexed is refused outright.
+  Files inside a folder Beam skips wholesale (a hidden or housekeeping folder, an `AUDIO_TS`, an
   extras folder, a folder an ignore pattern matches) are never looked at, so they do not count: a root holding only
   `Movie (2019)/Trailers/Teaser.mkv` is refused too. A refused scan changes nothing, so this errs
   on the safe side. That is what an unmounted volume looks like, whether its mount point is left empty or
@@ -268,10 +269,10 @@ Some video files are skipped too, because they are not what a library is for:
 - **Hidden files and folders** — any name starting with `.`, at any depth.
 - **NAS and system housekeeping folders** — `@eaDir` (Synology), `#recycle`, `$RECYCLE.BIN`,
   `System Volume Information`, `lost+found`.
-- **DVD and Blu-ray disc structures** — everything in a `VIDEO_TS`, `AUDIO_TS`, `BDMV` or
-  `CERTIFICATE` folder, at any depth. A disc copied whole splits one film into files such as
-  `VTS_01_1.VOB` or `00001.m2ts`, none of which is a title on its own, so Beam does not index them
-  yet. Remux the disc to a single file (`Heat (1995)/Heat (1995).mkv`) to add it to your library.
+- **The rest of a DVD or Blu-ray disc** — a `VIDEO_TS` or `BDMV` folder is indexed as one version
+  of its film, playing its main title (see [DVD and Blu-ray folders](#dvd-and-blu-ray-folders)),
+  and every other file in it — menus, extras, other playlists — is skipped, as is everything in an
+  `AUDIO_TS` or `CERTIFICATE` folder, at any depth.
 - **Extras folders** anywhere below the top of a library — `Extras`, `Featurettes`,
   `Behind The Scenes`, `Deleted Scenes`, `Interviews`, `Sample`, `Samples`, `Bonus`
   (`Breaking Bad/Extras/`, a release folder's `Sample/`).
@@ -409,6 +410,76 @@ next time Beam starts, and each part keeps its place in the movie.
 
 The web player and the apps start a multi-part version at its first part; they do not yet move on
 to the next part by themselves.
+
+### DVD and Blu-ray folders
+
+A disc copied whole — a `VIDEO_TS` or `BDMV` folder — is one version of the film its folder names:
+
+```
+Movies/
+├── Heat (1995)/
+│   └── VIDEO_TS/
+│       ├── VIDEO_TS.IFO
+│       ├── VTS_01_0.IFO
+│       ├── VTS_01_1.VOB
+│       └── VTS_01_2.VOB
+└── Ronin (1998)/
+    └── BDMV/
+        ├── PLAYLIST/
+        │   └── 00800.mpls
+        └── STREAM/
+            └── 00800.m2ts
+```
+
+The folder around the disc is read like a file name (`Heat.1995.DVD9-GROUP/VIDEO_TS` is *Heat* too),
+and the files inside the disc are never read as titles, so every disc's `VTS_01_1.VOB` or
+`00001.m2ts` stays with its own film. A folder with a year in its name (`Heat (1995)`) names the
+film whatever the folders below it are called, so `Heat (1995)/Bonus Feature/VIDEO_TS` is *Heat*
+too. A folder named only for the disc, side, volume or part (`Disc 1`, `Disc One`, `DVD 1`, `BD1`,
+`Disc 1 of 2`, `Disc 2 - Extras`, `Side A`, `Vol 1`), only for the edition (`Theatrical`,
+`Director's Cut`, `Extended Edition`) or only with release words (`DVD9`) is skipped for the folder
+above it, so `Heat/Disc One/VIDEO_TS` is *Heat*. Without a year anywhere, any other folder name
+(`Heat/Bonus Feature/VIDEO_TS`) is taken as the film's, so give the film's folder its year. A disc
+with no folder naming a film above it, or with a season folder anywhere above it (`Show/Season
+1/Disc 1/VIDEO_TS`), names no film: it is indexed without a title and the admin log says why. A disc of a show's episodes is not split into episodes.
+
+A film spread over several discs plays as one version, disc 1 first, when its disc folders are
+numbered and sit side by side:
+
+```
+Movies/
+├── Lawrence of Arabia (1962)/
+│   ├── Disc 1/
+│   │   └── VIDEO_TS/
+│   └── Disc 2/
+│       └── VIDEO_TS/
+├── Heat (1995) - CD1/
+│   └── VIDEO_TS/
+└── Heat (1995) - CD2/
+    └── VIDEO_TS/
+```
+
+The discs must run from disc 1 with none missing and none numbered twice. If disc 2 of three is
+missing, Beam cannot play them as one film, so it lists each disc as a version of its own until
+disc 2 arrives.
+
+Beam plays a disc's main title, which it reads from the disc without writing anything to it:
+
+- **DVD** — the title set that runs longest according to its `VTS_nn_0.IFO`, played as its VOBs
+  `VTS_nn_1.VOB`, `VTS_nn_2.VOB`, … in turn. If a title set's IFO is missing or damaged, Beam takes
+  the largest title set instead. Menus, trailers and other title sets are not listed.
+- **Blu-ray** — the playlist in `BDMV/PLAYLIST` that runs longest, played as the clips in
+  `BDMV/STREAM` it names, in its order. If no playlist can be read, Beam takes the largest clip.
+
+A disc moved or renamed as a folder keeps its watch progress, as any moved file does. Anything a
+disc holds in an `AUDIO_TS` or `CERTIFICATE` folder is skipped.
+
+Beam serves a disc's files as they are and never converts them. A DVD's VOBs are MPEG program
+streams, usually MPEG-2 video with AC-3 audio, and a Blu-ray's clips are MPEG transport streams,
+often with DTS or TrueHD audio. The Android app does not open VOBs, so there a DVD version is listed
+as not playable, with the reason; it judges a Blu-ray clip by its codecs. Most browsers play
+neither, and the web player does not yet check what it can play: it tries a disc version and fails.
+Remux the disc to a single file (`Heat (1995)/Heat (1995).mkv`) to play it everywhere.
 
 ### Directory layout for TV
 

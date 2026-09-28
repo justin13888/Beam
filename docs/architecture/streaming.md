@@ -43,7 +43,25 @@ state is kept per title ([#188](https://github.com/justin13888/beam/issues/188))
 played, so a multi-part movie is one continue-watching row, and resuming it resumes the part that
 was playing at the position within that part. A report's position is held to the reported part's
 own duration, and only its last part can mark the movie played: 95% of an earlier part records the
-position and marks nothing, since that part's end is only where the next one starts. Sources
+position and marks nothing, since that part's end is only where the next one starts.
+
+A DVD or Blu-ray folder rip ([#234](https://github.com/justin13888/beam/issues/234), FR-222) is a
+source of its film the same way: its `parts` are the stream files the disc's main title plays --
+the main title set's VOBs, or the main playlist's `.m2ts` clips -- and its `disc_structure` is `dvd`
+or `blu_ray`. The discs of a set of one film (`Disc 1`, `Disc 2`, ... side by side, decision
+D234-7) are one source whose parts run through each disc's main title in disc order. They are
+served as they are, like any file. Whether they play is the client's to say
+([ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md)): a VOB is an MPEG program stream
+(`container_format` `mpeg`), usually MPEG-2 video with AC-3 or MPEG audio, which no browser and not
+the Android app's ExoPlayer container list open, so the Android app's capability check lists the
+source as not directly playable with its reason. The web player has no capability check yet
+([#138](https://github.com/justin13888/beam/issues/138)): it plays `sources[0]`, so a title whose
+primary source is a disc is tried and fails in the browser. A Blu-ray clip is a BDAV transport stream
+(`mpegts`, each packet carrying a 4-byte timestamp): the Android app's container list admits
+`mpegts`, so its capability check judges the clip by its codecs -- often refusing its DTS or TrueHD
+audio -- though ExoPlayer has not been verified to demux BDAV's timestamped packets, which a client
+may use `disc_structure` to decide. The server never remuxes a disc into something a
+client can open; an operator who wants one playable everywhere remuxes it to a single file. Sources
 accept a movie id or an episode id; a show id is rejected with 400, since shows have no files of
 their own. Episode sources landed in
 [#102](https://github.com/justin13888/beam/pull/102), closing
