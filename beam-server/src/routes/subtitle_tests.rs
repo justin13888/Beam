@@ -130,6 +130,7 @@ impl Fixture {
             missing_since: None,
             classifier_version: 0,
             container_tags: None,
+            identity: None,
         };
         let id = file.id;
         self.files.files.lock().unwrap().insert(file.id, file);

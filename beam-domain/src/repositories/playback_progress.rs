@@ -307,6 +307,7 @@ pub mod in_memory_fixture {
                     hash: 0,
                     size_bytes: 1024,
                     mtime: None,
+                    identity: None,
                     mime_type: None,
                     duration: None,
                     container_format: None,

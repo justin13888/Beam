@@ -80,6 +80,7 @@ async fn seeded_store() -> InMemoryLibraryShapeRepository {
             hash: 0xdead_beef,
             size_bytes: 2 * GIB,
             mtime: None,
+            identity: None,
             mime_type: Some("video/x-matroska".to_string()),
             duration: None,
             container_format: Some("matroska,webm".to_string()),

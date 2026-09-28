@@ -961,6 +961,7 @@ async fn an_unhashed_row_is_hashed_when_it_is_probed_again() {
             hash: 0,
             size_bytes,
             mtime,
+            identity: None,
             mime_type: None,
             duration: None,
             container_format: None,

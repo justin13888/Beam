@@ -231,6 +231,8 @@ impl FileRepository for SqlFileRepository {
             updated_at: Set(now.into()),
             file_status: Set(create.status.into()),
             mtime: Set(create.mtime.map(|d| d.into())),
+            inode: Set(create.identity.map(|identity| identity.inode as i64)),
+            ctime: Set(create.identity.map(|identity| identity.ctime.into())),
             missing_since: Set(None),
             last_episode_number: Set(last_episode_number),
             classifier_version: Set(create.classifier_version as i16),
@@ -258,6 +260,10 @@ impl FileRepository for SqlFileRepository {
         }
         if let Some(mtime) = update.mtime {
             active_model.mtime = Set(Some(mtime.into()));
+        }
+        if let Some(identity) = update.identity {
+            active_model.inode = Set(Some(identity.inode as i64));
+            active_model.ctime = Set(Some(identity.ctime.into()));
         }
         match update.probe {
             ProbeUpdate::Keep => {}
@@ -431,6 +437,7 @@ impl FileRepository for SqlFileRepository {
             path,
             size_bytes,
             mtime,
+            identity,
         } in relinks
         {
             files::ActiveModel {
@@ -438,6 +445,8 @@ impl FileRepository for SqlFileRepository {
                 file_path: Set(path.to_string_lossy().to_string()),
                 file_size: Set(size_bytes as i64),
                 mtime: Set(mtime.map(|d| d.into())),
+                inode: Set(identity.map(|identity| identity.inode as i64)),
+                ctime: Set(identity.map(|identity| identity.ctime.into())),
                 missing_since: Set(None),
                 updated_at: Set(now),
                 ..Default::default()

@@ -37,6 +37,14 @@ pub struct Model {
     /// change-detection gate before an XXH3 rehash.
     pub mtime: Option<DateTimeWithTimeZone>,
 
+    /// The file's inode (its bits, as `hash_xxh3`'s) and change time when it
+    /// was last recorded; both `NULL` on a platform without them, or for a
+    /// row recorded before they were (issue #228). A rename or a replace
+    /// always changes them, so a file whose inode or ctime moved is hashed
+    /// even when its size and mtime match.
+    pub inode: Option<i64>,
+    pub ctime: Option<DateTimeWithTimeZone>,
+
     /// When the indexer first found this file gone from disk, or `None` while
     /// it is present. A missing row is hidden from every visible read and
     /// purged once it has been missing for the grace period (issue #179).
