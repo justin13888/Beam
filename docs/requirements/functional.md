@@ -246,21 +246,23 @@ strength. Each requirement is independently testable. See `product.md` for narra
   met in nor how their folders' names sort changes the outcome: an NFO whose content its path's
   record does not hold (or that has no record) has *moved* when its content is what the record of
   an NFO path one of those videos had holds, and the file there no longer holds it -- gone, or
-  holding other content. A moved NFO MUST be recorded as applied and change no pin -- a kept,
-  conflicting NFO stays kept -- whether it moved to a free path or, in a swap or rotation of
-  files or folders, to a path whose own NFO moved on in turn. An NFO whose content no such record
-  holds is an edited or a new one: at a path already recorded, or where the NFO the video had at
-  its old path is gone from disk and recorded, it is edited and applied as edited; one whose
-  path's record already holds its content is left alone, so a video moved beside an NFO already
-  recorded does not take it; any other -- never applied to the title, or forgotten by a removal
-  seen first -- MUST be applied as a new file's NFO is, keeping a title's other pin, and recorded.
-  An NFO forgotten by a removal and put back at the same path is therefore one added after
-  indexing and re-pins its title, while one that comes back with its video at another path keeps
-  the title's pin. A watcher event sees a move one name at a time, so it MUST leave a changed NFO
-  as it is -- neither applied nor recorded -- for the next scan to judge as above when the NFO may
-  be one half of a move: a video it may describe was left to the scan by the same event (FR-221)
-  or is no longer the file its row records, or its content is what another NFO path's record
-  holds and the file there no longer holds it.
+  holding other content. An NFO several of those videos locate (a folder's `movie.nfo`, a show's
+  `tvshow.nfo`) MUST be judged once, over all of them. A moved NFO MUST be recorded as applied and
+  change no pin -- a kept, conflicting NFO stays kept -- whether it moved to a free path or, in a
+  swap or rotation of files or folders, to a path whose own NFO moved on in turn. An NFO whose
+  content no such record holds is an edited or a new one: at a path already recorded, or where an
+  NFO any video locating it had at its old path is gone from disk and recorded, it is edited and
+  applied as edited; one whose path's record already holds its content is left alone, so a video
+  moved beside an NFO already recorded does not take it; any other -- never applied to the title,
+  or forgotten by a removal seen first -- MUST be applied, to every video locating it, as a new
+  file's NFO is, keeping a title's other pin, and recorded. An NFO forgotten by a removal and put
+  back at the same path is therefore one added after indexing and re-pins its title, while one
+  that comes back with its video at another path keeps the title's pin. A watcher event sees a
+  move one name at a time, so it MUST leave a changed NFO as it is -- neither applied nor
+  recorded -- for the next scan to judge as above when the NFO may be one half of a move: a video
+  it may describe was left to the scan by the same event (FR-221) or is no longer the file its
+  row records, or its content is what another NFO path's record holds and the file there no
+  longer holds it.
   A walk that could not read where an NFO lives, or a removal reported while the library root is
   gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a

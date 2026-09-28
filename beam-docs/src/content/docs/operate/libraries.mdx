@@ -179,11 +179,13 @@ in, as long as it comes back within the grace period. Subtitle files and NFOs be
 by where they are now: a moved video has the subtitles beside its new name, and an NFO moved with it
 keeps pinning its title to the same id — or, if the admin log said its id was not used because the
 title already had another, still leaves that pin alone. An NFO you edit on the way re-pins the title
-to the id it now names. An NFO already in the folder a video is moved into is not taken by that
-video when Beam has already read it for the files there; one Beam has not read yet is applied as a
-new file's NFO would be, keeping the title's pin if it names another id. If Beam saw an NFO
-deleted, putting it back in the same place is adding it, and it re-pins its title; if it comes back
-with its video in another place, it is that video's NFO arriving with it, and the pin stays.
+to the id it now names — and a `movie.nfo` or `tvshow.nfo` that several moved videos share is judged
+for all of them together, so it makes no difference which of them Beam comes to first. An NFO
+already in the folder a video is moved into is not taken by that video when Beam has already read
+it for the files there; one Beam has not read yet is applied as a new file's NFO would be, keeping
+the title's pin if it names another id. If Beam saw an NFO deleted, putting it back in the same
+place is adding it, and it re-pins its title; if it comes back with its video in another place, it
+is that video's NFO arriving with it, and the pin stays.
 
 The same holds when files trade names. Swap two files' names, rotate three, or rename a file onto
 the name of one you deleted earlier, and each record follows its file's contents rather than its

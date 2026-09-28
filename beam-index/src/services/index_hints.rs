@@ -838,18 +838,21 @@ impl LocalIndexService {
     /// relinked videos had holds, and the file there no longer holds it --
     /// gone, or holding other content. A moved NFO takes that record's
     /// applied state: it is recorded as it is, and changes no pin. An NFO
-    /// whose content no such record holds is judged by itself:
+    /// several of the videos locate -- a folder's `movie.nfo`, a show's
+    /// `tvshow.nfo` -- is judged once, over all of them. An NFO whose
+    /// content no such record holds is judged by itself:
     ///
     /// * one its path's record already holds is settled and left alone -- a
     ///   video moved beside it does not take it;
     /// * one whose path has a record of other content was edited, and is
     ///   left for the re-apply to replace the pin with;
-    /// * one with no record, where the NFO the video had at `from` is gone
-    ///   from disk and recorded, was edited during the move: left
-    ///   unrecorded, so the re-apply replaces the pin with it;
+    /// * one with no record, where an NFO any video locating it had at its
+    ///   `from` is gone from disk and recorded, was edited during the move:
+    ///   left unrecorded, so the re-apply replaces the pin with it;
     /// * any other with no record -- an NFO the title never had, or one
-    ///   whose record a removal forgot first -- is applied as classification
-    ///   applies a new file's, keeping a title's other pin, then recorded.
+    ///   whose record a removal forgot first -- is applied to every video
+    ///   locating it as classification applies a new file's, keeping a
+    ///   title's other pin, then recorded.
     pub(super) async fn carry_nfos_on_relink(
         &self,
         library: &Library,
@@ -934,14 +937,24 @@ impl LocalIndexService {
             }
         }
 
-        // An NFO two relinked videos share -- a folder's `movie.nfo`, a
-        // show's `tvshow.nfo` -- is judged once, for the first of them.
-        let mut judged: HashSet<&Path> = HashSet::new();
+        // An NFO several relinked videos share -- a folder's `movie.nfo`, a
+        // show's `tvshow.nfo` -- is judged once, over all of them: every
+        // video that locates it, and every path their counterparts at
+        // `from` could have had. Ordered by path, so the NFOs of one batch
+        // are judged in the same order whatever order the videos came in.
+        let mut shared: std::collections::BTreeMap<
+            &Path,
+            (&LocatedNfo, Vec<&MediaFile>, Vec<&Path>),
+        > = std::collections::BTreeMap::new();
         for (moved, located, before) in &located {
+            let (_, videos, olds) = shared
+                .entry(located.path.as_path())
+                .or_insert_with(|| (located, Vec::new(), Vec::new()));
+            videos.push(*moved);
+            olds.extend(before.iter().map(PathBuf::as_path));
+        }
+        for (located, videos, before) in shared.into_values() {
             let LocatedNfo { path, nfo, content } = located;
-            if !judged.insert(path.as_path()) {
-                continue;
-            }
             let stored = record_of(path);
             if stored.is_some_and(|stored| content.same_as(stored)) {
                 continue;
@@ -960,7 +973,7 @@ impl LocalIndexService {
                     continue;
                 }
                 if self
-                    .repin_from_nfo(library, path, nfo, &[*moved], PinConflict::Keep)
+                    .repin_from_nfo(library, path, nfo, &videos, PinConflict::Keep)
                     .await?
                     == PinOutcome::Refused
                 {

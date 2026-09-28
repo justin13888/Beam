@@ -2547,3 +2547,117 @@ async fn a_kept_nfos_event_heard_before_its_moved_videos_keeps_the_pin() {
     h.scan().await;
     assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
 }
+
+/// Move each `(from, to)` video on disk, and return the batch a relink of
+/// them hands [`LocalIndexService::carry_nfos_on_relink`]: each row's old
+/// path, and the row at its new one.
+fn move_videos(h: &Harness, moves: &[(&str, &str)]) -> Vec<(PathBuf, MediaFile)> {
+    moves
+        .iter()
+        .map(|(from, to)| {
+            let row = h.file(from);
+            move_file(h, from, to);
+            (
+                h.root.join(from),
+                MediaFile {
+                    path: h.root.join(to),
+                    ..row
+                },
+            )
+        })
+        .collect()
+}
+
+/// A `movie.nfo` two relinked videos share -- moved from one video's old
+/// folder and edited on the way, beside another video that had no NFO -- is
+/// judged over both of them, never for whichever the batch holds first
+/// (FR-219): edited in the move in either order, so it is left for the
+/// re-apply, which replaces the pin with it.
+#[tokio::test]
+async fn a_shared_movie_nfo_edited_in_a_move_is_judged_the_same_in_either_batch_order() {
+    for reversed in [false, true] {
+        let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+        h.video("P/Heat (1995).mkv");
+        h.write("P/movie.nfo", &tmdb_movie(949));
+        h.video("Q/Heat (1995) - Remux.mkv");
+        h.scan().await;
+        assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+
+        let mut batch = move_videos(
+            &h,
+            &[
+                ("P/Heat (1995).mkv", "N/Heat (1995) - X.mkv"),
+                ("Q/Heat (1995) - Remux.mkv", "N/Heat (1995) - Y.mkv"),
+            ],
+        );
+        move_file(&h, "P/movie.nfo", "N/movie.nfo");
+        h.write("N/movie.nfo", &tmdb_movie(2));
+        if reversed {
+            batch.reverse();
+        }
+        h.service
+            .carry_nfos_on_relink(&h.library, &batch)
+            .await
+            .unwrap();
+
+        assert!(
+            h.applied("N/movie.nfo").await.is_none(),
+            "edited in the move, reversed: {reversed}"
+        );
+        assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+        h.scan().await;
+        assert_eq!(
+            h.movie_pins(),
+            vec![Some("tmdb:2".to_string())],
+            "reversed: {reversed}"
+        );
+    }
+}
+
+/// The same for a `tvshow.nfo` above two relinked episodes' season folder.
+#[tokio::test]
+async fn a_shared_tvshow_nfo_edited_in_a_move_is_judged_the_same_in_either_batch_order() {
+    for reversed in [false, true] {
+        let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+        h.video("P/Lost/Season 01/Lost - S01E01.mkv");
+        h.write("P/Lost/tvshow.nfo", &tmdb_show(4607));
+        h.video("Q/Lost/Season 01/Lost - S01E02.mkv");
+        h.scan().await;
+        assert_eq!(h.show_pins(), vec![Some("tmdb:4607".to_string())]);
+
+        let mut batch = move_videos(
+            &h,
+            &[
+                (
+                    "P/Lost/Season 01/Lost - S01E01.mkv",
+                    "N/Lost/Season 01/Lost - S01E01.mkv",
+                ),
+                (
+                    "Q/Lost/Season 01/Lost - S01E02.mkv",
+                    "N/Lost/Season 01/Lost - S01E02.mkv",
+                ),
+            ],
+        );
+        move_file(&h, "P/Lost/tvshow.nfo", "N/Lost/tvshow.nfo");
+        h.write("N/Lost/tvshow.nfo", &tmdb_show(2));
+        if reversed {
+            batch.reverse();
+        }
+        h.service
+            .carry_nfos_on_relink(&h.library, &batch)
+            .await
+            .unwrap();
+
+        assert!(
+            h.applied("N/Lost/tvshow.nfo").await.is_none(),
+            "edited in the move, reversed: {reversed}"
+        );
+        assert_eq!(h.show_pins(), vec![Some("tmdb:4607".to_string())]);
+        h.scan().await;
+        assert_eq!(
+            h.show_pins(),
+            vec![Some("tmdb:2".to_string())],
+            "reversed: {reversed}"
+        );
+    }
+}
