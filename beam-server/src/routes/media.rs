@@ -29,7 +29,8 @@ pub struct BrowseQuery {
     //
     // Kynos 0.3.0 neither documents nor enforces `#[schema]` bounds on an
     // `Option` field of a `QueryParams` struct (`HistoryQuery::limit` shows
-    // the same), an upstream gap not yet filed. The service enforces 1-100
+    // the same) -- tracked with #223, the local issue for this class of
+    // Kynos constraint gap; upstream issue pending. The service enforces 1-100
     // either way -- `#invalid-pagination` -- and the prose states it; the
     // bounds below reach the document once Kynos honours them.
     #[schema(minimum = 1, maximum = 100)]
