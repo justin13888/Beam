@@ -420,7 +420,7 @@ Not yet read by any endpoint — serving sidecar subtitles is issue #189's.
 | `title` | TEXT | yes | what else the name carries (`Commentary`, a BCP 47 region such as `pt-BR`) |
 | `is_forced` / `is_sdh` / `is_default` | BOOLEAN | no | default `false` |
 | `size_bytes` | BIGINT | no | `CHECK (size_bytes >= 0)`; with `mtime`, what a scan compares to skip an unchanged subtitle |
-| `mtime` | TIMESTAMPTZ | yes | |
+| `mtime` | TIMESTAMPTZ | yes | whole microseconds, as `files.mtime`: the indexer compares a subtitle's mtime with its row at that precision (`mtime_as_stored`, [#229](https://github.com/justin13888/beam/issues/229)) |
 | `created_at` / `updated_at` | TIMESTAMPTZ | no | |
 
 Indexes on `file_id` and `library_id`. A row no scan finds any more, or whose video is no longer

@@ -4584,6 +4584,33 @@ macro_rules! sidecar_subtitle_repository_contract {
             assert_eq!(repo.find_by_file_id(other_video).await.unwrap().len(), 1);
         }
 
+        /// `sidecar_subtitles.mtime` is a `TIMESTAMPTZ`, as `files.mtime` is:
+        /// a filesystem's nanoseconds read back as whole microseconds
+        /// (issue #229), which is what a scan compares a subtitle's stat with.
+        #[tokio::test]
+        async fn an_mtime_reads_back_in_whole_microseconds() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let library = fixture.new_library().await;
+            let video = fixture.new_video_file(library).await;
+            let dir = Uuid::new_v4().to_string();
+            let written = ::chrono::DateTime::from_timestamp(1_790_000_341, 802_029_432)
+                .expect("valid instant");
+            let read_back = ::chrono::DateTime::from_timestamp(1_790_000_341, 802_029_000)
+                .expect("valid instant");
+
+            let upserted = repo
+                .upsert_by_path(UpsertSidecarSubtitle {
+                    mtime: Some(written),
+                    ..subtitle(library, video, &dir, "Movie.en.srt")
+                })
+                .await
+                .unwrap();
+            assert_eq!(upserted.mtime, Some(read_back));
+            let stored = repo.find_by_path(&upserted.path).await.unwrap().unwrap();
+            assert_eq!(stored.mtime, Some(read_back));
+        }
+
         #[tokio::test]
         async fn subtitles_are_listed_by_file_and_by_library_in_path_order() {
             let fixture = $setup().await;

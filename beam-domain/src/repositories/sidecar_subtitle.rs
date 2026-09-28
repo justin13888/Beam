@@ -19,7 +19,8 @@ pub trait SidecarSubtitleRepository: Send + Sync + std::fmt::Debug {
     /// Record `upsert` under its path: a new row, or the row already at that
     /// path updated in place -- keeping its id and `created_at` -- to belong
     /// to `upsert.file_id` with `upsert`'s format, language, flags, size and
-    /// modification time.
+    /// modification time -- the last kept, as `files.mtime` is, in whole
+    /// microseconds ([`crate::models::file::mtime_as_stored`]).
     ///
     /// Atomic: concurrent upserts of one path leave one row.
     async fn upsert_by_path(&self, upsert: UpsertSidecarSubtitle)
@@ -38,6 +39,7 @@ pub trait SidecarSubtitleRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::models::file::mtime_as_stored;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -82,7 +84,7 @@ pub mod in_memory {
                 path: path.clone(),
                 info,
                 size_bytes,
-                mtime,
+                mtime: mtime.map(mtime_as_stored),
                 created_at,
                 updated_at: now,
             };

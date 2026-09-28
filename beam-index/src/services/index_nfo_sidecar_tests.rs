@@ -1047,6 +1047,51 @@ async fn a_subtitle_for_a_video_not_yet_indexed_waits_for_the_video() {
     assert_eq!(h.subtitles_of("Movie/Movie.mkv").await.len(), 1);
 }
 
+/// A row keeps a subtitle's mtime in whole microseconds and the filesystem
+/// reports nanoseconds (issue #229): a rescan still finds an untouched
+/// subtitle unchanged, and writes nothing for it.
+#[tokio::test]
+async fn a_rescan_writes_nothing_for_a_subtitle_with_a_sub_microsecond_mtime() {
+    use chrono::Timelike;
+
+    let h = Harness::new().await;
+    h.video("Movie/Movie.mkv");
+    let subtitle = h.write("Movie/Movie.fr.srt", "1");
+    h.set_mtime(
+        "Movie/Movie.fr.srt",
+        std::time::UNIX_EPOCH + Duration::new(1_790_000_000, 123_456_789),
+    );
+    let on_disk: DateTime<Utc> = std::fs::metadata(&subtitle)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .into();
+    assert_eq!(
+        on_disk.nanosecond(),
+        123_456_789,
+        "the filesystem keeps the sub-microsecond part, or this proves nothing"
+    );
+    h.scan().await;
+
+    // Mark the row, so a rewrite -- which stamps it afresh -- shows.
+    let marker = DateTime::<Utc>::UNIX_EPOCH;
+    h.sidecar_repo
+        .rows
+        .lock()
+        .unwrap()
+        .get_mut(&subtitle)
+        .expect("the subtitle is recorded")
+        .updated_at = marker;
+    h.scan().await;
+
+    let rows = h.subtitles_of("Movie/Movie.mkv").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].updated_at, marker,
+        "the unchanged row is not rewritten"
+    );
+}
+
 /// Every regular file under `root`, with its bytes, modification time and
 /// permissions; and every directory, with its modification time.
 fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>, std::time::SystemTime, bool)> {

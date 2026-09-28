@@ -46,14 +46,19 @@ use beam_domain::utils::media_path::{
 };
 use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path};
 
-/// Read the size and modification time of a file in a single stat call --
-/// the only place the indexer reads an mtime. The mtime comes back at the
-/// precision a row keeps ([`mtime_as_stored`]), so it compares equal to the
-/// row of an unchanged file (issue #229).
+/// Read the size and modification time of a file in a single stat call,
+/// the mtime as [`stored_mtime`] reads it.
 fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
     let meta = std::fs::metadata(path)?;
-    let mtime: Option<DateTime<Utc>> = meta.modified().ok().map(|t| mtime_as_stored(t.into()));
-    Ok((meta.len(), mtime))
+    Ok((meta.len(), stored_mtime(&meta)))
+}
+
+/// The modification time `meta` records -- the only way the indexer reads an
+/// mtime, for a media file or a sidecar. It comes back at the precision a row
+/// keeps ([`mtime_as_stored`]), so it compares equal to the row of an
+/// unchanged file (issue #229).
+fn stored_mtime(meta: &std::fs::Metadata) -> Option<DateTime<Utc>> {
+    meta.modified().ok().map(|t| mtime_as_stored(t.into()))
 }
 
 /// The container tags a probe read, as classification takes them (issue #184).
@@ -175,7 +180,7 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
                                     subtitles.push(sidecars::WalkedSidecar {
                                         path,
                                         size: meta.len(),
-                                        mtime: meta.modified().ok().map(Into::into),
+                                        mtime: stored_mtime(&meta),
                                     });
                                 } else if hints::is_nfo(&path) {
                                     nfos.push(hints::WalkedNfo {
