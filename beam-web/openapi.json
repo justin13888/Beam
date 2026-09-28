@@ -12716,6 +12716,14 @@
         ],
         "description": "The episodes one file holds, first and last inclusive."
       },
+      "DiscStructure": {
+        "type": "string",
+        "enum": [
+          "dvd",
+          "blu_ray"
+        ],
+        "description": "The disc structure a source was copied from whole (issue #234).\n\nIts parts are the disc's stream files: a DVD's VOBs are MPEG program\nstreams (`mpeg`), usually MPEG-2 video with AC-3 or MPEG audio; a\nBlu-ray's clips are BDAV MPEG transport streams (`mpegts` with a 4-byte\ntimestamp before each packet). Beam serves them as they are and never\nremuxes them (ADR-0004), so a client that cannot demux or decode them\nlists the source as not directly playable."
+      },
       "SubtitleOrigin": {
         "type": "string",
         "enum": [
@@ -13024,6 +13032,17 @@
               }
             ],
             "description": "Present when this file holds a run of episodes (`S01E01-E03`): its\nduration is then the whole run's, not one episode's."
+          },
+          "disc_structure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiscStructure"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present when this source is a DVD or Blu-ray folder rip's main title\n(issue #234): its parts are the disc's own stream files, served as\nthey are (ADR-0004)."
           },
           "parts": {
             "items": {

@@ -886,6 +886,69 @@ mod tests {
         );
     }
 
+    /// A DVD or Blu-ray folder rip is one source of its title (issue #234):
+    /// the main title's stream files are its parts, in order, and the source
+    /// names the disc it was copied from. A file that is no disc's names
+    /// none.
+    #[tokio::test]
+    async fn a_disc_rips_main_title_is_one_source_naming_its_disc() {
+        use crate::models::DiscStructure;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie = make_movie("Heat", Some(1995));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let file = |path: &str, part_number: Option<u32>, size_bytes: u64| {
+            let id = file_of(
+                &file_repo,
+                MediaFileContent::Movie {
+                    movie_entry_id: theatrical,
+                    part_number,
+                },
+                size_bytes,
+                3000,
+            );
+            file_repo.files.lock().unwrap().get_mut(&id).unwrap().path = path.into();
+            id
+        };
+        let vob2 = file("/m/Heat (1995)/VIDEO_TS/VTS_02_2.VOB", Some(2), 9_000);
+        let vob1 = file("/m/Heat (1995)/VIDEO_TS/VTS_02_1.VOB", Some(1), 9_000);
+        let clip = file("/m/Heat (1995) BD/BDMV/STREAM/00800.m2ts", None, 30_000);
+        let mkv = file("/m/Heat (1995)/Heat (1995).mkv", None, 1_000);
+
+        let service = service_with_sidecars(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(InMemorySidecarSubtitleRepository::default()),
+            Arc::default(),
+        );
+        let mut sources: Vec<(Uuid, Option<DiscStructure>, Vec<Uuid>)> = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| {
+                (
+                    s.file_id,
+                    s.disc_structure,
+                    s.parts.iter().map(|p| p.file_id).collect(),
+                )
+            })
+            .collect();
+        sources.sort_by_key(|(file_id, _, _)| *file_id);
+        let mut expected = vec![
+            (vob1, Some(DiscStructure::Dvd), vec![vob1, vob2]),
+            (clip, Some(DiscStructure::BluRay), vec![clip]),
+            (mkv, None, vec![mkv]),
+        ];
+        expected.sort_by_key(|(file_id, _, _)| *file_id);
+        assert_eq!(sources, expected);
+    }
+
     /// A folder's parts are one source only as the whole run 1..n (C2 of
     /// the #233 review): parts 2 and 3 with no part 1, or 1 and 3 with no
     /// part 2, are missing a part -- or are two films whose names end alike
