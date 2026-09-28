@@ -28,13 +28,10 @@ pub struct SessionData {
 pub enum SessionError {
     #[error("Database error: {0}")]
     Db(#[from] sea_orm::DbErr),
-    /// A caller-supplied identifier is not a UUID.
+    /// A user id is not a UUID.
     ///
-    /// Named for the shape rather than the field: `delete_by_id` parses the
-    /// session id through it as well as the user id, and only the session id
-    /// can actually be malformed -- the user id comes from an authenticated
-    /// session. A handler that cannot tell this from a database failure
-    /// reports a client's typo as a 500.
+    /// Only reachable through a bug: user ids come from authenticated
+    /// sessions, and session ids are typed `Uuid` from the path onwards.
     #[error("Invalid id: {0}")]
     InvalidId(#[from] uuid::Error),
 }
@@ -137,12 +134,12 @@ pub trait SessionStore: Send + Sync + std::fmt::Debug {
     /// Each entry is `(id, SessionData)`, where `id` is the session's stable
     /// internal identifier -- NOT the credential itself, which cannot be
     /// recovered once hashed. Use `delete_by_id` to revoke one of these.
-    async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>>;
+    async fn list_for_user(&self, user_id: &str) -> Result<Vec<(Uuid, SessionData)>>;
 
     /// Revokes a specific session by its internal id, scoped to the given
     /// owning user (so one user can never revoke another's session by
     /// guessing an id). Returns `true` if a session was deleted.
-    async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool>;
+    async fn delete_by_id(&self, id: Uuid, user_id: &str) -> Result<bool>;
 
     /// The store's own view of the current time.
     ///
@@ -302,7 +299,7 @@ impl SessionStore for PgSessionStore {
         Ok(result.rows_affected)
     }
 
-    async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
+    async fn list_for_user(&self, user_id: &str) -> Result<Vec<(Uuid, SessionData)>> {
         let user_uuid: Uuid = user_id.parse()?;
         let now = self.clock.now();
         let models = SessionEntity::find()
@@ -312,14 +309,10 @@ impl SessionStore for PgSessionStore {
             .all(self.db.as_ref())
             .await?;
 
-        Ok(models
-            .iter()
-            .map(|m| (m.id.to_string(), to_session_data(m)))
-            .collect())
+        Ok(models.iter().map(|m| (m.id, to_session_data(m))).collect())
     }
 
-    async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool> {
-        let id: Uuid = id.parse()?;
+    async fn delete_by_id(&self, id: Uuid, user_id: &str) -> Result<bool> {
         let user_uuid: Uuid = user_id.parse()?;
         let result: DeleteResult = SessionEntity::delete_many()
             .filter(Column::Id.eq(id))
@@ -340,7 +333,7 @@ pub mod in_memory {
 
     #[derive(Debug, Clone)]
     struct StoredSession {
-        id: String,
+        id: Uuid,
         data: SessionData,
         idle_expires_at: chrono::DateTime<Utc>,
         absolute_expires_at: chrono::DateTime<Utc>,
@@ -404,7 +397,7 @@ pub mod in_memory {
             self.lock_sessions().insert(
                 hash_token(&token),
                 StoredSession {
-                    id: Uuid::new_v4().to_string(),
+                    id: Uuid::new_v4(),
                     data,
                     idle_expires_at: now + chrono::Duration::seconds(idle_ttl_secs as i64),
                     absolute_expires_at: now + chrono::Duration::seconds(absolute_ttl_secs as i64),
@@ -453,7 +446,7 @@ pub mod in_memory {
             Ok(count)
         }
 
-        async fn list_for_user(&self, user_id: &str) -> Result<Vec<(String, SessionData)>> {
+        async fn list_for_user(&self, user_id: &str) -> Result<Vec<(Uuid, SessionData)>> {
             // Expired sessions are filtered out here, matching the Postgres
             // store: this list is what the profile page offers for revocation,
             // and an already-dead session in it is a confusing no-op button.
@@ -466,17 +459,13 @@ pub mod in_memory {
                         && s.idle_expires_at > now
                         && s.absolute_expires_at > now
                 })
-                .map(|s| (s.id.clone(), s.data.clone()))
+                .map(|s| (s.id, s.data.clone()))
                 .collect())
         }
 
-        async fn delete_by_id(&self, id: &str, user_id: &str) -> Result<bool> {
-            // Parsed, not string-compared. The SQL store parses before it
-            // queries, so a malformed id is an error there; answering
-            // `Ok(false)` here made the double say "no such session" for input
-            // production rejects outright, and the handler above cannot tell
-            // those two apart. The shared contract pins it for both.
-            let _: Uuid = id.parse()?;
+        async fn delete_by_id(&self, id: Uuid, user_id: &str) -> Result<bool> {
+            // The user id is parsed, not string-compared: the SQL store parses
+            // it before it queries, so a malformed one is an error there too.
             let _: Uuid = user_id.parse()?;
             let mut sessions = self.lock_sessions();
             let key = sessions

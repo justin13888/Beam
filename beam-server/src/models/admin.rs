@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use kynos::Schema;
 use kynos::schema::unchecked::Unchecked;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// How severe an admin event or admin log entry is. One enum for both: the
 /// live event stream and the persisted log speak the same three levels.
@@ -74,12 +75,13 @@ impl From<EventCategory> for AdminEventCategory {
 
 #[derive(Clone, Debug, Serialize, Schema)]
 pub struct AdminEvent {
-    pub id: String,
-    pub timestamp: DateTime<Utc>,
+    pub id: Uuid,
+    /// When the event happened.
+    pub occurred_at: DateTime<Utc>,
     pub level: LogLevel,
     pub category: AdminEventCategory,
     pub message: String,
-    pub library_id: Option<String>,
+    pub library_id: Option<Uuid>,
     pub library_name: Option<String>,
     /// The scan job a `scan_progress` event reports on; `null` on every
     /// other category.
@@ -104,7 +106,7 @@ impl From<notification::AdminEvent> for AdminEvent {
         } = event;
         Self {
             id,
-            timestamp,
+            occurred_at: timestamp,
             level: level.into(),
             category: category.into(),
             message,
@@ -342,7 +344,7 @@ impl From<admin_log::AdminLogCategory> for AdminLogCategory {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct AdminLogEntry {
-    pub id: String,
+    pub id: Uuid,
     pub level: LogLevel,
     pub category: AdminLogCategory,
     pub message: String,
@@ -356,7 +358,7 @@ pub struct AdminLogEntry {
     /// out loud instead, annotating the property `x-kynos-unchecked`. It is
     /// `#[serde(transparent)]`, so the bytes on the wire are unchanged.
     pub details: Option<Unchecked<serde_json::Value>>,
-    pub created_at: String,
+    pub created_at: DateTime<Utc>,
 }
 
 impl From<AdminLog> for AdminLogEntry {
@@ -370,12 +372,12 @@ impl From<AdminLog> for AdminLogEntry {
             created_at,
         } = log;
         Self {
-            id: id.to_string(),
+            id,
             level: level.into(),
             category: category.into(),
             message,
             details: details.map(Unchecked),
-            created_at: created_at.to_rfc3339(),
+            created_at,
         }
     }
 }
@@ -398,7 +400,7 @@ pub struct AdminLogCount {
 /// login, so there is deliberately no endpoint to change it.
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct AdminUser {
-    pub id: String,
+    pub id: Uuid,
     pub display_name: String,
     pub email: Option<String>,
     pub avatar_url: Option<String>,
@@ -424,7 +426,7 @@ impl From<beam_auth::utils::models::User> for AdminUser {
             updated_at: _,
         } = user;
         Self {
-            id: id.to_string(),
+            id,
             display_name,
             email,
             avatar_url,
@@ -491,7 +493,8 @@ impl From<beam_domain::models::enrichment::EnrichmentStatusCounts> for Enrichmen
 pub struct RecentScan {
     pub level: LogLevel,
     pub message: String,
-    pub timestamp: DateTime<Utc>,
+    /// When the entry was logged.
+    pub created_at: DateTime<Utc>,
 }
 
 impl From<AdminLog> for RecentScan {
@@ -507,7 +510,7 @@ impl From<AdminLog> for RecentScan {
         Self {
             level: level.into(),
             message,
-            timestamp: created_at,
+            created_at,
         }
     }
 }
@@ -638,23 +641,25 @@ mod tests {
 
     #[test]
     fn admin_event_maps_all_fields() {
+        let occurred_at = Utc::now();
         let event = notification::AdminEvent {
-            id: "evt-1".to_string(),
-            timestamp: Utc::now(),
+            id: Uuid::from_u128(1),
+            timestamp: occurred_at,
             level: EventLevel::Warning,
             category: EventCategory::LibraryScan,
             message: "scan finished".to_string(),
-            library_id: Some("lib-1".to_string()),
+            library_id: Some(Uuid::from_u128(2)),
             library_name: Some("Movies".to_string()),
             scan: None,
             enrichment: None,
         };
         let wire = AdminEvent::from(event.clone());
-        assert_eq!(wire.id, "evt-1");
+        assert_eq!(wire.id, Uuid::from_u128(1));
+        assert_eq!(wire.occurred_at, occurred_at);
         assert_eq!(wire.level, LogLevel::Warning);
         assert_eq!(wire.category, AdminEventCategory::LibraryScan);
         assert_eq!(wire.message, "scan finished");
-        assert_eq!(wire.library_id, Some("lib-1".to_string()));
+        assert_eq!(wire.library_id, Some(Uuid::from_u128(2)));
     }
 
     /// An admin log category is spelled on the wire exactly as it is stored:

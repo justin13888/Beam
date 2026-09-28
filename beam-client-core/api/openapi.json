@@ -233,7 +233,8 @@
             "description": "The title's ID.",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -336,40 +337,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid media id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-media-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -559,7 +541,8 @@
             "description": "The title's ID.",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -662,40 +645,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid media id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-media-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -877,7 +841,8 @@
             "description": "Media id (movie or show UUID).",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -937,40 +902,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid media id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-media-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -1054,7 +1000,8 @@
             "description": "Media id (movie or show UUID).",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -1114,7 +1061,7 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid media id; Sources are not available at the show level",
+            "description": "Bad Request; Sources are not available at the show level",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1143,28 +1090,11 @@
                           "properties": {
                             "type": {
                               "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-media-id"
-                            }
-                          }
-                        }
-                      ],
-                      "title": "Invalid media id"
-                    },
-                    {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
                               "const": "https://beam.justinchung.net/reference/errors/#sources-not-available-for-show"
                             }
                           }
                         }
-                      ],
-                      "title": "Sources are not available at the show level"
+                      ]
                     }
                   ]
                 }
@@ -1675,7 +1605,7 @@
           {
             "name": "year",
             "in": "query",
-            "description": "Filter by year (exact match).",
+            "description": "Filter by year (exact match). A year beyond 2147483647 is refused as\n`#invalid-filter`, as are the range bounds below.",
             "required": false,
             "schema": {
               "type": [
@@ -1732,16 +1662,14 @@
           {
             "name": "min_rating",
             "in": "query",
-            "description": "Filter by minimum rating (0-100).",
+            "description": "Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;\nan unrated title counts as 0. Outside 0-10 is `#invalid-filter`.",
             "required": false,
             "schema": {
               "type": [
-                "integer",
+                "number",
                 "null"
               ],
-              "maximum": 4294967295.0,
-              "minimum": 0.0,
-              "format": "uint32"
+              "format": "double"
             }
           },
           {
@@ -1801,7 +1729,7 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid cursor; Invalid pagination; Invalid search query",
+            "description": "Bad Request; Invalid cursor; Invalid pagination; Invalid search query; Invalid filter",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1868,6 +1796,22 @@
                         }
                       ],
                       "title": "Invalid search query"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-filter"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid filter"
                     }
                   ]
                 }
@@ -3591,7 +3535,8 @@
             "description": "File ID.",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -3685,40 +3630,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid file id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-file-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -3909,7 +3835,8 @@
             "description": "File ID.",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -4003,40 +3930,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid file id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-file-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -4229,7 +4137,8 @@
             "description": "File ID.",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -4323,40 +4232,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid file id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-file-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -4547,7 +4437,8 @@
             "description": "File ID.",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -4641,40 +4532,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid file id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-file-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -5656,7 +5528,8 @@
             "description": "Library id (UUID).",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -5716,40 +5589,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid library id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-library-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -5832,7 +5686,8 @@
             "description": "Library id (UUID).",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -5892,40 +5747,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid library id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-library-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -6836,7 +6672,8 @@
             "description": "Media id (movie or show UUID).",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -6971,40 +6808,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid media id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-media-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -7082,7 +6900,8 @@
             "description": "Library id (UUID).",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -7205,40 +7024,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid library id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-library-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -11749,7 +11549,8 @@
             "description": "Session id, from `GET /sessions`.",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           },
           {
@@ -11852,40 +11653,21 @@
             }
           },
           "400": {
-            "description": "Bad Request; Invalid session id",
+            "description": "Bad Request",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#invalid-session-id"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -13445,13 +13227,13 @@
         "properties": {
           "tmdb": {
             "type": [
-              "integer",
+              "number",
               "null"
             ],
-            "maximum": 4294967295.0,
+            "maximum": 10.0,
             "minimum": 0.0,
-            "format": "uint32",
-            "description": "TMDB rating as a percentage (0-100)"
+            "format": "double",
+            "description": "TMDB rating on TMDB's own 0-10 scale, as precise as it is stored."
           }
         },
         "type": "object"
@@ -13495,16 +13277,16 @@
               "string",
               "null"
             ],
-            "format": "date-time",
-            "description": "First air date"
+            "format": "date",
+            "description": "The day the season's first episode aired: a calendar date."
           },
           "last_aired": {
             "type": [
               "string",
               "null"
             ],
-            "format": "date-time",
-            "description": "Last air date"
+            "format": "date",
+            "description": "The day the season's last episode aired: a calendar date."
           }
         },
         "type": "object"
@@ -13590,7 +13372,8 @@
               "string",
               "null"
             ],
-            "description": "Optional air date of the episode in YYYY-MM-DD format"
+            "format": "date",
+            "description": "The day the episode aired: a calendar date."
           },
           "thumbnail_url": {
             "type": [
@@ -13599,7 +13382,7 @@
             ],
             "description": "Optional URL to the episode's thumbnail image"
           },
-          "duration": {
+          "duration_secs": {
             "type": [
               "number",
               "null"
@@ -13683,7 +13466,7 @@
             "$ref": "#/components/schemas/ShowDates",
             "description": "Show dates"
           },
-          "episode_runtime": {
+          "episode_runtime_mins": {
             "type": [
               "integer",
               "null"
@@ -13691,7 +13474,7 @@
             "maximum": 4294967295.0,
             "minimum": 0.0,
             "format": "uint32",
-            "description": "Runtime of episodes in minutes"
+            "description": "Runtime of episodes in whole minutes"
           },
           "episodes": {
             "items": {
@@ -13904,10 +13687,10 @@
               "string",
               "null"
             ],
-            "format": "date-time",
-            "description": "Release date of the movie"
+            "format": "date",
+            "description": "The day the movie was released: a calendar date, with no time or zone."
           },
-          "runtime": {
+          "runtime_mins": {
             "type": [
               "integer",
               "null"
@@ -13915,15 +13698,15 @@
             "maximum": 4294967295.0,
             "minimum": 0.0,
             "format": "uint32",
-            "description": "Runtime of the movie in minutes"
+            "description": "Runtime of the movie in whole minutes, as its provider lists it."
           },
-          "duration": {
+          "duration_secs": {
             "type": [
               "number",
               "null"
             ],
             "format": "double",
-            "description": "Duration of the primary source's file in seconds"
+            "description": "Duration of the primary source's file in seconds."
           },
           "poster_url": {
             "type": [
@@ -15097,7 +14880,8 @@
       "Library": {
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid"
           },
           "name": {
             "type": "string"
@@ -15108,12 +14892,11 @@
               "null"
             ]
           },
-          "size": {
+          "file_count": {
             "type": "integer",
-            "maximum": 4294967295.0,
             "minimum": 0.0,
-            "format": "uint32",
-            "description": "Number of media items in the library"
+            "format": "uint64",
+            "description": "How many indexed files the library holds now."
           },
           "last_scan_started_at": {
             "type": [
@@ -15136,9 +14919,8 @@
               "integer",
               "null"
             ],
-            "maximum": 2147483647.0,
-            "minimum": -2147483648.0,
-            "format": "int32",
+            "minimum": 0.0,
+            "format": "uint64",
             "description": "Number of files found in the last scan"
           }
         },
@@ -15146,7 +14928,7 @@
         "required": [
           "id",
           "name",
-          "size"
+          "file_count"
         ]
       },
       "FileIndexStatus": {
@@ -15170,10 +14952,12 @@
       "LibraryFile": {
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid"
           },
           "library_id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid"
           },
           "path": {
             "type": "string",
@@ -15181,7 +14965,8 @@
           },
           "size_bytes": {
             "type": "integer",
-            "format": "int64",
+            "minimum": 0.0,
+            "format": "uint64",
             "description": "File size in bytes"
           },
           "hash": {
@@ -15443,7 +15228,8 @@
       "AdminLogEntry": {
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid"
           },
           "level": {
             "$ref": "#/components/schemas/LogLevel"
@@ -15466,7 +15252,8 @@
             "description": "Structured context an operator can read, whose shape depends on the\nevent that produced it.\n\n`Unchecked` because it genuinely is unconstrained: a scan failure and an\nenrichment failure put different keys here. Kynos refuses a bare\n`serde_json::Value` in a described type -- the schema would be `true`,\nwhich is a claim the document cannot check -- and this wrapper says so\nout loud instead, annotating the property `x-kynos-unchecked`. It is\n`#[serde(transparent)]`, so the bytes on the wire are unchanged."
           },
           "created_at": {
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           }
         },
         "type": "object",
@@ -15585,11 +15372,13 @@
       "AdminEvent": {
         "properties": {
           "id": {
-            "type": "string"
-          },
-          "timestamp": {
             "type": "string",
-            "format": "date-time"
+            "format": "uuid"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the event happened."
           },
           "level": {
             "$ref": "#/components/schemas/LogLevel"
@@ -15604,7 +15393,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "format": "uuid"
           },
           "library_name": {
             "type": [
@@ -15638,7 +15428,7 @@
         "type": "object",
         "required": [
           "id",
-          "timestamp",
+          "occurred_at",
           "level",
           "category",
           "message"
@@ -15647,7 +15437,8 @@
       "AdminUser": {
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid"
           },
           "display_name": {
             "type": "string"
@@ -15824,16 +15615,17 @@
           "message": {
             "type": "string"
           },
-          "timestamp": {
+          "created_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "When the entry was logged."
           }
         },
         "type": "object",
         "required": [
           "level",
           "message",
-          "timestamp"
+          "created_at"
         ],
         "description": "One recent library-scan admin log entry, slimmed to what the system\nstatus tab renders."
       },
@@ -16803,7 +16595,8 @@
       "CurrentUser": {
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid"
           },
           "email": {
             "type": [
@@ -16834,7 +16627,8 @@
       "SessionSummary": {
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "format": "uuid"
           },
           "device_hash": {
             "type": "string"
@@ -16843,12 +16637,14 @@
             "type": "string"
           },
           "created_at": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string",
+            "format": "date-time",
+            "description": "When the session was signed in."
           },
-          "last_active": {
-            "type": "integer",
-            "format": "int64"
+          "last_active_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the session was last used, to the hour: activity slides it\nforward at most once an hour."
           }
         },
         "type": "object",
@@ -16857,7 +16653,7 @@
           "device_hash",
           "ip",
           "created_at",
-          "last_active"
+          "last_active_at"
         ],
         "description": "One of the current user's active sessions, as returned by `GET\n/sessions`. `id` is an opaque row identifier for revocation via `DELETE\n/sessions/{id}` -- never the session credential itself, which is hashed\nat rest and cannot be recovered."
       },

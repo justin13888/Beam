@@ -100,9 +100,9 @@ a movie id or an episode id; a show id is rejected with 400, since shows have no
 own. Episode sources landed in [#102](https://github.com/justin13888/beam/pull/102), closing
 [#68](https://github.com/justin13888/beam/issues/68).
 
-`GET /v1/media/{id}` no longer carries tracks: a movie has `file_id` and `duration` from its
+`GET /v1/media/{id}` no longer carries tracks: a movie has `file_id` and `duration_secs` from its
 primary source and a `source_count` (absent from browse, which reads no files), and each episode
-the same, its `duration` absent when its primary file spans several episodes.
+the same, its `duration_secs` absent when its primary file spans several episodes.
 
 `GET /v1/artwork/{kind}/{id}/{variant}` is what `poster_url`, `backdrop_url` and `thumbnail_url`
 point at: those fields carry this path, never a provider URL, so a viewer's client never contacts
@@ -147,16 +147,20 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     A `query` keeps the requested sort rather than ranking by relevance. A `query` holding a NUL
     character, which no title can contain, is `400 #invalid-search-query`.
   - Filters apply to movies and shows alike, `min_rating` included; `genre` matches by name or
-    slug. Only titles with a present file are listed.
+    slug. `min_rating` is on the 0-10 scale `ratings.tmdb` is reported on, compared in the single
+    precision a rating is stored in, an unrated title counting as 0. A numeric filter out of its
+    range -- a year above 2147483647 (the `year` columns are signed), a `min_rating` outside 0-10,
+    `NaN` included -- is `400 #invalid-filter`, never narrowed into a bound that matches
+    everything. Only titles with a present file are listed.
   - One page is one catalogue statement plus a fixed number of reads by id to hydrate the page
     (titles, genres, season and episode counts), whatever the library's size (NFR-301). The
     statement is a `UNION ALL` over `movies` and `shows` in which each branch filters, seeks,
     orders and limits itself, and the outer query merges the two. For `title` and `date_added`
     each branch reads its own index in order (`(lower(title), id)`, `(created_at, id)`), checking
     liveness and the filters per row. Unfiltered or filtered only by `media_type`, it stops at the
-    page size. A selective `genre`, `query` or `min_rating` filter can leave most rows it reads
-    unmatched, so such a page may read up to the whole index: its cost is bounded by the catalogue,
-    not the page. `year`, `rating` and `runtime` are unindexed and sort every matching title. A
+    page size. A selective `genre`, `query`, `min_rating` or `year`/`year_from`/`year_to` filter
+    can leave most rows it reads unmatched, so such a page may read up to the whole index: its cost
+    is bounded by the catalogue, not the page. `year`, `rating` and `runtime` are unindexed and sort every matching title. A
     browsed show carries `season_count`/`episode_count` and no `seasons`; its detail carries both.
   - A database failure is `500 #internal`, on browse and on detail — never an empty page, and
     never a `404` for a title that could not be read.
@@ -276,13 +280,29 @@ and by the router refusing to build if it cannot describe itself.
 violation, with no exception list — a schema that cannot comply is changed, not waived
 ([#190](https://github.com/justin13888/beam/issues/190)):
 
-- **R1** every enum value is `snake_case` (`^[a-z][a-z0-9_]*$`);
+- **R1** every enum value and every `const` is `snake_case` (`^[a-z][a-z0-9_]*$`). A problem
+  document's `type` is a URI by RFC 9457, not a value from a set; the taxonomy test governs it;
 - **R2** no schema name ends in `Dto` or `Response` — a name is the thing on the wire. Where a wire
   type shares its name with the domain type it mirrors (`AdminEvent`, `AdminLogCategory`,
   `TitleKind`), the domain type is reached through its module;
 - **R2b** no two enums carry the same set of values: one meaning is one enum (`LogLevel` serves the
   admin log and the admin event stream alike; `TitleKind` is the browse filter, the
-  continue-watching and history `media_type`, and an enrichment row's `kind`).
+  continue-watching and history `media_type`, and an enrichment row's `kind`);
+- **R4** every identifier -- a value named `id` or `*_id` -- is `format: uuid`, in a body and in a
+  path or query parameter alike, so a malformed path id is the framework's plain `400` on every
+  route. `ExternalIdentifiers` is outside it: its `imdb_id`, `tmdb_id` and `tvdb_id` are other
+  systems' identifiers, in their shapes;
+- **R5** a value is named `*_at` if and only if it is an instant (`format: date-time`); a value
+  naming a day (`date`, `*_date`, `*_on`, `*_aired`) is `format: date`, not a date-time at a
+  made-up midnight; nothing is an integer epoch or named like one (`timestamp`, `*_time`,
+  `*_epoch`, `*_unix`);
+- **R6** a number measuring a duration, runtime, size, position or length names its unit:
+  `_secs`, `_mins`, `_ms`, `_days`, `_bytes` or `_count` (`duration_secs`, `runtime_mins`,
+  `size_bytes`, `file_count`).
+
+R4-R6 read every property of every component schema and every path and query parameter. Headers
+are transport, and so is the SSE frame Kynos describes around an event (its `id` is the
+event-stream field, not a Beam identifier); the event payload inside it is a component and is read.
 
 ## Server-Sent Events
 

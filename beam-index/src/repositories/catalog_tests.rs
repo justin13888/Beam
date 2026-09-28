@@ -140,7 +140,7 @@ async fn each_filter_binds_once_and_both_branches_read_it() {
     let statement = sent(query(
         CatalogFilters {
             genre_slug: Some("science-fiction".to_string()),
-            min_rating: Some(70),
+            min_rating: Some(7.2),
             year_from: Some(1990),
             year_to: Some(2000),
             ..Default::default()
@@ -174,19 +174,15 @@ async fn each_filter_binds_once_and_both_branches_read_it() {
 
     let rating_at = bound
         .iter()
-        .position(|v| *v == Value::from(70_i32))
+        .position(|v| *v == Value::from(7.2_f32))
         .expect("the rating is bound")
         + 1;
     assert!(
-        sql.contains(&format!(
-            "COALESCE(movies.rating_tmdb * 10::real, 0) >= ${rating_at}"
-        )),
+        sql.contains(&format!("COALESCE(movies.rating_tmdb, 0) >= ${rating_at}")),
         "{sql}"
     );
     assert!(
-        sql.contains(&format!(
-            "COALESCE(shows.rating_tmdb * 10::real, 0) >= ${rating_at}"
-        )),
+        sql.contains(&format!("COALESCE(shows.rating_tmdb, 0) >= ${rating_at}")),
         "a show's rating is filtered too: {sql}"
     );
     let from_at = bound
@@ -537,10 +533,10 @@ fn any_query() -> impl Strategy<Value = CatalogQuery> {
             proptest::option::of(prop_oneof![Just(TitleKind::Movie), Just(TitleKind::Show)]),
             proptest::option::of("[a-z]{1,6}"),
             proptest::option::of("[a-z-]{1,6}"),
-            proptest::option::of(1900_u32..2100),
-            proptest::option::of(1900_u32..2100),
-            proptest::option::of(1900_u32..2100),
-            proptest::option::of(0_u32..=100),
+            proptest::option::of(1900_i32..2100),
+            proptest::option::of(1900_i32..2100),
+            proptest::option::of(1900_i32..2100),
+            proptest::option::of((0_u32..=100).prop_map(|tenths| tenths as f32 / 10.0)),
         ),
         any_sort(),
         (0_u8..3, any::<bool>(), any::<bool>(), -5_i32..5),

@@ -60,8 +60,10 @@ mod tests {
         assert_eq!(body["status"], "healthy");
         assert_eq!(body["checks"]["database"]["status"], "ok");
         assert!(
-            body["checks"]["database"]["detail"].is_null(),
-            "a passing check has nothing to explain"
+            body["checks"]["database"]
+                .as_object()
+                .is_some_and(|check| !check.contains_key("detail")),
+            "a passing check has nothing to explain, so `detail` is absent, not null: {body}"
         );
         assert!(body["uptime_secs"].is_u64(), "uptime_secs must be present");
         assert!(body["version"].is_string());

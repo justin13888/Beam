@@ -200,7 +200,7 @@ mod tests {
                 assert_eq!(m.id, movie_id);
                 assert_eq!(m.title.original, "Test Movie");
                 assert_eq!(m.year, Some(2023));
-                assert!(m.duration.is_some());
+                assert!(m.duration_secs.is_some());
                 assert!(m.file_id.is_some(), "file_id must point at the seeded file");
             }
             _ => panic!("Expected Movie metadata"),
@@ -297,33 +297,8 @@ mod tests {
         use crate::services::metadata::MetadataError;
 
         let service = make_service();
-        let result = service.get_media_sources(&Uuid::new_v4().to_string()).await;
+        let result = service.get_media_sources(Uuid::new_v4()).await;
         assert!(matches!(result, Err(MetadataError::MediaNotFound)));
-    }
-
-    /// A malformed id is the caller's mistake, and must stay distinguishable
-    /// from both a well-formed miss and a server fault.
-    ///
-    /// It was folded into `InternalError`, which the routes render as a 500 --
-    /// so `/v1/media/{id}/sources` answered a typo with "the server broke"
-    /// while `/v1/media/{id}` answered the same typo with 404 (issue #123).
-    #[tokio::test]
-    async fn test_get_media_sources_malformed_id_is_distinct_from_a_miss() {
-        use crate::services::metadata::MetadataError;
-
-        let service = make_service();
-
-        let malformed = service.get_media_sources("not-a-uuid").await;
-        assert!(
-            matches!(malformed, Err(MetadataError::InvalidId)),
-            "a malformed id must be InvalidId, got {malformed:?}"
-        );
-
-        let missing = service.get_media_sources(&Uuid::new_v4().to_string()).await;
-        assert!(
-            matches!(missing, Err(MetadataError::MediaNotFound)),
-            "a well-formed id that resolves to nothing stays MediaNotFound"
-        );
     }
 
     #[tokio::test]
@@ -360,7 +335,7 @@ mod tests {
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let result = service.get_media_sources(&show_id.to_string()).await;
+        let result = service.get_media_sources(show_id).await;
         assert!(matches!(result, Err(MetadataError::Unsupported(_))));
     }
 
@@ -396,10 +371,7 @@ mod tests {
             stream_repo,
         );
 
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].file_id, file_id);
         assert!(sources[0].is_primary);
@@ -452,10 +424,7 @@ mod tests {
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
         let ids: Vec<Uuid> = sources.iter().map(|s| s.file_id).collect();
         assert_eq!(ids, vec![present_id]);
     }
@@ -535,10 +504,7 @@ mod tests {
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let sources = service
-            .get_media_sources(&episode_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(episode_id).await.unwrap();
         assert_eq!(sources.len(), 2);
 
         // Two files alike in every other way are ranked by id, whatever
@@ -566,10 +532,7 @@ mod tests {
         );
 
         // A known episode with no files is playable-but-empty, not a 404.
-        let sources = service
-            .get_media_sources(&episode_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(episode_id).await.unwrap();
         assert!(sources.is_empty());
     }
 
@@ -722,10 +685,7 @@ mod tests {
             stream_repo,
         );
 
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
         let order: Vec<(Uuid, bool, Option<&str>)> = sources
             .iter()
             .map(|s| (s.file_id, s.is_primary, s.edition.as_deref()))
@@ -745,7 +705,7 @@ mod tests {
             panic!("the movie resolves");
         };
         assert_eq!(detail.file_id, Some(uhd));
-        assert_eq!(detail.duration, Some(200.0));
+        assert_eq!(detail.duration_secs, Some(200.0));
         assert_eq!(detail.source_count, Some(3));
     }
 
@@ -821,10 +781,7 @@ mod tests {
             sidecar_repo,
             Arc::default(),
         );
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
 
         /// A source's first file, whether it is primary, and its parts.
         type Shape = (Uuid, bool, Vec<(Uuid, Option<u32>)>);
@@ -881,7 +838,7 @@ mod tests {
             panic!("the movie resolves");
         };
         assert_eq!(
-            (detail.file_id, detail.duration, detail.source_count),
+            (detail.file_id, detail.duration_secs, detail.source_count),
             (Some(cd1), Some(5800.0), Some(3))
         );
     }
@@ -924,10 +881,7 @@ mod tests {
             file_repo,
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
 
         /// A source's first file and its parts.
         type Shape = (Uuid, Vec<(Uuid, Option<u32>)>);
@@ -989,10 +943,7 @@ mod tests {
             file_repo,
             stream_repo,
         );
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
         let source = &sources[0];
 
         let video = &source.video_tracks[0];
@@ -1154,10 +1105,7 @@ mod tests {
             sidecar_repo,
             Arc::default(),
         );
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
         assert_eq!(sources[0].file_id, file);
         let tracks = &sources[0].subtitle_tracks;
 
@@ -1229,10 +1177,7 @@ mod tests {
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let sources = service
-            .get_media_sources(&episode_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(episode_id).await.unwrap();
         let span = sources[0].episode_span.expect("the file spans episodes");
         assert_eq!(
             (span.first_episode_number, span.last_episode_number),
@@ -1246,7 +1191,7 @@ mod tests {
         };
         let episode = &show.seasons[0].episodes[0];
         assert_eq!(episode.file_id, Some(sources[0].file_id));
-        assert_eq!(episode.duration, None);
+        assert_eq!(episode.duration_secs, None);
         assert_eq!(episode.source_count, 1);
     }
 
@@ -1274,16 +1219,13 @@ mod tests {
             Arc::new(InMemoryMediaStreamRepository::default()),
         );
 
-        let sources = service
-            .get_media_sources(&episode_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(episode_id).await.unwrap();
         assert!(sources[0].episode_span.is_none());
         let Some(MediaMetadata::Show(show)) = service.get_media_metadata(show_id).await.unwrap()
         else {
             panic!("the show resolves");
         };
-        assert_eq!(show.seasons[0].episodes[0].duration, Some(2700.0));
+        assert_eq!(show.seasons[0].episodes[0].duration_secs, Some(2700.0));
     }
 
     // ---------------------------------------------------------------------------
@@ -2056,7 +1998,7 @@ mod browse {
             matches!(detail, Err(MetadataError::InternalError(_))),
             "{detail:?}"
         );
-        let sources = service(failing()).get_media_sources(&id.to_string()).await;
+        let sources = service(failing()).get_media_sources(id).await;
         assert!(
             matches!(sources, Err(MetadataError::InternalError(_))),
             "{sources:?}"
@@ -2265,7 +2207,7 @@ mod browse {
             assert_eq!(show.genres, ["drama", "Thriller"], "{view}");
             assert_eq!(
                 show.ratings.as_ref().and_then(|r| r.tmdb),
-                Some(84),
+                Some(8.4),
                 "{view}"
             );
             let identifiers = show.identifiers.as_ref().expect("identified");

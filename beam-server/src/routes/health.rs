@@ -27,6 +27,7 @@ pub enum CheckStatus {
 pub struct DependencyCheck {
     pub status: CheckStatus,
     /// Why the check failed; absent when it passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 

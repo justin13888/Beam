@@ -494,8 +494,7 @@ mod tests {
             .cookie("beam_session", &token)
             .send()
             .await
-            .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
+            .assert_status(StatusCode::BAD_REQUEST);
         assert_eq!(
             fixture.fetcher.call_count(),
             0,

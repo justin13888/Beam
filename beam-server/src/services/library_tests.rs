@@ -143,7 +143,7 @@ mod tests {
             .return_const(());
 
         let service = make_service(mock_library_repo, mock_file_repo, video_dir, mock_index);
-        let result = service.delete_library(lib_id.to_string()).await;
+        let result = service.delete_library(lib_id).await;
         assert!(matches!(result, Ok(true)), "{result:?}");
     }
 
@@ -171,7 +171,7 @@ mod tests {
             PathBuf::from("/media/videos"),
             mock_index,
         );
-        let result = service.delete_library(lib_id.to_string()).await;
+        let result = service.delete_library(lib_id).await;
         assert!(matches!(result, Ok(true)), "{result:?}");
     }
 
@@ -244,7 +244,7 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.delete_library(lib_id.to_string()).await;
+        let result = service.delete_library(lib_id).await;
         assert!(matches!(result, Err(LibraryError::Db(_))), "{result:?}");
 
         assert_eq!(
@@ -345,7 +345,7 @@ mod tests {
             .create_library("Movies".to_string(), "movies".to_string())
             .await
             .expect("the library is created while its registration is held");
-        let id = Uuid::parse_str(&created.id).unwrap();
+        let id = created.id;
         assert!(
             watcher.inner.watched_libraries().is_empty(),
             "not registered yet"
@@ -382,7 +382,7 @@ mod tests {
         assert!(result.is_ok());
         let lib = result.unwrap();
         assert_eq!(lib.name, "Movies");
-        assert_eq!(lib.size, 0);
+        assert_eq!(lib.file_count, 0);
 
         // Library stored in repo
         let stored = lib_repo_ref.libraries.lock().unwrap();
@@ -580,9 +580,9 @@ mod tests {
         let libs = result.unwrap();
         assert_eq!(libs.len(), 2);
         let movies = libs.iter().find(|l| l.name == "Movies").unwrap();
-        assert_eq!(movies.size, 5);
+        assert_eq!(movies.file_count, 5);
         let shows = libs.iter().find(|l| l.name == "Shows").unwrap();
-        assert_eq!(shows.size, 12);
+        assert_eq!(shows.file_count, 12);
     }
 
     #[tokio::test]
@@ -666,15 +666,15 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.get_library_by_id(lib_id.to_string()).await;
+        let result = service.get_library_by_id(lib_id).await;
 
         assert!(result.is_ok());
         let opt = result.unwrap();
         assert!(opt.is_some());
         let lib = opt.unwrap();
-        assert_eq!(lib.id, lib_id.to_string());
+        assert_eq!(lib.id, lib_id);
         assert_eq!(lib.name, "Movies");
-        assert_eq!(lib.size, 7);
+        assert_eq!(lib.file_count, 7);
     }
 
     #[tokio::test]
@@ -691,30 +691,10 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.get_library_by_id(Uuid::new_v4().to_string()).await;
+        let result = service.get_library_by_id(Uuid::new_v4()).await;
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_get_library_by_id_invalid_uuid_returns_invalid_id_error() {
-        let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
-
-        let result = service
-            .get_library_by_id("not-a-valid-uuid".to_string())
-            .await;
-        assert!(matches!(result, Err(LibraryError::InvalidId)));
     }
 
     // ── get_library_files ─────────────────────────────────────────────────────────
@@ -752,12 +732,12 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.get_library_files(lib_id.to_string()).await;
+        let result = service.get_library_files(lib_id).await;
 
         assert!(result.is_ok());
         let files = result.unwrap();
         assert_eq!(files.len(), 3);
-        assert!(files.iter().all(|f| f.library_id == lib_id.to_string()));
+        assert!(files.iter().all(|f| f.library_id == lib_id));
         // Stored at `/media/videos/test.mp4` under a `/media/videos` root: the
         // listing carries the root-relative path, never the absolute one
         // (NFR-108).
@@ -778,29 +758,9 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.get_library_files(Uuid::new_v4().to_string()).await;
+        let result = service.get_library_files(Uuid::new_v4()).await;
 
         assert!(matches!(result, Err(LibraryError::LibraryNotFound)));
-    }
-
-    #[tokio::test]
-    async fn test_get_library_files_invalid_uuid_returns_invalid_id_error() {
-        let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
-
-        let result = service
-            .get_library_files("not-a-valid-uuid".to_string())
-            .await;
-        assert!(matches!(result, Err(LibraryError::InvalidId)));
     }
 
     // ── get_file_by_id ────────────────────────────────────────────────────────────
@@ -838,7 +798,7 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.get_file_by_id(file_id.to_string()).await;
+        let result = service.get_file_by_id(file_id).await;
 
         assert!(result.is_ok());
         let opt = result.unwrap();
@@ -869,7 +829,7 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.get_file_by_id(Uuid::new_v4().to_string()).await;
+        let result = service.get_file_by_id(Uuid::new_v4()).await;
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -905,31 +865,7 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        assert!(
-            service
-                .get_file_by_id(file_id.to_string())
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_file_by_id_invalid_uuid_returns_invalid_id_error() {
-        let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
-
-        let result = service.get_file_by_id("not-a-valid-uuid".to_string()).await;
-        assert!(matches!(result, Err(LibraryError::InvalidId)));
+        assert!(service.get_file_by_id(file_id).await.unwrap().is_none());
     }
 
     // ── delete_library (additional cases) ────────────────────────────────────────
@@ -955,7 +891,7 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.delete_library(Uuid::new_v4().to_string()).await;
+        let result = service.delete_library(Uuid::new_v4()).await;
 
         assert!(matches!(result, Err(LibraryError::LibraryNotFound)));
     }
@@ -992,7 +928,7 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.delete_library(lib_id.to_string()).await;
+        let result = service.delete_library(lib_id).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
 

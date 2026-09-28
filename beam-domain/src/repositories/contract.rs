@@ -2477,7 +2477,7 @@ macro_rules! show_repository_contract {
                 .await
                 .unwrap()
                 .expect("the episode is readable by id");
-            assert_eq!(stored.air_date, Some(aired.to_string()));
+            assert_eq!(stored.air_date, Some(aired));
         }
 
         /// Episodes of one new season indexed at once -- two libraries'
@@ -6417,19 +6417,19 @@ macro_rules! catalog_repository_contract {
                 ["alpha", "Echo"]
             );
             assert_eq!(
-                listed(CatalogFilters { min_rating: Some(70), ..Default::default() }).await,
+                listed(CatalogFilters { min_rating: Some(7.0), ..Default::default() }).await,
                 ["alpha", "delta"],
                 "a show's rating counts as a movie's does"
             );
             assert_eq!(
-                listed(CatalogFilters { min_rating: Some(60), ..Default::default() }).await,
+                listed(CatalogFilters { min_rating: Some(6.0), ..Default::default() }).await,
                 ["alpha", "delta", "Echo", "golf"],
                 "a rating exactly at the minimum is kept; an unrated title counts as 0"
             );
         }
 
         /// The minimum rating compares in the precision a rating is stored
-        /// and shown in: a 7.2 is 72 per cent, not 71.99..., for either kind.
+        /// in: a stored 7.2 meets a minimum of 7.2, not 7.19999..., for either kind.
         #[tokio::test]
         async fn a_rating_exactly_at_a_fractional_minimum_is_kept() {
             let fixture = $setup().await;
@@ -6442,7 +6442,7 @@ macro_rules! catalog_repository_contract {
                 listed_names(
                     &fixture,
                     &made,
-                    CatalogFilters { min_rating: Some(72), ..Default::default() },
+                    CatalogFilters { min_rating: Some(7.2), ..Default::default() },
                 )
                 .await,
                 ["lima", "mike"]

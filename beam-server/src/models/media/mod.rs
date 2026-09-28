@@ -49,7 +49,8 @@ pub struct ExternalIdentifiers {
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct Ratings {
-    /// TMDB rating as a percentage (0-100)
-    pub tmdb: Option<u32>,
+    /// TMDB rating on TMDB's own 0-10 scale, as precise as it is stored.
+    #[schema(minimum = 0, maximum = 10)]
+    pub tmdb: Option<f64>,
     // TODO: Add more ratings sources if needed
 }

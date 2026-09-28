@@ -14,7 +14,7 @@ curl http://localhost:8000/v1/health
 Returns the server's status, its dependency checks, when they ran (`checked_at`), version and
 uptime. A healthy server answers `200`; a degraded one answers **`503`** with the same body shape,
 and the `checks` object names what is wrong — in practice, the database. Each check reports a
-`status` of `ok` or `error`, and a failing one says why in `detail`:
+`status` of `ok` or `error`, and a failing one says why in `detail`, which a passing one omits:
 
 ```json
 {"status":"degraded","checks":{"database":{"status":"error","detail":"connection refused"}},
