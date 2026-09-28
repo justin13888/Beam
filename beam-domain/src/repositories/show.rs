@@ -577,7 +577,7 @@ pub mod in_memory {
                 episode_number,
                 title,
                 description: None,
-                air_date: air_date.map(|d| d.to_string()),
+                air_date,
                 runtime,
                 thumbnail_url: None,
                 created_at: chrono::Utc::now(),
@@ -700,7 +700,7 @@ pub mod in_memory {
                         episode.description = ep_enrichment.description.clone();
                     }
                     if let Some(air_date) = ep_enrichment.air_date {
-                        episode.air_date = Some(air_date.to_string());
+                        episode.air_date = Some(air_date);
                     }
                     if let Some(runtime_mins) = ep_enrichment.runtime_mins {
                         episode.runtime =

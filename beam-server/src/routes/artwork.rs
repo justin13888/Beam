@@ -40,7 +40,7 @@ pub struct ArtworkPath {
     /// Which kind of title the artwork belongs to.
     pub kind: ArtworkKind,
     /// The title's ID.
-    pub id: String,
+    pub id: Uuid,
     /// Which image of that title.
     pub variant: ArtworkVariant,
 }
@@ -62,15 +62,13 @@ pub type ArtworkDelivery = RuntimeDelivery<ArtworkRanges>;
 ///
 /// `None` covers three cases that are one answer to a client: the title does
 /// not exist, it exists but has no art yet, and the variant does not apply to
-/// this kind of title. An id that is not an id at all is not among them: that
-/// is the caller's mistake, and it gets the same 400 every other media-id
-/// route gives it rather than being folded into the miss.
+/// this kind of title. An id that is not an id at all is not among them: the
+/// `Path` extractor answers it 400 before the handler runs.
 async fn upstream_url(
     state: &AppState,
     path: &ArtworkPath,
 ) -> Result<Option<String>, ArtworkError> {
-    let id = Uuid::parse_str(&path.id)
-        .map_err(|_| ArtworkError::InvalidId(format!("Invalid media id: {}", path.id)))?;
+    let id = path.id;
     let services = &state.services;
 
     let url = match (path.kind, path.variant) {

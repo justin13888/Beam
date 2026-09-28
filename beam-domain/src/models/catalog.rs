@@ -163,7 +163,7 @@ impl CatalogPosition {
 }
 
 /// Which titles are listed. Every filter narrows; none is set by default.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CatalogFilters {
     /// Only films, or only series.
     pub kind: Option<TitleKind>,
@@ -172,11 +172,14 @@ pub struct CatalogFilters {
     /// Titles carrying the genre with this slug
     /// (see [`crate::repositories::genre::slugify`]).
     pub genre_slug: Option<String>,
-    pub year: Option<u32>,
-    pub year_from: Option<u32>,
-    pub year_to: Option<u32>,
-    /// Minimum rating as a percentage (0-100); an unrated title counts as 0.
-    pub min_rating: Option<u32>,
+    /// Signed, as the `year` columns are: a bound the column cannot hold is
+    /// refused where the request is read, never wrapped into one it can.
+    pub year: Option<i32>,
+    pub year_from: Option<i32>,
+    pub year_to: Option<i32>,
+    /// Minimum rating on the provider's 0-10 scale, in the single precision
+    /// the rating is stored in; an unrated title counts as 0.
+    pub min_rating: Option<f32>,
 }
 
 /// Which side of a position a page is taken from.

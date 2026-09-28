@@ -1,6 +1,6 @@
 use super::{ExternalIdentifiers, Ratings, Title};
 use crate::models::playback::UserTitleState;
-use chrono::{DateTime, Utc};
+use chrono::NaiveDate;
 use kynos::Schema;
 use serde::Serialize;
 use uuid::Uuid;
@@ -15,12 +15,12 @@ pub struct MovieMetadata {
     pub description: Option<String>,
     /// Year the movie was released
     pub year: Option<u32>,
-    /// Release date of the movie
-    pub release_date: Option<DateTime<Utc>>,
-    /// Runtime of the movie in minutes
-    pub runtime: Option<u32>,
-    /// Duration of the primary source's file in seconds
-    pub duration: Option<f64>,
+    /// The day the movie was released: a calendar date, with no time or zone.
+    pub release_date: Option<NaiveDate>,
+    /// Runtime of the movie in whole minutes, as its provider lists it.
+    pub runtime_mins: Option<u32>,
+    /// Duration of the primary source's file in seconds.
+    pub duration_secs: Option<f64>,
     /// Optional URL to the movie's poster image
     pub poster_url: Option<String>,
     /// Optional URL to the movie's backdrop image

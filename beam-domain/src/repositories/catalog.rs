@@ -105,10 +105,11 @@ pub mod in_memory {
             && genre_slug
                 .as_deref()
                 .is_none_or(|slug| candidate.genre_slugs.iter().any(|s| s == slug))
-            && year.is_none_or(|y| candidate.year == Some(y))
-            && year_from.is_none_or(|y| candidate.year.is_some_and(|c| c >= y))
-            && year_to.is_none_or(|y| candidate.year.is_some_and(|c| c <= y))
-            && min_rating.is_none_or(|min| candidate.rating.map_or(0.0, |r| r * 10.0) >= min as f32)
+            && year.is_none_or(|y| candidate.year.is_some_and(|c| i64::from(c) == i64::from(y)))
+            && year_from
+                .is_none_or(|y| candidate.year.is_some_and(|c| i64::from(c) >= i64::from(y)))
+            && year_to.is_none_or(|y| candidate.year.is_some_and(|c| i64::from(c) <= i64::from(y)))
+            && min_rating.is_none_or(|min| candidate.rating.unwrap_or(0.0) >= min)
     }
 
     fn key(candidate: &Candidate, field: CatalogSortField) -> SortKey {

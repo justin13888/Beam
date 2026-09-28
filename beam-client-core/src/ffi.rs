@@ -633,7 +633,10 @@ impl BeamClient {
         let record = self.record_for(&server_id)?;
 
         let response = self
-            .send(&server_id, client.get_media_sources(media_id, None))
+            .send(
+                &server_id,
+                client.get_media_sources(parse_uuid("media_id", &media_id)?, None),
+            )
             .await?;
 
         response
@@ -854,9 +857,10 @@ impl BeamClient {
     ///
     /// Propagates transport and server failures.
     pub async fn media_detail(&self, media_id: String) -> Result<MediaDetail, BeamError> {
+        let wire_media_id = parse_uuid("media_id", &media_id)?;
         let (server_id, client, record) = self.active_context()?;
         let cache = self.metadata_cache(&server_id)?;
-        match Self::fetch_detail(&client, &record, &cache, &media_id).await {
+        match Self::fetch_detail(&client, &record, &cache, wire_media_id).await {
             Ok(detail) => Ok(detail),
             Err(failure) => Err(self.fail(&server_id, &failure).await),
         }
@@ -939,7 +943,10 @@ impl BeamClient {
     pub async fn library(&self, library_id: String) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self
-            .send(&server_id, client.get_library(library_id, None))
+            .send(
+                &server_id,
+                client.get_library(parse_uuid("library_id", &library_id)?, None),
+            )
             .await?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
     }
@@ -955,7 +962,10 @@ impl BeamClient {
     ) -> Result<Vec<LibraryFileSummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self
-            .send(&server_id, client.get_library_files(library_id, None))
+            .send(
+                &server_id,
+                client.get_library_files(parse_uuid("library_id", &library_id)?, None),
+            )
             .await?;
         Ok(response
             .into_inner()
@@ -1269,8 +1279,11 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn revoke_session(&self, session_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        self.send(&server_id, client.delete_session(session_id, None))
-            .await?;
+        self.send(
+            &server_id,
+            client.delete_session(parse_uuid("session_id", &session_id)?, None),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1451,8 +1464,11 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn delete_library(&self, library_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        self.send(&server_id, client.delete_library(library_id, None))
-            .await?;
+        self.send(
+            &server_id,
+            client.delete_library(parse_uuid("library_id", &library_id)?, None),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1486,7 +1502,7 @@ impl BeamClient {
         let (server_id, client, _) = self.active_context()?;
         self.send(
             &server_id,
-            client.refresh_media_metadata(media_id.clone(), None),
+            client.refresh_media_metadata(parse_uuid("media_id", &media_id)?, None),
         )
         .await?;
         if let Ok(cache) = self.metadata_cache(&server_id) {
@@ -1817,18 +1833,18 @@ impl BeamClient {
         client: &GeneratedClient,
         record: &ServerRecord,
         cache: &Arc<RwLock<HashMap<String, MediaDetail>>>,
-        media_id: &str,
+        media_id: uuid::Uuid,
     ) -> Result<MediaDetail, TransportFailure> {
-        if let Some(hit) = cache.read().expect("metadata lock").get(media_id) {
+        let key = media_id.to_string();
+        if let Some(hit) = cache.read().expect("metadata lock").get(&key) {
             return Ok(hit.clone());
         }
-        let response =
-            TransportFailure::capture(client.get_media_detail(media_id.to_owned(), None)).await?;
+        let response = TransportFailure::capture(client.get_media_detail(media_id, None)).await?;
         let detail = MediaDetail::from_generated(response.into_inner(), record);
         cache
             .write()
             .expect("metadata lock")
-            .insert(media_id.to_owned(), detail.clone());
+            .insert(key, detail.clone());
         Ok(detail)
     }
 
@@ -1850,11 +1866,17 @@ impl BeamClient {
 
         let mut tasks = tokio::task::JoinSet::new();
         for media_id in wanted {
+            // The ids come from the server's own rows, so one that is not a
+            // UUID names nothing to fetch; it is dropped like any other
+            // failure here.
+            let Ok(wire_id) = uuid::Uuid::parse_str(&media_id) else {
+                continue;
+            };
             let client = client.clone();
             let record = record.clone();
             let cache = Arc::clone(cache);
             tasks.spawn(async move {
-                let detail = Self::fetch_detail(&client, &record, &cache, &media_id).await;
+                let detail = Self::fetch_detail(&client, &record, &cache, wire_id).await;
                 (media_id, detail)
             });
         }
@@ -2019,7 +2041,7 @@ impl BeamClient {
         let response = self.send(server_id, client.get_current_user(None)).await?;
         let me = response.into_inner();
         Ok(UserSummary {
-            id: me.id,
+            id: me.id.to_string(),
             display_name: me.display_name,
             email: me.email,
             is_admin: me.is_admin,
@@ -2428,8 +2450,12 @@ mod tests {
         assert_eq!(next.map(|episode| episode.id), Some("e2".to_owned()));
     }
 
+    /// The title the transport tests ask about; what it names never matters.
+    const MEDIA_ID: &str = "00000000-0000-0000-0000-000000000007";
+
     /// What `GET /v1/me` answers for the signed-in user in these tests.
-    const ME: &str = r#"{"id":"u-1","display_name":"Ada","is_admin":false}"#;
+    const ME: &str =
+        r#"{"id":"00000000-0000-0000-0000-0000000000a1","display_name":"Ada","is_admin":false}"#;
 
     /// What `GET /v1/media/{id}/sources` answers for a title with no file.
     const NO_SOURCES: &str = r#"{"items":[],"page_info":{"has_next_page":false,"has_previous_page":false,"start_cursor":null,"end_cursor":null}}"#;
@@ -2508,13 +2534,13 @@ mod tests {
 
         // The canned body is a `CurrentUser`, so this decodes to nothing
         // useful; what matters is that the request left at all, and how.
-        let _ = client.media_sources("7".to_owned()).await;
+        let _ = client.media_sources(MEDIA_ID.to_owned()).await;
 
         let recorded = backend.recorded();
         assert_eq!(recorded.len(), 2, "the /v1/me of the sign-in, then this");
         let sources = &recorded[1];
         assert_eq!(sources.method, reqwest::Method::GET);
-        assert_eq!(sources.url.path(), "/v1/media/7/sources");
+        assert_eq!(sources.url.path(), format!("/v1/media/{MEDIA_ID}/sources"));
         assert_eq!(cookies_of(sources), vec!["beam_session=opaque-value"]);
         assert_eq!(
             cookies_of(&recorded[0]),
@@ -2534,7 +2560,7 @@ mod tests {
         let sent_before = backend.recorded().len();
 
         let error = client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect_err("no credential, no request");
 
@@ -2568,11 +2594,11 @@ mod tests {
                 Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
             )
             .expect("the server is registered");
-        let _ = client.media_sources("7".to_owned()).await;
+        let _ = client.media_sources(MEDIA_ID.to_owned()).await;
         let sent_before = backend.recorded().len();
 
         let error = client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect_err("no credential, no request");
 
@@ -2645,7 +2671,7 @@ mod tests {
             .expect("the server is registered");
 
         let views = client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect("the sources decode");
 
@@ -2707,7 +2733,7 @@ mod tests {
             .expect("the server is registered");
 
         second
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect("an empty list decodes");
 
@@ -2743,7 +2769,7 @@ mod tests {
             .expect("the server is registered");
 
         let error = client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect_err("the canned 401 fails the call");
 
@@ -2753,7 +2779,7 @@ mod tests {
             SessionState::Expired
         ));
         let sent_before = backend.recorded().len();
-        let _ = client.media_sources("7".to_owned()).await;
+        let _ = client.media_sources(MEDIA_ID.to_owned()).await;
         assert_eq!(
             backend.recorded().len(),
             sent_before,
@@ -2811,7 +2837,7 @@ mod tests {
         ));
         let sent_before = backend.recorded().len();
         assert_eq!(
-            client.media_sources("7".to_owned()).await,
+            client.media_sources(MEDIA_ID.to_owned()).await,
             Err(BeamError::Unauthenticated)
         );
         assert_eq!(
@@ -2828,7 +2854,7 @@ mod tests {
         "expires_in_secs":600,"interval_secs":5}"#;
 
     const DEVICE_APPROVED: &str = r#"{"session_token":"issued-value","session_expires_in_secs":5184000,
-        "user":{"id":"u-1","display_name":"Ada","is_admin":false}}"#;
+        "user":{"id":"00000000-0000-0000-0000-0000000000a1","display_name":"Ada","is_admin":false}}"#;
 
     /// A registered, signed-out server over `backend`.
     async fn device_client(
@@ -2939,7 +2965,7 @@ mod tests {
         let DeviceLoginStep::SignedIn { user } = step else {
             panic!("expected a signed-in step, got {step:?}");
         };
-        assert_eq!(user.id, "u-1");
+        assert_eq!(user.id, "00000000-0000-0000-0000-0000000000a1");
         assert!(matches!(
             client.session_state(id.clone()).expect("known"),
             SessionState::Authenticated { .. }
@@ -3031,7 +3057,7 @@ mod tests {
 
         assert_eq!(backend.recorded().len(), 1, "the logout-all itself");
         assert_eq!(
-            client.media_sources("7".to_owned()).await,
+            client.media_sources(MEDIA_ID.to_owned()).await,
             Err(BeamError::Unauthenticated)
         );
         assert_eq!(
@@ -3105,7 +3131,7 @@ mod tests {
             )
             .expect("the server is registered");
         client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect("an empty list decodes");
 
@@ -3172,7 +3198,7 @@ mod tests {
                 .expect("the server is registered");
 
             let error = client
-                .media_sources("7".to_owned())
+                .media_sources(MEDIA_ID.to_owned())
                 .await
                 .expect_err("the canned 401 fails the call");
 
@@ -3224,7 +3250,7 @@ mod tests {
         storage.set_failure(FailureMode::FailWrites);
 
         let error = client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect_err("the canned 401 fails the call");
 
@@ -3248,7 +3274,7 @@ mod tests {
             SessionState::LoggedOut
         ));
         assert_eq!(
-            client.media_sources("7".to_owned()).await,
+            client.media_sources(MEDIA_ID.to_owned()).await,
             Err(BeamError::Unauthenticated),
             "the rejected cookie is not back on the client"
         );
@@ -3288,7 +3314,7 @@ mod tests {
             &client
                 .metadata_cache(&id)
                 .expect("the server is registered"),
-            vec!["7".to_owned()],
+            vec![MEDIA_ID.to_owned()],
         )
         .await;
         assert!(
@@ -3323,7 +3349,7 @@ mod tests {
             .expect("the server is registered");
 
         let error = client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect_err("the canned 404 fails the call");
 
@@ -3474,7 +3500,7 @@ mod tests {
         .await;
 
         let error = client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect_err("the canned 404 fails the call");
 
@@ -3616,7 +3642,7 @@ mod tests {
         .await;
 
         let error = client
-            .media_sources("7".to_owned())
+            .media_sources(MEDIA_ID.to_owned())
             .await
             .expect_err("the canned 404 fails the call");
 

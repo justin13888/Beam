@@ -2,7 +2,7 @@ use super::{ExternalIdentifiers, Ratings};
 
 use super::Title;
 use crate::models::playback::{UserGroupState, UserTitleState};
-use chrono::{DateTime, Utc};
+use chrono::NaiveDate;
 use kynos::Schema;
 use serde::Serialize;
 use uuid::Uuid;
@@ -49,8 +49,8 @@ pub struct SeasonMetadata {
     pub season_number: u32,
     /// Show dates
     pub dates: ShowDates,
-    /// Runtime of episodes in minutes
-    pub episode_runtime: Option<u32>,
+    /// Runtime of episodes in whole minutes
+    pub episode_runtime_mins: Option<u32>,
     /// List of episodes in the season
     pub episodes: Vec<EpisodeMetadata>,
 
@@ -72,10 +72,10 @@ pub struct SeasonMetadata {
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct ShowDates {
-    /// First air date
-    pub first_aired: Option<DateTime<Utc>>,
-    /// Last air date
-    pub last_aired: Option<DateTime<Utc>>,
+    /// The day the season's first episode aired: a calendar date.
+    pub first_aired: Option<NaiveDate>,
+    /// The day the season's last episode aired: a calendar date.
+    pub last_aired: Option<NaiveDate>,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
@@ -88,14 +88,14 @@ pub struct EpisodeMetadata {
     pub title: String,
     /// Optional description of the episode
     pub description: Option<String>,
-    /// Optional air date of the episode in YYYY-MM-DD format
-    pub air_date: Option<String>,
+    /// The day the episode aired: a calendar date.
+    pub air_date: Option<NaiveDate>,
     /// Optional URL to the episode's thumbnail image
     pub thumbnail_url: Option<String>,
 
     /// Duration of the primary source's file in seconds. Absent when that
     /// file holds a run of episodes, whose duration is not this one's.
-    pub duration: Option<f64>,
+    pub duration_secs: Option<f64>,
 
     /// Identifier of the primary source's file -- the one
     /// `GET /v1/media/{id}/sources` lists first for this episode's id -- if

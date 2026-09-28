@@ -69,7 +69,6 @@ impl From<ControlError> for MediaRefreshError {
 impl From<LibraryError> for LibraryRefError {
     fn from(err: LibraryError) -> Self {
         match err {
-            LibraryError::InvalidId => Self::InvalidLibraryId(err.to_string()),
             LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
             // Unreachable: a path is only validated when a library is
             // registered or rescanned, never when one is resolved by id.
@@ -90,12 +89,11 @@ impl From<LibraryError> for LibraryCreateError {
             LibraryError::PathOutsideRoot(_) => Self::PathOutsideRoot(err.to_string()),
             LibraryError::PathOverlapsLibrary => Self::PathOverlapsLibrary(err.to_string()),
             LibraryError::PathOverlapsDataDir => Self::PathOverlapsDataDir(err.to_string()),
-            // Unreachable: creation names no existing library, parses no id and
-            // starts no scan.
-            LibraryError::InvalidId
-            | LibraryError::LibraryNotFound
-            | LibraryError::ScanInProgress
-            | LibraryError::Db(_) => Self::Internal(err.to_string()),
+            // Unreachable: creation names no existing library and starts no
+            // scan.
+            LibraryError::LibraryNotFound | LibraryError::ScanInProgress | LibraryError::Db(_) => {
+                Self::Internal(err.to_string())
+            }
         }
     }
 }
@@ -109,10 +107,9 @@ impl From<LibraryError> for LibraryScanError {
             // its message carries no filesystem path (NFR-108).
             LibraryError::PathNotFound(_) => Self::PathNotFound(err.to_string()),
             LibraryError::ScanInProgress => Self::ScanInProgress(err.to_string()),
-            // Unreachable: the id arrives parsed, and containment and overlap
-            // are decided at registration.
-            LibraryError::InvalidId
-            | LibraryError::PathOutsideRoot(_)
+            // Unreachable: containment and overlap are decided at
+            // registration.
+            LibraryError::PathOutsideRoot(_)
             | LibraryError::PathOverlapsLibrary
             | LibraryError::PathOverlapsDataDir
             | LibraryError::Db(_) => Self::Internal(err.to_string()),
@@ -124,10 +121,9 @@ impl From<LibraryError> for LibraryScanReadError {
     fn from(err: LibraryError) -> Self {
         match err {
             LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
-            // Unreachable: the id arrives parsed, and reading a job validates
-            // no path and starts no scan.
-            LibraryError::InvalidId
-            | LibraryError::PathNotFound(_)
+            // Unreachable: reading a job validates no path and starts no
+            // scan.
+            LibraryError::PathNotFound(_)
             | LibraryError::PathOutsideRoot(_)
             | LibraryError::PathOverlapsLibrary
             | LibraryError::PathOverlapsDataDir
@@ -137,18 +133,11 @@ impl From<LibraryError> for LibraryScanReadError {
     }
 }
 
-/// What `/v1/libraries/{id}` and its subresources capture.
+/// What `/v1/libraries/{id}`, `/v1/admin/libraries/{id}` and their
+/// subresources capture. A `Uuid`, per the wire conventions: a malformed id is
+/// the `Path` extractor's 400.
 #[derive(Debug, Schema, PathParams)]
 pub struct LibraryPath {
-    /// Library id (UUID).
-    pub id: String,
-}
-
-/// What `/v1/admin/libraries/{id}/scan` captures. A `Uuid` rather than
-/// [`LibraryPath`]'s string, per the wire conventions: a malformed id is the
-/// `Path` extractor's 400. The other library routes move with #190.
-#[derive(Debug, Schema, PathParams)]
-pub struct LibraryScanPath {
     /// Library id (UUID).
     pub id: uuid::Uuid,
 }
@@ -157,7 +146,7 @@ pub struct LibraryScanPath {
 #[derive(Debug, Schema, PathParams)]
 pub struct MediaPath {
     /// Media id (movie or show UUID).
-    pub id: String,
+    pub id: uuid::Uuid,
 }
 
 /// What `/v1/admin/users/{id}` captures.
@@ -226,12 +215,7 @@ pub async fn get_library(
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<Library>, LibraryRefError> {
-    match state
-        .services
-        .library
-        .get_library_by_id(path.id.clone())
-        .await?
-    {
+    match state.services.library.get_library_by_id(path.id).await? {
         Some(library) => Ok(Json(library)),
         None => Err(LibraryRefError::LibraryNotFound(format!(
             "library {} not found",
@@ -283,7 +267,7 @@ pub async fn create_library(
 )]
 pub async fn scan_library(
     _auth: AdminAuth,
-    Path(path): Path<LibraryScanPath>,
+    Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Accepted<Json<ScanJob>>, LibraryScanError> {
     let job = state.services.library.start_scan(path.id).await?;
@@ -299,7 +283,7 @@ pub async fn scan_library(
 )]
 pub async fn get_library_scan(
     _auth: AdminAuth,
-    Path(path): Path<LibraryScanPath>,
+    Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<ScanJob>, LibraryScanReadError> {
     match state.services.library.get_scan(path.id).await? {
@@ -328,13 +312,11 @@ pub async fn refresh_media_metadata(
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, MediaRefreshError> {
     let crate::routes::enrichment::RefreshQuery { rematch } = query;
-    let id = uuid::Uuid::parse_str(&path.id)
-        .map_err(|_| MediaRefreshError::InvalidMediaId("invalid media id".to_owned()))?;
     state
         .services
         .enrichment_control
         .refresh(
-            RefreshScope::Title(id),
+            RefreshScope::Title(path.id),
             rematch.unwrap_or(false),
             &auth.0.user_id,
         )
@@ -353,12 +335,7 @@ pub async fn delete_library(
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, LibraryRefError> {
-    if state
-        .services
-        .library
-        .delete_library(path.id.clone())
-        .await?
-    {
+    if state.services.library.delete_library(path.id).await? {
         Ok(NoContent)
     } else {
         Err(LibraryRefError::LibraryNotFound(format!(
