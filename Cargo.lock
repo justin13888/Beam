@@ -673,6 +673,7 @@ dependencies = [
  "async-trait",
  "beam-domain",
  "beam-entity",
+ "beam-migration",
  "beam-test-support",
  "cameo",
  "chrono",

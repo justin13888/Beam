@@ -1138,6 +1138,9 @@ async fn the_tracks_migration_renames_codecs_and_reverses() {
         ("audio", "EAC3", "eac3"),
         ("audio", "TRUEHD", "truehd"),
         ("audio", "PCM_S16LE", "pcm_s16le"),
+        // Two whose `Debug` name lower-cased is not FFmpeg's name.
+        ("video", "XM4", "4xm"),
+        ("audio", "ACELP_KELVIN", "acelp.kelvin"),
         ("subtitle", "SubRip", "subrip"),
         ("subtitle", "ASS/SSA", "ass"),
         ("subtitle", "WebVTT", "webvtt"),

@@ -50,6 +50,9 @@ rustix = { version = "1.1", features = ["fs"] }
 # own `#[cfg(test)]` modules: a dependency is not compiled with `cfg(test)`.
 beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"] }
 beam-test-support = { path = "../beam-test-support" }
+# The codec names the tracks migration renames, checked against every codec
+# the linked FFmpeg describes.
+beam-migration = { path = "../beam-migration" }
 futures = "0.3.34"
 metrics-util = { workspace = true }
 mockall = "0.15.0"

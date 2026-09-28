@@ -28,6 +28,8 @@ mod m20261002_000001_nfo_sidecars;
 mod m20261003_000001_catalogue_browse;
 mod m20261006_000001_tracks_subtitles;
 
+pub use m20261006_000001_tracks_subtitles::RENAMED_FFMPEG_CODECS;
+
 pub struct Migrator;
 
 #[async_trait::async_trait]
