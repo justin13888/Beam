@@ -136,7 +136,9 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
-    use crate::models::file::{FileStatus, MediaFileContent, ProbeUpdate, mtime_as_stored};
+    use crate::models::file::{
+        FileIdentity, FileStatus, MediaFileContent, ProbeUpdate, mtime_as_stored,
+    };
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Mutex;
@@ -301,6 +303,7 @@ pub mod in_memory {
                 hash: create.hash,
                 size_bytes: create.size_bytes,
                 mtime: create.mtime.map(mtime_as_stored),
+                identity: create.identity.map(FileIdentity::as_stored),
                 mime_type: create.mime_type,
                 duration: create.duration,
                 container_format: create.container_format,
@@ -343,6 +346,9 @@ pub mod in_memory {
             }
             if let Some(mtime) = update.mtime {
                 file.mtime = Some(mtime_as_stored(mtime));
+            }
+            if let Some(identity) = update.identity {
+                file.identity = Some(identity.as_stored());
             }
             match update.probe {
                 ProbeUpdate::Keep => {}
@@ -465,12 +471,14 @@ pub mod in_memory {
                 path,
                 size_bytes,
                 mtime,
+                identity,
             } in relinks
             {
                 let stored = files.get_mut(&id).expect("checked above");
                 stored.path = path;
                 stored.size_bytes = size_bytes;
                 stored.mtime = mtime.map(mtime_as_stored);
+                stored.identity = identity.map(FileIdentity::as_stored);
                 stored.missing_since = None;
                 stored.updated_at = now;
             }

@@ -37,6 +37,7 @@ async fn create_persists_a_file_and_reads_it_back_by_path() {
                 movie_entry_id: entry_id,
             }),
             mtime: None,
+            identity: None,
         })
         .await
         .expect("inserting a file must work against the real schema");
@@ -78,6 +79,7 @@ async fn find_by_hash_matches_the_full_unsigned_range() {
                 movie_entry_id: entry_id,
             }),
             mtime: None,
+            identity: None,
         })
         .await
         .unwrap();
@@ -196,6 +198,7 @@ async fn relinking_a_missing_file_keeps_its_playback_progress() {
             path: moved_to.clone(),
             size_bytes: 2048,
             mtime: None,
+            identity: None,
         }],
         Vec::new(),
         chrono::Utc::now(),
@@ -232,6 +235,7 @@ async fn a_swap_exchanges_paths_under_the_unique_path_index() {
         path: path.clone(),
         size_bytes: 1024,
         mtime: None,
+        identity: None,
     };
 
     let alone = repo

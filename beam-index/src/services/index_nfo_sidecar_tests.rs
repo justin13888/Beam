@@ -820,6 +820,7 @@ async fn an_edited_nfo_repins_on_its_event_beside_a_row_kept_to_microseconds() {
             hash: None,
             size_bytes: None,
             mtime: Some(at_micros),
+            identity: None,
             probe: ProbeUpdate::Keep,
             content: None,
             status: None,

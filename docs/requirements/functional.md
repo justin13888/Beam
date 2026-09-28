@@ -201,12 +201,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   it has gone `BEAM_SCAN_SETTLE_SECS` without a write (measured with the injected `Clock`), and a
   file whose probe failed MUST be probed again on each visit and classified when a probe succeeds;
   when a file's content changes and its probe fails, the old content's probe results and streams
-  MUST be cleared rather than kept; when its size or modification time moved but its content did
-  not, the new size and modification time MUST be recorded so it is not hashed again on the next
-  visit. At most one `files` row MAY exist per path. Deleting a library MUST first stop anything
-  from starting on it -- a scan of any trigger, or a watcher reconcile -- then fail a queued scan of
-  it as cancelled at once and wait (bounded) for a running one to stop; if the delete itself then
-  fails, the library MUST be scanned and reconciled again as before.
+  MUST be cleared rather than kept; when its size, modification time or identity (FR-221: inode and
+  change time) moved but its content did not, the new size, modification time and identity MUST be
+  recorded so it is not hashed again on the next visit. At most one `files` row MAY exist per
+  path. Deleting a library MUST first stop anything from starting on it -- a scan of any trigger,
+  or a watcher reconcile -- then fail a queued scan of it as cancelled at once and wait (bounded)
+  for a running one to stop; if the delete itself then fails, the library MUST be scanned and
+  reconciled again as before.
 - **FR-219**: Classification (FR-204) MUST also read the Kodi-style NFO describing a file --
   `<stem>.nfo` beside it, else `movie.nfo` in its folder, and for an episode `tvshow.nfo` in its
   folder or, when that is a season folder, the series folder above; never one at the library root
@@ -295,9 +296,21 @@ strength. Each requirement is independently testable. See `product.md` for narra
   row has changed content, a new path gets a new row, and a file whose original is still at its path
   is a copy with a row of its own. A full scan MUST decide every path it walked at once,
   deterministically -- every path gets at most one row and every row at most one path -- and MUST
-  apply the relinks atomically, one row per path holding when they are done. Among several rows for
-  one path, and several paths for one row, the pairing with the same file name wins, then the same
-  directory, then the row played most recently by anyone (a row never played last), then the lowest
+  apply the relinks atomically, one row per path holding when they are done. A scan MUST NOT take
+  a path's size and modification time alone as proof that it still holds its row's content: on
+  Linux and macOS it MUST also record each file's inode and change time, and hash a path whose
+  inode or change time is not its row's, so a swap or a rotation of files of one size and one
+  modification time (written within one timestamp tick, or copied by a tool that keeps mtimes) is
+  relinked like any other. On a library whose root the watcher classifies as a network or FUSE
+  filesystem (FR-213's network filesystems), whose inode numbers may change between scans, the
+  inode MUST NOT be compared -- only the change time -- so an unchanged library is not hashed again
+  on every scan. A filesystem that reports no change time of its own -- sshfs and rclone mount
+  report a file's modification time as its change time -- gives that comparison nothing to add, so
+  on such a library a swap of files of one size and one modification time is not detected; NFS and
+  SMB, which report a real change time, are unaffected. A row with no inode and change time recorded
+  MUST be given its file's by the next visit that finds it unchanged, without hashing it. Among
+  several rows for one path, and several paths for one row, the pairing with the same file name
+  wins, then the same directory, then the row played most recently by anyone (a row never played last), then the lowest
   row id, then the lowest path. One pairing is declined, a replace-by-rename: when the row a path
   has -- present or missing -- would otherwise be displaced (its own content is at no path the scan
   hashed, or that path went to a better pairing), has been played by anyone, and the row whose
