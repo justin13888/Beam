@@ -240,12 +240,23 @@ strength. Each requirement is independently testable. See `product.md` for narra
   title's pin. That holds only when Beam saw the NFO gone, and the same whether the NFO alone or a
   folder holding it went -- a watcher removal event for either, or a scan while it was missing; one
   put back unseen with the same bytes is an unchanged NFO. A video relinked to its row (FR-221) is
-  not classified again, so the NFOs classification would read for it at its new path that have no
-  record MUST take their applied state from the NFO it had at its old path, where that one is gone
-  from disk and recorded: moved with the same content, the NFO is recorded as applied and changes
-  no pin -- a kept, conflicting NFO stays kept; edited in the move, it is applied as edited. One
-  with no such counterpart -- never applied to the title, or forgotten by a removal seen first --
-  MUST be applied as a new file's NFO is, keeping a title's other pin, and recorded.
+  not classified again, so the NFOs classification would read for it at its new path MUST take
+  their applied state by one rule, judged for every video one scan or watcher event relinks
+  together, against the records as they stood before, so that neither the order the videos are
+  met in nor how their folders' names sort changes the outcome: an NFO whose content its path's
+  record does not hold (or that has no record) has *moved* when its content is what the record of
+  an NFO path one of those videos had holds, and the file there no longer holds it -- gone, or
+  holding other content. A moved NFO MUST be recorded as applied and change no pin -- a kept,
+  conflicting NFO stays kept -- whether it moved to a free path or, in a swap or rotation of
+  files or folders, to a path whose own NFO moved on in turn. An NFO whose content no such record
+  holds is an edited or a new one: at a path already recorded, or where the NFO the video had at
+  its old path is gone from disk and recorded, it is edited and applied as edited; one whose
+  path's record already holds its content is left alone, so a video moved beside an NFO already
+  recorded does not take it; any other -- never applied to the title, or forgotten by a removal
+  seen first -- MUST be applied as a new file's NFO is, keeping a title's other pin, and recorded.
+  An NFO forgotten by a removal and put back at the same path is therefore one added after
+  indexing and re-pins its title, while one that comes back with its video at another path keeps
+  the title's pin.
   A walk that could not read where an NFO lives, or a removal reported while the library root is
   gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a

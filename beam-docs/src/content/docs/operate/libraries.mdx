@@ -179,12 +179,18 @@ in, as long as it comes back within the grace period. Subtitle files and NFOs be
 by where they are now: a moved video has the subtitles beside its new name, and an NFO moved with it
 keeps pinning its title to the same id — or, if the admin log said its id was not used because the
 title already had another, still leaves that pin alone. An NFO you edit on the way re-pins the title
-to the id it now names; one already in the folder a video is moved into, which that title never
-had, is applied as a new file's NFO would be.
+to the id it now names. An NFO already in the folder a video is moved into is not taken by that
+video when Beam has already read it for the files there; one Beam has not read yet is applied as a
+new file's NFO would be, keeping the title's pin if it names another id. If Beam saw an NFO
+deleted, putting it back in the same place is adding it, and it re-pins its title; if it comes back
+with its video in another place, it is that video's NFO arriving with it, and the pin stays.
 
 The same holds when files trade names. Swap two files' names, rotate three, or rename a file onto
 the name of one you deleted earlier, and each record follows its file's contents rather than its
-old name — your place in *Heat* stays with *Heat*. The watcher sees such a change one name at a
+old name — your place in *Heat* stays with *Heat*. NFOs follow in the same way: swap two folders,
+or rotate three, and each NFO counts as moved rather than edited, so one whose id the admin log
+said was not used still leaves the pin alone, however the folders' names sort. Only an NFO whose
+contents you also changed on the way re-pins its title. The watcher sees such a change one name at a
 time and cannot tell which file is which yet, so it leaves those files as they were and the next
 scan sorts them out; scan the library to have it done at once. If a file takes over the name of one
 whose contents are nowhere in the library any more, that old record is kept as missing, not
