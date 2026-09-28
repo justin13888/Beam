@@ -3081,12 +3081,23 @@ impl LocalIndexService {
                     .ensure_library_association(library_id, survivor)
                     .await?;
                 let moved = entry_files.remove(&entry_id).unwrap_or_default();
-                for (file, _) in &moved {
-                    // A part stays the part it was; a file classified before
-                    // parts were read gets its part from reclassification.
-                    let part_number = match file.content {
-                        Some(MediaFileContent::Movie { part_number, .. }) => part_number,
-                        _ => None,
+                for (file, inferred) in &moved {
+                    // The part the current rules read, when they key the file
+                    // to the merged title. The stored part is not enough: a
+                    // file `hold_classification` kept apart is stamped with
+                    // the current version but never had its part read, and
+                    // reclassification skips it from then on, so a part
+                    // stored as none would stay none after the merge
+                    // (issue #233). A file keyed elsewhere keeps its stored
+                    // part until reclassification re-reads it.
+                    let part_number = match inferred {
+                        MediaInference::Movie(inferred) if inferred.title.identity_key() == key => {
+                            inferred.part_number
+                        }
+                        _ => match file.content {
+                            Some(MediaFileContent::Movie { part_number, .. }) => part_number,
+                            _ => None,
+                        },
                     };
                     self.move_file(
                         file,
@@ -3373,7 +3384,8 @@ impl LocalIndexService {
                         "{conflicting} pairs of titles the current naming rules read as one are \
                          matched to different provider entries, so they are kept apart: each \
                          keeps its identity key and its files. Rename the files or correct a \
-                         match to settle them."
+                         match to settle them; a pair whose matches agree is merged the next \
+                         time the server starts."
                     ),
                     Some(serde_json::json!({
                         "conflicting_movies": pairs(conflicting_movies),

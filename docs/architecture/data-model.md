@@ -234,7 +234,10 @@ matched, and disagreeing on an id both carry or sharing none -- are never merged
 ([#233](https://github.com/justin13888/beam/issues/233) review): the stale one keeps its key and
 version, its files are stamped with the current version as they are classified (so
 reclassification does not move them onto the other title), and an admin-log warning names the
-pair. Rekeys and merges are listed in an admin-log entry.
+pair at every process start until it is settled. Correcting either title's match to the other's
+entry settles it: the next process start merges the two, and a file moved by a merge takes the part
+the current rules read from its name -- not the part stored on it, which a held file never had
+read. Rekeys and merges are listed in an admin-log entry.
 
 **Live titles.** A title is *live* while at least one file behind it is present
 (`missing_since IS NULL`): for a movie, through `movie_entries`; for a show, through `seasons` and

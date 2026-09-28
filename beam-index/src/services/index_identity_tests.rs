@@ -1684,8 +1684,14 @@ async fn a_rekey_never_merges_movies_matched_to_different_entries() {
         .await;
     h.enrich_movie(stale, 2019, 2).await;
 
-    // Twice: the second process start finds the pair as the first left it.
-    for _ in 0..2 {
+    // Twice: the second process start -- which runs the identity passes
+    // again -- finds the pair as the first left it, its files already held.
+    for start in 0..2 {
+        if start > 0 {
+            h.service
+                .identity_passes_succeeded
+                .store(false, Ordering::SeqCst);
+        }
         h.service
             .scan_all_libraries(ScanTrigger::Periodic)
             .await
@@ -1720,17 +1726,110 @@ async fn a_rekey_never_merges_movies_matched_to_different_entries() {
         assert_eq!(h.file_version(part), CLASSIFIER_VERSION);
     }
 
-    let warning = h
-        .admin_log_details("different provider entries")
+    let warnings: Vec<serde_json::Value> = h
+        .admin_log_repo
+        .list(100, 0)
         .await
-        .expect("the administrator is told");
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.message.contains("different provider entries"))
+        .filter_map(|l| l.details)
+        .map(|details| details["conflicting_movies"].clone())
+        .collect();
     assert_eq!(
-        warning["conflicting_movies"],
-        serde_json::json!([{ "stale": stale, "holder": holder }])
+        warnings,
+        vec![serde_json::json!([{ "stale": stale, "holder": holder }]); 2],
+        "each process start re-examines the pair and tells the administrator again"
     );
     assert!(
         h.admin_log_details("identity keys of").await.is_none(),
         "nothing was rekeyed or merged"
+    );
+}
+
+/// A pair kept apart by a provider-id conflict is settled by correcting a
+/// match, as the warning says: at the next process start the two merge, and a
+/// part held on the stale title -- stamped as classified, so reclassification
+/// never reads its part -- arrives as the part its name says, so the parts
+/// are one source again.
+#[tokio::test]
+async fn correcting_a_match_merges_a_held_part_as_its_part() {
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let cd1 = "Movie (2019)/Movie (2019) - CD1.avi";
+    let cd2 = "Movie (2019)/Movie (2019) - CD2.avi";
+    let holder = h
+        .keyed_movie("Movie", Some(2019), "movie|2019", &[cd1], base)
+        .await;
+    assert!(
+        h.movie_repo
+            .rekey(holder, Some("movie|2019".to_string()), CLASSIFIER_VERSION)
+            .await
+            .unwrap()
+    );
+    h.enrich_movie(holder, 2019, 1).await;
+    let stale = h
+        .keyed_movie(
+            "Movie - CD2",
+            Some(2019),
+            "movie cd2|2019",
+            &[cd2],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    h.enrich_movie(stale, 2019, 2).await;
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+    assert_eq!(
+        h.movie_repo.movies.lock().unwrap()[&stale].identity_key,
+        Some("movie cd2|2019".to_string()),
+        "the conflict holds the pair apart"
+    );
+    assert_eq!(
+        h.file_version(cd2),
+        CLASSIFIER_VERSION,
+        "and holds CD2 as classified"
+    );
+
+    // The administrator corrects the stale title's match to the holder's film,
+    // and the server restarts.
+    h.enrich_movie(stale, 2019, 1).await;
+    h.service
+        .identity_passes_succeeded
+        .store(false, Ordering::SeqCst);
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let movie = h.only_movie();
+    assert_eq!(movie.id, holder, "of two matched titles, the older is kept");
+    assert_eq!(movie.identity_key.as_deref(), Some("movie|2019"));
+    let entries = h.movie_repo.find_entries_by_movie_id(holder).await.unwrap();
+    assert_eq!(entries.len(), 1, "both parts are the one default edition");
+    let files: Vec<(PathBuf, Option<u32>)> = h
+        .file_repo
+        .find_by_movie_entry_id(entries[0].id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|f| match f.content {
+            Some(MediaFileContent::Movie { part_number, .. }) => (f.path, part_number),
+            other => panic!("not a movie file: {other:?}"),
+        })
+        .collect();
+    let sources: Vec<Vec<PathBuf>> =
+        beam_domain::utils::source_rank::stack_parts(files, |(_, part)| part.map(|n| ((), n)))
+            .into_iter()
+            .map(|source| source.into_iter().map(|(path, _)| path).collect())
+            .collect();
+    assert_eq!(
+        sources,
+        vec![vec![h.root.join(cd1), h.root.join(cd2)]],
+        "CD2 arrives as part 2, so the parts play as one source"
     );
 }
 
