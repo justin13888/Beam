@@ -1045,11 +1045,14 @@ async fn an_episodes_detail_carries_its_show_its_neighbours_and_the_viewers_stat
     assert_eq!(detail.episode.id, e1);
     assert_eq!(detail.season_number, 1);
     assert_eq!(detail.show.id, show);
-    assert_eq!(detail.previous_episode_id, Some(special));
+    assert_eq!(
+        detail.previous_episode_id, None,
+        "season 1 does not step back into the specials ({special})"
+    );
     assert_eq!(
         detail.next_episode_id,
         Some(e2),
-        "across the season boundary"
+        "past an episode with no file, across the season boundary"
     );
     assert_eq!(detail.episode.user_state.position_secs, 42.0);
     assert_eq!(detail.episode.user_state.last_file_id, Some(f1));
@@ -1073,6 +1076,55 @@ async fn an_episodes_detail_carries_its_show_its_neighbours_and_the_viewers_stat
         .send()
         .await;
     assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+}
+
+/// The next of an episode whose file holds a run is the one after the run:
+/// playing the file plays the run, so "next" must not replay part of it.
+#[tokio::test]
+async fn an_episodes_next_is_after_the_run_its_file_holds() {
+    let fixture = fixture();
+    let show = fixture.show("Dark").await;
+    let e1 = fixture.bare_episode(show, 1, 1).await;
+    fixture
+        .file(
+            MediaFileContent::Episode {
+                episode_id: e1,
+                last_episode_number: Some(3),
+            },
+            1_000,
+            100,
+        )
+        .await;
+    // E2 and E3 also have files of their own.
+    fixture.episode(show, 1, 2).await;
+    let (e3, _) = fixture.episode(show, 1, 3).await;
+    let (e4, _) = fixture.episode(show, 1, 4).await;
+    let client = client(&fixture);
+    let token = session(&fixture).await;
+
+    let detail = |id: Uuid| {
+        let client = &client;
+        let token = &token;
+        async move {
+            let response = client
+                .get(&format!("/v1/episodes/{id}"))
+                .cookie("beam_session", token)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{}", response.text());
+            response.json::<EpisodeDetail>()
+        }
+    };
+    let first = detail(e1).await;
+    assert_eq!(
+        (first.previous_episode_id, first.next_episode_id),
+        (None, Some(e4))
+    );
+    let last = detail(e4).await;
+    assert_eq!(
+        (last.previous_episode_id, last.next_episode_id),
+        (Some(e3), None)
+    );
 }
 
 #[tokio::test]

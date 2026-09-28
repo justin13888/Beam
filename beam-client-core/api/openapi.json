@@ -14440,7 +14440,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "The episode before this one in the show, by season then episode\nnumber -- across a season boundary; absent for the first."
+            "description": "The episode before this one in the show, by season then episode\nnumber -- across a season boundary, but never from a numbered season\nback into the specials (season 0) -- skipping episodes with no file\nto play; absent for the first."
           },
           "next_episode_id": {
             "type": [
@@ -14448,7 +14448,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "The episode after this one, likewise; absent for the last."
+            "description": "The episode after this one, as next-up picks it: the first with a\nfile to play, across a season boundary, after the run of episodes\nthis one's primary file holds; absent for the last."
           }
         },
         "type": "object",

@@ -81,8 +81,9 @@ pub struct PrimarySource {
     pub file_id: Option<Uuid>,
     /// The primary file's duration in seconds.
     pub duration_secs: Option<f64>,
-    /// Whether the primary file holds a run of episodes.
-    pub spans_episodes: bool,
+    /// The last episode of the run the primary file holds, when it holds
+    /// more than the one episode.
+    pub last_episode_number: Option<u32>,
     pub source_count: u32,
 }
 
@@ -231,8 +232,9 @@ fn primary(ranked: &[RankedFile], episode_number: Option<u32>) -> PrimarySource 
     PrimarySource {
         file_id: first.map(|ranked| ranked.file.id),
         duration_secs: first.and_then(|ranked| ranked.file.duration.map(|d| d.as_secs_f64())),
-        spans_episodes: first
-            .is_some_and(|ranked| episode_span(&ranked.file, episode_number).is_some()),
+        last_episode_number: first
+            .and_then(|ranked| episode_span(&ranked.file, episode_number))
+            .map(|span| span.last_episode_number),
         source_count: u32::try_from(ranked.len()).unwrap_or(u32::MAX),
     }
 }

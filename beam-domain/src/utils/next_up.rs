@@ -85,6 +85,53 @@ pub fn next_up(outline: &[OutlineEpisode], watched: &[EpisodeWatch]) -> NextUp {
         })
 }
 
+/// The episodes a viewer steps to from one episode: what "previous" and
+/// "next" on its page open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Neighbours {
+    pub previous: Option<Uuid>,
+    pub next: Option<Uuid>,
+}
+
+/// The neighbours of `episode_id`, by next-up's rules: in `(season,
+/// episode)` order across seasons, stepping over episodes with no file to
+/// play. The file `episode_id` plays may hold a run of episodes -- up to
+/// `last_episode_number` of its season -- and the next is the first after the
+/// run, since playing the file plays the run.
+///
+/// Stepping back never leaves a numbered season for the specials: season 0
+/// leads into season 1, as next-up has it, but is not what comes before it.
+/// An episode not in `outline` has no neighbours.
+#[must_use]
+pub fn neighbours(
+    outline: &[OutlineEpisode],
+    episode_id: Uuid,
+    last_episode_number: Option<u32>,
+) -> Neighbours {
+    let mut ordered: Vec<&OutlineEpisode> = outline.iter().collect();
+    ordered.sort_by_key(|e| (e.season_number, e.episode_number, e.episode_id));
+    let Some(at) = ordered.iter().position(|e| e.episode_id == episode_id) else {
+        return Neighbours::default();
+    };
+    let current = ordered[at];
+    let run_end = last_episode_number
+        .unwrap_or(current.episode_number)
+        .max(current.episode_number);
+    let in_run = |e: &OutlineEpisode| {
+        e.season_number == current.season_number && e.episode_number <= run_end
+    };
+    let next = ordered[at + 1..]
+        .iter()
+        .find(|e| e.playable && !in_run(e))
+        .map(|e| e.episode_id);
+    let previous = ordered[..at]
+        .iter()
+        .rev()
+        .find(|e| e.playable && (current.season_number == 0 || e.season_number != 0))
+        .map(|e| e.episode_id);
+    Neighbours { previous, next }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +360,178 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    fn around(previous: Option<(u32, u32)>, next: Option<(u32, u32)>) -> Neighbours {
+        Neighbours {
+            previous: previous.map(|(s, e)| id(s, e)),
+            next: next.map(|(s, e)| id(s, e)),
+        }
+    }
+
+    #[test]
+    fn the_neighbours_table() {
+        let two_seasons = [episode(1, 1), episode(1, 2), episode(2, 1), episode(2, 2)];
+        let with_specials = [episode(0, 1), episode(0, 2), episode(1, 1), episode(1, 2)];
+        let gap = [episode(1, 1), unplayable(1, 2), episode(1, 3)];
+        // E1's file holds E1-E3; E2 and E3 also have files of their own.
+        let run = [
+            episode(1, 1),
+            episode(1, 2),
+            episode(1, 3),
+            episode(1, 4),
+            episode(2, 1),
+        ];
+        let shuffled = [episode(2, 1), episode(1, 2), episode(1, 1)];
+
+        // (why, outline, the episode, its file's last episode, expected)
+        type Case<'a> = (
+            &'a str,
+            &'a [OutlineEpisode],
+            (u32, u32),
+            Option<u32>,
+            Neighbours,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "the first",
+                &two_seasons,
+                (1, 1),
+                None,
+                around(None, Some((1, 2))),
+            ),
+            (
+                "the last",
+                &two_seasons,
+                (2, 2),
+                None,
+                around(Some((2, 1)), None),
+            ),
+            (
+                "across a season boundary, both ways",
+                &two_seasons,
+                (2, 1),
+                None,
+                around(Some((1, 2)), Some((2, 2))),
+            ),
+            (
+                "season 1 does not step back into the specials",
+                &with_specials,
+                (1, 1),
+                None,
+                around(None, Some((1, 2))),
+            ),
+            (
+                "the last special leads into season 1",
+                &with_specials,
+                (0, 2),
+                None,
+                around(Some((0, 1)), Some((1, 1))),
+            ),
+            (
+                "an episode with no file is stepped over forwards",
+                &gap,
+                (1, 1),
+                None,
+                around(None, Some((1, 3))),
+            ),
+            (
+                "an episode with no file is stepped over backwards",
+                &gap,
+                (1, 3),
+                None,
+                around(Some((1, 1)), None),
+            ),
+            (
+                "the next is after the run the file holds",
+                &run,
+                (1, 1),
+                Some(3),
+                around(None, Some((1, 4))),
+            ),
+            (
+                "a run ends with its season",
+                &run,
+                (1, 4),
+                Some(9),
+                around(Some((1, 3)), Some((2, 1))),
+            ),
+            (
+                "a run no longer than the episode is the episode",
+                &run,
+                (1, 2),
+                Some(1),
+                around(Some((1, 1)), Some((1, 3))),
+            ),
+            (
+                "the numbers order, not the listing",
+                &shuffled,
+                (1, 2),
+                None,
+                around(Some((1, 1)), Some((2, 1))),
+            ),
+            (
+                "not in the show",
+                &two_seasons,
+                (9, 9),
+                None,
+                Neighbours::default(),
+            ),
+        ];
+        for (why, outline, (season, number), last, expected) in cases {
+            assert_eq!(
+                neighbours(outline, id(season, number), last),
+                expected,
+                "{why}"
+            );
+        }
+    }
+
+    proptest! {
+        /// A neighbour is always a playable episode of the show, on the side
+        /// it names; next never lands inside the current file's run, and
+        /// previous never steps from a numbered season into the specials.
+        #[test]
+        fn a_neighbour_is_playable_and_on_its_side(
+            outline in outline_strategy(),
+            pick in 0usize..20,
+            last in prop::option::of(0u32..10),
+        ) {
+            prop_assume!(!outline.is_empty());
+            let current = outline[pick % outline.len()];
+            let key = |e: &OutlineEpisode| (e.season_number, e.episode_number);
+            let find = |id: Uuid| outline.iter().find(|e| e.episode_id == id).copied().unwrap();
+            let Neighbours { previous, next } = neighbours(&outline, current.episode_id, last);
+            if let Some(next) = next.map(find) {
+                prop_assert!(next.playable);
+                prop_assert!(key(&next) > key(&current));
+                prop_assert!(
+                    next.season_number != current.season_number
+                        || next.episode_number > last.unwrap_or(0)
+                );
+            }
+            if let Some(previous) = previous.map(find) {
+                prop_assert!(previous.playable);
+                prop_assert!(key(&previous) < key(&current));
+                prop_assert!(current.season_number == 0 || previous.season_number != 0);
+            }
+            // Nothing playable is skipped that the rules allow.
+            let skipped_next = outline.iter().any(|e| {
+                e.playable
+                    && key(e) > key(&current)
+                    && (e.season_number != current.season_number
+                        || e.episode_number > last.unwrap_or(0).max(current.episode_number))
+                    && next.is_none_or(|n| key(e) < key(&find(n)))
+            });
+            prop_assert!(!skipped_next, "a nearer playable next was skipped");
+            let skipped_previous = outline.iter().any(|e| {
+                e.playable
+                    && key(e) < key(&current)
+                    && (current.season_number == 0 || e.season_number != 0)
+                    && previous.is_none_or(|p| key(e) > key(&find(p)))
+            });
+            prop_assert!(!skipped_previous, "a nearer playable previous was skipped");
         }
     }
 }

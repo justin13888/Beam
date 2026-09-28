@@ -126,9 +126,13 @@ pub struct EpisodeDetail {
     pub season_number: u32,
     pub show: ShowRef,
     /// The episode before this one in the show, by season then episode
-    /// number -- across a season boundary; absent for the first.
+    /// number -- across a season boundary, but never from a numbered season
+    /// back into the specials (season 0) -- skipping episodes with no file
+    /// to play; absent for the first.
     pub previous_episode_id: Option<Uuid>,
-    /// The episode after this one, likewise; absent for the last.
+    /// The episode after this one, as next-up picks it: the first with a
+    /// file to play, across a season boundary, after the run of episodes
+    /// this one's primary file holds; absent for the last.
     pub next_episode_id: Option<Uuid>,
 }
 

@@ -20,6 +20,7 @@ use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
     CatalogRepository, GenreRepository, MovieRepository, ShowRepository,
 };
+use beam_domain::utils::next_up::{Neighbours, neighbours};
 
 #[async_trait::async_trait]
 pub trait MetadataService: Send + Sync + std::fmt::Debug {
@@ -206,7 +207,7 @@ impl From<PrimarySource> for MovieFiles {
         let PrimarySource {
             file_id,
             duration_secs,
-            spans_episodes: _,
+            last_episode_number: _,
             source_count,
         } = primary;
         Self {
@@ -460,12 +461,12 @@ impl DbMetadataService {
         let PrimarySource {
             file_id,
             duration_secs,
-            spans_episodes,
+            last_episode_number,
             source_count,
         } = self.sources.episode_primary(&ep).await.map_err(internal)?;
         // A file holding a run of episodes lasts the whole run, which is not
         // this episode's duration.
-        let duration = duration_secs.filter(|_| !spans_episodes);
+        let duration = duration_secs.filter(|_| last_episode_number.is_none());
         let beam_domain::models::Episode {
             id,
             season_id: _,
@@ -777,19 +778,23 @@ impl MetadataService for DbMetadataService {
         else {
             return Ok(None);
         };
-        // Neighbours in the order next-up walks: by season, then episode,
-        // specials first.
+        // Neighbours by next-up's rules: playable episodes only, and the
+        // next after the run the episode's primary file holds.
         let outline = self
             .show_repo
             .episode_outline(show.id)
             .await
             .map_err(internal)?;
-        let at = outline.iter().position(|e| e.episode_id == episode_id);
-        let previous_episode_id = at
-            .and_then(|at| at.checked_sub(1))
-            .and_then(|before| outline.get(before))
-            .map(|e| e.episode_id);
-        let next_episode_id = at.and_then(|at| outline.get(at + 1)).map(|e| e.episode_id);
+        let run_end = self
+            .sources
+            .episode_primary(&episode)
+            .await
+            .map_err(internal)?
+            .last_episode_number;
+        let Neighbours {
+            previous: previous_episode_id,
+            next: next_episode_id,
+        } = neighbours(&outline, episode_id, run_end);
         Ok(Some(EpisodeDetail {
             episode: self.episode_metadata(episode).await?,
             season_id: season.id,
