@@ -217,6 +217,14 @@ What an administrator set on the retired title goes with its files (issue #185):
 administrator's pin moves to the survivor, which is queued to be fetched by it, unless the survivor
 has an administrator's pin of its own — then the survivor's stands and an admin-log warning names
 the one dropped — and its locked fields join the survivor's.
+A movie a merge keeps, or one rekeyed in place, is also retitled to the title its files now spell
+(`MovieRepository::retitle_from`, compare-and-set on the old title) when its display title is still
+the one older rules spelled -- it keys to the key it had -- and no provider matched it and no
+administrator locked its title. `CLASSIFIER_VERSION` 3 is such a change
+([#233](https://github.com/justin13888/beam/issues/233)): the parts of `Movie (2019) - CD1.avi` and
+`- CD2.avi` were two films keyed `movie cd1|2019` and `movie cd2|2019`; both now key `movie|2019`,
+so they merge into one movie titled `Movie`, every file keeping its row (and its playback progress),
+and the reclassification that follows records each file's `part_number`.
 A show whose stored key's title part is a season-folder name (`season 05|`) is released (key set to
 NULL) instead, as the
 backfill leaves one keyless. A title whose files derive no key of its kind keeps its key and
@@ -268,7 +276,8 @@ potentially backed by its own file(s).
 
 Unique index `idx_movie_entries_unique` on `(library_id, movie_id, edition)` `NULLS NOT DISTINCT` —
 at most one entry per edition per library, per movie, the default (NULL) edition included. Every
-copy of one edition is another `files` row of its one entry. The indexer finds or creates an entry
+copy of one edition -- and every part of a copy split across files (`files.part_number`) -- is
+another `files` row of its one entry. The indexer finds or creates an entry
 with one `INSERT ... ON CONFLICT (library_id, movie_id, edition) DO NOTHING` and a read-back
 (`MovieRepository::find_or_create_entry`). Before
 [#182](https://github.com/justin13888/beam/issues/182) the index let any number of NULL-edition
@@ -320,6 +329,7 @@ quality/edition/language rip.
 | `ctime` | TIMESTAMPTZ | yes | the file's change time when last recorded, at `mtime`'s stored precision; set by the kernel on every rename and write, and never kept by a copy tool. A `CHECK` (`chk_files_identity_whole`) holds `inode` and `ctime` NULL or set together |
 | `missing_since` | TIMESTAMPTZ | yes | soft-delete stamp: NULL while the file is on disk; the instant the indexer first found it gone otherwise (FR-211) |
 | `last_episode_number` | INTEGER | yes | the last episode of a multi-episode file (`S01E01E02`); the file's `episode_id` is its first. A `CHECK` (`files_last_episode_requires_episode`) allows it only alongside `episode_id` |
+| `part_number` | INTEGER | yes | which part of a movie split across files the file is (`Movie (2019) - CD2.avi` is `2`, [#233](https://github.com/justin13888/beam/issues/233)); NULL for a whole file. Every part of one edition is a file of its one entry, and the parts of an entry in one folder are one source played in this order (`beam_domain::utils::source_rank::stack_parts`). A `CHECK` (`files_part_number_requires_movie`) allows it only alongside `movie_entry_id`, and never below 1 |
 | `classifier_version` | SMALLINT | no | default `0`: the version of the classification rules (`beam_domain::utils::media_path::CLASSIFIER_VERSION`) that decided `movie_entry_id`/`episode_id`. A scan reclassifies a probed row with an older version from its path, the NFOs beside it and its `container_tags`, keeping its id, hash and probe results; `0` marks rows classified before versions existed and rows never probed |
 | `container_tags` | JSONB | yes | the file-level container tags classification reads (`title`, `show`, `season`, `episode`, `year`; `beam_domain::utils::classification::ContainerTags`) as the last successful probe read them, `title` and `show` each cut to at most 512 bytes (`MAX_TAG_VALUE_BYTES`) on a character boundary. Set with the other probe results, cleared with them when changed content fails its probe; NULL while the file has no successful probe, or had it before this column existed. A `CHECK` (`files_container_tags_object`) holds it to a JSON object. A reclassification reads it instead of probing again, so a file placed by its tags keeps its place (FR-219) |
 
@@ -576,7 +586,10 @@ Indexes: `created_at DESC` (recent-first admin log view), `level`.
   tallest picture, the highest video bit rate, the largest file, the lowest file id -- so no row can
   hold a stale choice. `files.is_primary` and `movie_entries.is_primary`, which the indexer wrote
   `true` to every row of and nothing read, were dropped for it
-  ([#189](https://github.com/justin13888/beam/issues/189)).
+  ([#189](https://github.com/justin13888/beam/issues/189)). The parts of a movie split across
+  files (`files.part_number`) in one entry and one folder are one source, stacked when read
+  (`stack_parts`) and ranked by the first part's picture and all the parts' size
+  ([#233](https://github.com/justin13888/beam/issues/233)).
 - **One title per pin:** `movies.pinned_ref` and `shows.pinned_ref` are unique, so a provider id an
   NFO names pins at most one movie and one show.
 - **One sidecar subtitle per path:** `sidecar_subtitles.path` is unique.

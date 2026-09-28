@@ -28,7 +28,16 @@ subtitle track by stream index with FFmpeg's own codec name (`h264`, `hevc`, `ea
 primary first -- the default edition, then the tallest picture, the highest video bit rate, the
 largest file -- ranked when read rather than stored, and marks that one `is_primary`; the detail
 route's `file_id` is the same file ([#189](https://github.com/justin13888/beam/issues/189)).
-Selecting one is just a request against that file's own `/stream` endpoint. Sources
+Selecting one is just a request against that file's own `/stream` endpoint.
+
+A movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`,
+[#233](https://github.com/justin13888/beam/issues/233)) is one source, not one per file: the parts
+of one edition in one folder, listed in part order in the source's `parts`, each with its own
+`stream_url`. A client plays them as a playlist -- Android's ExoPlayer as consecutive
+`MediaItem`s, a browser by moving to the next part's stream when one ends -- and every request is
+still a direct play of one file: the server never concatenates or remuxes parts, which would be the
+transcoding ADR-0004 rules out. Playback progress stays per file, so resuming a multi-part movie
+resumes the part that was playing. Sources
 accept a movie id or an episode id; a show id is rejected with 400, since shows have no files of
 their own. Episode sources landed in
 [#102](https://github.com/justin13888/beam/pull/102), closing

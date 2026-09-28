@@ -366,6 +366,36 @@ words after the title or its year (`Movie (2019) Director's Cut.mkv`): *Director
 same edition — a 1080p and a 4K file — is a version of that one edition (see
 [Multiple versions](#multiple-versions)).
 
+### Multi-part movies
+
+A film split across files is one movie, not one per file:
+
+```
+Movies/
+└── Movie (2019)/
+    ├── Movie (2019) - CD1.avi
+    └── Movie (2019) - CD2.avi
+```
+
+Beam reads a part from the end of the name: `cd`, `disc`, `disk`, `part` or `pt` and a number,
+after a space, dot, dash or underscore — `- CD1`, `- Part 2`, `.pt1`, `_disc_1`. Only release
+details such as `1080p` or a `[GROUP]` tag may follow it. `part` counts only after the year
+(`Movie (2019) - Part 1.mkv`) or in a folder named for the movie, because some titles end in it:
+*Harry Potter and the Deathly Hallows Part 1 (2010)* is a film of its own. A number that opens the
+name (`Part 2: The Sequel (2020).mkv`) or is followed by more of the title is part of the title.
+
+The parts of one edition in one folder are one version of the movie, listed in part order, and its
+size and length are all the parts' together. Parts of different editions — `{edition-Director's
+Cut} - CD1` — are a version of that edition. If two files in one folder claim the same part, Beam
+cannot tell which to play, so it lists each of that folder's parts as a version of its own.
+
+A library indexed by an earlier Beam, which listed each part as a film (*Movie - CD1*, *Movie -
+CD2*), is merged on the first scan after the upgrade: the films become one, named *Movie*, and
+every file keeps its watch progress. A title a provider matched or you renamed keeps its name.
+
+The web player and the apps start a multi-part version at its first part; they do not yet move on
+to the next part by themselves.
+
 ### Directory layout for TV
 
 A show is named by its **series folder**:
