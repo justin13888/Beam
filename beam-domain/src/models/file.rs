@@ -14,12 +14,13 @@ use uuid::Uuid;
 /// first brings the file's to this precision.
 pub fn mtime_as_stored(mtime: DateTime<Utc>) -> DateTime<Utc> {
     let epoch = DateTime::from_timestamp(946_684_800, 0).expect("2000-01-01 is a valid instant");
-    match (mtime - epoch).num_microseconds() {
-        Some(micros) => epoch + chrono::TimeDelta::microseconds(micros),
-        // Hundreds of thousands of years out, beyond what the column holds:
-        // there is no stored form to match.
-        None => mtime,
-    }
+    // chrono spans about 262,000 years either side of year 0, so no instant
+    // is further from 2000-01-01 than about 8.3e18 microseconds -- inside
+    // i64's 9.2e18.
+    let micros = (mtime - epoch)
+        .num_microseconds()
+        .expect("chrono's range fits in i64 microseconds from 2000-01-01");
+    epoch + chrono::TimeDelta::microseconds(micros)
 }
 
 /// Represents a media file in the library

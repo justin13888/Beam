@@ -706,6 +706,8 @@ macro_rules! file_repository_contract {
                 (instant(1_790_000_341, 999_999_999), instant(1_790_000_341, 999_999_000)),
                 // Before it, the driver truncates toward that epoch: up.
                 (instant(946_684_799, 500), instant(946_684_799, 1_000)),
+                // Before 1970 as well: the Unix epoch is not the one that counts.
+                (instant(-1, 500), instant(-1, 1_000)),
                 // Whole microseconds are kept as they are.
                 (instant(1_790_000_341, 802_029_000), instant(1_790_000_341, 802_029_000)),
             ];
