@@ -359,11 +359,15 @@ strength. Each requirement is independently testable. See `product.md` for narra
   purges.
 - **FR-222**: A DVD or Blu-ray disc structure copied whole -- a `VIDEO_TS` or `BDMV` folder, in any
   case, at any depth the policy of FR-216 does not exclude -- MUST be indexed as one source of the
-  movie the nearest folder above it that names one names, read as a filename is (FR-204) and
-  completed from the folder above that (`Heat (1995)/VIDEO_TS` is *Heat* (1995)). A folder that is
-  nothing but a disc token (`Disc 1`, `DISC1`, `CD2`) or release noise (`DVD9`) names no film, so
-  `Heat (1995)/DVD9/VIDEO_TS` and `Heat (1995)/Disc 2/VIDEO_TS` are *Heat* too, and two films' `Disc
-  1` folders MUST NOT make one title. No file inside a disc is judged by its own name. A disc with
+  movie a folder above it names, read as a filename is (FR-204) and completed from the folder above
+  that (`Heat (1995)/VIDEO_TS` is *Heat* (1995)): the nearest folder that names a film with a year,
+  or -- when none above it has a year -- the nearest that names a film at all. A folder that says
+  only which piece of a release it is (`Disc 1`, `Disc One`, `DVD 1`, `BD1`, `Disc 1 of 2`, `DISC 1
+  [Feature]`, `Disc 2 - Extras`, `Side A`, `Vol 1`, `Part 2`), only which edition (`Theatrical`,
+  `Director's Cut`, `Extended Edition`), or is release noise (`DVD9`) names no film, so `Heat
+  (1995)/DVD9/VIDEO_TS`, `Heat (1995)/Disc 2/VIDEO_TS` and `Heat/Disc One/VIDEO_TS` are *Heat*
+  too, and two films' discs under the same such folder MUST NOT make one title. No file inside a
+  disc is judged by its own name. A disc with
   a season folder anywhere above it (`Show/Season 1/Disc 1/VIDEO_TS`), or with no folder naming a
   film above it, names no title: its files MUST be indexed without one and the administrator told.
   The source MUST play

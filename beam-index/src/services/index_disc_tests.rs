@@ -573,6 +573,41 @@ async fn discs_in_disc_folders_are_their_films_and_a_shows_are_untitled() {
     assert_eq!(h.entries().len(), 3, "one entry per film");
 }
 
+/// A folder inside a film's that says only which piece of a release or which
+/// edition it holds names no film (decision D234-8): two films whose discs
+/// carry the same label are two titles, and a dated folder above any label
+/// names the film.
+#[tokio::test]
+async fn discs_under_label_folders_are_their_films() {
+    let h = Harness::new().await;
+    for (film, size) in [("Heat (1995)", 2000), ("Ronin (1998)", 3000)] {
+        let film = h.root.join(film);
+        one_disc(&film.join("Disc One"), size);
+        one_disc(&film.join("DISC 2 [Extras]"), size + 100);
+        one_disc(&film.join("Extended Edition/Disc 1"), size + 200);
+        one_disc(&film.join("Bonus Feature"), size + 300);
+    }
+    for (film, size) in [("Collateral", 4000), ("Thief", 5000)] {
+        let film = h.root.join("Movies").join(film);
+        one_disc(&film.join("DVD 1"), size);
+        one_disc(&film.join("Theatrical"), size + 100);
+    }
+
+    h.scan().await.expect("the scan runs");
+
+    assert_eq!(
+        h.movies().await,
+        [
+            ("Collateral".to_string(), None),
+            ("Heat".to_string(), Some(1995)),
+            ("Ronin".to_string(), Some(1998)),
+            ("Thief".to_string(), None),
+        ]
+    );
+    assert_eq!(h.entries().len(), 4, "one entry per film");
+    assert_eq!(h.present().len(), 12, "every disc is indexed");
+}
+
 /// The discs of a set of one film are one source (decision D234-7): each
 /// disc's main title in disc order, numbered as one run of parts, whatever
 /// kind each disc is.

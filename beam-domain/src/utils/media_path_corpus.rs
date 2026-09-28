@@ -766,8 +766,53 @@ const CORPUS: &[(&str, &str)] = &[
         "Heat (1995) {edition-Director's Cut}/Disc 1/BDMV/STREAM/00800.m2ts",
         "movie Heat|1995 ed=Director's Cut",
     ),
+    // A folder that says only which piece of a release it is, or which
+    // edition, names no film either (decision D234-8).
+    ("Heat/Disc One/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    ("Heat/DVD 1/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    ("Heat/BD1/BDMV/STREAM/00001.m2ts", "movie Heat|-"),
+    ("Heat/Blu-ray 2/BDMV/STREAM/00001.m2ts", "movie Heat|-"),
+    ("Heat/Disc 1 of 2/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    (
+        "Heat/DISC 1 [Feature]/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|-",
+    ),
+    ("Heat/Disc 2 - Bonus/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    ("Heat/Side A/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    ("Heat/Vol 1/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    ("Heat/Part Two/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    ("Heat/Theatrical/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    ("Heat/Director's Cut/BDMV/STREAM/00001.m2ts", "movie Heat|-"),
+    (
+        "Heat/Extended Edition/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|-",
+    ),
+    // A folder naming a film with a year wins over any year-less folder
+    // below it, whatever that folder is called.
+    (
+        "Heat (1995)/Bonus Feature/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    (
+        "Heat (1995)/Main Feature Disc/BDMV/STREAM/00001.m2ts",
+        "movie Heat|1995",
+    ),
+    // One of a film's parts or volumes with its own words names that film.
+    (
+        "Lord of the Rings/Part 1 - The Fellowship of the Ring/VIDEO_TS/VTS_01_1.VOB",
+        "movie Part 1 - The Fellowship of the Ring|-",
+    ),
+    // With no year anywhere, the nearest folder naming anything names it.
+    ("Movies/Heat/VIDEO_TS/VTS_01_1.VOB", "movie Heat|-"),
+    // A title that opens with an edition word is a title.
+    (
+        "Uncut Gems (2019)/VIDEO_TS/VTS_01_1.VOB",
+        "movie Uncut Gems|2019",
+    ),
     // A disc no folder names a film for.
     ("VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
+    ("Theatrical/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
+    ("Disc One/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
     ("BDMV/STREAM/00001.m2ts", "unclassifiable disc"),
     ("Disc 1/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
     ("DVD9/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
@@ -888,6 +933,68 @@ fn two_discs_with_same_named_files_key_apart() {
     );
 }
 
+/// Every label a folder inside a film's may carry to say which piece of a
+/// release or which edition it holds (decision D234-8): each layout, `{}`
+/// standing for the film's folder, is that film's -- never a title the label
+/// names that every film's discs share.
+const DISC_LABEL_LAYOUTS: &[&str] = &[
+    "{}/Disc One/VIDEO_TS/VTS_01_1.VOB",
+    "{}/disc two/VIDEO_TS/VTS_01_1.VOB",
+    "{}/DVD 1/VIDEO_TS/VTS_01_1.VOB",
+    "{}/DVD2/VIDEO_TS/VTS_01_1.VOB",
+    "{}/BD1/BDMV/STREAM/00001.m2ts",
+    "{}/BD 2/BDMV/STREAM/00001.m2ts",
+    "{}/Bluray 1/BDMV/STREAM/00001.m2ts",
+    "{}/Blu-ray Disc 2/BDMV/STREAM/00001.m2ts",
+    "{}/Disc 1 of 2/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Disc.2.of.2/VIDEO_TS/VTS_01_1.VOB",
+    "{}/DISC 1 [Feature]/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Disc 2 (Extras)/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Disc 1 - Feature/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Part 1/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Pt.2/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Vol 1/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Volume Two/BDMV/STREAM/00001.m2ts",
+    "{}/Side A/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Theatrical/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Theatrical Cut/BDMV/STREAM/00001.m2ts",
+    "{}/Directors Cut/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Director's Cut/BDMV/STREAM/00001.m2ts",
+    "{}/Extended Edition/Disc 1/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Unrated/VIDEO_TS/VTS_01_1.VOB",
+    "{}/Special Edition/Disc 2/BDMV/STREAM/00001.m2ts",
+];
+
+/// Each label layout names the film of the folder above it, dated or not,
+/// and two films' discs under the same label never key alike.
+#[test]
+fn a_disc_label_folder_is_its_films() {
+    let movie = |path: &str| match infer_media(Path::new(path)) {
+        MediaInference::Movie(movie) => movie,
+        other => panic!("{path} is not a movie: {other:?}"),
+    };
+    let films = [
+        ("Heat (1995)", "Heat", Some(1995)),
+        ("Ronin (1998)", "Ronin", Some(1998)),
+        ("Movies/Heat", "Heat", None),
+        ("Movies/Ronin", "Ronin", None),
+    ];
+    for layout in DISC_LABEL_LAYOUTS {
+        let mut keys = std::collections::BTreeSet::new();
+        for (folder, title, year) in films {
+            let path = layout.replace("{}", folder);
+            let movie = movie(&path);
+            assert_eq!(
+                (movie.title.title.as_str(), movie.title.year),
+                (title, year),
+                "{path}"
+            );
+            keys.insert(movie.title.identity_key());
+        }
+        assert_eq!(keys.len(), films.len(), "{layout}: {keys:?}");
+    }
+}
+
 /// Two releases of one show -- one in season folders, one flat -- key to the
 /// same show, which is what makes the season-folder rule matter: the old
 /// parent-folder rule keyed the first to a show called "Season 01".
@@ -938,6 +1045,27 @@ mod properties {
         #[test]
         fn inference_never_panics(path in ".*") {
             let _ = infer_media(Path::new(&path));
+        }
+
+        /// Whatever a year-less folder inside a dated film's folder is
+        /// called, the disc beneath it is that film (decision D234-8).
+        #[test]
+        fn a_disc_under_a_dated_folder_is_that_film(
+            title in "Q[a-z]{2,8}( Q[a-z]{2,8})?",
+            year in 1920u32..2030,
+            label in "[A-Za-z .()\\[\\]_'-]{0,16}[0-9]?",
+        ) {
+            prop_assume!(!label.trim().is_empty() && !label.trim_start().starts_with('.'));
+            prop_assume!(season_folder(&label).is_none() && !is_bare_season_range(&label));
+            prop_assume!(DiscKind::of_folder(&label).is_none());
+            let path = format!("{title} ({year})/{label}/VIDEO_TS/VTS_01_1.VOB");
+            match infer_media(Path::new(&path)) {
+                MediaInference::Movie(movie) => {
+                    prop_assert_eq!(&movie.title.title, &title, "{}", path);
+                    prop_assert_eq!(movie.title.year, Some(year), "{}", path);
+                }
+                other => prop_assert!(false, "{path} is not a movie: {other:?}"),
+            }
         }
 
         /// Whatever the filename, a file in a season folder is never a movie:

@@ -433,11 +433,15 @@ Movies/
 
 The folder around the disc is read like a file name (`Heat.1995.DVD9-GROUP/VIDEO_TS` is *Heat* too),
 and the files inside the disc are never read as titles, so every disc's `VTS_01_1.VOB` or
-`00001.m2ts` stays with its own film. A folder named only for the disc (`Disc 1`, `DISC2`, `CD2`)
-or only with release words (`DVD9`) is skipped for the folder above it, so `Heat (1995)/Disc
-1/VIDEO_TS` is *Heat*. A disc with no folder naming a film above it, or with a season folder
-anywhere above it (`Show/Season 1/Disc 1/VIDEO_TS`), names no film: it is indexed without a title
-and the admin log says why. A disc of a show's episodes is not split into episodes.
+`00001.m2ts` stays with its own film. A folder with a year in its name (`Heat (1995)`) names the
+film whatever the folders below it are called, so `Heat (1995)/Bonus Feature/VIDEO_TS` is *Heat*
+too. A folder named only for the disc, side, volume or part (`Disc 1`, `Disc One`, `DVD 1`, `BD1`,
+`Disc 1 of 2`, `Disc 2 - Extras`, `Side A`, `Vol 1`), only for the edition (`Theatrical`,
+`Director's Cut`, `Extended Edition`) or only with release words (`DVD9`) is skipped for the folder
+above it, so `Heat/Disc One/VIDEO_TS` is *Heat*. Without a year anywhere, any other folder name
+(`Heat/Bonus Feature/VIDEO_TS`) is taken as the film's, so give the film's folder its year. A disc
+with no folder naming a film above it, or with a season folder anywhere above it (`Show/Season
+1/Disc 1/VIDEO_TS`), names no film: it is indexed without a title and the admin log says why. A disc of a show's episodes is not split into episodes.
 
 A film spread over several discs plays as one version, disc 1 first, when its disc folders are
 numbered and sit side by side:
