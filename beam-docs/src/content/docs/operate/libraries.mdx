@@ -466,8 +466,10 @@ video whose name it starts with — the longest, so `Movie.Extended.en.srt` belo
 `Movie.Extended.mkv`, not `Movie.mkv` — and a `Subs` or `Subtitles` folder beside the videos holds
 subtitles named the same way, or named for their language alone when the folder above holds one
 video. Image subtitles (`.sub`/`.idx`, `.sup`) are not indexed. Rescans and the watcher keep the
-list current as subtitles are added, changed and removed. Indexed subtitles are not yet offered in
-the players; that is tracked in [#189](https://github.com/justin13888/beam/issues/189).
+list current as subtitles are added, changed and removed. Each indexed subtitle is listed as a
+track of its video and served read-only, as stored and — for `.srt` and `.vtt` up to 8 MiB — as
+WebVTT for browsers; nothing is ever written beside your videos. The players do not show subtitles
+yet: see [Watching](/using/watching/#subtitles).
 
 ### Upgrading: files are reclassified once
 

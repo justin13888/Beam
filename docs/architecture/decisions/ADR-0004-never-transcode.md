@@ -57,3 +57,6 @@ supposed to be a framework-agnostic domain layer — codecs are plain strings/en
   for libraries with exotic content.
 - This is a rejected philosophy, not a deferred feature — reversing it later is a significant
   architectural undertaking, not a config flag.
+- Subtitle files are inside the line, and subtitle streams outside it:
+  [ADR-0020](ADR-0020-text-subtitle-delivery.md) serves a subtitle file beside a video as stored and
+  rewrites SubRip as WebVTT -- text, not media -- and never extracts a stream from a video.

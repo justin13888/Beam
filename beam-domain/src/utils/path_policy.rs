@@ -43,7 +43,7 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
 /// `00001.m2ts` and friends -- so indexing the files as they stand invents
 /// films named `VTS 01 1` or `00001`, and merges every disc's same-numbered
 /// file into one. Matched case-insensitively at any depth; playing a disc
-/// structure as its enclosing title is issue #189's.
+/// structure as its enclosing title is issue #234's.
 const DISC_STRUCTURE_DIRECTORIES: &[&str] = &["video_ts", "audio_ts", "bdmv", "certificate"];
 
 /// Folders that hold a title's extras rather than the title (the Plex and

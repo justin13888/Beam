@@ -174,7 +174,7 @@ strength. Each requirement is independently testable. See `product.md` for narra
   or anything under a hidden folder; NAS and operating-system housekeeping folders (`@eaDir`,
   `#recycle`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`); DVD and Blu-ray disc
   structures (`VIDEO_TS`, `AUDIO_TS`, `BDMV`, `CERTIFICATE`, at any depth: playing one as its title
-  is #189's); extras folders below the top level of a library (`Extras`, `Featurettes`, `Behind The
+  is #234's); extras folders below the top level of a library (`Extras`, `Featurettes`, `Behind The
   Scenes`, `Deleted Scenes`, `Interviews`, `Sample(s)`, `Bonus`), and the extras folder names that
   can also name a category (`Scenes`, `Shorts`, `Trailers`, `Other`) only inside a title's folder --
   one naming a title and year, a season folder, or any folder below the top level of a library;
@@ -281,8 +281,7 @@ strength. Each requirement is independently testable. See `product.md` for narra
   subtitles beside its new path, and no longer those beside its old one: the scan judges subtitles
   and NFOs after its relinks, and the watcher reconciles a relinked video's subtitle rows, and the
   subtitles and NFOs beneath a directory it reconciles. An NFO's record stays keyed by the NFO's own
-  path (FR-219). Image-based subtitles are not indexed. Serving sidecar
-  subtitles is [#189](https://github.com/justin13888/beam/issues/189)'s scope.
+  path (FR-219). Image-based subtitles are not indexed. Serving them is FR-512.
 - **FR-221**: A file's `files` row MUST follow the file's content within its library. A path whose
   content hash (non-zero) and size match a row of the same library whose own content has left its
   path -- the path is gone, the row is marked missing (FR-211) and its path not walked, or the path
@@ -405,10 +404,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   cookie established per FR-103. The server MUST NOT accept a bearer or stream token supplied via URL
   query string.
 - **FR-505**: For a title with multiple indexed file versions, the server MUST expose an endpoint
-  (`/media/{id}/sources`) enumerating the available versions — including real probed per-stream
-  codec information, resolution, container, and size — so the client can present a source-quality
-  picker. The endpoint accepts a movie id or an episode id; a show id is rejected, since shows have
-  no files of their own.
+  (`/media/{id}/sources`) enumerating the available versions — container, size, edition, and each
+  version's video, audio and subtitle tracks, every track tied to its file by its stream index and
+  naming its real codec as FFmpeg does, with language, title and default/forced flags — so the
+  client can present a source-quality picker and choose tracks. A value the file does not state
+  MUST be absent, never a substituted default. A file holding a run of episodes MUST say so. The
+  endpoint accepts a movie id or an episode id; a show id is rejected, since shows have no files of
+  their own.
 - **FR-506**: Switching between file versions during the source-selection scenario MUST result in
   direct-play of the newly selected file; the server MUST NOT perform any transcoding or format
   conversion to service the switch.
@@ -429,6 +431,17 @@ strength. Each requirement is independently testable. See `product.md` for narra
   names (client kind, container, codecs, resolution class, bitrate class), discarding the file and
   the reporting user (NFR-503). A file it cannot resolve MUST be dropped, not refused. When
   telemetry is disabled the endpoint MUST refuse with a distinct 409 so clients stop reporting.
+- **FR-512**: The subtitle files indexed beside a video (FR-220) MUST be listed among its source's
+  subtitle tracks, and the server MUST serve each read-only: as stored, Range-capable, with its
+  format's content type; and, for SubRip and WebVTT files up to 8 MiB, as WebVTT, SubRip converted
+  and WebVTT normalised to UTF-8. Rewriting a text subtitle is not transcoding (FR-501,
+  [ADR-0020](../architecture/decisions/ADR-0020-text-subtitle-delivery.md)). A subtitle stream
+  inside the video MUST NOT be extracted; it is listed with its stream index and no URL. A subtitle
+  of a video that is missing from disk MUST NOT be served.
+- **FR-513**: Of a title's file versions, exactly one MUST be marked primary and listed first: the
+  default edition before a named one, then the tallest picture, the highest video bit rate, the
+  largest file, and the lowest file id. The choice MUST be computed from the files when read, and
+  the detail endpoint's `file_id` and duration MUST be the primary's.
 
 ## FR-6xx — Administration
 

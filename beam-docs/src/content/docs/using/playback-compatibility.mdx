@@ -19,6 +19,10 @@ not a feature that has yet to be built. The trade is deliberate: no transcoding 
 melting under several viewers, no quality lost to re-encoding, and playback that starts as fast as
 the file can be read.
 
+The one thing Beam rewrites is subtitle text: a `.srt` file beside a video can also be fetched as
+WebVTT, the only subtitle format a browser reads. That is a few kilobytes of cue text, never your
+video or audio.
+
 ## What it looks like when it fails
 
 | Symptom | Usually means |

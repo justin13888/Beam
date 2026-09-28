@@ -22,9 +22,13 @@ around them.
 
 For (c): a logical title (`movie_entries` row or `episodes` row) can have multiple `files` rows —
 e.g. a 1080p remux and a separately indexed 480p re-encode. `GET /v1/media/{id}/sources` exposes
-the available versions with size, container, duration, and real probed per-stream codecs
-(`H264`/`H265`/`AV1`, `Aac`/`Opus`, with an `UNKNOWN` fallback) plus each file's `stream_url` and
-`download_url`. Selecting one is just a request against that file's own `/stream` endpoint. Sources
+the available versions with size, container, duration, edition, and every video, audio and
+subtitle track by stream index with FFmpeg's own codec name (`h264`, `hevc`, `eac3`, `truehd`,
+`subrip`, `hdmv_pgs_subtitle`), plus each file's `stream_url` and `download_url`. It lists them
+primary first -- the default edition, then the tallest picture, the highest video bit rate, the
+largest file -- ranked when read rather than stored, and marks that one `is_primary`; the detail
+route's `file_id` is the same file ([#189](https://github.com/justin13888/beam/issues/189)).
+Selecting one is just a request against that file's own `/stream` endpoint. Sources
 accept a movie id or an episode id; a show id is rejected with 400, since shows have no files of
 their own. Episode sources landed in
 [#102](https://github.com/justin13888/beam/pull/102), closing
@@ -69,7 +73,21 @@ The correctness bar is standard HTTP semantics, not media semantics:
   validator; a changed file is caught by the indexer's `mtime`/`hash_xxh3` change detection (see
   `data-model.md`).
 
-Subtitle tracks are not burned in or composited server-side; where present they are separate
-`media_streams` rows for the client to handle. Text subtitle files beside a video are indexed too,
-as `sidecar_subtitles` rows of that video (issue #184, see `data-model.md`), but no endpoint serves
-them yet: delivering embedded and sidecar subtitles alike is issue #189's.
+## Subtitles
+
+Subtitles are never burned in or composited server-side, and a subtitle stream inside a video is
+never extracted: it is listed on its source with its stream index, codec, flags and `is_text`, for
+the client to read from the stream it is already playing. The text subtitle files beside a video
+-- indexed as `sidecar_subtitles` rows of it (issue #184, see `data-model.md`) -- are listed after
+the embedded tracks, and served read-only
+([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)):
+
+| Endpoint | Serves |
+|---|---|
+| `GET /v1/files/{fileId}/subtitles/{subtitleId}` | The file as stored, with its format's content type (`application/x-subrip`, `text/vtt`, `text/x-ass`, `text/x-ssa`), Range-capable through the same byte source and validator as file delivery. |
+| `GET /v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | A SubRip file converted to WebVTT, or a WebVTT file normalised to UTF-8 with LF line ends, as `text/vtt; charset=utf-8`, for a browser's `<track>`. Produced per request from the file on disk and never stored; its `ETag` derives from the file's modification time and length. ASS, SSA and any file over 8 MiB are `404` `subtitle-rendition-unavailable`: fetch the track's `url` instead. |
+
+A track offers the second exactly when it carries a `webvtt_url`. A subtitle id is only valid
+beside the video whose sources listed it, and a subtitle of a video missing from disk is not
+served. Converting a subtitle is rewriting a few kilobytes of cue text with a pure function, not
+transcoding media: see ADR-0020 for where that line is drawn.
