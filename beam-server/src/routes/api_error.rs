@@ -124,6 +124,50 @@ pub enum MediaLookupError {
     Internal(String),
 }
 
+/// `GET /v1/media`: browse and search (issue #187).
+///
+/// A database failure is a 500, never an empty page: an empty page says the
+/// library has nothing matching, which a failed read does not know.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum MediaBrowseError {
+    /// `after` or `before` is not a cursor this server issued for the
+    /// requested sort.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        title = "Invalid cursor"
+    )]
+    InvalidCursor(String),
+
+    /// The page parameters mix directions, or ask for a page size outside
+    /// 1-100.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
+
+    /// `query` holds a NUL character, which no title can contain.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-search-query",
+        title = "Invalid search query"
+    )]
+    InvalidSearchQuery(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// `GET /v1/media/{id}/sources`.
 ///
 /// Two 400s share one declared response with the `Path` extractor's own. Kynos

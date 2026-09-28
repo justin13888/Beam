@@ -123,13 +123,21 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `updated_at` | TIMESTAMPTZ | no | |
 
 A trigram GIN index on `title` (via the `pg_trgm` extension) backs catalog search; `shows.title`
-has the same.
+has the same. `idx_movies_title_sort` on `(lower(title), id)` serves the default browse order and
+`idx_movies_added_sort` on `(created_at, id)` the `date_added` one: each branch of the catalogue
+query orders and seeks on exactly those columns, so it reads the index in order. Unfiltered or
+filtered only by kind, it stops at the page size; with a selective genre, search or minimum-rating
+filter it may read up to the whole index before the page fills, so that page is bounded by the
+catalogue rather than the page size. `idx_shows_title_sort` and `idx_shows_added_sort` are the same
+on `shows`. Year, rating and runtime sorts have no index.
 
 ### `shows`
 Canonical show/series record, analogous to `movies`: `id` (PK), `title`, `identity_key` (unique,
 nullable — as for movies), `identity_key_version` (as for movies), `title_localized`, `description`, `year`, `poster_url`,
 `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id` (each unique, nullable),
-`created_at`, `updated_at`.
+`rating_tmdb` (REAL, nullable — the provider rating on the same 0-10 scale as
+`movies.rating_tmdb`; added by `m20261003_000001_catalogue_browse` and filled on a show's next
+enrichment), `created_at`, `updated_at`.
 
 ### Title identity and lifetime
 
@@ -210,8 +218,8 @@ is named in an admin-log warning. Rekeys and merges are listed in an admin-log e
 
 **Live titles.** A title is *live* while at least one file behind it is present
 (`missing_since IS NULL`): for a movie, through `movie_entries`; for a show, through `seasons` and
-`episodes`. `MovieRepository::search` / `ShowRepository::search` — browse and search — return only
-live titles, with the check an `EXISTS` in the same statement. Detail reads by id do not filter, so
+`episodes`. The `CatalogRepository` — browse and search — lists only live titles, with the check
+an `EXISTS` inside each branch of its one statement. Detail reads by id do not filter, so
 a bookmark or continue-watching tile still resolves while its file is away.
 
 **Retirement.** A scan whose walk read the whole tree finishes by deleting orphans:

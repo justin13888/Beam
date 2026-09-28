@@ -150,6 +150,36 @@ pub mod fixture {
         fn streams(&self) -> &dyn crate::repositories::MediaStreamRepository;
     }
 
+    /// Everything the [`crate::catalog_repository_contract`] suite needs from a
+    /// backing store: the read model under contract, and the repositories the
+    /// contract builds its titles through -- all over one store, so what one
+    /// writes the catalogue lists.
+    ///
+    /// The catalogue is global, so as for shows and movies a Postgres fixture
+    /// must give each test a store of its own.
+    #[async_trait::async_trait]
+    pub trait CatalogRepositoryFixture: Send + Sync {
+        /// The read model under contract.
+        fn repo(&self) -> &dyn crate::repositories::CatalogRepository;
+        fn movies(&self) -> &dyn crate::repositories::MovieRepository;
+        fn shows(&self) -> &dyn crate::repositories::ShowRepository;
+        fn genres(&self) -> &dyn crate::repositories::GenreRepository;
+        fn files(&self) -> &dyn crate::repositories::FileRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
+    }
+
+    /// Everything the [`crate::genre_repository_contract`] suite needs: the
+    /// repository under contract and the title repositories over the same
+    /// store, since a real Postgres enforces the junction tables' foreign keys.
+    pub trait GenreRepositoryFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::GenreRepository;
+        fn movies(&self) -> &dyn crate::repositories::MovieRepository;
+        fn shows(&self) -> &dyn crate::repositories::ShowRepository;
+    }
+
     /// Everything the [`crate::playback_telemetry_repository_contract`] suite
     /// needs from a backing store. The counters reference nothing, so the
     /// repository is all there is -- but `summarize` and `prune_before` are
@@ -1511,7 +1541,7 @@ macro_rules! show_repository_contract {
         use ::std::time::Duration;
         use ::uuid::Uuid;
         use $crate::models::file::{CreateMediaFile, FileStatus, MediaFile, MediaFileContent};
-        use $crate::models::show::{CreateEpisode, CreateShow, ShowSearchQuery};
+        use $crate::models::show::{CreateEpisode, CreateShow};
         use $crate::providers::enrichment::ShowEnrichment;
         use $crate::repositories::ShowRepository;
         use $crate::repositories::contract::fixture::ShowRepositoryFixture;
@@ -1561,15 +1591,6 @@ macro_rules! show_repository_contract {
                 })
                 .await
                 .expect("create an episode file")
-        }
-
-        /// Whether a filterless search lists `show_id`.
-        async fn listed(repo: &dyn ShowRepository, show_id: Uuid) -> bool {
-            repo.search(&ShowSearchQuery::default())
-                .await
-                .unwrap()
-                .iter()
-                .any(|s| s.id == show_id)
         }
 
         /// A cutoff every row created so far falls before.
@@ -1793,6 +1814,7 @@ macro_rules! show_repository_contract {
                 &ShowEnrichment {
                     title: "Shōgun (Provider Title)".to_string(),
                     year: Some(2024),
+                    rating: Some(8.5),
                     ..Default::default()
                 },
             )
@@ -1805,52 +1827,93 @@ macro_rules! show_repository_contract {
                 found.title, "Shōgun (Provider Title)",
                 "enrichment's title stands"
             );
+            assert_eq!(
+                found.rating_tmdb,
+                Some(8.5),
+                "enrichment's rating is kept (issue #187)"
+            );
             assert_eq!(found.identity_key, show.identity_key);
         }
 
         #[tokio::test]
-        async fn search_lists_only_shows_with_a_present_episode_file() {
+        async fn find_by_ids_reads_every_named_show_in_one_call() {
             let fixture = $setup().await;
             let repo = fixture.repo();
-            let (season, _) = new_seasons(repo).await;
-            let show = repo
-                .find_season_by_id(season)
+            let one = repo
+                .find_or_create_by_identity(new_show("One"))
+                .await
+                .unwrap();
+            let two = repo
+                .find_or_create_by_identity(new_show("Two"))
+                .await
+                .unwrap();
+
+            let mut found: Vec<Uuid> = repo
+                .find_by_ids(&[two.id, Uuid::new_v4(), one.id])
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|s| s.id)
+                .collect();
+            found.sort();
+            let mut expected = vec![one.id, two.id];
+            expected.sort();
+            assert_eq!(found, expected, "an unknown id is skipped");
+            assert!(repo.find_by_ids(&[]).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn child_counts_count_every_season_and_episode_per_show() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (one, two) = new_seasons(repo).await;
+            let show = repo.find_season_by_id(one).await.unwrap().unwrap().show_id;
+            repo.find_or_create_episode(episode(one, 1, "Pilot", 30))
+                .await
+                .unwrap();
+            repo.find_or_create_episode(episode(one, 2, "Second", 30))
+                .await
+                .unwrap();
+            repo.find_or_create_episode(episode(two, 1, "Return", 30))
+                .await
+                .unwrap();
+            let bare = repo
+                .find_or_create_by_identity(new_show("Bare"))
+                .await
+                .unwrap();
+            let (empty_season, _) = new_seasons(repo).await;
+            let seasons_only = repo
+                .find_season_by_id(empty_season)
                 .await
                 .unwrap()
                 .unwrap()
                 .show_id;
-            let ep = repo
-                .find_or_create_episode(episode(season, 1, "Pilot", 30))
+
+            let counts = repo
+                .child_counts(&[show, bare.id, seasons_only])
                 .await
                 .unwrap();
 
-            assert!(
-                !listed(repo, show).await,
-                "a show with no file is not listed"
+            assert_eq!(
+                counts.get(&show).copied(),
+                Some($crate::models::catalog::ShowChildCounts {
+                    seasons: 2,
+                    episodes: 3
+                })
             );
-
-            let file = episode_file(&fixture, ep.id).await;
-            assert!(listed(repo, show).await, "a present file makes it listed");
-
-            fixture
-                .files()
-                .mark_missing(vec![file.id], ::chrono::Utc::now())
-                .await
-                .unwrap();
-            assert!(
-                !listed(repo, show).await,
-                "hidden once its only file is missing"
+            assert_eq!(
+                counts.get(&seasons_only).copied(),
+                Some($crate::models::catalog::ShowChildCounts {
+                    seasons: 2,
+                    episodes: 0
+                }),
+                "a season without episodes still counts"
             );
             assert!(
-                repo.find_by_id(show).await.unwrap().is_some(),
-                "a read by id still resolves the hidden show"
+                !counts.contains_key(&bare.id),
+                "a show with no season is absent"
             );
-
-            fixture.files().restore(file.id).await.unwrap();
-            assert!(
-                listed(repo, show).await,
-                "listed again when the file returns"
-            );
+            assert!(repo.child_counts(&[]).await.unwrap().is_empty());
         }
 
         #[tokio::test]
@@ -2278,7 +2341,7 @@ macro_rules! movie_repository_contract {
     ($setup:path) => {
         use ::uuid::Uuid;
         use $crate::models::file::{CreateMediaFile, FileStatus, MediaFile, MediaFileContent};
-        use $crate::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieSearchQuery};
+        use $crate::models::movie::{CreateMovie, CreateMovieEntry, Movie};
         use $crate::providers::enrichment::MovieEnrichment;
         use $crate::repositories::MovieRepository;
         use $crate::repositories::contract::fixture::MovieRepositoryFixture;
@@ -2340,14 +2403,6 @@ macro_rules! movie_repository_contract {
                     .await
                     .expect("create a movie file"),
             )
-        }
-
-        async fn listed(repo: &dyn MovieRepository, movie_id: Uuid) -> bool {
-            repo.search(&MovieSearchQuery::default())
-                .await
-                .unwrap()
-                .iter()
-                .any(|m| m.id == movie_id)
         }
 
         fn after_everything() -> ::chrono::DateTime<::chrono::Utc> {
@@ -2491,45 +2546,63 @@ macro_rules! movie_repository_contract {
         }
 
         #[tokio::test]
-        async fn search_lists_only_movies_with_a_present_file() {
+        async fn find_by_ids_reads_every_named_movie_in_one_call() {
+            let fixture = $setup().await;
+            let repo: &dyn MovieRepository = fixture.repo();
+            let one = repo
+                .find_or_create_by_identity(new_movie("One"))
+                .await
+                .unwrap();
+            let two = repo
+                .find_or_create_by_identity(new_movie("Two"))
+                .await
+                .unwrap();
+
+            let mut found: Vec<Uuid> = repo
+                .find_by_ids(&[two.id, Uuid::new_v4(), one.id])
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|m| m.id)
+                .collect();
+            found.sort();
+            let mut expected = vec![one.id, two.id];
+            expected.sort();
+            assert_eq!(found, expected, "an unknown id is skipped");
+            assert!(repo.find_by_ids(&[]).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn enrichment_replaces_the_runtime_and_rating() {
             let fixture = $setup().await;
             let repo = fixture.repo();
-            let fileless = repo
-                .find_or_create_by_identity(parsed("Fileless", None))
-                .await
-                .unwrap();
-            entry_for(&fixture, &fileless, false).await;
             let movie = repo
-                .find_or_create_by_identity(parsed("Present", None))
+                .find_or_create_by_identity(CreateMovie::new(
+                    format!("Timed {}", Uuid::new_v4()),
+                    None,
+                    Some(::std::time::Duration::from_secs(90 * 60)),
+                ))
                 .await
                 .unwrap();
-            let file = entry_for(&fixture, &movie, true).await.unwrap();
 
-            assert!(
-                !listed(repo, fileless.id).await,
-                "a movie with no file is not listed"
-            );
-            assert!(listed(repo, movie.id).await);
+            repo.apply_enrichment(
+                movie.id,
+                &MovieEnrichment {
+                    title: movie.title.clone(),
+                    runtime_mins: Some(121),
+                    rating: Some(7.5),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
 
-            fixture
-                .files()
-                .mark_missing(vec![file.id], ::chrono::Utc::now())
-                .await
-                .unwrap();
-            assert!(
-                !listed(repo, movie.id).await,
-                "hidden once its only file is missing"
+            let stored = repo.find_by_id(movie.id).await.unwrap().unwrap();
+            assert_eq!(
+                stored.runtime,
+                Some(::std::time::Duration::from_secs(121 * 60))
             );
-            assert!(
-                repo.find_by_id(movie.id).await.unwrap().is_some(),
-                "a read by id still resolves the hidden movie"
-            );
-
-            fixture.files().restore(file.id).await.unwrap();
-            assert!(
-                listed(repo, movie.id).await,
-                "listed again when the file returns"
-            );
+            assert_eq!(stored.rating_tmdb, Some(7.5));
         }
 
         #[tokio::test]
@@ -3747,6 +3820,878 @@ macro_rules! playback_telemetry_repository_contract {
             assert_eq!(kept.rebuffers[0].events, 2);
             assert_eq!(kept.switches[0].count, 2);
             assert_eq!(fixture.repo().prune_before(day(2)).await.unwrap(), 0);
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::CatalogRepository`]: one
+/// listing of movies and shows together, filtered, ordered by every sort field
+/// in both directions with missing values last, paged from a position either
+/// way without a title repeated or skipped -- and never listing a title with
+/// no present file (issues #179, #183, #187).
+///
+/// Titles are single ASCII words: the SQL catalogue orders by `lower(title)`
+/// under the database's collation, which agrees with the in-memory byte order
+/// only there.
+///
+/// `$setup` names an `async fn() -> impl CatalogRepositoryFixture`.
+#[macro_export]
+macro_rules! catalog_repository_contract {
+    ($setup:path) => {
+        use ::std::collections::HashMap;
+        use ::std::num::NonZeroU32;
+        use ::std::time::Duration;
+        use ::uuid::Uuid;
+        use $crate::models::catalog::{
+            CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
+            SortDirection, SortKey, TitleKind,
+        };
+        use $crate::models::file::{CreateMediaFile, FileStatus, MediaFileContent};
+        use $crate::models::movie::{CreateMovie, CreateMovieEntry};
+        use $crate::models::show::{CreateEpisode, CreateShow};
+        use $crate::providers::enrichment::{MovieEnrichment, ShowEnrichment};
+        use $crate::repositories::contract::fixture::CatalogRepositoryFixture;
+
+        /// A title the contract made: its id and its file's, when it has one.
+        #[derive(Debug, Clone, Copy)]
+        struct Made {
+            id: Uuid,
+            file: Option<Uuid>,
+        }
+
+        /// A present file in the library `library_id`.
+        async fn present_file(
+            fixture: &impl CatalogRepositoryFixture,
+            library_id: Uuid,
+            content: MediaFileContent,
+        ) -> Uuid {
+            let unique = Uuid::new_v4();
+            fixture
+                .files()
+                .create(CreateMediaFile {
+                    library_id,
+                    path: ::std::path::PathBuf::from(format!("/videos/{library_id}/{unique}.mkv")),
+                    hash: (unique.as_u128() as u64) >> 1,
+                    size_bytes: 1024,
+                    mtime: None,
+                    mime_type: Some("video/x-matroska".to_string()),
+                    duration: None,
+                    container_format: Some("matroska".to_string()),
+                    content: Some(content),
+                    status: FileStatus::Known,
+                    classifier_version: 0,
+                })
+                .await
+                .expect("create a file")
+                .id
+        }
+
+        /// A movie as the indexer and enrichment leave it, with a present file
+        /// when `with_file`.
+        async fn movie(
+            fixture: &impl CatalogRepositoryFixture,
+            name: &str,
+            year: Option<u32>,
+            runtime_mins: Option<u32>,
+            rating: Option<f32>,
+            with_file: bool,
+        ) -> Made {
+            let movies = fixture.movies();
+            let movie = movies
+                .find_or_create_by_identity(CreateMovie::new(
+                    name,
+                    year,
+                    runtime_mins.map(|mins| Duration::from_secs(u64::from(mins) * 60)),
+                ))
+                .await
+                .expect("create a movie");
+            if rating.is_some() {
+                movies
+                    .apply_enrichment(
+                        movie.id,
+                        &MovieEnrichment {
+                            title: name.to_string(),
+                            year,
+                            runtime_mins,
+                            rating,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("rate the movie");
+            }
+            let library_id = fixture.new_library().await;
+            let entry = movies
+                .find_or_create_entry(CreateMovieEntry {
+                    library_id,
+                    movie_id: movie.id,
+                    edition: None,
+                    is_primary: true,
+                })
+                .await
+                .expect("create an entry");
+            let file = if with_file {
+                Some(
+                    present_file(
+                        fixture,
+                        library_id,
+                        MediaFileContent::Movie {
+                            movie_entry_id: entry.id,
+                        },
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+            Made { id: movie.id, file }
+        }
+
+        /// A show with one season of `episodes` episodes, each with a present
+        /// file when `with_files`. Returns the show and its episodes' files.
+        async fn show(
+            fixture: &impl CatalogRepositoryFixture,
+            name: &str,
+            year: Option<u32>,
+            rating: Option<f32>,
+            episodes: u32,
+            with_files: bool,
+        ) -> (Uuid, Vec<Uuid>) {
+            let shows = fixture.shows();
+            let show = shows
+                .find_or_create_by_identity(CreateShow::new(name, year))
+                .await
+                .expect("create a show");
+            if rating.is_some() {
+                shows
+                    .apply_enrichment(
+                        show.id,
+                        &ShowEnrichment {
+                            title: name.to_string(),
+                            year,
+                            rating,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("rate the show");
+            }
+            let season = shows
+                .find_or_create_season(show.id, 1)
+                .await
+                .expect("create a season");
+            let library_id = fixture.new_library().await;
+            let mut files = Vec::new();
+            for number in 1..=episodes {
+                let episode = shows
+                    .find_or_create_episode(CreateEpisode {
+                        season_id: season.id,
+                        episode_number: number,
+                        title: format!("Episode {number}"),
+                        runtime: None,
+                        air_date: None,
+                    })
+                    .await
+                    .expect("create an episode");
+                if with_files {
+                    files.push(
+                        present_file(fixture, library_id, MediaFileContent::episode(episode.id))
+                            .await,
+                    );
+                }
+            }
+            (show.id, files)
+        }
+
+        /// Seven live titles covering every sort field's interesting cases:
+        /// both kinds, mixed-case titles, tied and missing years and ratings,
+        /// and runtimes only films have. Returns each title's id and name, in
+        /// the order they were created.
+        async fn seed(fixture: &impl CatalogRepositoryFixture) -> Vec<(Uuid, &'static str)> {
+            vec![
+                (movie(fixture, "alpha", Some(2001), Some(100), Some(8.0), true).await.id, "alpha"),
+                (movie(fixture, "Bravo", None, None, None, true).await.id, "Bravo"),
+                (movie(fixture, "charlie", Some(1999), Some(90), None, true).await.id, "charlie"),
+                (show(fixture, "delta", Some(2010), Some(9.0), 1, true).await.0, "delta"),
+                (movie(fixture, "Echo", Some(2001), None, Some(6.0), true).await.id, "Echo"),
+                (show(fixture, "Foxtrot", None, None, 1, true).await.0, "Foxtrot"),
+                (show(fixture, "golf", Some(1999), Some(6.0), 1, true).await.0, "golf"),
+            ]
+        }
+
+        fn every_sort() -> Vec<CatalogSort> {
+            let mut sorts = Vec::new();
+            for field in [
+                CatalogSortField::Title,
+                CatalogSortField::Year,
+                CatalogSortField::Rating,
+                CatalogSortField::DateAdded,
+                CatalogSortField::Runtime,
+            ] {
+                for direction in [SortDirection::Asc, SortDirection::Desc] {
+                    sorts.push(CatalogSort { field, direction });
+                }
+            }
+            sorts
+        }
+
+        fn sorted(field: CatalogSortField, direction: SortDirection) -> CatalogSort {
+            CatalogSort { field, direction }
+        }
+
+        fn by_title() -> CatalogSort {
+            sorted(CatalogSortField::Title, SortDirection::Asc)
+        }
+
+        async fn browse(
+            fixture: &impl CatalogRepositoryFixture,
+            filters: CatalogFilters,
+            sort: CatalogSort,
+            seek: Seek,
+            limit: u32,
+        ) -> Vec<CatalogPosition> {
+            fixture
+                .repo()
+                .browse(&CatalogQuery {
+                    filters,
+                    sort,
+                    seek,
+                    limit: NonZeroU32::new(limit).expect("a positive limit"),
+                })
+                .await
+                .expect("browse")
+        }
+
+        /// The whole listing in one page.
+        async fn everything(
+            fixture: &impl CatalogRepositoryFixture,
+            filters: CatalogFilters,
+            sort: CatalogSort,
+        ) -> Vec<CatalogPosition> {
+            browse(fixture, filters, sort, Seek::Forward(None), 1000).await
+        }
+
+        fn names(rows: &[CatalogPosition], made: &[(Uuid, &'static str)]) -> Vec<&'static str> {
+            let by_id: HashMap<Uuid, &'static str> = made.iter().copied().collect();
+            rows.iter()
+                .map(|row| *by_id.get(&row.id).expect("a title the contract made"))
+                .collect()
+        }
+
+        /// `rows` lists `groups` in order; within a group, in any order.
+        #[track_caller]
+        fn assert_grouped(rows: &[&'static str], groups: &[&[&'static str]]) {
+            let mut at = 0;
+            for group in groups {
+                let mut got: Vec<&str> = rows[at..at + group.len()].to_vec();
+                let mut want: Vec<&str> = group.to_vec();
+                got.sort_unstable();
+                want.sort_unstable();
+                assert_eq!(got, want, "at {at} of {rows:?}");
+                at += group.len();
+            }
+            assert_eq!(at, rows.len(), "{rows:?} has more than {groups:?}");
+        }
+
+        /// The key a title really has for `field`, read back through its own
+        /// repository.
+        async fn stored_key(
+            fixture: &impl CatalogRepositoryFixture,
+            row: &CatalogPosition,
+            field: CatalogSortField,
+        ) -> SortKey {
+            match row.kind {
+                TitleKind::Movie => {
+                    let movie = fixture.movies().find_by_id(row.id).await.unwrap().unwrap();
+                    match field {
+                        CatalogSortField::Title => SortKey::Title(movie.title.to_lowercase()),
+                        CatalogSortField::Year => SortKey::Year(movie.year.map(|y| y as i32)),
+                        CatalogSortField::Rating => SortKey::Rating(movie.rating_tmdb),
+                        CatalogSortField::DateAdded => SortKey::DateAdded(movie.created_at),
+                        CatalogSortField::Runtime => {
+                            SortKey::Runtime(movie.runtime.map(|d| (d.as_secs() / 60) as i32))
+                        }
+                    }
+                }
+                TitleKind::Show => {
+                    let show = fixture.shows().find_by_id(row.id).await.unwrap().unwrap();
+                    match field {
+                        CatalogSortField::Title => SortKey::Title(show.title.to_lowercase()),
+                        CatalogSortField::Year => SortKey::Year(show.year.map(|y| y as i32)),
+                        CatalogSortField::Rating => SortKey::Rating(show.rating_tmdb),
+                        CatalogSortField::DateAdded => SortKey::DateAdded(show.created_at),
+                        CatalogSortField::Runtime => SortKey::Runtime(None),
+                    }
+                }
+            }
+        }
+
+        async fn order_of(
+            fixture: &impl CatalogRepositoryFixture,
+            made: &[(Uuid, &'static str)],
+            field: CatalogSortField,
+            direction: SortDirection,
+        ) -> Vec<&'static str> {
+            names(
+                &everything(fixture, CatalogFilters::default(), sorted(field, direction)).await,
+                made,
+            )
+        }
+
+        async fn listed_names(
+            fixture: &impl CatalogRepositoryFixture,
+            made: &[(Uuid, &'static str)],
+            filters: CatalogFilters,
+        ) -> Vec<&'static str> {
+            names(&everything(fixture, filters, by_title()).await, made)
+        }
+
+        #[tokio::test]
+        async fn titles_of_both_kinds_interleave_by_title_ignoring_case() {
+            let fixture = $setup().await;
+            let made = seed(&fixture).await;
+
+            let asc = everything(&fixture, CatalogFilters::default(), by_title()).await;
+            assert_eq!(
+                names(&asc, &made),
+                ["alpha", "Bravo", "charlie", "delta", "Echo", "Foxtrot", "golf"]
+            );
+            assert_eq!(asc[3].kind, TitleKind::Show);
+            assert_eq!(asc[3].key, SortKey::Title("delta".to_string()));
+
+            assert_eq!(
+                order_of(&fixture, &made, CatalogSortField::Title, SortDirection::Desc).await,
+                ["golf", "Foxtrot", "Echo", "delta", "charlie", "Bravo", "alpha"]
+            );
+        }
+
+        #[tokio::test]
+        async fn every_field_sorts_both_ways_with_missing_values_last() {
+            use CatalogSortField::{DateAdded, Rating, Runtime, Year};
+            use SortDirection::{Asc, Desc};
+            let fixture = $setup().await;
+            let made = seed(&fixture).await;
+
+            // A group is one key: its titles tie, and the id -- not the kind
+            // -- orders them (strict order is the next test's to check).
+            assert_grouped(
+                &order_of(&fixture, &made, Year, Asc).await,
+                &[&["charlie", "golf"], &["alpha", "Echo"], &["delta"], &["Bravo", "Foxtrot"]],
+            );
+            assert_grouped(
+                &order_of(&fixture, &made, Year, Desc).await,
+                &[&["delta"], &["alpha", "Echo"], &["charlie", "golf"], &["Bravo", "Foxtrot"]],
+            );
+            assert_grouped(
+                &order_of(&fixture, &made, Rating, Asc).await,
+                &[&["Echo", "golf"], &["alpha"], &["delta"], &["Bravo", "charlie", "Foxtrot"]],
+            );
+            assert_grouped(
+                &order_of(&fixture, &made, Rating, Desc).await,
+                &[&["delta"], &["alpha"], &["Echo", "golf"], &["Bravo", "charlie", "Foxtrot"]],
+            );
+            assert_grouped(
+                &order_of(&fixture, &made, Runtime, Asc).await,
+                &[&["charlie"], &["alpha"], &["Bravo", "delta", "Echo", "Foxtrot", "golf"]],
+            );
+            assert_grouped(
+                &order_of(&fixture, &made, Runtime, Desc).await,
+                &[&["alpha"], &["charlie"], &["Bravo", "delta", "Echo", "Foxtrot", "golf"]],
+            );
+            let created: Vec<&str> = made.iter().map(|(_, name)| *name).collect();
+            assert_eq!(order_of(&fixture, &made, DateAdded, Asc).await, created);
+            let mut newest_first = created.clone();
+            newest_first.reverse();
+            assert_eq!(order_of(&fixture, &made, DateAdded, Desc).await, newest_first);
+        }
+
+        /// Whatever the sort, every row carries the key its title really has,
+        /// and each row sorts strictly after the one before it -- ties
+        /// included, which only the `(id, kind)` tie-break can separate.
+        #[tokio::test]
+        async fn every_row_carries_its_own_key_in_strict_display_order() {
+            let fixture = $setup().await;
+            seed(&fixture).await;
+
+            for sort in every_sort() {
+                let rows = everything(&fixture, CatalogFilters::default(), sort).await;
+                assert_eq!(rows.len(), 7, "{sort:?}");
+                for row in &rows {
+                    assert_eq!(row.key, stored_key(&fixture, row, sort.field).await, "{sort:?}");
+                }
+                for pair in rows.windows(2) {
+                    assert!(
+                        pair[0].display_cmp(&pair[1], sort.direction).is_lt(),
+                        "{sort:?}: {:?} before {:?}",
+                        pair[0],
+                        pair[1]
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn paging_forward_in_any_page_size_visits_every_title_once() {
+            let fixture = $setup().await;
+            seed(&fixture).await;
+
+            for sort in every_sort() {
+                let whole = everything(&fixture, CatalogFilters::default(), sort).await;
+                for size in 1..=3_u32 {
+                    let mut walked = Vec::new();
+                    let mut after = None;
+                    loop {
+                        let page = browse(
+                            &fixture,
+                            CatalogFilters::default(),
+                            sort,
+                            Seek::Forward(after.clone()),
+                            size,
+                        )
+                        .await;
+                        assert!(page.len() <= size as usize);
+                        let short = page.len() < size as usize;
+                        after = page.last().cloned();
+                        walked.extend(page);
+                        if short {
+                            break;
+                        }
+                    }
+                    assert_eq!(walked, whole, "{sort:?} in pages of {size}");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn paging_backward_from_the_end_mirrors_paging_forward() {
+            let fixture = $setup().await;
+            seed(&fixture).await;
+
+            for sort in every_sort() {
+                let whole = everything(&fixture, CatalogFilters::default(), sort).await;
+                for size in 1..=3_u32 {
+                    let mut walked: Vec<CatalogPosition> = Vec::new();
+                    let mut before = None;
+                    loop {
+                        let page = browse(
+                            &fixture,
+                            CatalogFilters::default(),
+                            sort,
+                            Seek::Backward(before.clone()),
+                            size,
+                        )
+                        .await;
+                        assert!(page.len() <= size as usize);
+                        let short = page.len() < size as usize;
+                        before = page.first().cloned();
+                        let mut joined = page;
+                        joined.extend(walked);
+                        walked = joined;
+                        if short {
+                            break;
+                        }
+                    }
+                    assert_eq!(walked, whole, "{sort:?} in pages of {size}, backwards");
+                }
+            }
+        }
+
+        /// A position is a value, not an offset: a page from a title that has
+        /// since left the listing starts where that title was.
+        #[tokio::test]
+        async fn a_page_from_a_title_that_left_the_listing_continues_where_it_was() {
+            let fixture = $setup().await;
+            let made = seed(&fixture).await;
+            let whole = everything(&fixture, CatalogFilters::default(), by_title()).await;
+            let gone = whole[2].clone();
+            assert_eq!(names(std::slice::from_ref(&gone), &made), ["charlie"]);
+            // charlie is a movie: its only file is behind its only entry.
+            let entries = fixture.movies().find_entries_by_movie_id(gone.id).await.unwrap();
+            let files = fixture.files().find_by_movie_entry_id(entries[0].id).await.unwrap();
+            fixture
+                .files()
+                .mark_missing(vec![files[0].id], ::chrono::Utc::now())
+                .await
+                .unwrap();
+
+            let after = browse(
+                &fixture,
+                CatalogFilters::default(),
+                by_title(),
+                Seek::Forward(Some(gone.clone())),
+                10,
+            )
+            .await;
+            assert_eq!(names(&after, &made), ["delta", "Echo", "Foxtrot", "golf"]);
+            let before = browse(
+                &fixture,
+                CatalogFilters::default(),
+                by_title(),
+                Seek::Backward(Some(gone)),
+                10,
+            )
+            .await;
+            assert_eq!(names(&before, &made), ["alpha", "Bravo"]);
+        }
+
+        #[tokio::test]
+        async fn a_backward_page_is_the_last_rows_before_the_position_in_display_order() {
+            let fixture = $setup().await;
+            let made = seed(&fixture).await;
+            let sort = sorted(CatalogSortField::Title, SortDirection::Desc);
+
+            let last_two =
+                browse(&fixture, CatalogFilters::default(), sort, Seek::Backward(None), 2).await;
+            assert_eq!(names(&last_two, &made), ["Bravo", "alpha"]);
+
+            let whole = everything(&fixture, CatalogFilters::default(), sort).await;
+            let before_echo = browse(
+                &fixture,
+                CatalogFilters::default(),
+                sort,
+                Seek::Backward(Some(whole[2].clone())),
+                1,
+            )
+            .await;
+            assert_eq!(names(&before_echo, &made), ["Foxtrot"]);
+        }
+
+        #[tokio::test]
+        async fn every_filter_narrows_both_kinds() {
+            let fixture = $setup().await;
+            let made = seed(&fixture).await;
+            let id_of = |name: &str| made.iter().find(|(_, n)| *n == name).unwrap().0;
+            let genres = fixture.genres();
+            genres
+                .set_movie_genres(
+                    id_of("alpha"),
+                    &["Science Fiction".to_string(), "Drama".to_string()],
+                )
+                .await
+                .unwrap();
+            genres
+                .set_show_genres(id_of("delta"), &["Science Fiction".to_string()])
+                .await
+                .unwrap();
+            genres
+                .set_movie_genres(id_of("charlie"), &["Comedy".to_string()])
+                .await
+                .unwrap();
+            let listed = |filters| listed_names(&fixture, &made, filters);
+
+            assert_eq!(
+                listed(CatalogFilters { kind: Some(TitleKind::Show), ..Default::default() }).await,
+                ["delta", "Foxtrot", "golf"]
+            );
+            assert_eq!(
+                listed(CatalogFilters { kind: Some(TitleKind::Movie), ..Default::default() }).await,
+                ["alpha", "Bravo", "charlie", "Echo"]
+            );
+            assert_eq!(
+                listed(CatalogFilters { query: Some("ALPH".to_string()), ..Default::default() })
+                    .await,
+                ["alpha"],
+                "the title search ignores case"
+            );
+            assert_eq!(
+                listed(CatalogFilters {
+                    genre_slug: Some("science-fiction".to_string()),
+                    ..Default::default()
+                })
+                .await,
+                ["alpha", "delta"]
+            );
+            assert_eq!(
+                listed(CatalogFilters { genre_slug: Some("drama".to_string()), ..Default::default() })
+                    .await,
+                ["alpha"]
+            );
+            assert_eq!(
+                listed(CatalogFilters {
+                    genre_slug: Some("science-fiction".to_string()),
+                    kind: Some(TitleKind::Movie),
+                    ..Default::default()
+                })
+                .await,
+                ["alpha"]
+            );
+            assert_eq!(
+                listed(CatalogFilters { year: Some(2001), ..Default::default() }).await,
+                ["alpha", "Echo"]
+            );
+            assert_eq!(
+                listed(CatalogFilters { year_from: Some(2000), ..Default::default() }).await,
+                ["alpha", "delta", "Echo"]
+            );
+            assert_eq!(
+                listed(CatalogFilters { year_to: Some(2000), ..Default::default() }).await,
+                ["charlie", "golf"]
+            );
+            assert_eq!(
+                listed(CatalogFilters {
+                    year_from: Some(2000),
+                    year_to: Some(2005),
+                    ..Default::default()
+                })
+                .await,
+                ["alpha", "Echo"]
+            );
+            assert_eq!(
+                listed(CatalogFilters { min_rating: Some(70), ..Default::default() }).await,
+                ["alpha", "delta"],
+                "a show's rating counts as a movie's does"
+            );
+            assert_eq!(
+                listed(CatalogFilters { min_rating: Some(60), ..Default::default() }).await,
+                ["alpha", "delta", "Echo", "golf"],
+                "a rating exactly at the minimum is kept; an unrated title counts as 0"
+            );
+        }
+
+        /// The minimum rating compares in the precision a rating is stored
+        /// and shown in: a 7.2 is 72 per cent, not 71.99..., for either kind.
+        #[tokio::test]
+        async fn a_rating_exactly_at_a_fractional_minimum_is_kept() {
+            let fixture = $setup().await;
+            let made = vec![
+                (movie(&fixture, "lima", None, None, Some(7.2), true).await.id, "lima"),
+                (show(&fixture, "mike", None, Some(7.2), 1, true).await.0, "mike"),
+                (movie(&fixture, "november", None, None, Some(7.1), true).await.id, "november"),
+            ];
+            assert_eq!(
+                listed_names(
+                    &fixture,
+                    &made,
+                    CatalogFilters { min_rating: Some(72), ..Default::default() },
+                )
+                .await,
+                ["lima", "mike"]
+            );
+        }
+
+        /// Only titles with a present file are browsable or searchable
+        /// (issues #179, #183): a title that never had a file, or whose files
+        /// are all missing, is on no page and matches no filter -- and comes
+        /// back the moment one of its files does.
+        #[tokio::test]
+        async fn only_titles_with_a_present_file_are_listed() {
+            let fixture = $setup().await;
+            movie(&fixture, "hotel", None, None, None, false).await;
+            show(&fixture, "india", None, None, 1, false).await;
+            let kept_movie = movie(&fixture, "juliet", None, None, None, true).await;
+            let (kept_show, show_files) = show(&fixture, "kilo", None, None, 2, true).await;
+            let movie_file = kept_movie.file.expect("juliet has a file");
+            let listed = |filters| {
+                let fixture = &fixture;
+                async move {
+                    everything(fixture, filters, by_title())
+                        .await
+                        .into_iter()
+                        .map(|row| row.id)
+                        .collect::<Vec<Uuid>>()
+                }
+            };
+
+            assert_eq!(
+                listed(CatalogFilters::default()).await,
+                [kept_movie.id, kept_show],
+                "titles with no file are not listed"
+            );
+            assert!(
+                listed(CatalogFilters { query: Some("hotel".to_string()), ..Default::default() })
+                    .await
+                    .is_empty(),
+                "nor found by searching for them"
+            );
+
+            let files = fixture.files();
+            files
+                .mark_missing(vec![movie_file, show_files[0]], ::chrono::Utc::now())
+                .await
+                .unwrap();
+            assert_eq!(
+                listed(CatalogFilters::default()).await,
+                [kept_show],
+                "a movie whose only file is missing leaves; a show with another present episode stays"
+            );
+
+            files.mark_missing(vec![show_files[1]], ::chrono::Utc::now()).await.unwrap();
+            assert!(
+                listed(CatalogFilters::default()).await.is_empty(),
+                "a show with every episode file missing leaves"
+            );
+            assert!(
+                listed(CatalogFilters { query: Some("juliet".to_string()), ..Default::default() })
+                    .await
+                    .is_empty(),
+                "and is not found by searching for it"
+            );
+            assert!(
+                fixture.movies().find_by_id(kept_movie.id).await.unwrap().is_some(),
+                "a hidden title still resolves by id"
+            );
+
+            files.restore(movie_file).await.unwrap();
+            assert_eq!(
+                listed(CatalogFilters::default()).await,
+                [kept_movie.id],
+                "listed again when its file returns"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_position_keyed_for_another_sort_is_refused() {
+            let fixture = $setup().await;
+            let result = fixture
+                .repo()
+                .browse(&CatalogQuery {
+                    filters: CatalogFilters::default(),
+                    sort: by_title(),
+                    seek: Seek::Forward(Some(CatalogPosition {
+                        kind: TitleKind::Movie,
+                        id: Uuid::new_v4(),
+                        key: SortKey::Year(Some(2001)),
+                    })),
+                    limit: NonZeroU32::MIN,
+                })
+                .await;
+            assert!(result.is_err());
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::GenreRepository`]: genres
+/// are shared by slug, a title's set is replaced whole, and a page of titles
+/// reads its genre names in one sorted list per title.
+///
+/// `$setup` names an `async fn() -> impl GenreRepositoryFixture`.
+#[macro_export]
+macro_rules! genre_repository_contract {
+    ($setup:path) => {
+        use ::uuid::Uuid;
+        use $crate::models::movie::CreateMovie;
+        use $crate::models::show::CreateShow;
+        use $crate::repositories::contract::fixture::GenreRepositoryFixture;
+
+        async fn new_movie(fixture: &impl GenreRepositoryFixture) -> Uuid {
+            fixture
+                .movies()
+                .find_or_create_by_identity(CreateMovie::new(
+                    format!("genre movie {}", Uuid::new_v4()),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap()
+                .id
+        }
+
+        async fn new_show(fixture: &impl GenreRepositoryFixture) -> Uuid {
+            fixture
+                .shows()
+                .find_or_create_by_identity(CreateShow::new(
+                    format!("genre show {}", Uuid::new_v4()),
+                    None,
+                ))
+                .await
+                .unwrap()
+                .id
+        }
+
+        fn owned(names: &[&str]) -> Vec<String> {
+            names.iter().map(|n| n.to_string()).collect()
+        }
+
+        #[tokio::test]
+        async fn each_title_reads_its_own_genres_sorted_ignoring_case() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let first = new_movie(&fixture).await;
+            let second = new_movie(&fixture).await;
+            let bare = new_movie(&fixture).await;
+            let series = new_show(&fixture).await;
+            repo.set_movie_genres(first, &owned(&["thriller", "Action", "Drama"]))
+                .await
+                .unwrap();
+            repo.set_movie_genres(second, &owned(&["Comedy"]))
+                .await
+                .unwrap();
+            repo.set_show_genres(series, &owned(&["Mystery", "animation"]))
+                .await
+                .unwrap();
+
+            let movies = repo
+                .movie_genre_names(&[first, second, bare])
+                .await
+                .unwrap();
+            assert_eq!(
+                movies.get(&first).unwrap(),
+                &owned(&["Action", "Drama", "thriller"])
+            );
+            assert_eq!(movies.get(&second).unwrap(), &owned(&["Comedy"]));
+            assert!(
+                !movies.contains_key(&bare),
+                "a title without genres is absent"
+            );
+
+            let shows = repo.show_genre_names(&[series, first]).await.unwrap();
+            assert_eq!(
+                shows.get(&series).unwrap(),
+                &owned(&["animation", "Mystery"])
+            );
+            assert!(!shows.contains_key(&first), "a movie is not read as a show");
+
+            assert!(repo.movie_genre_names(&[]).await.unwrap().is_empty());
+            assert!(repo.show_genre_names(&[]).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn setting_genres_replaces_the_set_and_shares_one_genre_per_slug() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = new_movie(&fixture).await;
+            let series = new_show(&fixture).await;
+            let unique = Uuid::new_v4().simple().to_string();
+            let sci_fi = format!("Science Fiction {unique}");
+
+            repo.set_movie_genres(movie, &[sci_fi.clone(), "Drama".to_string()])
+                .await
+                .unwrap();
+            repo.set_movie_genres(movie, std::slice::from_ref(&sci_fi))
+                .await
+                .unwrap();
+            repo.set_show_genres(series, &[format!("science-fiction {unique}")])
+                .await
+                .unwrap();
+
+            assert_eq!(
+                repo.movie_genre_names(&[movie])
+                    .await
+                    .unwrap()
+                    .get(&movie)
+                    .unwrap(),
+                &vec![sci_fi.clone()],
+                "the second set replaced the first"
+            );
+            assert_eq!(
+                repo.show_genre_names(&[series])
+                    .await
+                    .unwrap()
+                    .get(&series)
+                    .unwrap(),
+                &vec![sci_fi.clone()],
+                "a name with the same slug is the genre already stored"
+            );
+            let slug = $crate::repositories::genre::slugify(&sci_fi);
+            assert_eq!(
+                repo.find_all()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|g| g.slug == slug)
+                    .count(),
+                1
+            );
         }
     };
 }

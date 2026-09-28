@@ -113,6 +113,8 @@ mod tests {
                 "title": { "original": "Severance" },
                 "seasons": [],
                 "genres": [],
+                "season_count": 0,
+                "episode_count": 0,
             }
         });
 

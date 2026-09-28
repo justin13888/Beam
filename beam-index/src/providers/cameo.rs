@@ -320,6 +320,7 @@ fn map_show_enrichment(details: &cameo::UnifiedTvShowDetails) -> ShowEnrichment 
         year: year_of(show.first_air_date.as_ref()),
         poster_url: show.poster_url.clone(),
         backdrop_url: show.backdrop_url.clone(),
+        rating: show.vote_average.map(|v| v as f32),
         genres: show.genres.iter().map(|g| g.name().to_string()).collect(),
     }
 }
@@ -409,6 +410,18 @@ mod tests {
         assert_eq!(enrichment.tmdb_id, None);
         assert_eq!(enrichment.imdb_id, None);
         assert_eq!(enrichment.title, "Cowboy Bebop");
+        assert_eq!(enrichment.rating, None, "an unrated show stays unrated");
+    }
+
+    /// A show's rating is carried on the provider's 0-10 scale, as a movie's
+    /// is, so the two sort and filter by rating together (issue #187).
+    #[test]
+    fn maps_show_enrichment_rating() {
+        let show =
+            UnifiedTvShow::new(MediaId::tmdb(1399), "Game of Thrones").with_vote_average(8.4);
+        let details = UnifiedTvShowDetails::new(show);
+
+        assert_eq!(map_show_enrichment(&details).rating, Some(8.4_f32));
     }
 
     #[test]

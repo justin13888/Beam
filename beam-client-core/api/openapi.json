@@ -1242,12 +1242,13 @@
           "media"
         ],
         "summary": "Browse/search the media library with cursor-based pagination, sorting, and filtering.",
+        "description": "Only titles with at least one present file are listed.",
         "operationId": "browseMedia",
         "parameters": [
           {
             "name": "first",
             "in": "query",
-            "description": "Number of items to return from the start.",
+            "description": "Page forwards: this many items (1-100, default 20), after `after` or\nfrom the start. Not combined with `last` or `before`.",
             "required": false,
             "schema": {
               "type": [
@@ -1262,7 +1263,7 @@
           {
             "name": "after",
             "in": "query",
-            "description": "Cursor to start after.",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page forwards from.",
             "required": false,
             "schema": {
               "type": [
@@ -1274,7 +1275,7 @@
           {
             "name": "last",
             "in": "query",
-            "description": "Number of items to return from the end.",
+            "description": "Page backwards: this many items (1-100), before `before` or from the\nend. Not combined with `first` or `after`.",
             "required": false,
             "schema": {
               "type": [
@@ -1289,7 +1290,7 @@
           {
             "name": "before",
             "in": "query",
-            "description": "Cursor to start before.",
+            "description": "An opaque cursor -- a page's `start_cursor` -- to page backwards from.",
             "required": false,
             "schema": {
               "type": [
@@ -1301,7 +1302,7 @@
           {
             "name": "sort_by",
             "in": "query",
-            "description": "Sort field.",
+            "description": "Sort field (default `title`). Titles with no value for the field sort\nlast in either order; ties fall back to a stable per-title order.",
             "required": false,
             "schema": {
               "anyOf": [
@@ -1317,7 +1318,7 @@
           {
             "name": "sort_order",
             "in": "query",
-            "description": "Sort order.",
+            "description": "Sort order (default `asc`).",
             "required": false,
             "schema": {
               "anyOf": [
@@ -1349,7 +1350,7 @@
           {
             "name": "genre",
             "in": "query",
-            "description": "Filter by genre.",
+            "description": "Filter by genre, by name or slug: `Science Fiction` and\n`science-fiction` name the same genre.",
             "required": false,
             "schema": {
               "type": [
@@ -1406,7 +1407,7 @@
           {
             "name": "query",
             "in": "query",
-            "description": "Search query for title.",
+            "description": "Search the titles: those resembling this text or containing it,\nignoring case. Results keep the requested sort.",
             "required": false,
             "schema": {
               "type": [
@@ -1487,21 +1488,73 @@
             }
           },
           "400": {
-            "description": "Bad Request",
+            "description": "Bad Request; Invalid cursor; Invalid pagination; Invalid search query",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "allOf": [
+                  "oneOf": [
                     {
-                      "$ref": "#/components/schemas/Problem"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
                     },
                     {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "about:blank"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
+                            }
+                          }
                         }
-                      }
+                      ],
+                      "title": "Invalid cursor"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid pagination"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-search-query"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid search query"
                     }
                   ]
                 }
@@ -1534,6 +1587,28 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MediaConnection"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -9361,6 +9436,53 @@
           "original"
         ]
       },
+      "Ratings": {
+        "properties": {
+          "tmdb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "TMDB rating as a percentage (0-100)"
+          }
+        },
+        "type": "object"
+      },
+      "ExternalIdentifiers": {
+        "properties": {
+          "imdb_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IMDb ID (e.g., tt1234567)"
+          },
+          "tmdb_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "TMDb ID (e.g., 12345)"
+          },
+          "tvdb_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "TVDb ID (e.g., 12345)"
+          }
+        },
+        "type": "object"
+      },
       "ShowDates": {
         "properties": {
           "first_aired": {
@@ -9580,7 +9702,8 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Stable identifier for this episode (UUID)."
+            "format": "uuid",
+            "description": "Stable identifier for this episode."
           },
           "episode_number": {
             "type": "integer",
@@ -9633,6 +9756,7 @@
               "string",
               "null"
             ],
+            "format": "uuid",
             "description": "Identifier of the streamable file backing this episode, if any."
           }
         },
@@ -9644,57 +9768,11 @@
           "streams"
         ]
       },
-      "Ratings": {
-        "properties": {
-          "tmdb": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "maximum": 4294967295.0,
-            "minimum": 0.0,
-            "format": "uint32",
-            "description": "TMDB rating as a percentage (0-100)"
-          }
-        },
-        "type": "object"
-      },
-      "ExternalIdentifiers": {
-        "properties": {
-          "imdb_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "IMDb ID (e.g., tt1234567)"
-          },
-          "tmdb_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "maximum": 4294967295.0,
-            "minimum": 0.0,
-            "format": "uint32",
-            "description": "TMDb ID (e.g., 12345)"
-          },
-          "tvdb_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "maximum": 4294967295.0,
-            "minimum": 0.0,
-            "format": "uint32",
-            "description": "TVDb ID (e.g., 12345)"
-          }
-        },
-        "type": "object"
-      },
       "SeasonMetadata": {
         "properties": {
           "id": {
             "type": "string",
+            "format": "uuid",
             "description": "Season ID"
           },
           "season_number": {
@@ -9737,7 +9815,7 @@
               "type": "string"
             },
             "type": "array",
-            "description": "Show genres"
+            "description": "Always empty: genres are recorded per show, on `ShowMetadata::genres`."
           },
           "ratings": {
             "anyOf": [
@@ -9748,7 +9826,7 @@
                 "type": "null"
               }
             ],
-            "description": "Show ratings"
+            "description": "Always absent: ratings are recorded per show, on\n`ShowMetadata::ratings`."
           },
           "identifiers": {
             "anyOf": [
@@ -9759,7 +9837,7 @@
                 "type": "null"
               }
             ],
-            "description": "External identifiers to show"
+            "description": "Always absent: identifiers are recorded per show, on\n`ShowMetadata::identifiers`."
           }
         },
         "type": "object",
@@ -9775,7 +9853,8 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Stable identifier for this show (UUID)."
+            "format": "uuid",
+            "description": "Stable identifier for this show."
           },
           "title": {
             "$ref": "#/components/schemas/Title",
@@ -9812,18 +9891,64 @@
             ],
             "description": "Path of the show's own backdrop image, served by the artwork route;\nabsent when the show has no backdrop."
           },
+          "genres": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "description": "Genre names, sorted case-insensitively."
+          },
+          "ratings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Ratings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The show's ratings."
+          },
+          "identifiers": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExternalIdentifiers"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The show's identifiers at external providers."
+          },
+          "season_count": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "How many seasons the show has."
+          },
+          "episode_count": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "How many episodes the show has, across every season."
+          },
           "seasons": {
             "items": {
               "$ref": "#/components/schemas/SeasonMetadata"
             },
             "type": "array",
-            "description": "List of seasons in the show"
+            "description": "List of seasons in the show. Empty in a browse result, which carries\n`season_count` and `episode_count` instead; the detail route fills it."
           }
         },
         "type": "object",
         "required": [
           "id",
           "title",
+          "genres",
+          "season_count",
+          "episode_count",
           "seasons"
         ]
       },
@@ -9831,7 +9956,8 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Stable identifier for this movie (UUID)."
+            "format": "uuid",
+            "description": "Stable identifier for this movie."
           },
           "title": {
             "$ref": "#/components/schemas/Title",
@@ -9899,7 +10025,7 @@
               "type": "string"
             },
             "type": "array",
-            "description": "Movie genres"
+            "description": "Genre names, sorted case-insensitively."
           },
           "ratings": {
             "anyOf": [
@@ -9928,14 +10054,15 @@
               "$ref": "#/components/schemas/MediaStreamMetadata"
             },
             "type": "array",
-            "description": "List of unique streams associated with this movie"
+            "description": "List of unique streams associated with this movie. Empty in a browse\nresult, which does not read files; the detail route fills it."
           },
           "file_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Identifier of the primary streamable file, if any."
+            "format": "uuid",
+            "description": "Identifier of the primary streamable file, if any. Absent in a browse\nresult, as `streams` is empty there."
           }
         },
         "type": "object",
@@ -10133,47 +10260,29 @@
         ],
         "description": "Media type filter."
       },
-      "MediaEdge": {
-        "properties": {
-          "cursor": {
-            "type": "string",
-            "description": "Cursor for this edge"
-          },
-          "node": {
-            "$ref": "#/components/schemas/MediaMetadata",
-            "description": "The media item"
-          }
-        },
-        "type": "object",
-        "required": [
-          "cursor",
-          "node"
-        ],
-        "description": "Relay-style edge for media."
-      },
       "PageInfo": {
         "properties": {
           "has_next_page": {
             "type": "boolean",
-            "description": "Whether there is a next page"
+            "description": "Whether a page follows this one."
           },
           "has_previous_page": {
             "type": "boolean",
-            "description": "Whether there is a previous page"
+            "description": "Whether a page precedes this one."
           },
           "start_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Cursor of the first edge"
+            "description": "Cursor of the first item; absent on an empty page."
           },
           "end_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Cursor of the last edge"
+            "description": "Cursor of the last item; absent on an empty page."
           }
         },
         "type": "object",
@@ -10181,28 +10290,28 @@
           "has_next_page",
           "has_previous_page"
         ],
-        "description": "Relay-style page info."
+        "description": "Where a page sits in the whole listing."
       },
       "MediaConnection": {
         "properties": {
-          "edges": {
+          "items": {
             "items": {
-              "$ref": "#/components/schemas/MediaEdge"
+              "$ref": "#/components/schemas/MediaMetadata"
             },
             "type": "array",
-            "description": "List of edges containing media items and cursors"
+            "description": "The titles on this page."
           },
           "page_info": {
             "$ref": "#/components/schemas/PageInfo",
-            "description": "Pagination information"
+            "description": "Where this page sits in the whole listing."
           }
         },
         "type": "object",
         "required": [
-          "edges",
+          "items",
           "page_info"
         ],
-        "description": "Relay-style connection for media search results."
+        "description": "One page of browse or search results.\n\n`items` are in the requested order. `page_info`'s cursors are opaque: pass\n`end_cursor` as `after` for the next page, `start_cursor` as `before` for\nthe previous one, with the same `sort_by` and `sort_order`."
       },
       "ReportProgressRequest": {
         "properties": {

@@ -210,6 +210,7 @@ mod tests {
             imdb_id: None,
             tvdb_id: None,
             anilist_id: None,
+            rating_tmdb: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

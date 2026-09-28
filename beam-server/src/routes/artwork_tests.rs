@@ -382,14 +382,27 @@ mod tests {
             .await
             .expect("enrichment applies");
 
-        let metadata = DbMetadataService::new(
-            fixture.movies.clone(),
-            fixture.shows.clone(),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
+        let genres = Arc::new(
+            beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
         );
-        let Some(MediaMetadata::Show(published)) =
-            metadata.get_media_metadata(&show.id.to_string()).await
+        let metadata = DbMetadataService::new(crate::services::metadata::MetadataRepositories {
+            movies: fixture.movies.clone(),
+            shows: fixture.shows.clone(),
+            files: Arc::new(InMemoryFileRepository::default()),
+            streams: Arc::new(InMemoryMediaStreamRepository::default()),
+            catalog: Arc::new(
+                beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository::new(
+                    fixture.movies.clone(),
+                    fixture.shows.clone(),
+                    genres.clone(),
+                ),
+            ),
+            genres,
+        });
+        let Some(MediaMetadata::Show(published)) = metadata
+            .get_media_metadata(show.id)
+            .await
+            .expect("the lookup succeeds")
         else {
             panic!("the show resolves");
         };

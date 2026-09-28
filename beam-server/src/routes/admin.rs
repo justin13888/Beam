@@ -55,9 +55,13 @@ impl From<MetadataError> for MediaRefreshError {
             MetadataError::MediaNotFound => Self::MediaNotFound(err.to_string()),
             // `refresh_metadata` applies to any media id; there is no
             // show-level restriction for it to report.
-            MetadataError::Unsupported(msg) | MetadataError::InternalError(msg) => {
-                Self::Internal(msg)
-            }
+            // Nor does it page or search, so a cursor, page size or search
+            // text is never its to refuse.
+            MetadataError::Unsupported(msg)
+            | MetadataError::InternalError(msg)
+            | MetadataError::InvalidCursor(msg)
+            | MetadataError::InvalidPagination(msg)
+            | MetadataError::InvalidSearchQuery(msg) => Self::Internal(msg),
         }
     }
 }

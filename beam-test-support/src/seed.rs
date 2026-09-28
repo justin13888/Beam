@@ -152,6 +152,7 @@ pub async fn episode(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         imdb_id: Set(None),
         tvdb_id: Set(None),
         anilist_id: Set(None),
+        rating_tmdb: Set(None),
         created_at: Set(now()),
         updated_at: Set(now()),
     }
