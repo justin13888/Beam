@@ -1005,6 +1005,17 @@ macro_rules! file_repository_contract {
                     .expect("relink the file");
                 let stored = repo.find_by_id(moving.id).await.unwrap().expect("stored");
                 assert_eq!(stored.identity, read_back, "relinked at {written:?}");
+
+                // A relink records what the file was found at, so one found
+                // with no identity -- a platform without them -- clears the
+                // identity the row had, unlike an update naming none.
+                let moved_again =
+                    PathBuf::from(format!("/videos/{library}/again/{}.mkv", Uuid::new_v4()));
+                repo.relink(vec![to(&stored, &moved_again, 1024, None)], Vec::new(), at(1))
+                    .await
+                    .expect("relink the file again");
+                let stored = repo.find_by_id(moving.id).await.unwrap().expect("stored");
+                assert_eq!(stored.identity, None, "relinked from {written:?} with none");
             }
         }
 
