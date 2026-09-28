@@ -311,6 +311,11 @@ the first one by construction rather than by test:
   what the router emits. Drift is a reviewable diff. The two copies had previously been identical by
   habit rather than by construction, and only the `beam-web` one was checked, so
   `beam-client-core` could have kept generating a client for a server that no longer existed.
+- **A consistent spec is not the same as an unchanged one.** `codegen:openapi:check` proves the
+  committed document is the one the router emits, not that the document is coherent.
+  `routes/conventions_tests.rs` walks it for the `/v1` wire conventions (`docs/architecture/api.md`)
+  with no exception list, and proves each rule can fire by running it over a small document built
+  to violate it.
 
 ## What the hermetic layer deliberately does not cover
 

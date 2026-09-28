@@ -18,8 +18,8 @@ use beam_index::services::enrichment::control::{ControlError, RefreshScope};
 
 use crate::models::{
     EnrichmentStatus, FieldError, FixMatchRequest, MatchCandidate, MatchCandidateConnection,
-    MediaEnrichment, MediaEnrichmentConnection, MediaTypeFilter, PageInfo, RefreshQueued,
-    SetFieldLocksRequest,
+    MediaEnrichment, MediaEnrichmentConnection, PageInfo, RefreshQueued, SetFieldLocksRequest,
+    TitleKind,
 };
 use crate::routes::api_error::{
     AdminAuth, EnrichmentListError, FieldLocksError, FixMatchError, InternalError,
@@ -51,7 +51,7 @@ pub struct EnrichmentListQuery {
     /// `failed` are the ones to fix.
     pub status: Option<EnrichmentStatus>,
     /// Only movies, or only shows; both when absent.
-    pub kind: Option<MediaTypeFilter>,
+    pub kind: Option<TitleKind>,
     /// This many titles (1-100, default 20).
     //
     // Kynos 0.3.0 neither documents nor enforces `#[schema]` bounds on an

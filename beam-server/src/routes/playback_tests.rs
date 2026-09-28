@@ -32,7 +32,7 @@ use crate::models::playback::{
     ContinueWatchingConnection, ContinueWatchingReason, HistoryConnection, ReportProgressRequest,
     UserTitleState,
 };
-use crate::models::{EpisodeDetail, MediaConnection, MediaMetadata, MediaTypeFilter, SeasonDetail};
+use crate::models::{EpisodeDetail, MediaConnection, MediaMetadata, SeasonDetail, TitleKind};
 use crate::routes::media::{browse_media, get_episode_detail, get_media_detail, get_season_detail};
 use crate::routes::playback::{
     clear_title_progress, dismiss_continue_watching, get_continue_watching, get_history,
@@ -765,10 +765,7 @@ async fn a_finished_episode_offers_the_next_with_what_the_row_displays() {
     assert_eq!(shelf.items.len(), 1);
     let item = &shelf.items[0];
     assert_eq!(item.reason, ContinueWatchingReason::NextUp);
-    assert_eq!(
-        (item.media_id, item.media_type),
-        (show, MediaTypeFilter::Show)
-    );
+    assert_eq!((item.media_id, item.media_type), (show, TitleKind::Show));
     assert_eq!(item.episode_id, Some(e2));
     assert_eq!(item.file_id, e2_primary);
     assert_eq!(item.position_secs, 0.0);

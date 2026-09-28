@@ -11,7 +11,7 @@ use crate::state::AppState;
 
 /// The distinct genre names present in the library, sorted alphabetically.
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct GenreListResponse {
+pub struct GenreList {
     /// Genre display names, sorted alphabetically (case-insensitive).
     pub genres: Vec<String>,
 }
@@ -25,7 +25,7 @@ pub struct GenreListResponse {
 pub async fn list_genres(
     _auth: SessionAuth,
     Inject(state): Inject<AppState>,
-) -> Result<Json<GenreListResponse>, InternalError> {
+) -> Result<Json<GenreList>, InternalError> {
     let mut genres: Vec<String> = state
         .services
         .genre_repo
@@ -37,7 +37,7 @@ pub async fn list_genres(
         .collect();
     genres.sort_by_key(|name| name.to_lowercase());
 
-    Ok(Json(GenreListResponse { genres }))
+    Ok(Json(GenreList { genres }))
 }
 
 #[cfg(test)]

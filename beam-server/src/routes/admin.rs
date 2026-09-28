@@ -20,10 +20,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::models::{
-    AdminEventDto, AdminLogCountResponse, AdminLogEntryDto, AdminStatusCounts, AdminStatusResponse,
-    AdminUserDto, AdminUserListResponse, CreateLibraryRequest, EnrichmentQueueCounts, Library,
-    LibraryFile, LibraryTelemetryPreview, PlaybackTelemetryReport, RecentScanDto, ScanJob,
-    UpdateAdminUserRequest, WatcherStatus,
+    AdminEvent, AdminLogCount, AdminLogEntry, AdminStatus, AdminStatusCounts, AdminUser,
+    AdminUserList, CreateLibraryRequest, EnrichmentQueueCounts, Library, LibraryFile,
+    LibraryTelemetryPreview, PlaybackTelemetryReport, RecentScan, ScanJob, UpdateAdminUserRequest,
+    WatcherStatus,
 };
 use crate::routes::api_error::{
     AdminAuth, AdminUserError, InternalError, LibraryCreateError, LibraryRefError,
@@ -376,14 +376,14 @@ pub async fn get_admin_logs(
     _auth: AdminAuth,
     Query(query): Query<LogsQuery>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<AdminLogEntryDto>>, InternalError> {
+) -> Result<Json<Vec<AdminLogEntry>>, InternalError> {
     let logs = state
         .services
         .admin_log
         .get_logs(query.limit.unwrap_or(50), query.offset.unwrap_or(0))
         .await
         .map_err(|e| InternalError::Internal(e.to_string()))?;
-    Ok(Json(logs.into_iter().map(AdminLogEntryDto::from).collect()))
+    Ok(Json(logs.into_iter().map(AdminLogEntry::from).collect()))
 }
 
 /// How many operational log entries exist.
@@ -395,14 +395,14 @@ pub async fn get_admin_logs(
 pub async fn get_admin_log_count(
     _auth: AdminAuth,
     Inject(state): Inject<AppState>,
-) -> Result<Json<AdminLogCountResponse>, InternalError> {
+) -> Result<Json<AdminLogCount>, InternalError> {
     let count = state
         .services
         .admin_log
         .count()
         .await
         .map_err(|e| InternalError::Internal(e.to_string()))?;
-    Ok(Json(AdminLogCountResponse { count }))
+    Ok(Json(AdminLogCount { count }))
 }
 
 // ── Admin events: snapshot + SSE live stream (admin only) ───────────────────
@@ -413,10 +413,10 @@ pub async fn get_admin_events(
     _auth: AdminAuth,
     Query(query): Query<EventsQuery>,
     Inject(state): Inject<AppState>,
-) -> Json<Vec<AdminEventDto>> {
+) -> Json<Vec<AdminEvent>> {
     let limit = (query.limit.unwrap_or(100) as usize).min(1000);
     let events = state.services.notification.recent_events(limit);
-    Json(events.into_iter().map(AdminEventDto::from).collect())
+    Json(events.into_iter().map(AdminEvent::from).collect())
 }
 
 /// Headers an SSE response needs to survive an intermediary.
@@ -456,7 +456,7 @@ pub async fn stream_admin_events(
     _auth: AdminAuth,
     Inject(state): Inject<AppState>,
 ) -> WithHeaders<
-    Sse<impl futures_core::Stream<Item = Result<Event<AdminEventDto>, Infallible>>>,
+    Sse<impl futures_core::Stream<Item = Result<Event<AdminEvent>, Infallible>>>,
     StreamHeaders,
 > {
     let mut receiver = state.services.notification.subscribe();
@@ -464,7 +464,7 @@ pub async fn stream_admin_events(
     let events = stream! {
         loop {
             match receiver.recv().await {
-                Ok(event) => yield Ok(Event::new(AdminEventDto::from(event))),
+                Ok(event) => yield Ok(Event::new(AdminEvent::from(event))),
                 // The sender is gone: the process is shutting down.
                 Err(RecvError::Closed) => break,
                 // A slow consumer fell behind the broadcast buffer. Beam owns
@@ -507,7 +507,7 @@ pub async fn list_admin_users(
     _auth: AdminAuth,
     Query(query): Query<UsersQuery>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<AdminUserListResponse>, InternalError> {
+) -> Result<Json<AdminUserList>, InternalError> {
     let internal = |e: sea_orm::DbErr| InternalError::Internal(e.to_string());
 
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
@@ -521,8 +521,8 @@ pub async fn list_admin_users(
         .map_err(internal)?;
     let total = state.services.user_repo.count().await.map_err(internal)?;
 
-    Ok(Json(AdminUserListResponse {
-        items: items.into_iter().map(AdminUserDto::from).collect(),
+    Ok(Json(AdminUserList {
+        items: items.into_iter().map(AdminUser::from).collect(),
         total,
     }))
 }
@@ -593,7 +593,7 @@ const RECENT_SCANS_LIMIT: u32 = 10;
 pub async fn get_admin_status(
     _auth: AdminAuth,
     Inject(state): Inject<AppState>,
-) -> Result<Json<AdminStatusResponse>, InternalError> {
+) -> Result<Json<AdminStatus>, InternalError> {
     let internal = |e: sea_orm::DbErr| InternalError::Internal(e.to_string());
 
     let users = state.services.user_repo.count().await.map_err(internal)?;
@@ -635,7 +635,7 @@ pub async fn get_admin_status(
         .map(|library| library.id);
     let watcher = WatcherStatus::from_snapshot(state.services.watch_status.snapshot(), library_ids);
 
-    Ok(Json(AdminStatusResponse {
+    Ok(Json(AdminStatus {
         uptime_secs: state.uptime_secs(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         counts: AdminStatusCounts {
@@ -648,7 +648,7 @@ pub async fn get_admin_status(
             &state.config,
             &state.services.enrichment_control.available_providers(),
         ),
-        recent_scans: recent_scans.into_iter().map(RecentScanDto::from).collect(),
+        recent_scans: recent_scans.into_iter().map(RecentScan::from).collect(),
         watcher,
     }))
 }

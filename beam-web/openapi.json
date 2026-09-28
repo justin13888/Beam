@@ -174,7 +174,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenreListResponse"
+                  "$ref": "#/components/schemas/GenreList"
                 }
               }
             }
@@ -1652,7 +1652,7 @@
             "schema": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/MediaTypeFilter"
+                  "$ref": "#/components/schemas/TitleKind"
                 },
                 {
                   "type": "null"
@@ -7487,7 +7487,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/AdminLogEntryDto"
+                    "$ref": "#/components/schemas/AdminLogEntry"
                   },
                   "type": "array"
                 }
@@ -7658,7 +7658,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminLogCountResponse"
+                  "$ref": "#/components/schemas/AdminLogCount"
                 }
               }
             }
@@ -7865,7 +7865,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/AdminEventDto"
+                    "$ref": "#/components/schemas/AdminEvent"
                   },
                   "type": "array"
                 }
@@ -8034,7 +8034,7 @@
                       "type": "string",
                       "contentMediaType": "application/json",
                       "contentSchema": {
-                        "$ref": "#/components/schemas/AdminEventDto"
+                        "$ref": "#/components/schemas/AdminEvent"
                       }
                     },
                     "event": {
@@ -8248,7 +8248,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminUserListResponse"
+                  "$ref": "#/components/schemas/AdminUserList"
                 }
               }
             }
@@ -8707,7 +8707,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminStatusResponse"
+                  "$ref": "#/components/schemas/AdminStatus"
                 }
               }
             }
@@ -9182,7 +9182,7 @@
             "schema": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/MediaTypeFilter"
+                  "$ref": "#/components/schemas/TitleKind"
                 },
                 {
                   "type": "null"
@@ -11330,7 +11330,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MeResponse"
+                  "$ref": "#/components/schemas/CurrentUser"
                 }
               }
             }
@@ -13265,11 +13265,46 @@
   },
   "components": {
     "schemas": {
+      "HealthState": {
+        "type": "string",
+        "enum": [
+          "healthy",
+          "degraded"
+        ],
+        "description": "The server's overall health: `healthy` exactly when every dependency\ncheck is `ok`."
+      },
+      "CheckStatus": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "error"
+        ],
+        "description": "The outcome of probing one dependency."
+      },
+      "DependencyCheck": {
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/CheckStatus"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the check failed; absent when it passed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "description": "One probed dependency."
+      },
       "HealthChecks": {
         "properties": {
           "database": {
-            "type": "string",
-            "description": "`\"ok\"` when the database round-trips, otherwise `\"error: <reason>\"`."
+            "$ref": "#/components/schemas/DependencyCheck",
+            "description": "Whether the database round-trips."
           }
         },
         "type": "object",
@@ -13281,15 +13316,17 @@
       "HealthStatus": {
         "properties": {
           "status": {
-            "type": "string",
-            "description": "`\"healthy\"` when every dependency check passed, `\"degraded\"` otherwise."
+            "$ref": "#/components/schemas/HealthState",
+            "description": "`healthy` when every dependency check passed, `degraded` otherwise."
           },
           "checks": {
             "$ref": "#/components/schemas/HealthChecks",
             "description": "Result of each probed dependency."
           },
-          "timestamp": {
-            "type": "string"
+          "checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the checks ran."
           },
           "version": {
             "type": "string"
@@ -13305,7 +13342,7 @@
         "required": [
           "status",
           "checks",
-          "timestamp",
+          "checked_at",
           "version",
           "uptime_secs"
         ]
@@ -13340,7 +13377,7 @@
         "title": "Problem Details",
         "description": "An RFC 9457 problem detail."
       },
-      "GenreListResponse": {
+      "GenreList": {
         "properties": {
           "genres": {
             "items": {
@@ -14560,13 +14597,13 @@
         ],
         "description": "Sort order."
       },
-      "MediaTypeFilter": {
+      "TitleKind": {
         "type": "string",
         "enum": [
           "movie",
           "show"
         ],
-        "description": "Media type filter."
+        "description": "Which kind of title something is: a movie, or a show. The one enum for it on\nthe wire -- the `media_type` browse filter, a continue-watching or history\nitem's `media_type`, and an enrichment row's `kind` all use it."
       },
       "MediaConnection": {
         "properties": {
@@ -14630,7 +14667,7 @@
             "description": "The movie or show, for its detail page."
           },
           "media_type": {
-            "$ref": "#/components/schemas/MediaTypeFilter"
+            "$ref": "#/components/schemas/TitleKind"
           },
           "episode_id": {
             "type": [
@@ -14750,7 +14787,7 @@
             "description": "The movie or show, for its detail page."
           },
           "media_type": {
-            "$ref": "#/components/schemas/MediaTypeFilter"
+            "$ref": "#/components/schemas/TitleKind"
           },
           "episode_id": {
             "type": [
@@ -15115,18 +15152,18 @@
       "FileIndexStatus": {
         "type": "string",
         "enum": [
-          "Known",
-          "Changed",
-          "Unknown"
+          "known",
+          "changed",
+          "unknown"
         ],
         "description": "File indexing status"
       },
       "FileContentType": {
         "type": "string",
         "enum": [
-          "Movie",
-          "Episode",
-          "Unclassified"
+          "movie",
+          "episode",
+          "unclassified"
         ],
         "description": "The kind of content a media file represents"
       },
@@ -15384,24 +15421,35 @@
         ],
         "description": "One scan of one library. A library has at most one queued or running\nscan; the latest is kept until the server restarts."
       },
-      "AdminLogLevelDto": {
+      "LogLevel": {
         "type": "string",
         "enum": [
           "info",
           "warning",
           "error"
-        ]
+        ],
+        "description": "How severe an admin event or admin log entry is. One enum for both: the\nlive event stream and the persisted log speak the same three levels."
       },
-      "AdminLogEntryDto": {
+      "AdminLogCategory": {
+        "type": "string",
+        "enum": [
+          "library_scan",
+          "system",
+          "auth",
+          "enrichment"
+        ],
+        "description": "What part of the server wrote an admin log entry."
+      },
+      "AdminLogEntry": {
         "properties": {
           "id": {
             "type": "string"
           },
           "level": {
-            "$ref": "#/components/schemas/AdminLogLevelDto"
+            "$ref": "#/components/schemas/LogLevel"
           },
           "category": {
-            "type": "string"
+            "$ref": "#/components/schemas/AdminLogCategory"
           },
           "message": {
             "type": "string"
@@ -15430,7 +15478,7 @@
           "created_at"
         ]
       },
-      "AdminLogCountResponse": {
+      "AdminLogCount": {
         "properties": {
           "count": {
             "type": "integer",
@@ -15443,15 +15491,7 @@
           "count"
         ]
       },
-      "AdminEventLevelDto": {
-        "type": "string",
-        "enum": [
-          "info",
-          "warning",
-          "error"
-        ]
-      },
-      "AdminEventCategoryDto": {
+      "AdminEventCategory": {
         "type": "string",
         "enum": [
           "library_scan",
@@ -15508,7 +15548,7 @@
             "format": "uuid"
           },
           "kind": {
-            "$ref": "#/components/schemas/MediaTypeFilter"
+            "$ref": "#/components/schemas/TitleKind"
           },
           "title": {
             "type": [
@@ -15542,7 +15582,7 @@
         ],
         "description": "The title an `enrichment` admin event reports on (FR-309)."
       },
-      "AdminEventDto": {
+      "AdminEvent": {
         "properties": {
           "id": {
             "type": "string"
@@ -15552,10 +15592,10 @@
             "format": "date-time"
           },
           "level": {
-            "$ref": "#/components/schemas/AdminEventLevelDto"
+            "$ref": "#/components/schemas/LogLevel"
           },
           "category": {
-            "$ref": "#/components/schemas/AdminEventCategoryDto"
+            "$ref": "#/components/schemas/AdminEventCategory"
           },
           "message": {
             "type": "string"
@@ -15604,7 +15644,7 @@
           "message"
         ]
       },
-      "AdminUserDto": {
+      "AdminUser": {
         "properties": {
           "id": {
             "type": "string"
@@ -15646,11 +15686,11 @@
         ],
         "description": "One user row in the admin users tab. `is_admin` is informational and\nread-only here: admin is derived from the IdP-asserted claim on every\nlogin, so there is deliberately no endpoint to change it."
       },
-      "AdminUserListResponse": {
+      "AdminUserList": {
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/AdminUserDto"
+              "$ref": "#/components/schemas/AdminUser"
             },
             "type": "array"
           },
@@ -15776,10 +15816,10 @@
         ],
         "description": "One provider's configuration, for the admin status (FR-307)."
       },
-      "RecentScanDto": {
+      "RecentScan": {
         "properties": {
           "level": {
-            "$ref": "#/components/schemas/AdminLogLevelDto"
+            "$ref": "#/components/schemas/LogLevel"
           },
           "message": {
             "type": "string"
@@ -15878,7 +15918,7 @@
         ],
         "description": "The filesystem watcher's state, for the admin system-status tab."
       },
-      "AdminStatusResponse": {
+      "AdminStatus": {
         "properties": {
           "uptime_secs": {
             "type": "integer",
@@ -15905,7 +15945,7 @@
           },
           "recent_scans": {
             "items": {
-              "$ref": "#/components/schemas/RecentScanDto"
+              "$ref": "#/components/schemas/RecentScan"
             },
             "type": "array",
             "description": "Most recent `library_scan` admin log entries, newest first."
@@ -16525,7 +16565,7 @@
             "description": "The movie's or show's id."
           },
           "kind": {
-            "$ref": "#/components/schemas/MediaTypeFilter"
+            "$ref": "#/components/schemas/TitleKind"
           },
           "title": {
             "type": "string",
@@ -16760,7 +16800,7 @@
         ],
         "description": "What a refresh queued."
       },
-      "MeResponse": {
+      "CurrentUser": {
         "properties": {
           "id": {
             "type": "string"
@@ -16892,7 +16932,7 @@
             "description": "The session's hard lifetime from now, in seconds."
           },
           "user": {
-            "$ref": "#/components/schemas/MeResponse",
+            "$ref": "#/components/schemas/CurrentUser",
             "description": "Who signed in."
           }
         },

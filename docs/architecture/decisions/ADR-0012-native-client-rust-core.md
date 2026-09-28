@@ -39,7 +39,7 @@ in `build.rs`. A gap in spargen blocks and is fixed upstream rather than worked 
 because a hand-written exception is exactly how a generated client stops describing the server.
 The document is now OpenAPI 3.2, emitted by Kynos under
 [ADR-0010](ADR-0010-openapi-3-2-kynos.md), and spargen 0.4.0 reads 3.2 natively -- including the
-typed SSE stream, which it lowers to an `EventStream<AdminEventDto>`. This was written while the
+typed SSE stream, which it lowers to an `EventStream<AdminEvent>` (then named `AdminEventDto`). This was written while the
 server still emitted 3.1 and said the two were independent; they are not, and the dependency turned
 out to be already satisfied.
 

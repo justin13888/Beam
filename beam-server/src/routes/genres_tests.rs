@@ -9,7 +9,7 @@ use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
 
-use crate::routes::genres::{GenreListResponse, list_genres};
+use crate::routes::genres::{GenreList, list_genres};
 use crate::routes::test_support::make_app_state;
 use crate::state::AppState;
 
@@ -93,7 +93,7 @@ async fn the_catalog_is_deduplicated_and_sorted_case_insensitively() {
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body: GenreListResponse = response.json();
+    let body: GenreList = response.json();
     assert_eq!(
         body.genres,
         vec![

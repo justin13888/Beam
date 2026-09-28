@@ -9,7 +9,7 @@ use kynos::Schema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::models::search::{MediaTypeFilter, PageInfo};
+use crate::models::search::{PageInfo, TitleKind};
 
 /// The viewer's state for one movie or episode.
 ///
@@ -118,7 +118,7 @@ pub struct ContinueWatchingItem {
     pub reason: ContinueWatchingReason,
     /// The movie or show, for its detail page.
     pub media_id: Uuid,
-    pub media_type: MediaTypeFilter,
+    pub media_type: TitleKind,
     /// The episode to play; absent for a movie.
     pub episode_id: Option<Uuid>,
     /// The source to play: the one the viewer last played if it is still
@@ -146,7 +146,7 @@ pub struct ContinueWatchingItem {
 pub struct HistoryItem {
     /// The movie or show, for its detail page.
     pub media_id: Uuid,
-    pub media_type: MediaTypeFilter,
+    pub media_type: TitleKind,
     /// The episode; absent for a movie.
     pub episode_id: Option<Uuid>,
     /// The source to play: the one last played if still present, else the

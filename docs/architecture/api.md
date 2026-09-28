@@ -24,7 +24,7 @@ role.
 
 | Route | Method(s) | Purpose |
 |---|---|---|
-| `/v1/health` | GET | Deep health check (public): probes the database and returns `200` `{status:"healthy"}` or `503` `{status:"degraded"}` with per-dependency `checks` and process `uptime_secs` |
+| `/v1/health` | GET | Deep health check (public): probes the database and returns `200` `{status:"healthy"}` or `503` `{status:"degraded"}` with per-dependency `checks` (each `{status: "ok" \| "error", detail}`, `detail` the failure reason), `checked_at` and process `uptime_secs` |
 | `/v1/media` | GET | Browse/search catalog (cursor pagination, filters, sort) |
 | `/v1/media/{id}` | GET | Full metadata for one movie or show |
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, primary first, each with its video, audio and subtitle tracks |
@@ -271,6 +271,18 @@ worked around: the client codegen step and the `ts:typecheck`/`ts:test` gates ca
 still use the pre-migration dotted names. While that holds, the TypeScript compiler is **not** a
 contract check for `beam-web`; the Rust side of the contract is checked by `codegen:openapi:check`
 and by the router refusing to build if it cannot describe itself.
+
+**Wire conventions.** `routes/conventions_tests.rs` walks the exported document and fails on any
+violation, with no exception list — a schema that cannot comply is changed, not waived
+([#190](https://github.com/justin13888/beam/issues/190)):
+
+- **R1** every enum value is `snake_case` (`^[a-z][a-z0-9_]*$`);
+- **R2** no schema name ends in `Dto` or `Response` — a name is the thing on the wire. Where a wire
+  type shares its name with the domain type it mirrors (`AdminEvent`, `AdminLogCategory`,
+  `TitleKind`), the domain type is reached through its module;
+- **R2b** no two enums carry the same set of values: one meaning is one enum (`LogLevel` serves the
+  admin log and the admin event stream alike; `TitleKind` is the browse filter, the
+  continue-watching and history `media_type`, and an enrichment row's `kind`).
 
 ## Server-Sent Events
 
