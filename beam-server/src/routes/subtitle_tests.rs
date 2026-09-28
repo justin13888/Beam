@@ -455,7 +455,7 @@ async fn a_subtitle_replaced_by_a_link_or_a_fifo_is_source_file_missing() {
         std::fs::remove_file(f.path("Movie.de.srt")).expect("remove the subtitle");
         rustix::fs::mkfifoat(
             rustix::fs::CWD,
-            &f.path("Movie.de.srt"),
+            f.path("Movie.de.srt"),
             rustix::fs::Mode::from_raw_mode(0o600),
         )
         .expect("make a FIFO");
