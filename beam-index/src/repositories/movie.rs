@@ -6,7 +6,7 @@ use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
 use beam_domain::models::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
-use beam_domain::models::{PinSource, ProviderPin};
+use beam_domain::models::{FieldLocks, MetadataField, PinSource, ProviderPin};
 use beam_domain::providers::enrichment::MovieEnrichment;
 use beam_domain::repositories::MovieRepository;
 
@@ -302,6 +302,27 @@ impl MovieRepository for SqlMovieRepository {
         }
     }
 
+    async fn clear_admin_pin(&self, movie_id: Uuid) -> Result<bool, DbErr> {
+        use beam_entity::movie;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let result = movie::Entity::update_many()
+            .col_expr(
+                movie::Column::PinnedRef,
+                Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                movie::Column::PinSource,
+                Expr::value(Option::<String>::None),
+            )
+            .filter(movie::Column::Id.eq(movie_id))
+            .filter(movie::Column::PinSource.eq(PinSource::Admin.as_str()))
+            .exec(self.db.as_ref())
+            .await?;
+        Ok(result.rows_affected == 1)
+    }
+
     async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
@@ -434,6 +455,7 @@ impl MovieRepository for SqlMovieRepository {
         &self,
         movie_id: Uuid,
         enrichment: &MovieEnrichment,
+        locks: &FieldLocks,
     ) -> Result<(), DbErr> {
         use beam_entity::movie;
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
@@ -445,19 +467,40 @@ impl MovieRepository for SqlMovieRepository {
             return Ok(());
         };
 
+        // A locked column is left `Unchanged`, so the `UPDATE` does not name
+        // it at all: what the administrator set stays, byte for byte.
+        let open = |field| !locks.is_locked(field);
         let mut active: movie::ActiveModel = model.into();
-        active.title = Set(enrichment.title.clone());
-        active.title_localized = Set(enrichment.original_title.clone());
-        active.description = Set(enrichment.description.clone());
-        active.year = Set(enrichment.year.map(|y| y as i32));
-        active.release_date = Set(enrichment.release_date);
-        active.runtime_mins = Set(enrichment.runtime_mins.map(|m| m as i32));
-        active.poster_url = Set(enrichment.poster_url.clone());
-        active.backdrop_url = Set(enrichment.backdrop_url.clone());
+        if open(MetadataField::Title) {
+            active.title = Set(enrichment.title.clone());
+        }
+        if open(MetadataField::OriginalTitle) {
+            active.title_localized = Set(enrichment.original_title.clone());
+        }
+        if open(MetadataField::Description) {
+            active.description = Set(enrichment.description.clone());
+        }
+        if open(MetadataField::Year) {
+            active.year = Set(enrichment.year.map(|y| y as i32));
+        }
+        if open(MetadataField::ReleaseDate) {
+            active.release_date = Set(enrichment.release_date);
+        }
+        if open(MetadataField::Runtime) {
+            active.runtime_mins = Set(enrichment.runtime_mins.map(|m| m as i32));
+        }
+        if open(MetadataField::Poster) {
+            active.poster_url = Set(enrichment.poster_url.clone());
+        }
+        if open(MetadataField::Backdrop) {
+            active.backdrop_url = Set(enrichment.backdrop_url.clone());
+        }
         active.tmdb_id = Set(enrichment.tmdb_id.map(|id| id as i32));
         active.imdb_id = Set(enrichment.imdb_id.clone());
         active.anilist_id = Set(enrichment.anilist_id.map(|id| id as i32));
-        active.rating_tmdb = Set(enrichment.rating);
+        if open(MetadataField::Rating) {
+            active.rating_tmdb = Set(enrichment.rating);
+        }
         active.updated_at = Set(chrono::Utc::now().into());
         active.update(self.db.as_ref()).await?;
         Ok(())

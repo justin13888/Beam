@@ -38,9 +38,7 @@ use crate::routes::stream::{download_file, head_download_file, head_stream_file,
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::hash::HashService;
 use crate::services::library::{LibraryError, LibraryService, LocatedFile};
-use crate::services::metadata::{
-    MediaConnection, MediaFilter, MetadataError, MetadataService, PageInfo,
-};
+use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::playback::{
     ContinueWatchingItem, PlaybackError, PlaybackProgressDto, PlaybackReadError, PlaybackService,
@@ -124,10 +122,6 @@ impl MetadataService for StubMetadataService {
                 end_cursor: None,
             },
         })
-    }
-
-    async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
-        Ok(())
     }
 
     async fn get_media_sources(
@@ -242,6 +236,10 @@ fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
         enrichment_repo: Arc::new(
             beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
         ),
+        enrichment_control: crate::routes::test_support::make_app_state()
+            .services
+            .enrichment_control
+            .clone(),
         movie_repo: Arc::new(
             beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
         ),

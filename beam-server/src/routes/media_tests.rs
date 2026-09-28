@@ -18,8 +18,8 @@ use crate::models::{MediaMetadata, MediaSource, MediaSourceConnection, MovieMeta
 use crate::routes::media::{browse_media, get_media_detail, get_media_sources};
 use crate::routes::test_support::make_app_state;
 use crate::services::metadata::{
-    BrowseRequest, DbMetadataService, MediaConnection, MediaFilter, MetadataError,
-    MetadataRepositories, MetadataService, PageInfo,
+    BrowseRequest, DbMetadataService, MediaConnection, MetadataError, MetadataRepositories,
+    MetadataService, PageInfo,
 };
 use crate::state::{AppServices, AppState};
 
@@ -63,10 +63,6 @@ impl MetadataService for StubMetadataService {
         })
     }
 
-    async fn refresh_metadata(&self, _filter: MediaFilter) -> Result<(), MetadataError> {
-        Ok(())
-    }
-
     async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError> {
         // Part of the trait's contract rather than a shortcut: a malformed id
         // is `InvalidId`, which the route owes a 400.
@@ -104,6 +100,7 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
         library_repo: base.services.library_repo.clone(),
         file_repo: base.services.file_repo.clone(),
         enrichment_repo: base.services.enrichment_repo.clone(),
+        enrichment_control: base.services.enrichment_control.clone(),
         movie_repo: base.services.movie_repo.clone(),
         show_repo: base.services.show_repo.clone(),
         artwork: base.services.artwork.clone(),
@@ -477,6 +474,7 @@ impl Library {
                     rating: Some(8.4),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .unwrap();

@@ -45,12 +45,18 @@ role.
 | `/v1/me` | GET | Current user |
 | `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions |
 | `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List / revoke own sessions |
-| `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, recent scans, and the filesystem watcher's per-library mode (native, polling and why, unwatched) with the watch limit |
+| `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, each metadata provider's configuration (`configured`, `not_configured`, `unavailable`, FR-307), recent scans, and the filesystem watcher's per-library mode (native, polling and why, unwatched) with the watch limit |
 | `/v1/admin/users` | GET | User accounts (limit/offset paged) |
 | `/v1/admin/users/{id}` | PATCH | Block or unblock an account |
 | `/v1/admin/libraries`, `/v1/admin/libraries/{id}` | POST, DELETE | Library management; deleting a library cancels its scan and waits for it to stop (at most 30 s on the injected clock) before its rows go, then forgets its latest scan job |
 | `/v1/admin/libraries/{id}/scan` | POST, GET | Start a scan: `202` with the scan job, queued, and the scan runs in the background; `409` `library-scan-in-progress` while one is queued or running. `GET` reads the latest job since the server started (`404` `scan-not-found` before one). `{id}` is a UUID (`format: uuid`); a malformed one is the path extractor's `400` `about:blank` |
-| `/v1/admin/media/{id}/refresh` | POST | Re-trigger enrichment for a title |
+| `/v1/admin/media/{id}/refresh` | POST | Queue a title for another enrichment pass, keeping its match, or with `?rematch=true` discarding it to be matched afresh (`204`) |
+| `/v1/admin/enrichment` | GET | Titles by enrichment status (`status`, `kind` filters), newest change first, with the last error (FR-303): a `MediaEnrichmentConnection` paged by `first`/`after` with `total` |
+| `/v1/admin/media/{id}/enrichment` | GET | One title's enrichment: status, match, pin and who set it, locked fields |
+| `/v1/admin/media/{id}/match-candidates` | GET | The configured providers' candidates for a title, best first, scored as the worker scores them (`query`, `year` override the title's own); `409` `provider-not-configured`, `502` `enrichment-provider-error` |
+| `/v1/admin/media/{id}/match` | POST, DELETE | Fix a title's match: `{"external_ref": "tmdb:603"}` pins it as the administrator's (outranks and is never replaced by an NFO, FR-312) and queues it: `202` with the title; `422` `validation-failed`, `409` `provider-not-configured` / `external-ref-taken`. `DELETE` clears an administrator's pin back to the NFO's pin or to a search and queues the title; on a title no administrator pinned it changes nothing (`204` either way) |
+| `/v1/admin/media/{id}/enrichment/locks` | PUT | Lock exactly the listed fields, so enrichment leaves them alone; `422` for a show's `release_date`/`runtime` |
+| `/v1/admin/media/refresh`, `/v1/admin/libraries/{id}/refresh` | POST | Queue every title, or one library's -- a title with no enrichment row yet is given one -- for another pass (FR-308), keeping each match unless `?rematch=true`: `202` `{queued_count}` |
 | `/v1/admin/logs`, `/v1/admin/logs/count` | GET | Admin log view |
 | `/v1/admin/events` | GET | Recent admin events (JSON) |
 | `/v1/admin/events/stream` | GET | Admin event stream (SSE) |
@@ -141,6 +147,13 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     browsed show carries `season_count`/`episode_count` and no `seasons`; its detail carries both.
   - A database failure is `500 #internal`, on browse and on detail — never an empty page, and
     never a `404` for a title that could not be read.
+
+  `GET /v1/admin/enrichment` ([#185](https://github.com/justin13888/beam/issues/185)) is the
+  same shape forwards only (`first`, 1-100, default 20, and `after`), plus `total`. Its order is
+  fixed -- the most recently changed row first, `updated_at` then row id, both descending -- so its
+  cursor (`services/enrichment_cursor.rs`) holds just that pair, at full precision, and is valid
+  under any `status`/`kind` filter. A page is one keyset statement on
+  `idx_metadata_enrichment_list`, one count and one read by ids per kind to name the titles.
 - **Errors:** every failure is an **RFC 9457 problem document** — one body shape for every status,
   on every route, including Kynos's own extractor rejections. There is no second envelope and no
   hook to render one, which closed half of [#123](https://github.com/justin13888/beam/issues/123):
@@ -266,5 +279,12 @@ per-file counts. They are live state rather than history, so they go out on the 
 never kept in the recent-event snapshot `GET /v1/admin/events` returns — one scan of a large library
 would otherwise push every other event out of it. The job itself (`GET
 /v1/admin/libraries/{id}/scan`) holds every file's count, unthrottled. Scan jobs live in memory, the
-latest per library, and a restart forgets them. SSE was chosen over WebSockets because the channel is strictly server-to-client — see
+latest per library, and a restart forgets them.
+
+Each title an enrichment sweep attempts publishes one `enrichment` event (FR-309): enriched, left
+unmatched, to be retried, or failed, carrying an `enrichment` object with the title's id, kind,
+display title, status, match and error. Live-only too, for the same reason: a sweep of a large
+library would flush the snapshot, and where every title stands is `GET /v1/admin/enrichment`. A
+title the sweep never reached -- it stopped for a provider's rate limit -- sends nothing. SSE was
+chosen over WebSockets because the channel is strictly server-to-client — see
 [ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md).

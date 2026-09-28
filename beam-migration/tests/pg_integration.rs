@@ -1320,3 +1320,103 @@ async fn the_change_identity_migration_keeps_old_rows_and_reverses() {
 
     scoped.drop_schema().await.expect("drop schema");
 }
+
+/// Issue #185's migration: an existing enrichment row gains no locks, the
+/// column holds only the names Beam knows, and `down()` takes the column and
+/// its index away so `up()` can apply again.
+#[tokio::test]
+async fn the_enrichment_locks_migration_defaults_constrains_and_reverses() {
+    use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
+
+    let scoped = ScopedSchema::create("enrichment_locks")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+
+    let before_this_one = beam_migration::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20261009_000001_enrichment_locks")
+        .expect("the migration is registered");
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(before_this_one as u32))
+        .await
+        .expect("every migration before this one applies");
+    for sql in [
+        "INSERT INTO movies (id, title, identity_key, created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-00000000000b', 'Heat', 'heat|1995', now(), now())",
+        "INSERT INTO metadata_enrichment (id, movie_id, status, attempts, force_refresh, \
+                                          created_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-00000000000b', \
+          'enriched', 0, false, now(), now())",
+    ] {
+        db.execute_unprepared(sql).await.expect("seed rows");
+    }
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(1))
+        .await
+        .expect("this migration applies over existing rows");
+
+    let text = |sql: &'static str| async move {
+        db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
+            .await
+            .expect("query")
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "v").expect("a text column v"))
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        text("SELECT array_to_string(locked_fields, ',') AS v FROM metadata_enrichment").await,
+        vec![String::new()],
+        "an existing row locks nothing"
+    );
+    assert!(
+        db.execute_unprepared("UPDATE metadata_enrichment SET locked_fields = ARRAY['tmdb_id']")
+            .await
+            .is_err(),
+        "an external id is not a lockable field"
+    );
+    db.execute_unprepared(
+        "UPDATE metadata_enrichment SET locked_fields = \
+         ARRAY['title', 'original_title', 'description', 'year', 'release_date', 'runtime', \
+               'poster', 'backdrop', 'rating', 'genres']",
+    )
+    .await
+    .expect("every known field locks");
+    assert_eq!(
+        text(
+            "SELECT indexname::text AS v FROM pg_indexes \
+              WHERE schemaname = current_schema() \
+                AND indexname IN ('idx_metadata_enrichment_list', \
+                                  'idx_metadata_enrichment_recent') \
+              ORDER BY 1"
+        )
+        .await,
+        vec![
+            "idx_metadata_enrichment_list",
+            "idx_metadata_enrichment_recent"
+        ],
+        "the list's order is indexed with and without a status filter"
+    );
+
+    beam_migration::Migrator::down(db, Some(1))
+        .await
+        .expect("the migration rolls back");
+    assert!(
+        text(
+            "SELECT column_name::text AS v FROM information_schema.columns \
+              WHERE table_schema = current_schema() AND column_name = 'locked_fields' \
+             UNION ALL \
+             SELECT indexname::text AS v FROM pg_indexes \
+              WHERE schemaname = current_schema() \
+                AND indexname IN ('idx_metadata_enrichment_list', \
+                                  'idx_metadata_enrichment_recent')"
+        )
+        .await
+        .is_empty(),
+        "down() drops the column and both indexes"
+    );
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+        .await
+        .expect("the migration reapplies over the rolled-back schema");
+
+    scoped.drop_schema().await.expect("drop schema");
+}

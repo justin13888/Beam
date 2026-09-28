@@ -237,6 +237,204 @@ pub enum MediaRefreshError {
     Internal(String),
 }
 
+/// `GET /v1/admin/enrichment`: the titles by enrichment status (issue #185).
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum EnrichmentListError {
+    /// `after` is not a cursor this list issued.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        title = "Invalid cursor"
+    )]
+    InvalidCursor(String),
+
+    /// `first` is outside 1-100.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/admin/media/{id}/enrichment` and `DELETE /v1/admin/media/{id}/match`.
+/// A malformed id is the `Path` extractor's 400.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum MediaEnrichmentError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
+    )]
+    MediaNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/admin/media/{id}/match-candidates`: a live search of the
+/// configured providers.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum MatchCandidatesError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
+    )]
+    MediaNotFound(String),
+
+    /// No metadata provider is configured to search.
+    #[error("{0}")]
+    #[problem(
+        status = 409,
+        type = "https://beam.justinchung.net/reference/errors/#provider-not-configured",
+        title = "Metadata provider not configured"
+    )]
+    ProviderNotConfigured(String),
+
+    /// The provider failed to answer: down, rate-limited, or erroring.
+    #[error("{0}")]
+    #[problem(
+        status = 502,
+        type = "https://beam.justinchung.net/reference/errors/#enrichment-provider-error",
+        title = "Metadata provider failed"
+    )]
+    ProviderError(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `POST /v1/admin/media/{id}/match`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum FixMatchError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
+    )]
+    MediaNotFound(String),
+
+    /// The id is from a provider that is not configured, so no pass could
+    /// fetch the title by it.
+    #[error("{0}")]
+    #[problem(
+        status = 409,
+        type = "https://beam.justinchung.net/reference/errors/#provider-not-configured",
+        title = "Metadata provider not configured"
+    )]
+    ProviderNotConfigured(String),
+
+    /// Another title is already pinned to the id.
+    #[error("{0}")]
+    #[problem(
+        status = 409,
+        type = "https://beam.justinchung.net/reference/errors/#external-ref-taken",
+        title = "External id already pinned"
+    )]
+    ExternalRefTaken(String),
+
+    /// `external_ref` is not a `"provider:id"` any provider issues.
+    #[error("the request body breaks {} rule(s)", errors.len())]
+    #[problem(
+        status = 422,
+        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
+        title = "Validation failed"
+    )]
+    ValidationFailed {
+        // kynos gap: the `errors` extension is not described (see
+        // `PlaybackTelemetryError::ValidationFailed`); tracked in #223.
+        #[problem(extension)]
+        errors: Vec<crate::models::FieldError>,
+    },
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `PUT /v1/admin/media/{id}/enrichment/locks`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum FieldLocksError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
+    )]
+    MediaNotFound(String),
+
+    /// A listed field is one enrichment never writes on this kind of title
+    /// (a show's release date or runtime).
+    #[error("the request body breaks {} rule(s)", errors.len())]
+    #[problem(
+        status = 422,
+        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
+        title = "Validation failed"
+    )]
+    ValidationFailed {
+        // kynos gap: as for `FixMatchError::ValidationFailed`; tracked in #223.
+        #[problem(extension)]
+        errors: Vec<crate::models::FieldError>,
+    },
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `POST /v1/admin/libraries/{id}/refresh`. A malformed id is the `Path`
+/// extractor's 400.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum LibraryRefreshError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
+        title = "Library not found"
+    )]
+    LibraryNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// An operation naming one library by id: `GET /v1/libraries/{id}`, its
 /// `/files` subresource, and `DELETE /v1/admin/libraries/{id}`.
 #[derive(Debug, thiserror::Error, ApiError)]

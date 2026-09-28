@@ -71,6 +71,7 @@ fn fixture() -> Fixture {
         library_repo: base.services.library_repo.clone(),
         file_repo: file_repo.clone(),
         enrichment_repo: base.services.enrichment_repo.clone(),
+        enrichment_control: base.services.enrichment_control.clone(),
         movie_repo: movie_repo.clone(),
         show_repo: base.services.show_repo.clone(),
         artwork: base.services.artwork.clone(),

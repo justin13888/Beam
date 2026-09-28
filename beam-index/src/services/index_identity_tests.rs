@@ -17,6 +17,7 @@ use beam_domain::models::{CreateLibrary, CreateMovie, CreateMovieEntry, Library,
 use beam_domain::providers::enrichment::{MovieEnrichment, ShowEnrichment};
 use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
+use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
@@ -33,6 +34,7 @@ struct Harness {
     movie_repo: Arc<InMemoryMovieRepository>,
     show_repo: Arc<InMemoryShowRepository>,
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
+    enrichment_repo: Arc<InMemoryEnrichmentStateRepository>,
     service: LocalIndexService,
 }
 
@@ -73,6 +75,7 @@ impl Harness {
         let movie_repo = Arc::new(InMemoryMovieRepository::with_files(file_repo.clone()));
         let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+        let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
         let library = library_repo
             .create(CreateLibrary {
                 name: "Identity".to_string(),
@@ -122,7 +125,8 @@ impl Harness {
             )),
             Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         )
-        .with_missing_file_grace(grace);
+        .with_missing_file_grace(grace)
+        .with_enrichment_repo(enrichment_repo.clone());
 
         Self {
             _dir: dir,
@@ -133,6 +137,7 @@ impl Harness {
             movie_repo,
             show_repo,
             admin_log_repo,
+            enrichment_repo,
             service,
         }
     }
@@ -438,6 +443,7 @@ impl Harness {
                     tmdb_id: Some(tmdb_id),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .unwrap();
@@ -453,6 +459,7 @@ impl Harness {
                     tmdb_id: Some(tmdb_id),
                     ..Default::default()
                 },
+                &beam_domain::models::enrichment::FieldLocks::none(),
             )
             .await
             .unwrap();
@@ -514,6 +521,7 @@ async fn a_renamed_movie_takes_its_next_file_instead_of_duplicating() {
                 tmdb_id: Some(603),
                 ..Default::default()
             },
+            &beam_domain::models::enrichment::FieldLocks::none(),
         )
         .await
         .unwrap();
@@ -565,6 +573,7 @@ async fn a_renamed_show_takes_its_next_episode_instead_of_duplicating() {
                 year: Some(2024),
                 ..Default::default()
             },
+            &beam_domain::models::enrichment::FieldLocks::none(),
         )
         .await
         .unwrap();
@@ -1330,6 +1339,134 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     assert_eq!(h.only_show().id, folder);
     assert_eq!(h.only_movie().id, older);
     assert_eq!(h.season_one(folder).len(), 2);
+}
+
+/// What an administrator set on a title a merge retires survives it (issue
+/// #185): its pin moves to the survivor, which is queued to be fetched by
+/// it, and its field locks join the survivor's. Of two titles an
+/// administrator pinned to different ids, the survivor keeps its own pin and
+/// the administrator is told which went.
+#[tokio::test]
+async fn a_merge_keeps_what_an_administrator_set_on_the_retired_title() {
+    use beam_domain::models::enrichment::{EnrichmentStatus, MetadataField};
+    use beam_domain::repositories::EnrichmentStateRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    // Both matched, so the older survives -- and the newer carries the pin.
+    let older = h
+        .keyed_movie(
+            "Ocean's Eleven",
+            Some(2001),
+            "ocean s eleven|2001",
+            &["Ocean's Eleven (2001)/Ocean's Eleven (2001).mkv"],
+            base,
+        )
+        .await;
+    let newer = h
+        .keyed_movie(
+            "Oceans Eleven",
+            Some(2001),
+            "oceans eleven|2001",
+            &["Oceans.Eleven.2001.1080p.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    h.enrich_movie(older, 2001, 1).await;
+    h.enrich_movie(newer, 2001, 2).await;
+    assert!(
+        h.movie_repo
+            .set_pinned_ref(newer, &ProviderPin::Tmdb(161), PinSource::Admin)
+            .await
+            .unwrap()
+    );
+    let locks = |fields: &[MetadataField]| fields.iter().copied().collect::<FieldLocks>();
+    h.enrichment_repo
+        .set_locked_fields(
+            EnrichmentTargetId::Movie(newer),
+            &locks(&[MetadataField::Title, MetadataField::Poster]),
+        )
+        .await
+        .unwrap();
+    h.enrichment_repo
+        .set_locked_fields(
+            EnrichmentTargetId::Movie(older),
+            &locks(&[MetadataField::Genres]),
+        )
+        .await
+        .unwrap();
+
+    let scene = h
+        .keyed_show(
+            "Greys Anatomy",
+            "greys anatomy|",
+            &["Greys.Anatomy.S01E01.720p.mkv"],
+            base,
+        )
+        .await;
+    let folder = h
+        .keyed_show(
+            "Grey's Anatomy",
+            "grey s anatomy|",
+            &["Grey's Anatomy/Season 1/Greys.Anatomy.S01E02.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    h.enrich_show(scene, 1416).await;
+    h.enrich_show(folder, 1417).await;
+    for (show, pin) in [(scene, 1416), (folder, 1417)] {
+        assert!(
+            h.show_repo
+                .set_pinned_ref(show, &ProviderPin::Tmdb(pin), PinSource::Admin)
+                .await
+                .unwrap()
+        );
+    }
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let movie = h.only_movie();
+    assert_eq!(movie.id, older, "the survivor is chosen as before");
+    assert_eq!(
+        (movie.pinned_ref.as_deref(), movie.pin_source),
+        (Some("tmdb:161"), Some(PinSource::Admin)),
+        "the retired title's administrator's pin moved to it"
+    );
+    let row = h
+        .enrichment_repo
+        .find_by_target(EnrichmentTargetId::Movie(older))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.locked_fields,
+        locks(&[
+            MetadataField::Title,
+            MetadataField::Poster,
+            MetadataField::Genres
+        ]),
+        "both titles' locks"
+    );
+    assert_eq!(row.status, EnrichmentStatus::Pending);
+    assert_eq!(row.matched_ref, None, "fetched by the carried pin");
+
+    let show = h.only_show();
+    assert_eq!(show.id, scene);
+    assert_eq!(
+        (show.pinned_ref.as_deref(), show.pin_source),
+        (Some("tmdb:1416"), Some(PinSource::Admin)),
+        "the survivor keeps its own administrator's pin"
+    );
+    let conflict = h
+        .admin_log_details("pinned to different ids")
+        .await
+        .expect("the administrator is told");
+    assert_eq!(conflict["kept"], serde_json::json!(scene));
+    assert_eq!(conflict["retired"], serde_json::json!(folder));
+    assert_eq!(conflict["dropped_pin"], "tmdb:1417");
 }
 
 /// If another writer takes the key between the merge releasing the loser and

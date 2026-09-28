@@ -165,7 +165,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   the classification rules (FR-204) that derived it; before a scan reclassifies any file, a key an
   older version derived MUST be re-derived from the title's files, in place (the title keeping its
   id and enrichment), and two titles the current rules key alike MUST be merged into one, keeping
-  the one a provider matched, else the older. Every path that reclassifies -- the scan of every
+  the one a provider matched, else the older, and carrying to it the other's administrator's pin
+  and locked fields (FR-313) -- a survivor an administrator pinned keeping its own pin. Every path that reclassifies -- the scan of every
   library, the administrator's scan of one, a watcher event -- MUST first run the identity-key
   backfill and re-derivation if they have not succeeded in the process, and while they have not
   (they failed, and are retried by the next such path) MUST NOT reclassify a file an older version
@@ -344,7 +345,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-302**: Metadata enrichment MUST run as a background pipeline that begins after a title has been
   indexed and classified, and MUST NOT block the indexing/classification scan itself.
 - **FR-303**: The server MUST persist enrichment status per title (e.g., pending, enriched, failed)
-  and MUST make that status queryable by the admin area.
+  and MUST make that status queryable by the admin area: a list of titles filterable by status and
+  kind, each with its last error, and each title's own status.
 - **FR-304**: On enrichment failure, the server MUST retry with backoff rather than permanently
   marking the title as failed after a single attempt.
 - **FR-305**: The server MUST enrich TV show titles at the season and episode level (season/episode
@@ -354,13 +356,17 @@ strength. Each requirement is independently testable. See `product.md` for narra
   enriched.
 - **FR-307**: If no `BEAM_TMDB_API_TOKEN` is configured, the server MUST leave TMDB-eligible titles
   un-enriched (rather than failing indexing or scan completion) and MUST surface this condition in
-  admin-visible enrichment status.
-- **FR-308**: The server MUST expose an admin-triggerable "re-enrich" action, scoped to a single title
-  or to all titles, that re-runs enrichment regardless of current status. Operator-facing enrichment
-  tuning knobs (batch size, minimum confidence, metadata language) are deferred — tracked in
-  [#71](https://github.com/justin13888/beam/issues/71).
+  admin-visible enrichment status: the admin status reports each provider as configured, not
+  configured, or configured but unavailable.
+- **FR-308**: The server MUST expose an admin-triggerable "re-enrich" action, scoped to a single title,
+  to one library's titles, or to all titles, that re-runs enrichment regardless of current status,
+  keeping each title's match unless the administrator asks for a rematch.
+  Operator-facing enrichment tuning knobs (batch size, minimum confidence, metadata language) are
+  deferred — tracked in [#71](https://github.com/justin13888/beam/issues/71).
 - **FR-309**: The server MUST emit enrichment progress/status-change events over SSE, in the same
-  manner as scan progress (FR-208).
+  manner as scan progress (FR-208): one per title an enrichment pass attempts, naming the title and
+  carrying its new status, match and error; like progress events, they MUST NOT displace other
+  events from the recent-event log.
 - **FR-310**: The server MUST serve every piece of artwork itself — movie and show posters and
   backdrops, season posters, episode thumbnails — from `/v1/artwork/{kind}/{id}/{variant}`, fetching
   each image from the provider once and caching it on disk. `poster_url`, `backdrop_url` and
@@ -382,6 +388,17 @@ strength. Each requirement is independently testable. See `product.md` for narra
   ([#185](https://github.com/justin13888/beam/issues/185)) sets an administrator's pin, which takes
   precedence over any NFO's and which no NFO -- re-read, edited, or named by a new file -- replaces,
   so an administrator never has to edit a file in a library to correct Beam.
+- **FR-313**: An administrator MUST be able to correct a title's enrichment without touching the
+  library ([#185](https://github.com/justin13888/beam/issues/185)): search the configured providers
+  for candidates; fix the match to a chosen id, which sets an administrator's pin (FR-312) and
+  queues the title with its old match cleared -- and clear that pin again, returning the title to
+  its NFO's pin or to a search (clearing a title no administrator pinned changes nothing); and lock individual fields (title, original title, description,
+  year, release date, runtime, poster, backdrop, rating, genres), which enrichment MUST then leave
+  as they are. A fetch by an id the provider answers it has no title for MUST be retried with
+  backoff (FR-304), naming the id, for a title a pin holds -- an NFO's or an administrator's --
+  and leave it unmatched rather than failed once the retries are spent; a title with no pin a
+  configured provider resolves, whose stored match the provider no longer has, MUST be searched
+  for again by its name instead.
 
 ## FR-4xx — Browse, Search & Detail
 

@@ -28,6 +28,7 @@ mod m20261002_000001_nfo_sidecars;
 mod m20261003_000001_catalogue_browse;
 mod m20261007_000001_files_change_identity;
 mod m20261008_000001_tracks_subtitles;
+mod m20261009_000001_enrichment_locks;
 
 pub use m20261008_000001_tracks_subtitles::RENAMED_FFMPEG_CODECS;
 
@@ -62,6 +63,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261003_000001_catalogue_browse::Migration),
             Box::new(m20261007_000001_files_change_identity::Migration),
             Box::new(m20261008_000001_tracks_subtitles::Migration),
+            Box::new(m20261009_000001_enrichment_locks::Migration),
         ]
     }
 }

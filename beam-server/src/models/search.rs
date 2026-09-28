@@ -92,6 +92,17 @@ pub struct UnknownVariant {
     got: String,
 }
 
+impl UnknownVariant {
+    /// `got` named none of the `expected` values.
+    #[must_use]
+    pub fn new(expected: &'static str, got: &str) -> Self {
+        Self {
+            expected,
+            got: got.to_owned(),
+        }
+    }
+}
+
 /// The wire spelling of each variant, in one place.
 ///
 /// `Display` and `FromStr` are the two halves of the same table, so they are

@@ -3,7 +3,6 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracing::warn;
 use uuid::Uuid;
 
 use crate::models::{
@@ -16,10 +15,9 @@ use beam_domain::models::catalog::{
     CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     ShowChildCounts, SortDirection, TitleKind,
 };
-use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
-    CatalogRepository, EnrichmentStateRepository, GenreRepository, MovieRepository, ShowRepository,
+    CatalogRepository, GenreRepository, MovieRepository, ShowRepository,
 };
 
 #[async_trait::async_trait]
@@ -40,9 +38,6 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     /// [`MetadataError::InternalError`] when the store fails -- never with an
     /// empty page.
     async fn search_media(&self, request: BrowseRequest) -> Result<MediaConnection, MetadataError>;
-
-    /// Refresh metadata for by media filter
-    async fn refresh_metadata(&self, filter: MediaFilter) -> Result<(), MetadataError>;
 
     /// List the playable/downloadable source files for a playable media id,
     /// the primary first. Movie ids and episode ids are both accepted (a show
@@ -139,7 +134,6 @@ pub struct DbMetadataService {
     sources: Arc<SourceCatalog>,
     catalog_repo: Arc<dyn CatalogRepository>,
     genre_repo: Arc<dyn GenreRepository>,
-    enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
 }
 
 /// Every store [`DbMetadataService`] reads.
@@ -329,17 +323,7 @@ impl DbMetadataService {
             sources,
             catalog_repo: catalog,
             genre_repo: genres,
-            enrichment_repo: None,
         }
-    }
-
-    /// Wire up `refresh_metadata` to actually flip enrichment-queue rows back
-    /// to `Pending` rather than being a no-op. Defaults to `None`, under
-    /// which `refresh_metadata` is a no-op (matches this service's prior
-    /// behavior when no enrichment pipeline is configured).
-    pub fn with_enrichment_repo(mut self, repo: Arc<dyn EnrichmentStateRepository>) -> Self {
-        self.enrichment_repo = Some(repo);
-        self
     }
 
     /// Build MediaMetadata for a movie by its DB model
@@ -509,30 +493,6 @@ impl DbMetadataService {
             })
             .collect())
     }
-
-    /// Whether `id` names a movie, a show, or neither -- failing, rather than
-    /// answering "neither", when a lookup fails.
-    async fn title_kind(&self, id: Uuid) -> Result<Option<TitleKind>, MetadataError> {
-        if self
-            .movie_repo
-            .find_by_id(id)
-            .await
-            .map_err(internal)?
-            .is_some()
-        {
-            return Ok(Some(TitleKind::Movie));
-        }
-        if self
-            .show_repo
-            .find_by_id(id)
-            .await
-            .map_err(internal)?
-            .is_some()
-        {
-            return Ok(Some(TitleKind::Show));
-        }
-        Ok(None)
-    }
 }
 
 impl From<MediaSortField> for CatalogSortField {
@@ -681,49 +641,6 @@ impl MetadataService for DbMetadataService {
         })
     }
 
-    /// Refresh metadata for by media filter
-    async fn refresh_metadata(&self, filter: MediaFilter) -> Result<(), MetadataError> {
-        let Some(enrichment_repo) = &self.enrichment_repo else {
-            return Ok(());
-        };
-
-        match filter {
-            MediaFilter::All => {
-                enrichment_repo
-                    .request_refresh_all(false)
-                    .await
-                    .map_err(internal)?;
-                Ok(())
-            }
-            MediaFilter::ByMediaId(media_id) => {
-                let id = Uuid::parse_str(&media_id).map_err(|_| MetadataError::InvalidId)?;
-
-                let target = match self.title_kind(id).await? {
-                    Some(TitleKind::Movie) => EnrichmentTargetId::Movie(id),
-                    Some(TitleKind::Show) => EnrichmentTargetId::Show(id),
-                    None => return Err(MetadataError::MediaNotFound),
-                };
-
-                let found = enrichment_repo
-                    .request_refresh(target, false)
-                    .await
-                    .map_err(internal)?;
-                if !found {
-                    warn!("No enrichment row exists for media {media_id}; nothing to refresh");
-                }
-                Ok(())
-            }
-            MediaFilter::ByLibraryId(_) => {
-                // Library-scoped bulk refresh needs a "titles in this
-                // library" query this crate doesn't expose yet; the REST
-                // admin API (E3) adds a proper library-scoped endpoint.
-                // GraphQL's ByLibraryId variant is left a no-op until then,
-                // rather than approximating it as a global refresh.
-                Ok(())
-            }
-        }
-    }
-
     async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError> {
         let id = Uuid::parse_str(media_id).map_err(|_| MetadataError::InvalidId)?;
 
@@ -804,13 +721,6 @@ pub enum MetadataError {
 pub use crate::models::search::{
     MediaConnection, MediaSortField, MediaTypeFilter, PageInfo, SortOrder,
 };
-
-#[derive(Debug, Clone)]
-pub enum MediaFilter {
-    All,
-    ByMediaId(String),
-    ByLibraryId(String),
-}
 
 /// Search filters for media
 #[derive(Clone, Debug, Default)]

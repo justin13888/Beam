@@ -22,6 +22,9 @@ pub struct Model {
     pub matched_ref: Option<String>,
     pub force_refresh: bool,
     pub last_error: Option<String>,
+    /// The fields enrichment leaves as they are (issue #185), by name --
+    /// `"title"`, `"poster"`, ... -- held to the known names by a `CHECK`.
+    pub locked_fields: Vec<String>,
 
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,

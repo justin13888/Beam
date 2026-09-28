@@ -6,6 +6,7 @@ use uuid::Uuid;
 use std::collections::HashMap;
 
 use crate::models::catalog::ShowChildCounts;
+use crate::models::enrichment::{FieldLocks, MetadataField};
 use crate::models::pin::{PinSource, ProviderPin};
 use crate::models::show::{CreateEpisode, CreateShow, Episode, Season, Show};
 use crate::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
@@ -87,6 +88,9 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
         pin: &ProviderPin,
         source: PinSource,
     ) -> Result<bool, DbErr>;
+    /// Unpin `show_id` if an administrator pinned it; see
+    /// `MovieRepository::clear_admin_pin`.
+    async fn clear_admin_pin(&self, show_id: Uuid) -> Result<bool, DbErr>;
     /// Delete every episode created before `created_before` that no file row
     /// references, then every season left with no episode, then every show
     /// created before `created_before` left with no season, returning how many
@@ -132,12 +136,14 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// `Season::show_id`, the show).
     async fn find_season_by_id(&self, season_id: Uuid) -> Result<Option<Season>, DbErr>;
     /// Apply enrichment-provider data to an existing show. Overwrites the
-    /// current values, same as `MovieRepository::apply_enrichment`, and
-    /// likewise never touches the identity key.
+    /// current values except those `locks` holds, same as
+    /// `MovieRepository::apply_enrichment`, and likewise never touches the
+    /// identity key.
     async fn apply_enrichment(
         &self,
         show_id: Uuid,
         enrichment: &ShowEnrichment,
+        locks: &FieldLocks,
     ) -> Result<(), DbErr>;
     /// Apply a season's enrichment to the show's *existing* season/episode
     /// rows. Never fabricates a season or episode that scanning hasn't
@@ -171,6 +177,8 @@ pub mod in_memory {
         /// The rules version behind each show's key; absent is `0`, as for
         /// `InMemoryMovieRepository::key_versions`.
         pub key_versions: Mutex<HashMap<Uuid, u16>>,
+        /// `(library_id, show_id)` associations.
+        library_links: Mutex<HashSet<(Uuid, Uuid)>>,
         files: Option<Arc<InMemoryFileRepository>>,
     }
 
@@ -181,6 +189,19 @@ pub mod in_memory {
                 files: Some(files),
                 ..Self::default()
             }
+        }
+
+        /// Every show associated with the library `library_id`, in no
+        /// particular order: what a real store's `library_shows` join
+        /// reads, for the doubles that stand in for one.
+        pub fn ids_in_library(&self, library_id: Uuid) -> Vec<Uuid> {
+            self.library_links
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(library, _)| *library == library_id)
+                .map(|(_, show)| *show)
+                .collect()
         }
 
         /// Episode ids some file row references -- only present files when
@@ -429,6 +450,18 @@ pub mod in_memory {
             }
         }
 
+        async fn clear_admin_pin(&self, show_id: Uuid) -> Result<bool, DbErr> {
+            let mut shows = self.shows.lock().unwrap();
+            match shows.get_mut(&show_id) {
+                Some(title) if title.pin_source == Some(PinSource::Admin) => {
+                    title.pinned_ref = None;
+                    title.pin_source = None;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+
         async fn delete_orphaned(&self, created_before: DateTime<Utc>) -> Result<u64, DbErr> {
             let Some(referenced) = self.referenced_episodes(false) else {
                 return Ok(0);
@@ -447,9 +480,13 @@ pub mod in_memory {
 
         async fn ensure_library_association(
             &self,
-            _library_id: Uuid,
-            _show_id: Uuid,
+            library_id: Uuid,
+            show_id: Uuid,
         ) -> Result<(), DbErr> {
+            self.library_links
+                .lock()
+                .unwrap()
+                .insert((library_id, show_id));
             Ok(())
         }
 
@@ -549,19 +586,35 @@ pub mod in_memory {
             &self,
             show_id: Uuid,
             enrichment: &ShowEnrichment,
+            locks: &FieldLocks,
         ) -> Result<(), DbErr> {
             let mut shows = self.shows.lock().unwrap();
             if let Some(show) = shows.get_mut(&show_id) {
-                show.title = enrichment.title.clone();
-                show.title_localized = enrichment.original_title.clone();
-                show.description = enrichment.description.clone();
-                show.year = enrichment.year;
-                show.poster_url = enrichment.poster_url.clone();
-                show.backdrop_url = enrichment.backdrop_url.clone();
+                let open = |field| !locks.is_locked(field);
+                if open(MetadataField::Title) {
+                    show.title = enrichment.title.clone();
+                }
+                if open(MetadataField::OriginalTitle) {
+                    show.title_localized = enrichment.original_title.clone();
+                }
+                if open(MetadataField::Description) {
+                    show.description = enrichment.description.clone();
+                }
+                if open(MetadataField::Year) {
+                    show.year = enrichment.year;
+                }
+                if open(MetadataField::Poster) {
+                    show.poster_url = enrichment.poster_url.clone();
+                }
+                if open(MetadataField::Backdrop) {
+                    show.backdrop_url = enrichment.backdrop_url.clone();
+                }
                 show.tmdb_id = enrichment.tmdb_id;
                 show.imdb_id = enrichment.imdb_id.clone();
                 show.anilist_id = enrichment.anilist_id;
-                show.rating_tmdb = enrichment.rating;
+                if open(MetadataField::Rating) {
+                    show.rating_tmdb = enrichment.rating;
+                }
                 show.updated_at = chrono::Utc::now();
             }
             Ok(())

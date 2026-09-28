@@ -5,6 +5,7 @@ pub mod api_error;
 pub mod artwork;
 pub mod auth;
 pub mod delivery;
+pub mod enrichment;
 pub mod genres;
 pub mod health;
 pub mod media;
@@ -120,6 +121,16 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             admin::get_admin_status,
             admin::preview_library_telemetry,
             admin::get_playback_telemetry,
+        ])
+        .mount(kynos::routes![
+            enrichment::list_enrichment,
+            enrichment::get_media_enrichment,
+            enrichment::search_match_candidates,
+            enrichment::fix_media_match,
+            enrichment::clear_media_match,
+            enrichment::set_media_field_locks,
+            enrichment::refresh_all_media_metadata,
+            enrichment::refresh_library_metadata,
         ])
         .mount(kynos::routes![
             auth::oidc_me,

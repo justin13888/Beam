@@ -68,9 +68,10 @@ not this error — it returns an empty list.
 
 ### invalid-cursor
 
-**400.** From `GET /v1/media`. The `after` or `before` cursor is not one this server issued for the
-requested sort: it was altered, it came from an older server whose cursors this one cannot read, or
-it was issued under a different `sort_by` or `sort_order`.
+**400.** From `GET /v1/media` and `GET /v1/admin/enrichment`. The `after` or `before` cursor is not
+one this server issued for that list: it was altered, it came from an older server whose cursors
+this one cannot read, or -- on `/v1/media` -- it was issued under a different `sort_by` or
+`sort_order`.
 
 **What to do.** Start again from the first page without a cursor. A cursor names a place in *one*
 ordering, so a client that changes the sort must drop the cursor it holds. A cursor does not go
@@ -79,7 +80,8 @@ starts where that title was.
 
 ### invalid-pagination
 
-**400.** From `GET /v1/media`. The page parameters ask for something the server does not answer:
+**400.** From `GET /v1/media` and `GET /v1/admin/enrichment`. The page parameters ask for something
+the server does not answer:
 `first` or `last` outside 1 to 100, or a forward parameter (`first`, `after`) combined with a
 backward one (`last`, `before`).
 
@@ -270,6 +272,33 @@ converse holds too: a stored artwork URL that Beam *itself* refuses to fetch (no
 unparseable) is reported as [`internal`](#internal), because no request was ever made and the bad
 data is Beam's own.
 
+### provider-not-configured
+
+**409.** From the admin enrichment routes. No configured metadata provider can do what was asked:
+`GET /v1/admin/media/{id}/match-candidates` with no provider configured at all, or `POST
+/v1/admin/media/{id}/match` naming an id of a provider that is not configured (a `tmdb:` id with no
+`BEAM_TMDB_API_TOKEN`).
+
+**What to do.** Operators: configure the provider (see [Metadata](/operate/metadata/)); the admin
+status's `enrichment_providers` says which are set up. Administrators: pick a candidate from a
+configured provider. The answer does not change on retry, which is why it is a 409.
+
+### external-ref-taken
+
+**409.** From `POST /v1/admin/media/{id}/match`. Another title is already pinned to that provider
+id: one id pins one title.
+
+**What to do.** The two titles are probably one. Fix the other title's match first (or clear it with
+`DELETE /v1/admin/media/{id}/match`), then fix this one.
+
+### enrichment-provider-error
+
+**502.** From `GET /v1/admin/media/{id}/match-candidates`. Beam searched the metadata provider and
+could not use the answer: it timed out, errored, or asked Beam to slow down.
+
+**What to do.** Retry later. A 502 rather than [`internal`](#internal) for the same reason as
+[`artwork-upstream-failed`](#artwork-upstream-failed): the fault is the provider's.
+
 ### invalid-file-id
 
 **400.** The file id in the path is not a UUID.
@@ -455,9 +484,11 @@ for the body as a whole) and a `detail`:
 }
 ```
 
-Today only `POST /v1/telemetry/playback` answers it: a batch carries 1 to 50 events in total and at
-most 50 in any one list, a rebuffer lasts 1 ms to 10 minutes, and a source switch is between two
-different files.
+Three operations answer it. `POST /v1/telemetry/playback`: a batch carries 1 to 50 events in total
+and at most 50 in any one list, a rebuffer lasts 1 ms to 10 minutes, and a source switch is between
+two different files. `POST /v1/admin/media/{id}/match`: `external_ref` is a `"provider:id"` some
+provider issues (`/external_ref`). `PUT /v1/admin/media/{id}/enrichment/locks`: a show has no
+`release_date` or `runtime` to lock (`/locked_fields/<index>`).
 
 **What to do.** Fix the request at each pointer. A 422 with `"type": "about:blank"` is the other
 kind: the body did not fit its schema at all (see [below](#responses-with-no-code)).
