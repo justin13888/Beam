@@ -573,6 +573,79 @@ async fn discs_in_disc_folders_are_their_films_and_a_shows_are_untitled() {
     assert_eq!(h.entries().len(), 3, "one entry per film");
 }
 
+/// A disc file's part follows its disc's main title whenever the disc is
+/// read, not only when its row is first made: a missing VOB restored makes
+/// the one-file title a run of three, and each file takes its place in it.
+#[tokio::test]
+async fn a_disc_files_part_follows_a_gap_filled_in_its_main_title() {
+    let h = Harness::new().await;
+    let disc = write_dvd(
+        &h.root.join("Heat (1995)"),
+        &[TitleSet {
+            set: 1,
+            parts: &[2000, 2000, 1000],
+            duration: Some(170 * MINUTE),
+        }],
+    );
+    let middle = std::fs::read(disc.join("VTS_01_2.VOB")).unwrap();
+    std::fs::remove_file(disc.join("VTS_01_2.VOB")).unwrap();
+    h.scan().await.expect("the scan runs");
+    assert_eq!(
+        h.present(),
+        [("Heat (1995)/VIDEO_TS/VTS_01_1.VOB".to_string(), None)],
+        "the title runs only to the gap: one file, played whole"
+    );
+
+    std::fs::write(disc.join("VTS_01_2.VOB"), middle).unwrap();
+    h.scan().await.expect("the rescan runs");
+
+    let whole = [
+        ("Heat (1995)/VIDEO_TS/VTS_01_1.VOB".to_string(), Some(1)),
+        ("Heat (1995)/VIDEO_TS/VTS_01_2.VOB".to_string(), Some(2)),
+        ("Heat (1995)/VIDEO_TS/VTS_01_3.VOB".to_string(), Some(3)),
+    ];
+    assert_eq!(h.present(), whole);
+    h.scan().await.expect("another rescan runs");
+    assert_eq!(h.present(), whole, "and stays so");
+}
+
+/// The watcher re-derives parts too: a Blu-ray main title of one clip grown
+/// to two -- its playlist rewritten as a copy finishes -- numbers the clip
+/// it already had.
+#[tokio::test]
+async fn a_disc_files_part_follows_a_one_file_title_grown_to_two() {
+    let h = Harness::new().await;
+    let disc = write_blu_ray(
+        &h.root.join("Heat (1995)"),
+        &[("00801", 3000)],
+        &[("00800.mpls", mpls(&[("00801", 0, ticks(5000))]))],
+    );
+    h.scan().await.expect("the scan runs");
+    assert_eq!(
+        h.present(),
+        [("Heat (1995)/BDMV/STREAM/00801.m2ts".to_string(), None)]
+    );
+
+    write_blu_ray(
+        &h.root.join("Heat (1995)"),
+        &[("00802", 2000)],
+        &[(
+            "00800.mpls",
+            mpls(&[("00801", 0, ticks(5000)), ("00802", 0, ticks(4000))]),
+        )],
+    );
+    h.reconcile(&disc.join("PLAYLIST/00800.mpls"), FsEventKind::Modified)
+        .await;
+
+    assert_eq!(
+        h.present(),
+        [
+            ("Heat (1995)/BDMV/STREAM/00801.m2ts".to_string(), Some(1)),
+            ("Heat (1995)/BDMV/STREAM/00802.m2ts".to_string(), Some(2)),
+        ]
+    );
+}
+
 /// A disc that cannot be read whole leaves its rows exactly as they were
 /// (FR-222): a VOB gone meanwhile is not marked missing and no part moves,
 /// since a title chosen from part of a disc may not be its main title.

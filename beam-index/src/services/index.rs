@@ -265,6 +265,10 @@ struct WalkOutcome {
     subtitles: Vec<sidecars::WalkedSidecar>,
     /// Every NFO beside the media (issue #184).
     nfos: Vec<hints::WalkedNfo>,
+    /// The root of every disc structure the walk read (issue #234), whether
+    /// or not it could be read whole: the discs whose files' parts
+    /// [`LocalIndexService::rederive_disc_parts`] brings up to date.
+    discs: Vec<PathBuf>,
 }
 
 impl WalkOutcome {
@@ -286,6 +290,7 @@ impl WalkOutcome {
             self.failed_subtrees.push(disc_root.to_path_buf());
         }
         self.files.extend(title);
+        self.discs.push(disc_root.to_path_buf());
     }
 }
 
@@ -427,6 +432,7 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
         unscoped_failure,
         subtitles,
         nfos,
+        discs: Vec::new(),
     };
     for (disc_root, kind) in discs {
         outcome.add_disc(root, &disc_root, kind, policy);
@@ -1676,6 +1682,60 @@ impl LocalIndexService {
         let (disc_root, kind) = self.path_policy.disc_root(relative_to(root, path))?;
         let read = disc::read_disc(root, &root.join(disc_root), kind, &self.path_policy);
         disc::part_in(&read.title, path)
+    }
+
+    /// Give each file of the main titles of the disc structures rooted at
+    /// `discs` the part its place in its title makes it, where its row holds
+    /// another (issue #234). A row keeps its part until something reads its
+    /// disc again, and a disc's main title can change under rows that are
+    /// otherwise unchanged -- a missing VOB restored, a one-file title grown
+    /// to two -- so every walk that reads a disc re-derives its parts. A disc
+    /// that could not be read whole changes no part.
+    async fn rederive_disc_parts(&self, library: &Library, discs: &[PathBuf]) -> Result<(), DbErr> {
+        let root = library.root_path.as_path();
+        let mut done: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for disc_root in discs {
+            let Some((rel, kind)) = self.path_policy.disc_root(relative_to(root, disc_root)) else {
+                continue;
+            };
+            let DiscRead {
+                title: files,
+                streams: _,
+                failed,
+            } = disc::read_disc(root, &root.join(rel), kind, &self.path_policy);
+            if failed {
+                continue;
+            }
+            for path in &files {
+                if !done.insert(path.clone()) {
+                    continue;
+                }
+                let Some(file) = self.file_repo.find_by_path(&path.to_string_lossy()).await? else {
+                    continue;
+                };
+                let Some(MediaFileContent::Movie {
+                    movie_entry_id,
+                    part_number,
+                }) = file.content
+                else {
+                    continue;
+                };
+                let part = disc::part_in(&files, path);
+                if part == part_number {
+                    continue;
+                }
+                debug!(path = %path.display(), from = ?part_number, to = ?part, "a disc file's place in its main title changed");
+                self.move_file(
+                    &file,
+                    MediaFileContent::Movie {
+                        movie_entry_id,
+                        part_number: part,
+                    },
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Tell the administrator a file was indexed without a title, and why.
@@ -4349,6 +4409,7 @@ impl LocalIndexService {
             unscoped_failure,
             subtitles,
             nfos,
+            discs,
         } = if self
             .path_policy
             .excludes_directory(relative_to(&library.root_path, dir))
@@ -4361,6 +4422,7 @@ impl LocalIndexService {
                 unscoped_failure: false,
                 subtitles: Vec::new(),
                 nfos: Vec::new(),
+                discs: Vec::new(),
             }
         } else {
             walk_under(&library.root_path, dir, &self.path_policy)
@@ -4390,6 +4452,8 @@ impl LocalIndexService {
                 | FileOutcome::Failed => {}
             }
         }
+        // Each disc read's source, once its files are at their paths.
+        self.rederive_disc_parts(library, &discs).await?;
 
         // What sits beside the media beneath it (issue #184), once its videos
         // are at their paths: each subtitle is recorded against the video
@@ -4821,6 +4885,7 @@ impl LocalIndexService {
             unscoped_failure,
             subtitles: walked_subtitles,
             nfos: walked_nfos,
+            discs: walked_discs,
         } = walk_library_root(&library.root_path, &self.path_policy);
         let inodes = self.inodes_of(library);
 
@@ -5029,6 +5094,13 @@ impl LocalIndexService {
         if ticket.is_cancelled() {
             info!(library_id = %lib_uuid, "Scan cancelled");
             return Err(IndexError::Cancelled);
+        }
+
+        // Each disc's files take the part their place in its source makes
+        // them (issue #234): a row the loop above left unchanged may be one
+        // whose disc's main title changed around it.
+        if let Err(e) = self.rederive_disc_parts(library, &walked_discs).await {
+            error!(library_id = %lib_uuid, error = %e, "re-deriving the parts of disc files failed");
         }
 
         // Phase 3c: What sits beside the media (issue #184). The NFOs whose
