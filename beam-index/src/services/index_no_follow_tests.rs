@@ -472,6 +472,58 @@ async fn an_indexed_file_whose_folder_becomes_a_link_mid_scan_is_marked_missing(
     assert_eq!(after.size_bytes, before.size_bytes);
 }
 
+/// A video relinked by the watcher drops the record of a subtitle it had
+/// whose folder has since become a link: that path leads to no file of the
+/// library, just as a watcher event on it would find.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_relinked_video_drops_a_subtitle_behind_a_folder_link() {
+    let h = Harness::new().await;
+    let video = h.put_inside("Heat (1995)/Heat (1995).mkv");
+    let subtitle = h.root.join("Heat (1995)/Heat (1995).en.srt");
+    std::fs::write(&subtitle, b"1\n00:00:01,000 --> 00:00:02,000\nInside\n").unwrap();
+    h.scan().await;
+    assert!(
+        h.sidecar_repo
+            .find_by_path(&subtitle)
+            .await
+            .unwrap()
+            .is_some(),
+        "the subtitle is recorded"
+    );
+
+    let moved = h.root.join("Moved/Heat (1995).mkv");
+    std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    std::fs::rename(&video, &moved).unwrap();
+    let outside = h.outside().join("Heat (1995)");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(
+        outside.join("Heat (1995).en.srt"),
+        b"1\n00:00:01,000 --> 00:00:02,000\nOutside\n",
+    )
+    .unwrap();
+    swap_for_link(&h.root.join("Heat (1995)"), &outside);
+
+    let outcome = h
+        .service
+        .reconcile_path(h.library.id, moved.clone(), FsEventKind::Created)
+        .await
+        .unwrap();
+
+    assert!(
+        h.row(&moved).await.is_some(),
+        "the video is relinked: {outcome:?}"
+    );
+    assert!(
+        h.sidecar_repo
+            .find_by_path(&subtitle)
+            .await
+            .unwrap()
+            .is_none(),
+        "no file of the library is there"
+    );
+}
+
 /// Whether this process is refused what a file's permissions refuse: not
 /// when it runs as root, which is refused nothing.
 #[cfg(unix)]
