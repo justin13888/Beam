@@ -5,9 +5,9 @@ import Foundation
 
 /// Everything this person has watched, newest first.
 ///
-/// Offset paged rather than cursor paged, because that is what
-/// `GET /v1/history` offers -- the catalogue's Relay cursors do not extend to
-/// it. The page size matches `beam-web` and `beam-android`.
+/// Cursor paged: `GET /v1/history` returns a `HistoryConnection`, and each
+/// page carries on from the last one's `end_cursor`. The page size matches
+/// `beam-web` and `beam-android`.
 @MainActor
 @Observable
 public final class HistoryModel {

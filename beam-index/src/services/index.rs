@@ -610,8 +610,8 @@ struct ContentMoves {
 
 /// Which rows follow their content to another path (issue #180): a move or
 /// a rename, two files swapping names, a rotation, a file renamed onto the
-/// path of a row already missing. Each row keeps its id, and so its playback
-/// progress, its title and its streams.
+/// path of a row already missing. Each row keeps its id, and so its title,
+/// its streams, and its place as the file a viewer's watch state last played.
 ///
 /// Every path gets at most one row and every row at most one path. The
 /// pairings are taken best first -- by [`relink_preference`], then by path --
@@ -1526,11 +1526,11 @@ impl LocalIndexService {
     /// Bring a row classified by older rules up to [`CLASSIFIER_VERSION`]:
     /// reclassify it from its path, the NFOs beside it and the container tags
     /// its last probe stored, attaching it to the title the current rules
-    /// name, and stamp the version. The row keeps its id -- and so its
-    /// playback progress -- its hash and its probe results; nothing is
-    /// re-probed. A title the move leaves with no file (a show a legacy
-    /// build named after a `Season 01` folder) is retired by the scan's
-    /// orphan cleanup.
+    /// name, and stamp the version. The row keeps its id -- and so stays the
+    /// file a viewer's watch state last played -- its hash and its probe
+    /// results; nothing is re-probed. A title the move leaves with no file (a
+    /// show a legacy build named after a `Season 01` folder) is retired by
+    /// the scan's orphan cleanup.
     ///
     /// Only a row that was probed is reclassified: one whose probe failed has
     /// no runtime and was never classified.
@@ -1758,9 +1758,9 @@ impl LocalIndexService {
     }
 
     /// Clear `missing_since` on a row whose path is back on disk, returning
-    /// whether it had been missing. The row keeps its id, so its playback
-    /// progress is still attached (issue #179). Shared by the full scan and
-    /// single-path watcher events.
+    /// whether it had been missing. The row keeps its id, so a viewer's watch
+    /// state that last played it resumes on it again (issue #179). Shared by
+    /// the full scan and single-path watcher events.
     async fn restore_if_missing(&self, existing: &MediaFile) -> Result<bool, IndexError> {
         if existing.missing_since.is_none() {
             return Ok(false);
@@ -1793,8 +1793,8 @@ impl LocalIndexService {
     /// swapped to, as found there, and move each of `displaced` aside as
     /// missing -- in one step, so rows can trade paths (issue #180).
     ///
-    /// A relinked row keeps its id, and so its playback progress, its movie
-    /// or episode, and its streams; a missing row is visible again. Nothing
+    /// A relinked row keeps its id, and so its movie or episode, its streams,
+    /// and its place as the file a viewer's watch state last played; a missing row is visible again. Nothing
     /// is probed or classified: the content is the content the row already
     /// describes. Each move, and each displaced row, is told to the
     /// administrator.
