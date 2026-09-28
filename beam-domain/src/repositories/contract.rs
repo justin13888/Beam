@@ -2817,7 +2817,6 @@ macro_rules! movie_repository_contract {
                     library_id,
                     movie_id: movie.id,
                     edition: None,
-                    is_primary: true,
                 })
                 .await
                 .expect("create an entry");
@@ -2869,7 +2868,6 @@ macro_rules! movie_repository_contract {
                 library_id,
                 movie_id: movie.id,
                 edition: edition.map(str::to_string),
-                is_primary: true,
             };
 
             let default = repo
@@ -3710,7 +3708,6 @@ macro_rules! library_shape_repository_contract {
                     library_id,
                     movie_id: movie.id,
                     edition: None,
-                    is_primary: true,
                 })
                 .await
                 .expect("create a movie entry")
@@ -3835,6 +3832,7 @@ macro_rules! library_shape_repository_contract {
                     title: None,
                     is_default: false,
                     is_forced: false,
+                    is_hearing_impaired: false,
                 }),
             };
             CreateMediaStream {
@@ -4975,7 +4973,6 @@ macro_rules! catalog_repository_contract {
                     library_id,
                     movie_id: movie.id,
                     edition: None,
-                    is_primary: true,
                 })
                 .await
                 .expect("create an entry");

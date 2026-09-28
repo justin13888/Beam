@@ -340,7 +340,6 @@ impl MovieRepository for SqlMovieRepository {
             library_id,
             movie_id,
             edition,
-            is_primary,
         } = create;
 
         // One `INSERT ... ON CONFLICT DO NOTHING` on `idx_movie_entries_unique`,
@@ -352,7 +351,6 @@ impl MovieRepository for SqlMovieRepository {
             library_id: Set(library_id),
             movie_id: Set(movie_id),
             edition: Set(edition.clone()),
-            is_primary: Set(is_primary),
             created_at: Set(Utc::now().into()),
         };
         movie_entry::Entity::insert(active)

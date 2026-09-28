@@ -661,7 +661,6 @@ async fn a_row_already_on_the_current_rules_is_not_reclassified() {
             library_id: h.library.id,
             movie_id: Uuid::new_v4(),
             edition: Some("Pinned".to_string()),
-            is_primary: false,
         })
         .await
         .unwrap();
@@ -706,7 +705,6 @@ async fn a_legacy_movie_that_now_reads_as_unclassifiable_loses_its_title() {
             library_id: h.library.id,
             movie_id: legacy.id,
             edition: None,
-            is_primary: true,
         })
         .await
         .unwrap();

@@ -323,6 +323,50 @@ mod tests {
         }
     }
 
+    /// What `m20261006_000001_tracks_subtitles` relies on: before issue #189
+    /// the indexer stored a video or audio codec as the `Debug` name of
+    /// FFmpeg's codec id, and the migration renames those rows by
+    /// lower-casing them. That is FFmpeg's own name for every codec a library
+    /// commonly holds -- and for the subtitle codecs, whose rows it also
+    /// lower-cases once past the arms for the prober's display names.
+    #[test]
+    fn an_ffmpeg_codec_id_debug_name_lower_cased_is_its_ffmpeg_name() {
+        use ffmpeg::codec::Id;
+        for id in [
+            Id::H264,
+            Id::HEVC,
+            Id::AV1,
+            Id::VP8,
+            Id::VP9,
+            Id::MPEG1VIDEO,
+            Id::MPEG2VIDEO,
+            Id::MPEG4,
+            Id::VC1,
+            Id::AAC,
+            Id::AC3,
+            Id::EAC3,
+            Id::TRUEHD,
+            Id::DTS,
+            Id::FLAC,
+            Id::OPUS,
+            Id::MP2,
+            Id::MP3,
+            Id::VORBIS,
+            Id::PCM_S16LE,
+            Id::PCM_S24LE,
+            Id::SUBRIP,
+            Id::ASS,
+            Id::SSA,
+            Id::WEBVTT,
+            Id::MOV_TEXT,
+            Id::HDMV_PGS_SUBTITLE,
+            Id::DVD_SUBTITLE,
+            Id::DVB_SUBTITLE,
+        ] {
+            assert_eq!(format!("{id:?}").to_lowercase(), id.name(), "{id:?}");
+        }
+    }
+
     #[test]
     fn hevc_and_its_h265_alias_are_the_same_codec() {
         // ffmpeg-next maps AV_CODEC_ID_HEVC to `Id::HEVC`; missing the alias

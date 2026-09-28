@@ -90,7 +90,6 @@ pub async fn movie_entry(db: &DatabaseConnection, library_id: Uuid) -> Result<Uu
         library_id: Set(library_id),
         movie_id: Set(movie_id),
         edition: Set(None),
-        is_primary: Set(true),
         created_at: Set(now()),
     }
     .insert(db)
@@ -120,7 +119,6 @@ pub async fn file(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         language: Set(None),
         quality: Set(None),
         release_group: Set(None),
-        is_primary: Set(true),
         scanned_at: Set(now()),
         updated_at: Set(now()),
         file_status: Set(beam_entity::files::FileStatus::Known),

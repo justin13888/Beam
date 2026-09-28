@@ -144,7 +144,6 @@ mod tests {
             library_id,
             movie_id,
             edition: None,
-            is_primary: true,
             created_at: chrono::Utc::now(),
         };
         let entry_id = entry.id;
@@ -390,7 +389,6 @@ mod tests {
             library_id,
             movie_id,
             edition: None,
-            is_primary: true,
             created_at: chrono::Utc::now(),
         };
         let entry_id = entry.id;
@@ -444,7 +442,6 @@ mod tests {
             library_id,
             movie_id,
             edition: None,
-            is_primary: true,
             created_at: chrono::Utc::now(),
         };
         let content = MediaFileContent::Movie {

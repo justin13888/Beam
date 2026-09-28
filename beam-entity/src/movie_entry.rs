@@ -12,7 +12,6 @@ pub struct Model {
     pub movie_id: Uuid,
 
     pub edition: Option<String>,
-    pub is_primary: bool,
 
     pub created_at: DateTimeWithTimeZone,
 }

@@ -50,6 +50,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
                 hdr_format,
                 is_default,
                 is_forced,
+                is_hearing_impaired,
             ) = match stream.metadata {
                 StreamMetadata::Video(v) => (
                     None,
@@ -64,6 +65,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
                     v.color_space,
                     v.color_range,
                     v.hdr_format,
+                    false,
                     false,
                     false,
                 ),
@@ -82,6 +84,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
                     None,
                     a.is_default,
                     a.is_forced,
+                    false,
                 ),
                 StreamMetadata::Subtitle(s) => (
                     s.language,
@@ -98,6 +101,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
                     None,
                     s.is_default,
                     s.is_forced,
+                    s.is_hearing_impaired,
                 ),
             };
 
@@ -111,6 +115,7 @@ impl MediaStreamRepository for SqlMediaStreamRepository {
                 title: Set(title),
                 is_default: Set(is_default),
                 is_forced: Set(is_forced),
+                is_hearing_impaired: Set(is_hearing_impaired),
                 width: Set(width),
                 height: Set(height),
                 frame_rate: Set(frame_rate),

@@ -210,7 +210,6 @@ fn seed_movie_file(fixture: &Fixture) -> (uuid::Uuid, uuid::Uuid) {
         library_id: uuid::Uuid::new_v4(),
         movie_id,
         edition: None,
-        is_primary: true,
         created_at: chrono::Utc::now(),
     };
     let entry_id = entry.id;

@@ -322,7 +322,6 @@ async fn indexed_movie(
             library_id,
             movie_id: movie.id,
             edition: None,
-            is_primary: true,
         })
         .await
         .unwrap();

@@ -1115,6 +1115,7 @@ impl LocalIndexService {
                         title: s.title(),
                         is_default: s.disposition.is_default(),
                         is_forced: s.disposition.is_forced(),
+                        is_hearing_impaired: s.disposition.is_hearing_impaired(),
                     });
                     (metadata, StreamType::Subtitle)
                 }
@@ -1124,10 +1125,12 @@ impl LocalIndexService {
                 file_id,
                 index: stream.index() as u32,
                 stream_type,
+                // FFmpeg's own codec name, the one vocabulary every stream
+                // kind and every sidecar subtitle is recorded in (#189).
                 codec: match stream {
                     StreamMetadata::Video(v) => v.video.codec_name.clone(),
                     StreamMetadata::Audio(a) => a.audio.codec_name.clone(),
-                    StreamMetadata::Subtitle(s) => format!("{:?}", s.codec_id),
+                    StreamMetadata::Subtitle(s) => s.codec_name.clone(),
                 },
                 metadata: stream_metadata,
             });
@@ -1267,7 +1270,6 @@ impl LocalIndexService {
                         library_id: library.id,
                         movie_id: movie.id,
                         edition,
-                        is_primary: true,
                     })
                     .await?;
 
@@ -2633,7 +2635,6 @@ impl LocalIndexService {
                     library_id,
                     movie_id: _,
                     edition,
-                    is_primary,
                     created_at: _,
                 } = entry;
                 let target = self
@@ -2642,7 +2643,6 @@ impl LocalIndexService {
                         library_id,
                         movie_id: survivor,
                         edition,
-                        is_primary,
                     })
                     .await?;
                 self.movie_repo
@@ -4469,6 +4469,7 @@ mod tests {
             disposition: Disposition::default(),
             discard: Discard::Default,
             codec_id: CodecId::SUBRIP,
+            codec_name: "subrip".to_string(),
             metadata,
         })
     }
@@ -4802,6 +4803,41 @@ mod tests {
         } else {
             panic!("expected Subtitle metadata");
         }
+    }
+
+    /// The stored codec is the prober's FFmpeg name, for an image-based
+    /// subtitle as for any other (#189): a PGS track used to read `Other(..)`.
+    /// A stream flagged for the deaf and hard of hearing keeps the flag.
+    #[tokio::test]
+    async fn test_insert_subtitle_stream_records_ffmpeg_codec_name_and_sdh() {
+        let repo = Arc::new(InMemoryMediaStreamRepository::default());
+        let service = make_service_with_stream_repo(Arc::clone(&repo));
+        let file_id = Uuid::new_v4();
+
+        let mut pgs = make_subtitle_stream(0, Some("eng"), None);
+        if let UtilStreamMetadata::Subtitle(s) = &mut pgs {
+            s.codec_id = CodecId::Other("hdmv_pgs_subtitle".to_string());
+            s.codec_name = "hdmv_pgs_subtitle".to_string();
+            s.disposition =
+                Disposition::from(ffmpeg_next::format::stream::Disposition::HEARING_IMPAIRED);
+        }
+        let plain = make_subtitle_stream(1, Some("eng"), None);
+        let metadata = make_stream_file_metadata(vec![pgs, plain]);
+
+        service
+            .insert_media_streams(file_id, &metadata)
+            .await
+            .unwrap();
+
+        let streams = repo.find_by_file_id(file_id).await.unwrap();
+        let sdh = |stream: &beam_domain::models::MediaStream| match &stream.metadata {
+            beam_domain::models::stream::StreamMetadata::Subtitle(sub) => sub.is_hearing_impaired,
+            other => panic!("expected Subtitle metadata, got {other:?}"),
+        };
+        assert_eq!(streams[0].codec, "hdmv_pgs_subtitle");
+        assert!(sdh(&streams[0]));
+        assert_eq!(streams[1].codec, "subrip");
+        assert!(!sdh(&streams[1]));
     }
 
     #[tokio::test]
@@ -5262,7 +5298,6 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, entry_id);
-        assert!(entries[0].is_primary);
 
         let movies: Vec<_> = movie_repo
             .movies
@@ -5362,7 +5397,6 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(entries.len(), 1);
-        assert!(entries[0].is_primary);
     }
 
     // ─── classify_media_content: edge cases ───────────────────────────────────
@@ -5498,7 +5532,6 @@ mod tests {
                     library_id: Uuid::new_v4(),
                     movie_id: Uuid::new_v4(),
                     edition: None,
-                    is_primary: true,
                     created_at: chrono::Utc::now(),
                 })
             });
@@ -7578,7 +7611,6 @@ mod tests {
                 library_id,
                 movie_id: movie.id,
                 edition: None,
-                is_primary: true,
             })
             .await
             .unwrap();
@@ -7587,7 +7619,6 @@ mod tests {
                 library_id,
                 movie_id: movie.id,
                 edition: Some("Extended".to_string()),
-                is_primary: false,
             })
             .await
             .unwrap();

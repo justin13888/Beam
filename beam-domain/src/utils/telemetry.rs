@@ -254,11 +254,10 @@ impl TotalSizeBucket {
 
 /// A container or codec name as a report may carry it.
 ///
-/// Lowercased, so `H264` (the indexer's current `Debug` spelling of a codec
-/// id) and `h264` (FFmpeg's own name) are one label and the payload does not
-/// change shape when the indexer's spelling does. An `Other("x")` wrapper --
-/// the `Debug` form of a codec the prober does not name -- is unwrapped to
-/// `x`. Anything outside `[a-z0-9_.,+-]` is dropped, which is what keeps a
+/// Lowercased, so `H264` (the `Debug` spelling of a codec id the indexer
+/// stored before issue #189) and `h264` (FFmpeg's own name, which it stores
+/// now) are one label. An `Other("x")` wrapper -- the `Debug` form of a codec
+/// the prober did not name -- is unwrapped to `x`. Anything outside `[a-z0-9_.,+-]` is dropped, which is what keeps a
 /// path separator, whitespace or quote out of a label whatever arrives; an
 /// empty, `none`, or overlong result is [`UNKNOWN_LABEL`].
 pub fn normalize_label(raw: &str) -> String {

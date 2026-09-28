@@ -59,6 +59,9 @@ pub struct SubtitleStreamMetadata {
     pub title: Option<String>,
     pub is_default: bool,
     pub is_forced: bool,
+    /// Subtitles for the deaf and hard of hearing (SDH): the stream's
+    /// hearing-impaired disposition.
+    pub is_hearing_impaired: bool,
 }
 
 /// Parameters for creating a media stream
@@ -107,6 +110,7 @@ impl From<beam_entity::media_stream::Model> for MediaStream {
                 title: model.title,
                 is_default: model.is_default,
                 is_forced: model.is_forced,
+                is_hearing_impaired: model.is_hearing_impaired,
             }),
         };
 

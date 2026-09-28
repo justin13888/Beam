@@ -66,6 +66,8 @@ pub struct VideoMetadata {
     pub intra_dc_precision: u8,
     pub profile: String,
     pub level: String,
+    /// FFmpeg's name for the codec (`h264`, `hevc`) -- what the indexer
+    /// records as the stream's codec.
     pub codec_name: String,
 }
 
@@ -104,6 +106,7 @@ pub struct AudioMetadata {
     pub frames: usize,
     pub align: usize,
     pub channel_layout: ChannelLayout,
+    /// FFmpeg's name for the codec (`aac`, `eac3`, `truehd`).
     pub codec_name: String,
     pub profile: String,
     pub title: String,
@@ -269,6 +272,8 @@ pub struct SubtitleStreamMetadata {
     pub disposition: Disposition,
     pub discard: Discard,
     pub codec_id: CodecId,
+    /// FFmpeg's name for the codec (`subrip`, `hdmv_pgs_subtitle`).
+    pub codec_name: String,
     pub metadata: HashMap<String, String>,
 }
 
@@ -460,7 +465,7 @@ impl VideoFileMetadata {
                 ffmpeg::media::Type::Video => {
                     trace!("Processing video stream index {}", stream.index());
                     let video_decoder = codec.decoder().video()?;
-                    let codec_name = format!("{:?}", codec_id);
+                    let codec_name = codec_id.name().to_string();
                     let profile = format!("{:?}", video_decoder.profile());
                     let level = "Unknown".to_string(); // Level not directly available in ffmpeg-next
 
@@ -543,7 +548,7 @@ impl VideoFileMetadata {
                     trace!("Processing audio stream index {}", stream.index());
                     let audio_decoder = codec.decoder().audio()?;
 
-                    let codec_name = format!("{:?}", codec_id);
+                    let codec_name = codec_id.name().to_string();
                     let profile = format!("{:?}", audio_decoder.profile());
 
                     let mut title = String::new();
@@ -633,6 +638,7 @@ impl VideoFileMetadata {
                         disposition: stream.disposition().into(),
                         discard: stream.discard().into(),
                         codec_id: codec_id.into(),
+                        codec_name: codec_id.name().to_string(),
                         metadata,
                     })))
                 }
@@ -809,6 +815,7 @@ mod tests {
             disposition: Disposition::default(),
             discard: Discard::Default,
             codec_id: CodecId::SUBRIP,
+            codec_name: "subrip".to_string(),
             metadata,
         }
     }

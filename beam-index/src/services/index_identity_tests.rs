@@ -259,7 +259,6 @@ impl Harness {
                     library_id: self.library.id,
                     movie_id: id,
                     edition: None,
-                    is_primary: true,
                 })
                 .await
                 .unwrap();

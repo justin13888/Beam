@@ -69,7 +69,6 @@ async fn seeded_store() -> InMemoryLibraryShapeRepository {
             library_id: library.id,
             movie_id: movie.id,
             edition: None,
-            is_primary: true,
         })
         .await
         .unwrap();
