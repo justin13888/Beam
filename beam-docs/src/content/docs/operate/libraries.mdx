@@ -421,8 +421,9 @@ above an episode, pins nothing. An NFO that describes several titles — a `movi
 of two movies, a `tvshow.nfo` in a folder holding episodes of two shows — pins only one of them,
 since an id pins one title, and the admin log says so once. Deleting an NFO leaves its title
 pinned; putting an NFO back is adding one, and pins the title to the id it names — as long as Beam
-saw it gone (the watcher reported the deletion, or a scan ran while it was missing). One put back
-unseen with the same contents is taken as unchanged. An NFO larger than 1 MiB, one that is not UTF-8, one declaring a document
+saw it gone, whether you deleted the NFO or a folder holding it (the watcher reported the deletion,
+or a scan ran while it was missing). One put back unseen with the same contents is taken as
+unchanged. An NFO larger than 1 MiB, one that is not UTF-8, one declaring a document
 type, and one that is a symbolic link are ignored, and the file is classified by its path.
 
 **Container tags.** The tags inside a file fill only what its path leaves open. An MP4 tagged with

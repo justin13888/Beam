@@ -2031,3 +2031,54 @@ async fn a_renamed_movie_folders_event_carries_its_subtitles_and_nfo_along() {
     );
     assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
 }
+
+/// Two copies of Heat in their own folders, indexed one scan after the other:
+/// `One/`'s NFO pins the movie to tmdb:949, and `Two/`'s, naming tmdb:1, is
+/// kept against it and recorded as applied (FR-219).
+async fn a_kept_conflicting_nfo_in_its_own_folder() -> Harness {
+    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    h.video("One/Heat (1995).mkv");
+    h.write("One/Heat (1995).nfo", &tmdb_movie(949));
+    h.scan().await;
+    h.video("Two/Heat (1995).mkv");
+    h.write("Two/Heat (1995).nfo", &tmdb_movie(1));
+    h.scan().await;
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+    assert!(h.applied("Two/Heat (1995).nfo").await.is_some());
+    h
+}
+
+/// A kept NFO whose folder Beam saw removed -- by the directory's own
+/// removal event, or by a scan while it was missing -- is forgotten with it,
+/// exactly as a removed NFO's own event forgets it: put back, it is an NFO
+/// added after indexing, and re-pins its title (FR-219).
+#[tokio::test]
+async fn a_kept_nfos_folder_seen_removed_and_put_back_repins_its_title() {
+    for by_scan in [true, false] {
+        let h = a_kept_conflicting_nfo_in_its_own_folder().await;
+        let away = h.root.parent().unwrap().join("Two, parked");
+
+        std::fs::rename(h.root.join("Two"), &away).unwrap();
+        if by_scan {
+            h.scan().await;
+        } else {
+            h.event("Two", FsEventKind::Removed).await;
+        }
+        assert!(
+            h.applied("Two/Heat (1995).nfo").await.is_none(),
+            "forgotten with its folder, by scan: {by_scan}"
+        );
+        std::fs::rename(&away, h.root.join("Two")).unwrap();
+        if by_scan {
+            h.scan().await;
+        } else {
+            h.event("Two", FsEventKind::Created).await;
+        }
+
+        assert_eq!(
+            h.movie_pins(),
+            vec![Some("tmdb:1".to_string())],
+            "by scan: {by_scan}"
+        );
+    }
+}

@@ -236,8 +236,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   be recorded as applied, pin the one title, and be reported once through the admin log. Deleting
   an NFO forgets its record and leaves the pin it set; an NFO created at that path again is one
   added after indexing and re-pins, so a kept, conflicting NFO deleted and recreated replaces the
-  title's pin. That holds only when Beam saw the NFO gone -- a watcher removal event, or a scan
-  while it was missing; one put back unseen with the same bytes is an unchanged NFO.
+  title's pin. That holds only when Beam saw the NFO gone, and the same whether the NFO alone or a
+  folder holding it went -- a watcher removal event for either, or a scan while it was missing; one
+  put back unseen with the same bytes is an unchanged NFO.
   A walk that could not read where an NFO lives, or a removal reported while the library root is
   gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a

@@ -3202,8 +3202,10 @@ impl LocalIndexService {
     /// Nothing is at `path` any more -- or only a symlink, which is not part
     /// of the library. Its row, if it has one, is marked missing; with none,
     /// `path` was a directory, and every row beneath it whose file is gone is
-    /// marked missing (issue #180). The watcher never purges: that waits for
-    /// a scan and the grace period.
+    /// marked missing (issue #180), and the record of every NFO beneath it
+    /// forgotten, as a removed NFO's own event forgets its record (FR-219):
+    /// Beam saw it gone, so one put back is applied again. The watcher never
+    /// purges: that waits for a scan and the grace period.
     ///
     /// A path the policy never indexes anything beneath -- an excluded
     /// directory, a hidden or ignored name, a sidecar file -- is not looked
@@ -3247,20 +3249,32 @@ impl LocalIndexService {
             .into_iter()
             .filter(|row| row.missing_since.is_none() && path_is_absent(&row.path))
             .collect();
-        if gone.is_empty() {
-            return Ok(());
+        if !gone.is_empty() {
+            let video_files_seen = usize::from(root_holds_a_video_file(
+                &library.root_path,
+                &self.path_policy,
+            ));
+            let indexed_video_files = gone.iter().filter(|row| is_video_path(&row.path)).count();
+            if root_looks_unmounted(video_files_seen, indexed_video_files) {
+                warn!(
+                    path = %path.display(),
+                    root = %library.root_path.display(),
+                    "library root holds no video files; leaving a removed directory to the next scan"
+                );
+                return Ok(());
+            }
         }
-        let video_files_seen = usize::from(root_holds_a_video_file(
-            &library.root_path,
-            &self.path_policy,
-        ));
-        let indexed_video_files = gone.iter().filter(|row| is_video_path(&row.path)).count();
-        if root_looks_unmounted(video_files_seen, indexed_video_files) {
-            warn!(
-                path = %path.display(),
-                root = %library.root_path.display(),
-                "library root holds no video files; leaving a removed directory to the next scan"
-            );
+        if let Some(repo) = &self.applied_nfo_repo {
+            let forgotten = repo.delete_beneath(library.id, path).await?;
+            if forgotten > 0 {
+                info!(
+                    path = %path.display(),
+                    forgotten,
+                    "Forgot the NFOs of a removed directory"
+                );
+            }
+        }
+        if gone.is_empty() {
             return Ok(());
         }
         info!(
