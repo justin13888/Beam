@@ -27,7 +27,7 @@ use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
 use beam_domain::models::file::{
     CreateMediaFile, FileClassification, FileRelink, FileStatus, MediaFile, MediaFileContent,
-    ProbeUpdate, UpdateMediaFile, displaced_from,
+    ProbeUpdate, UpdateMediaFile, displaced_from, mtime_as_stored,
 };
 use beam_domain::models::movie::{CreateMovieEntry, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, Episode};
@@ -44,10 +44,13 @@ use beam_domain::utils::media_path::{
 };
 use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path};
 
-/// Read the size and modification time of a file in a single stat call.
+/// Read the size and modification time of a file in a single stat call --
+/// the only place the indexer reads an mtime. The mtime comes back at the
+/// precision a row keeps ([`mtime_as_stored`]), so it compares equal to the
+/// row of an unchanged file (issue #229).
 fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
     let meta = std::fs::metadata(path)?;
-    let mtime: Option<DateTime<Utc>> = meta.modified().ok().map(|t| t.into());
+    let mtime: Option<DateTime<Utc>> = meta.modified().ok().map(|t| mtime_as_stored(t.into()));
     Ok((meta.len(), mtime))
 }
 
@@ -6760,15 +6763,15 @@ mod tests {
 
         let file_path = dir.path().join("movie.mp4");
         std::fs::write(&file_path, b"unchanged content").unwrap();
-        let disk_meta = std::fs::metadata(&file_path).unwrap();
-        let mtime: Option<DateTime<Utc>> = disk_meta.modified().ok().map(|t| t.into());
+        // As a row records it: at the precision a repository keeps.
+        let (size_bytes, mtime) = read_fs_meta(&file_path).unwrap();
 
         let existing = MediaFile {
             id: Uuid::new_v4(),
             library_id: library.id,
             path: file_path.clone(),
             hash: 4242,
-            size_bytes: disk_meta.len(),
+            size_bytes,
             mtime,
             mime_type: Some("video/mp4".to_string()),
             // Probed: a row whose probe never succeeded is probed again.
