@@ -778,6 +778,68 @@ async fn an_edited_nfo_repins_its_movie_when_the_watcher_sees_it() {
     );
 }
 
+/// A row a Postgres `FileRepository` returns holds its file's mtime in whole
+/// microseconds, while the filesystem reports nanoseconds (issue #229). The
+/// video beside an edited NFO is unmoved, so the NFO still re-pins on its
+/// watcher event rather than being left to the next scan as though the video
+/// might have moved.
+#[tokio::test]
+async fn an_edited_nfo_repins_on_its_event_beside_a_row_kept_to_microseconds() {
+    use chrono::Timelike;
+
+    let h = Harness::new().await;
+    let video = h.video("Matrix/matrix.mkv");
+    h.set_mtime(
+        "Matrix/matrix.mkv",
+        std::time::UNIX_EPOCH + Duration::new(1_790_000_000, 123_456_789),
+    );
+    let on_disk: DateTime<Utc> = std::fs::metadata(&video)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .into();
+    assert_eq!(
+        on_disk.nanosecond(),
+        123_456_789,
+        "the filesystem keeps the sub-microsecond part, or this proves nothing"
+    );
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.scan().await;
+
+    // The row exactly as `files.mtime`, a TIMESTAMPTZ, reads back.
+    let at_micros = on_disk.with_nanosecond(123_456_000).unwrap();
+    let row = h
+        .file_repo
+        .find_by_path(&video.to_string_lossy())
+        .await
+        .unwrap()
+        .expect("the video is indexed");
+    h.file_repo
+        .update(UpdateMediaFile {
+            id: row.id,
+            hash: None,
+            size_bytes: None,
+            mtime: Some(at_micros),
+            probe: ProbeUpdate::Keep,
+            content: None,
+            status: None,
+        })
+        .await
+        .unwrap();
+
+    h.write(
+        "Matrix/movie.nfo",
+        r#"<movie><uniqueid type="tmdb">604</uniqueid></movie>"#,
+    );
+    h.event("Matrix/movie.nfo", FsEventKind::Modified).await;
+
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:604"),
+        "the edit re-pins on its event, not at the next scan"
+    );
+}
+
 /// An administrator's pin is a decision made in Beam: no NFO -- edited, or
 /// named by a new file -- replaces it (FR-312).
 #[tokio::test]
