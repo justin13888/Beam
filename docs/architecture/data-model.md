@@ -532,7 +532,8 @@ on `show_id` guarantee at most one enrichment row per title — a rescan or refr
 existing row, and multiple files mapping to the same title share one row, and they are the
 conflict target of the lock upsert. Composite index on `(status, next_attempt_at)` for the
 worker's due-row poll, and `idx_metadata_enrichment_list` on `(status, updated_at DESC, id DESC)`
-for the admin list by status (FR-303).
+and `idx_metadata_enrichment_recent` on `(updated_at DESC, id DESC)` for the admin list, filtered
+by status and not (FR-303).
 
 A lock changes what the next pass writes, not whether one runs: a locked column is left out of
 the title's `UPDATE`, and locked `genres` leave the genre links alone. An administrator's

@@ -1236,6 +1236,21 @@ async fn the_enrichment_locks_migration_defaults_constrains_and_reverses() {
     )
     .await
     .expect("every known field locks");
+    assert_eq!(
+        text(
+            "SELECT indexname::text AS v FROM pg_indexes \
+              WHERE schemaname = current_schema() \
+                AND indexname IN ('idx_metadata_enrichment_list', \
+                                  'idx_metadata_enrichment_recent') \
+              ORDER BY 1"
+        )
+        .await,
+        vec![
+            "idx_metadata_enrichment_list",
+            "idx_metadata_enrichment_recent"
+        ],
+        "the list's order is indexed with and without a status filter"
+    );
 
     beam_migration::Migrator::down(db, Some(1))
         .await
@@ -1247,11 +1262,12 @@ async fn the_enrichment_locks_migration_defaults_constrains_and_reverses() {
              UNION ALL \
              SELECT indexname::text AS v FROM pg_indexes \
               WHERE schemaname = current_schema() \
-                AND indexname = 'idx_metadata_enrichment_list'"
+                AND indexname IN ('idx_metadata_enrichment_list', \
+                                  'idx_metadata_enrichment_recent')"
         )
         .await
         .is_empty(),
-        "down() drops the column and the index"
+        "down() drops the column and both indexes"
     );
     up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
         .await

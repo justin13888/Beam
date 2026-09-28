@@ -11,8 +11,11 @@ use sea_orm_migration::prelude::*;
 ///   the admin list's order under its status filter, so a page of the
 ///   unmatched or failed titles is an index range rather than a sort of the
 ///   whole table.
+/// - `idx_metadata_enrichment_recent`: `(updated_at DESC, id DESC)`, the
+///   same order with no status filter -- the list's default -- which the
+///   status-led index cannot serve.
 ///
-/// `down()` drops both.
+/// `down()` drops all three.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -35,6 +38,11 @@ impl MigrationTrait for Migration {
                  ON metadata_enrichment (status, updated_at DESC, id DESC)",
         )
         .await?;
+        db.execute_unprepared(
+            "CREATE INDEX idx_metadata_enrichment_recent \
+                 ON metadata_enrichment (updated_at DESC, id DESC)",
+        )
+        .await?;
 
         Ok(())
     }
@@ -42,6 +50,8 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
+        db.execute_unprepared("DROP INDEX idx_metadata_enrichment_recent")
+            .await?;
         db.execute_unprepared("DROP INDEX idx_metadata_enrichment_list")
             .await?;
         db.execute_unprepared("ALTER TABLE metadata_enrichment DROP COLUMN locked_fields")
