@@ -12,6 +12,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::disc::{self, DiscRead};
 use crate::library_file::{FileMeta, LibraryFile, StatCursor, is_refusal, stat_regular_file};
 use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
 use crate::services::admin_log::AdminLogService;
@@ -48,7 +49,9 @@ use beam_domain::utils::media_path::{
     CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, TitleGuess,
     UnclassifiableReason, infer_media, season_folder_number,
 };
-use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path};
+use beam_domain::utils::path_policy::{
+    DiscKind, PathDisposition, PathPolicy, disc_stream_kind, is_video_path,
+};
 
 /// Read the size and modification time of `path`, a file beneath the
 /// library `root`, the mtime as [`stored_mtime`] reads it. The stat follows
@@ -230,16 +233,20 @@ fn container_tags(metadata: &VideoFileMetadata) -> ContainerTags {
 ///
 /// A named result rather than a bare `Vec` so the walk can report more than
 /// the files it reached without changing its call site.
+#[derive(Default)]
 struct WalkOutcome {
     /// Every file under the root the [`PathPolicy`] calls media, in walk
-    /// order -- the files the scan indexes.
+    /// order, then the stream files each disc structure's main title plays
+    /// -- the files the scan indexes.
     files: Vec<PathBuf>,
     /// How many regular files with a video extension the walk saw, *before*
     /// the policy excluded any: the empty-root guard counts these. A root
     /// holding only samples or extras is a mounted root with nothing to
     /// index, not an unmounted one, so the files the policy keeps out still
     /// count here. What the walk never descends into (a hidden or housekeeping
-    /// folder, an extras folder, an ignored directory) is not counted.
+    /// folder, an extras folder, an ignored directory) is not counted. A disc
+    /// structure's stream files count, whether its main title plays them or
+    /// not (issue #234): a library of disc rips is a mounted one.
     video_files_seen: usize,
     /// How many regular files the policy excluded (hidden, extras, samples,
     /// ignore patterns). Reported in the scan's summary.
@@ -257,6 +264,28 @@ struct WalkOutcome {
     subtitles: Vec<sidecars::WalkedSidecar>,
     /// Every NFO beside the media (issue #184).
     nfos: Vec<hints::WalkedNfo>,
+}
+
+impl WalkOutcome {
+    /// Read the disc structure of `kind` rooted at `disc_root`, beneath the
+    /// library `root`, for its main title ([`disc::read_disc`]): its stream
+    /// files are seen, those its main title plays collected, and the rest
+    /// excluded. A disc read only in part is a path the walk failed to read:
+    /// a title chosen from part of a disc may not be its main title, so its
+    /// rows are left as they are.
+    fn add_disc(&mut self, root: &Path, disc_root: &Path, kind: DiscKind, policy: &PathPolicy) {
+        let DiscRead {
+            title,
+            streams,
+            failed,
+        } = disc::read_disc(root, disc_root, kind, policy);
+        self.video_files_seen += streams;
+        self.excluded += streams.saturating_sub(title.len());
+        if failed {
+            self.failed_subtrees.push(disc_root.to_path_buf());
+        }
+        self.files.extend(title);
+    }
 }
 
 /// Walks a library root and collects every regular file beneath it.
@@ -285,6 +314,11 @@ fn walk_library_root(root: &Path, policy: &PathPolicy) -> WalkOutcome {
 /// `start` is judged by the policy as a full scan would judge it, relative to
 /// the library `root`; whether the policy excludes `start` itself is the
 /// caller's to ask.
+///
+/// A DVD or Blu-ray disc structure is not walked as files: its folder is read
+/// whole for its main title ([`disc::read_disc`], issue #234), and only the
+/// stream files that title plays are collected. A walk that starts at or
+/// inside a disc reads that disc.
 fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut video_files_seen = 0usize;
@@ -293,22 +327,34 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
     let mut unscoped_failure = false;
     let mut subtitles: Vec<sidecars::WalkedSidecar> = Vec::new();
     let mut nfos: Vec<hints::WalkedNfo> = Vec::new();
+    if let Some((disc_root, kind)) = policy.disc_root(relative_to(root, start)) {
+        let mut outcome = WalkOutcome::default();
+        outcome.add_disc(root, &root.join(disc_root), kind, policy);
+        return outcome;
+    }
+    let mut discs: Vec<(PathBuf, DiscKind)> = Vec::new();
     let mut cursor = StatCursor::new(root);
-    let walk = WalkDir::new(start)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
-            !(entry.depth() > 0
-                && entry.file_type().is_dir()
-                && policy.excludes_directory(relative_to(root, entry.path())))
-        });
-    for entry in walk {
+    let mut walk = WalkDir::new(start).follow_links(false).into_iter();
+    while let Some(entry) = walk.next() {
         match entry {
             Ok(entry) => {
                 // A directory is descended by the walk itself, which reports
-                // any failure to list it as an `Err` below. A symlink is
-                // skipped whatever it points at.
-                if entry.file_type().is_dir() || entry.file_type().is_symlink() {
+                // any failure to list it as an `Err` below -- unless the
+                // policy excludes it, or it is a disc, read whole below. A
+                // symlink is skipped whatever it points at.
+                if entry.file_type().is_dir() {
+                    if entry.depth() > 0 {
+                        let rel = relative_to(root, entry.path());
+                        if policy.excludes_directory(rel) {
+                            walk.skip_current_dir();
+                        } else if let Some((_, kind)) = policy.disc_root(rel) {
+                            walk.skip_current_dir();
+                            discs.push((entry.into_path(), kind));
+                        }
+                    }
+                    continue;
+                }
+                if entry.file_type().is_symlink() {
                     continue;
                 }
                 let path = entry.into_path();
@@ -345,6 +391,9 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
                                 }
                             }
                             PathDisposition::Ignored => {}
+                            // Never met here: a disc's root folder is read
+                            // whole rather than descended.
+                            PathDisposition::DiscStream(_) => excluded += 1,
                         }
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -369,7 +418,7 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
             },
         }
     }
-    WalkOutcome {
+    let mut outcome = WalkOutcome {
         files,
         video_files_seen,
         excluded,
@@ -377,7 +426,11 @@ fn walk_under(root: &Path, start: &Path, policy: &PathPolicy) -> WalkOutcome {
         unscoped_failure,
         subtitles,
         nfos,
+    };
+    for (disc_root, kind) in discs {
+        outcome.add_disc(root, &disc_root, kind, policy);
     }
+    outcome
 }
 
 /// The walked `files` of the library rooted at `root`, each stat'ed as a row
@@ -944,9 +997,15 @@ fn survives(
 /// once a corrected match merges its title or the title takes its key. A
 /// file its name keys elsewhere keeps its stored part until reclassification
 /// reads it.
+///
+/// A disc structure's stream file keeps its stored part: its part is its
+/// place in the disc's main title, which its name does not say (issue #234),
+/// and a rekey reads no disc.
 fn part_as_read(file: &MediaFile, inferred: &MediaInference, key: &str) -> Option<u32> {
     match inferred {
-        MediaInference::Movie(inferred) if inferred.title.identity_key() == key => {
+        MediaInference::Movie(inferred)
+            if inferred.title.identity_key() == key && disc_stream_kind(&file.path).is_none() =>
+        {
             inferred.part_number
         }
         _ => match file.content {
@@ -1556,6 +1615,14 @@ impl LocalIndexService {
                 edition,
                 part_number,
             }) => {
+                // A disc's stream file is the part of the film its place in
+                // the disc's main title makes it, which only the disc says
+                // (issue #234).
+                let part_number = if disc_stream_kind(path).is_some() {
+                    self.disc_part(library, path)
+                } else {
+                    part_number
+                };
                 // Found by pin or identity key, never by display title:
                 // enrichment may have renamed the movie since its first file
                 // (#183). A new movie is shown as its NFO names it. One part
@@ -1598,6 +1665,16 @@ impl LocalIndexService {
                 Ok(None)
             }
         }
+    }
+
+    /// The part of its disc's main title the disc stream file at `path` is,
+    /// read from the disc ([`disc::part_in`]): `None` for a title of one
+    /// file, or for a file the title does not play.
+    fn disc_part(&self, library: &Library, path: &Path) -> Option<u32> {
+        let root = library.root_path.as_path();
+        let (disc_root, kind) = self.path_policy.disc_root(relative_to(root, path))?;
+        let read = disc::read_disc(root, &root.join(disc_root), kind, &self.path_policy);
+        disc::part_in(&read.title, path)
     }
 
     /// Tell the administrator a file was indexed without a title, and why.
@@ -1656,6 +1733,22 @@ impl LocalIndexService {
                         path.display()
                     ),
                     serde_json::json!({ "fractional_number": format!("{whole}.{tenth}") }),
+                )
+            }
+            UnclassifiableReason::DiscWithoutTitleFolder => {
+                warn!(
+                    path = %path.display(),
+                    "a disc structure is in no folder naming its film; indexed without a title"
+                );
+                (
+                    format!(
+                        "A DVD or Blu-ray folder in \"{}\" is not inside a folder naming its \
+                         film (it is at the library root, or in a season folder), so it was \
+                         indexed without a title: {}",
+                        library.name,
+                        path.display()
+                    ),
+                    serde_json::json!({ "disc_without_title_folder": true }),
                 )
             }
             UnclassifiableReason::NoEpisodeMarkerInMultiSeasonFolder => {
@@ -3859,6 +3952,10 @@ impl LocalIndexService {
     ///   (issue #186) -- marks the row at the path missing. With no row
     ///   there the path was a directory: every row beneath it whose file is
     ///   gone is marked missing. The watcher never purges.
+    ///
+    /// A path at or inside a DVD or Blu-ray disc structure stands for its
+    /// whole disc (issue #234): the disc is walked again as a directory is,
+    /// or, when it is gone, its rows are marked missing.
     pub async fn reconcile_path(
         &self,
         library_id: Uuid,
@@ -3923,6 +4020,40 @@ impl LocalIndexService {
                 && stat_regular_file(&library.root_path, &path).is_err_and(|err| is_refusal(&err)))
         });
 
+        // Anything at or inside a disc structure is its disc's (issue #234):
+        // which of its stream files the disc's main title plays depends on
+        // all of them and on its IFOs or playlists, so the disc is
+        // reconciled whole -- read again if it is there, and its rows marked
+        // missing if it is not.
+        if let Some((disc_root, _)) = self
+            .path_policy
+            .disc_root(relative_to(&library.root_path, &path))
+        {
+            let disc_root = library.root_path.join(disc_root);
+            return match std::fs::symlink_metadata(&disc_root) {
+                Ok(meta) if meta.is_dir() => {
+                    let inodes = self.inodes_of(&library);
+                    self.reconcile_directory(&disc_root, &library, inodes).await
+                }
+                Ok(_) => {
+                    self.reconcile_gone(&disc_root, &library).await?;
+                    Ok(ReconcileOutcome::Done)
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    self.reconcile_gone(&disc_root, &library).await?;
+                    Ok(ReconcileOutcome::Done)
+                }
+                Err(err) => {
+                    warn!(
+                        path = %disc_root.display(),
+                        error = %err,
+                        "could not stat a changed disc structure; leaving its rows as they are"
+                    );
+                    Ok(ReconcileOutcome::Done)
+                }
+            };
+        }
+
         // A subtitle or an NFO beside the media (issue #184). Handled here,
         // before the file-row bookkeeping below -- which still marks missing a
         // row a build before issue #182 made of one.
@@ -3980,12 +4111,14 @@ impl LocalIndexService {
         let path_str = path.to_string_lossy().to_string();
         // A file the policy keeps out of the library is not indexed. One that
         // was -- a `.nfo` from before issue #182, a sample renamed into place
-        // -- is marked missing, exactly as a full scan would leave it.
-        if self
-            .path_policy
-            .disposition(relative_to(&library.root_path, path))
-            != PathDisposition::Media
-        {
+        // -- is marked missing, exactly as a full scan would leave it. A
+        // disc's stream file reaches here only from a walk of its disc,
+        // which offers only those the disc's main title plays (issue #234).
+        if !matches!(
+            self.path_policy
+                .disposition(relative_to(&library.root_path, path)),
+            PathDisposition::Media | PathDisposition::DiscStream(_)
+        ) {
             if let Some(file) = self.file_repo.find_by_path(&path_str).await?
                 && file.missing_since.is_none()
             {
@@ -5096,6 +5229,10 @@ mod scan_tests;
 #[cfg(test)]
 #[path = "index_no_follow_tests.rs"]
 mod no_follow_tests;
+
+#[cfg(test)]
+#[path = "index_disc_tests.rs"]
+mod disc_tests;
 
 #[cfg(test)]
 mod tests {

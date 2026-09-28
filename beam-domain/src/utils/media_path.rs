@@ -18,6 +18,7 @@ use crate::utils::filename::{
     ParsedFilename, episode_title_after, is_noise_only, normalized_stem, parse_media_filename,
 };
 use crate::utils::identity::{normalize_title, title_identity_key};
+use crate::utils::path_policy::DiscKind;
 
 /// The version of the rules [`infer_media`] classifies by, and of the title
 /// fold ([`crate::utils::identity`]) that turns its titles into identity
@@ -39,6 +40,12 @@ use crate::utils::identity::{normalize_title, title_identity_key};
 ///   its own; every part now keys `movie|2019`, so the re-derivation this
 ///   bump triggers merges them into one title, and the reclassification
 ///   records each file's part.
+///
+/// Reading a disc structure's files as its enclosing folder's film (issue
+/// #234) moved no version: every build at version 3 kept those files out of
+/// the library, so no row at that version is one, and a row an older build
+/// made of one is below it and reclassified when its disc's main title plays
+/// it again.
 pub const CLASSIFIER_VERSION: u16 = 3;
 
 /// A title and year as a path spells them -- what a movie or show is keyed by.
@@ -118,6 +125,11 @@ pub enum UnclassifiableReason {
     /// carries no season and episode marker: the range cannot supply the
     /// season a season folder would.
     NoEpisodeMarkerInMultiSeasonFolder,
+    /// The file is inside a DVD or Blu-ray disc structure (issue #234) that
+    /// no folder names a film for: the disc is at the library root, or in a
+    /// season folder -- a show's disc, whose episodes its title sets do not
+    /// tell apart by any name.
+    DiscWithoutTitleFolder,
 }
 
 /// What a library path is.
@@ -392,6 +404,12 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         return MediaInference::Movie(movie_reading(rel_path));
     };
     let dirs = dirs.as_slice();
+    if let Some(at) = dirs
+        .iter()
+        .position(|dir| DiscKind::of_folder(dir).is_some())
+    {
+        return disc_title(&dirs[..at]);
+    }
     let parsed = parse_media_filename(&stem);
 
     let parent = dirs.last().map(String::as_str);
@@ -526,6 +544,33 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
     }
 
     MediaInference::Movie(movie_of(parsed, stem, parent))
+}
+
+/// What a file inside a disc structure is (issue #234), given the folders
+/// above the disc's root (`VIDEO_TS/`, `BDMV/`), root first: the movie the
+/// folder enclosing the disc names -- `Heat (1995)/VIDEO_TS` is *Heat* --
+/// read as a filename would be, and completed from the folder above it the
+/// same way. No file inside a disc is named for its title, so its own name
+/// is never read.
+///
+/// Its part is not a path's to say either: which of the disc's files its
+/// main title plays, and in what order, is read from the disc itself. A disc
+/// structure is always a movie: a show's disc holds its episodes in title
+/// sets no path tells apart, so one in a season folder, like one with no
+/// folder around it at all, names no title.
+fn disc_title(enclosing: &[String]) -> MediaInference {
+    let Some((folder, above)) = enclosing.split_last() else {
+        return MediaInference::Unclassifiable(UnclassifiableReason::DiscWithoutTitleFolder);
+    };
+    if season_folder(folder).is_some() || is_bare_season_range(folder) {
+        return MediaInference::Unclassifiable(UnclassifiableReason::DiscWithoutTitleFolder);
+    }
+    let parent = above.last().map(String::as_str);
+    let movie = movie_of(parse_media_filename(folder), folder.clone(), parent);
+    MediaInference::Movie(MovieInference {
+        part_number: None,
+        ..movie
+    })
 }
 
 /// The movie a filename parse names, completed from its parent folder.

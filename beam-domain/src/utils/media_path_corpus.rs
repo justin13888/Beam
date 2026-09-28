@@ -13,7 +13,8 @@ use super::*;
 /// [@<air date>] [!folder<n>]`, `movie <title>|<year> [ed=<edition>]
 /// [part=<n>]`,
 /// `unclassifiable season <n>`, `unclassifiable absolute <n>`,
-/// `unclassifiable fractional <n>.<d>`, or `unclassifiable season range`.
+/// `unclassifiable fractional <n>.<d>`, `unclassifiable season range`, or
+/// `unclassifiable disc`.
 fn describe(inference: &MediaInference) -> String {
     fn year(year: Option<u32>) -> String {
         year.map_or_else(|| "-".to_string(), |y| y.to_string())
@@ -78,6 +79,9 @@ fn describe(inference: &MediaInference) -> String {
         MediaInference::Unclassifiable(
             UnclassifiableReason::NoEpisodeMarkerInMultiSeasonFolder,
         ) => "unclassifiable season range".to_string(),
+        MediaInference::Unclassifiable(UnclassifiableReason::DiscWithoutTitleFolder) => {
+            "unclassifiable disc".to_string()
+        }
     }
 }
 
@@ -703,6 +707,39 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     // A season folder's file is an episode or nothing, never a part.
     ("Show/Season 1/Show - CD1.mkv", "unclassifiable season 1"),
+    // Disc structures copied whole (issue #234): the folder enclosing the
+    // disc names the film, and no file of the disc says anything -- nor
+    // which part it is, which the disc's own playlists say.
+    (
+        "Movies/Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    ("Heat (1995)/VIDEO_TS/VTS_01_3.VOB", "movie Heat|1995"),
+    (
+        "Heat.1995.DVD9.PAL-GRP/VIDEO_TS/VTS_02_1.VOB",
+        "movie Heat|1995",
+    ),
+    ("Heat (1995)/BDMV/STREAM/00001.m2ts", "movie Heat|1995"),
+    (
+        "Heat.1995.COMPLETE.BLURAY-GRP/BDMV/STREAM/00800.m2ts",
+        "movie Heat|1995",
+    ),
+    (
+        "Heat (1995) {edition-Director's Cut}/BDMV/STREAM/00800.m2ts",
+        "movie Heat|1995 ed=Director's Cut",
+    ),
+    // A folder's disc token is the folder's, not the part of any file.
+    (
+        "Heat (1995) - Disc 2/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    // A folder of release noise takes its title from the folder above.
+    ("Heat (1995)/DVD9/VIDEO_TS/VTS_01_1.VOB", "movie Heat|1995"),
+    ("Ronin (1998)/video_ts/vts_01_1.vob", "movie Ronin|1998"),
+    // A disc no folder names a film for.
+    ("VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
+    ("BDMV/STREAM/00001.m2ts", "unclassifiable disc"),
+    ("Show/Season 1/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
 ];
 
 #[test]
@@ -754,31 +791,32 @@ fn season_folder_names() {
     }
 }
 
-/// Disc structures copied whole, as rippers leave them. Inference would read
-/// each file as a film of its own (`VTS 01 1`, `00001`) and merge every
-/// disc's same-numbered file into one, so the path policy keeps them out of
-/// the library before inference is ever asked (playing a disc as its title
-/// is issue #234's).
+/// Two discs whose files are named alike -- every DVD has a `VTS_01_1.VOB`,
+/// and many Blu-rays a `00001.m2ts` -- are never one title: each is keyed by
+/// the folder enclosing it, never by its files' names (issue #234).
 #[test]
-fn disc_structures_never_reach_inference() {
-    use crate::utils::path_policy::{ExclusionReason, PathDisposition, PathPolicy};
-
-    let policy = PathPolicy::default();
-    for path in [
-        "Movies/Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
-        "Movies/Heat (1995)/VIDEO_TS/VTS_01_0.VOB",
-        "Movies/Heat (1995)/VIDEO_TS/VIDEO_TS.VOB",
-        "Heat.1995.DVD9/VIDEO_TS/VTS_01_1.VOB",
-        "Heat (1995)/BDMV/STREAM/00001.m2ts",
-        "Heat.1995.COMPLETE.BLURAY/BDMV/STREAM/00800.m2ts",
-        "Heat.1995.COMPLETE.BLURAY/CERTIFICATE/BACKUP/x.m2ts",
+fn two_discs_with_same_named_files_key_apart() {
+    let key = |path: &str| match infer_media(Path::new(path)) {
+        MediaInference::Movie(movie) => movie.title.identity_key(),
+        other => panic!("{path} is not a movie: {other:?}"),
+    };
+    for (a, b) in [
+        (
+            "Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+            "Ronin (1998)/VIDEO_TS/VTS_01_1.VOB",
+        ),
+        (
+            "Heat (1995)/BDMV/STREAM/00001.m2ts",
+            "Ronin (1998)/BDMV/STREAM/00001.m2ts",
+        ),
     ] {
-        assert_eq!(
-            policy.disposition(Path::new(path)),
-            PathDisposition::Excluded(ExclusionReason::DiscStructure),
-            "{path}"
-        );
+        assert_ne!(key(a), key(b), "{a} and {b}");
     }
+    // And a disc keys as the same film in any other layout does.
+    assert_eq!(
+        key("Heat (1995)/VIDEO_TS/VTS_01_1.VOB"),
+        key("Heat (1995)/Heat (1995).mkv")
+    );
 }
 
 /// Two releases of one show -- one in season folders, one flat -- key to the
