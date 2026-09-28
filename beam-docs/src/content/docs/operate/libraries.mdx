@@ -29,8 +29,8 @@ Scans are incremental — a file whose size and modification time are unchanged 
 rescan of a large library is far cheaper than the first one. On Linux and macOS a file must also
 still be the same file on disk (its inode and change time), so two files of one size swapped
 between names are still told apart even when a copy kept their modification times. On a network
-share only the change time is compared, not the inode (see
-[below](#network-shares-and-the-watch-limit)). A file whose permissions or owner changed is read
+share only the change time is compared, not the inode, and on sshfs and rclone mounts not even that
+(see [below](#network-shares-and-the-watch-limit)). A file whose permissions or owner changed is read
 once, on the next scan, and skipped again after that. A filesystem watcher also picks up
 changes as they happen — or within a poll interval, for a library on a network share (see
 [below](#network-shares-and-the-watch-limit)) — so routine additions usually need no manual scan.
@@ -109,7 +109,10 @@ and Beam handles both by **polling** the affected library instead — walking it
   Scans of such a library stay incremental: they compare a file's size, modification time and
   change time, but not its inode number, which these filesystems may renumber after a remount or a
   cache eviction (rclone, SMB mounted with `noserverino`). Comparing it would read the whole library
-  on every periodic rescan.
+  on every periodic rescan. sshfs and rclone mounts report a file's modification time as its change
+  time, so on those two a swap of files of one size between names is missed when the copy kept
+  their modification times, exactly as it would be by size and modification time alone. NFS and SMB
+  report a real change time and are unaffected.
 - **The watch limit.** On Linux each watched directory uses one of the per-user inotify watches
   (`fs.inotify.max_user_watches`). A library with more directories than remain is polled instead,
   whether the limit is hit when Beam starts watching it or later, as folders are added. Raise the

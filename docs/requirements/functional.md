@@ -303,10 +303,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   relinked like any other. On a library whose root the watcher classifies as a network or FUSE
   filesystem (FR-213's network filesystems), whose inode numbers may change between scans, the
   inode MUST NOT be compared -- only the change time -- so an unchanged library is not hashed again
-  on every scan. A row with none recorded MUST be given its file's by the next visit that finds it
-  unchanged, without hashing it. Among several rows for
-  one path, and several paths for one row, the pairing with the same file name wins, then the same
-  directory, then the row played most recently by anyone (a row never played last), then the lowest
+  on every scan. A filesystem that reports no change time of its own -- sshfs and rclone mount
+  report a file's modification time as its change time -- gives that comparison nothing to add, so
+  on such a library a swap of files of one size and one modification time is not detected; NFS and
+  SMB, which report a real change time, are unaffected. A row with no inode and change time recorded
+  MUST be given its file's by the next visit that finds it unchanged, without hashing it. Among
+  several rows for one path, and several paths for one row, the pairing with the same file name
+  wins, then the same directory, then the row played most recently by anyone (a row never played last), then the lowest
   row id, then the lowest path. One pairing is declined, a replace-by-rename: when the row a path
   has -- present or missing -- would otherwise be displaced (its own content is at no path the scan
   hashed, or that path went to a better pairing), has been played by anyone, and the row whose
