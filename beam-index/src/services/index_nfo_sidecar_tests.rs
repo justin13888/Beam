@@ -568,6 +568,40 @@ async fn a_file_placed_by_its_tags_keeps_its_place_when_it_is_reclassified() {
     assert_eq!(show.id, placed.id, "the same show as before");
 }
 
+/// A text tag longer than Beam keeps is stored cut to the cap, on a character
+/// boundary: one file cannot store an unbounded value with its row.
+#[tokio::test]
+async fn a_container_tag_longer_than_the_cap_is_stored_cut_to_it() {
+    use beam_domain::utils::classification::MAX_TAG_VALUE_BYTES;
+
+    let h = Harness::new().await;
+    h.video("The Office/The Dundies.m4v");
+    // Three-byte characters, so the cap falls inside one.
+    let show = "\u{4e2d}".repeat(MAX_TAG_VALUE_BYTES);
+    h.tag(
+        "The Office/The Dundies.m4v",
+        &[
+            ("show", show.as_str()),
+            ("season_number", "2"),
+            ("episode_sort", "1"),
+        ],
+    );
+
+    h.scan().await;
+
+    let stored = h
+        .file("The Office/The Dundies.m4v")
+        .container_tags
+        .expect("the probe's tags are stored")
+        .show
+        .expect("the show tag is kept");
+    assert_eq!(
+        stored,
+        "\u{4e2d}".repeat(MAX_TAG_VALUE_BYTES / 3),
+        "cut to the whole characters that fit"
+    );
+}
+
 /// A file whose first probe failed is classified when a later probe succeeds
 /// (issue #181) -- and by the tags that probe read, exactly as a new file
 /// would be, not by its path alone.

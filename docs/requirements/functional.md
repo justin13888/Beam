@@ -205,7 +205,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   or in a category folder above a show's own folder -- and the file's container tags, in the
   priority NFO, then path, then tags. The container tags a probe read MUST be stored with the
   file, replaced by each successful probe and cleared when changed content fails its probe, so a
-  reclassification reads them without probing the file again. An NFO's root (`<movie>`, or `<episodedetails>` with a
+  reclassification reads them without probing the file again; a text tag MUST be kept to at most
+  512 bytes, cut on a character boundary. An NFO's root (`<movie>`, or `<episodedetails>` with a
   season and episode) decides whether the file is a movie or an episode; container tags (`show`,
   `season_number`, `episode_sort`, `title`, `date`/`year`) only fill what the path leaves open. An
   NFO or a tag MUST NOT change the identity key a title is matched by (FR-214), which stays the

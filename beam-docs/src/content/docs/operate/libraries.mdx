@@ -378,7 +378,8 @@ a show, season and episode (`show`, `season_number`, `episode_sort`) is that epi
 name has no marker (`The Office/The Dundies.m4v`); a file in a season folder whose name has no
 episode number takes the episode from its tag; a `title` tag names an episode that has no title of
 its own, unless it is release noise or just the filename; a `date` or `year` tag gives a movie with
-no year one. A tag never overrides what the path or an NFO says.
+no year one. A tag never overrides what the path or an NFO says, and a `title` or `show` tag
+longer than 512 bytes is cut to that.
 
 **Subtitles.** A text subtitle — `.srt`, `.vtt`, `.ass` or `.ssa` — named after its video is
 recorded as a subtitle of that video, with the language and flags its name gives:

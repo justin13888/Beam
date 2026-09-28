@@ -43,6 +43,18 @@ pub struct ContainerTags {
     pub year: Option<u32>,
 }
 
+/// The most bytes of a text tag kept -- a longer `title` or `show` is cut to
+/// this, on a character boundary. A tag is whatever the file's author wrote,
+/// and every file stores the tags it was read with (`files.container_tags`),
+/// so one file must not be able to store an unbounded value.
+pub const MAX_TAG_VALUE_BYTES: usize = 512;
+
+/// `value` cut to at most [`MAX_TAG_VALUE_BYTES`] bytes, never inside a
+/// character.
+fn capped(value: &str) -> String {
+    value[..value.floor_char_boundary(MAX_TAG_VALUE_BYTES)].to_string()
+}
+
 /// The earliest and latest release years a tag is believed about.
 const TAG_YEARS: std::ops::RangeInclusive<u32> = 1870..=2100;
 
@@ -56,8 +68,8 @@ impl ContainerTags {
                 continue;
             }
             match key.to_ascii_lowercase().as_str() {
-                "title" => read.title = Some(value.to_string()),
-                "show" => read.show = Some(value.to_string()),
+                "title" => read.title = Some(capped(value)),
+                "show" => read.show = Some(capped(value)),
                 "season_number" => read.season = whole_number(value),
                 "episode_sort" => read.episode = whole_number(value),
                 "date" | "year" | "date_released" => {
@@ -561,6 +573,28 @@ mod tests {
     }
 
     proptest! {
+        /// A text tag is kept whole up to [`MAX_TAG_VALUE_BYTES`], and a
+        /// longer one is cut to a prefix of it no longer than that -- never
+        /// inside a character, so a multi-byte one straddling the cap loses
+        /// the whole character.
+        #[test]
+        fn a_text_tag_is_kept_whole_or_cut_to_a_prefix_within_the_cap(
+            value in "[a-z\u{e9}\u{4e2d}\u{1f3ac}]{1,400}",
+        ) {
+            let tags = ContainerTags::from_tags([("title", value.as_str()), ("show", value.as_str())]);
+            let title = tags.title.expect("a non-blank title is read");
+            prop_assert!(title.len() <= MAX_TAG_VALUE_BYTES);
+            prop_assert!(value.starts_with(&title));
+            if value.len() <= MAX_TAG_VALUE_BYTES {
+                prop_assert_eq!(&title, &value);
+            } else {
+                // Only a character too wide to fit was dropped at the cut.
+                let next = value[title.len()..].chars().next().expect("cut short");
+                prop_assert!(title.len() + next.len_utf8() > MAX_TAG_VALUE_BYTES);
+            }
+            prop_assert_eq!(tags.show.as_ref(), Some(&title));
+        }
+
         #[test]
         fn with_no_hints_classification_is_path_inference(
             dirs in proptest::collection::vec("[A-Za-z0-9 ._()-]{1,16}", 0..3),
