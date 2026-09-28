@@ -32,8 +32,8 @@ use crate::models::playback::{
     ContinueWatchingConnection, ContinueWatchingReason, HistoryConnection, ReportProgressRequest,
     UserTitleState,
 };
-use crate::models::{EpisodeDetail, MediaMetadata, MediaTypeFilter, SeasonDetail};
-use crate::routes::media::{get_episode_detail, get_media_detail, get_season_detail};
+use crate::models::{EpisodeDetail, MediaConnection, MediaMetadata, MediaTypeFilter, SeasonDetail};
+use crate::routes::media::{browse_media, get_episode_detail, get_media_detail, get_season_detail};
 use crate::routes::playback::{
     clear_title_progress, dismiss_continue_watching, get_continue_watching, get_history,
     get_title_progress, mark_unwatched, mark_watched, report_playback_progress,
@@ -145,6 +145,7 @@ fn client(fixture: &Fixture) -> TestClient<AppState> {
                 get_continue_watching,
                 dismiss_continue_watching,
                 get_history,
+                browse_media,
                 get_media_detail,
                 get_episode_detail,
                 get_season_detail,
@@ -1024,12 +1025,73 @@ async fn history_pages_by_cursor_newest_first_with_display_fields() {
 
 // ── Detail payloads ──────────────────────────────────────────────────────────
 
+/// Browse lays each movie's state over the page -- played, in progress, or
+/// untouched -- for the one signed in, and for no one else.
+#[tokio::test]
+async fn browse_carries_each_movies_state_for_the_viewer() {
+    let fixture = fixture();
+    let played = fixture.movie("Heat").await;
+    let played_file = fixture.movie_file(played, 1_000).await;
+    let started = fixture.movie("Ronin").await;
+    let started_file = fixture.movie_file(started, 1_000).await;
+    let untouched = fixture.movie("Thief").await;
+    fixture.movie_file(untouched, 1_000).await;
+    let client = client(&fixture);
+    let (token, other) = (session(&fixture).await, session(&fixture).await);
+    watch(&client, &token, played_file, 99.0).await;
+    watch(&client, &token, started_file, 40.0).await;
+
+    let browse = |token: String| {
+        let client = &client;
+        async move {
+            let response = client
+                .get("/v1/media")
+                .cookie("beam_session", &token)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{}", response.text());
+            response
+                .json::<MediaConnection>()
+                .items
+                .into_iter()
+                .filter_map(|title| match title {
+                    MediaMetadata::Movie(movie) => Some((movie.id, movie.user_state)),
+                    MediaMetadata::Show(_) => None,
+                })
+                .collect::<std::collections::HashMap<Uuid, UserTitleState>>()
+        }
+    };
+
+    let states = browse(token.clone()).await;
+    assert_eq!(states.len(), 3, "{states:?}");
+    let heat = &states[&played];
+    assert!(heat.played);
+    assert_eq!((heat.play_count, heat.position_secs), (1, 0.0));
+    let ronin = &states[&started];
+    assert!(!ronin.played);
+    assert_eq!(
+        (ronin.position_secs, ronin.last_file_id),
+        (40.0, Some(started_file))
+    );
+    assert_eq!(states[&untouched], UserTitleState::default());
+
+    let theirs = browse(other).await;
+    assert!(
+        theirs
+            .values()
+            .all(|state| *state == UserTitleState::default()),
+        "another viewer sees none of it: {theirs:?}"
+    );
+}
+
 #[tokio::test]
 async fn an_episodes_detail_carries_its_show_its_neighbours_and_the_viewers_state() {
     let fixture = fixture();
     let show = fixture.show("Dark").await;
     let (special, _) = fixture.episode(show, 0, 1).await;
     let (e1, f1) = fixture.episode(show, 1, 1).await;
+    // No file to play: navigation steps over it, as next-up does.
+    fixture.bare_episode(show, 1, 2).await;
     let (e2, _) = fixture.episode(show, 2, 1).await;
     let client = client(&fixture);
     let token = session(&fixture).await;
