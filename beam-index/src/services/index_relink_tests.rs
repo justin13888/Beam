@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicUsize;
 use super::*;
 use crate::probe::metadata::MetadataError;
 use crate::services::admin_log::LocalAdminLogService;
+use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
 use crate::services::hash::{HashConfig, LocalHashService};
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::CreateLibrary;
@@ -230,6 +231,7 @@ fn found(hash: u64) -> Fingerprint {
         size: 1000,
         mtime: None,
         identity: None,
+        inodes: Inodes::Stable,
         hash,
     }
 }
@@ -677,7 +679,10 @@ impl Harness {
             )),
             progress.clone(),
         )
-        .with_clock(clock);
+        .with_clock(clock)
+        // A local filesystem, whatever the temporary directory is on: its
+        // inode numbers are compared unless `configure` says otherwise.
+        .with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Local)));
         let service = configure(service);
         Self {
             dir,
@@ -1512,7 +1517,7 @@ async fn a_row_without_an_identity_is_given_one_without_a_hash() {
 
     assert_eq!(h.hashes(), hashes, "nothing is hashed");
     for path in [&heat, &ronin] {
-        let found = read_stat(path).unwrap().identity;
+        let found = read_stat(path, Inodes::Stable).unwrap().identity;
         assert!(found.is_some(), "a Unix file has an identity");
         assert_eq!(h.present(path).await.identity, found, "{}", path.display());
     }
@@ -1525,6 +1530,102 @@ async fn a_row_without_an_identity_is_given_one_without_a_hash() {
     assert_eq!(progress.relinked, 2);
     assert_eq!(h.present(&ronin).await.id, heat_id);
     assert_eq!(h.present(&heat).await.id, ronin_id);
+}
+
+/// Give every row an inode number its file does not have, keeping its
+/// ctime -- as a network or FUSE filesystem can renumber a file after a
+/// remount or a cache eviction, while the file itself is untouched.
+#[cfg(unix)]
+fn renumber_recorded_inodes(h: &Harness) {
+    for row in h.file_repo.files.lock().unwrap().values_mut() {
+        let identity = row.identity.as_mut().expect("a Unix file has an identity");
+        identity.inode = !identity.inode;
+    }
+}
+
+/// A library on a network or FUSE filesystem is compared by size, mtime and
+/// ctime, never by inode: its inode numbers can change between scans (an
+/// rclone mount after a remount, SMB with `noserverino`), and comparing them
+/// would hash the whole library on every periodic scan.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_network_library_whose_inodes_are_renumbered_is_not_hashed_again() {
+    let h = Harness::with_service(|service| {
+        service.with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Network)))
+    })
+    .await;
+    let heat = h.write("Heat (1995).mkv", "heat");
+    let ronin = h.write("Ronin (1998).mkv", "ronin");
+    h.scan().await;
+    let before = [h.present(&heat).await, h.present(&ronin).await];
+    let hashes = h.hashes();
+
+    renumber_recorded_inodes(&h);
+    let progress = h.scan().await;
+
+    assert_eq!(h.hashes(), hashes, "nothing is hashed");
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (0, 0, 0)
+    );
+    for row in &before {
+        let now = h.present(&row.path).await;
+        assert_eq!((now.id, now.hash), (row.id, row.hash));
+    }
+}
+
+/// On a local filesystem an inode number is stable, so a different one is a
+/// different file -- which is how a same-tick swap is seen. Each file whose
+/// recorded inode is not its own is hashed once, found unchanged, and given
+/// its identity; the next scan hashes nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_local_library_whose_inodes_differ_hashes_each_file_once() {
+    let h = Harness::new().await;
+    let heat = h.write("Heat (1995).mkv", "heat");
+    let ronin = h.write("Ronin (1998).mkv", "ronin");
+    h.scan().await;
+    let before = [h.present(&heat).await, h.present(&ronin).await];
+    let hashes = h.hashes();
+
+    renumber_recorded_inodes(&h);
+    let progress = h.scan().await;
+
+    assert_eq!(h.hashes(), hashes + 2, "each file is hashed");
+    assert_eq!(
+        (progress.relinked, progress.changed, progress.added),
+        (0, 0, 0)
+    );
+    for row in &before {
+        let now = h.present(&row.path).await;
+        assert_eq!(
+            (now.id, now.hash, now.identity),
+            (row.id, row.hash, row.identity)
+        );
+    }
+    h.scan().await;
+    assert_eq!(h.hashes(), hashes + 2, "once");
+}
+
+/// A library whose filesystem cannot be classified is taken as local, as
+/// the watcher takes it: its inode numbers are compared. At worst that
+/// hashes a file that did not change; not comparing them could miss a swap.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_library_whose_filesystem_cannot_be_classified_compares_inodes() {
+    use crate::services::filesystem_probe::FailingFilesystemProbe;
+    let h = Harness::with_service(|service| {
+        service.with_filesystem_probe(Arc::new(FailingFilesystemProbe))
+    })
+    .await;
+    h.write("Heat (1995).mkv", "heat");
+    h.scan().await;
+    let hashes = h.hashes();
+
+    renumber_recorded_inodes(&h);
+    h.scan().await;
+
+    assert_eq!(h.hashes(), hashes + 1, "the renumbered file is hashed");
 }
 
 /// A file renamed onto the path of a file deleted earlier, whose row is

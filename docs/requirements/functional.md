@@ -299,8 +299,11 @@ strength. Each requirement is independently testable. See `product.md` for narra
   Linux and macOS it MUST also record each file's inode and change time, and hash a path whose
   inode or change time is not its row's, so a swap or a rotation of files of one size and one
   modification time (written within one timestamp tick, or copied by a tool that keeps mtimes) is
-  relinked like any other. A row with none recorded MUST be given its file's by the next visit that
-  finds it unchanged, without hashing it. Among several rows for
+  relinked like any other. On a library whose root the watcher classifies as a network or FUSE
+  filesystem (FR-213's network filesystems), whose inode numbers may change between scans, the
+  inode MUST NOT be compared -- only the change time -- so an unchanged library is not hashed again
+  on every scan. A row with none recorded MUST be given its file's by the next visit that finds it
+  unchanged, without hashing it. Among several rows for
   one path, and several paths for one row, the pairing with the same file name wins, then the same
   directory, then the row played most recently by anyone (a row never played last), then the lowest
   row id, then the lowest path. One pairing is declined, a replace-by-rename: when the row a path

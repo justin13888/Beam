@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 
 use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
 use crate::services::admin_log::AdminLogService;
+use crate::services::filesystem_probe::{FilesystemKind, FilesystemProbe, StatfsFilesystemProbe};
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
@@ -49,43 +50,95 @@ use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path
 /// Read the size and modification time of a file in a single stat call,
 /// the mtime as [`stored_mtime`] reads it.
 fn read_fs_meta(path: &Path) -> std::io::Result<(u64, Option<DateTime<Utc>>)> {
-    let FileStat { size, mtime, .. } = read_stat(path)?;
-    Ok((size, mtime))
+    let meta = std::fs::metadata(path)?;
+    Ok((meta.len(), stored_mtime(&meta)))
+}
+
+/// Whether a library's filesystem keeps a file's inode number from one scan
+/// to the next -- whether the inode half of a [`FileIdentity`] can be
+/// compared at all.
+///
+/// A local filesystem does. A network or FUSE one may not: SMB mounted with
+/// `noserverino`, and FUSE filesystems such as rclone, sshfs and mergerfs,
+/// can hand out new inode numbers after a remount or a cache eviction, and
+/// comparing them would make every file look changed -- and be hashed -- on
+/// every scan. Such a library is compared by size, mtime and ctime. The
+/// classification is the watcher's ([`FilesystemKind`]), so the libraries it
+/// polls are exactly the ones whose inodes are not trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Inodes {
+    /// Inode numbers are compared.
+    Stable,
+    /// Inode numbers are recorded but never compared.
+    Unstable,
+}
+
+impl From<FilesystemKind> for Inodes {
+    fn from(kind: FilesystemKind) -> Self {
+        match kind {
+            FilesystemKind::Local => Inodes::Stable,
+            FilesystemKind::Network => Inodes::Unstable,
+        }
+    }
 }
 
 /// What one stat says about a media file that a row records: its size,
 /// modification time and [`FileIdentity`], each at the precision a row
-/// keeps.
+/// keeps, and whether the inode it read can be compared ([`Inodes`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileStat {
     size: u64,
     mtime: Option<DateTime<Utc>>,
     identity: Option<FileIdentity>,
+    inodes: Inodes,
 }
 
 impl FileStat {
     /// Whether `row` records the file this stat describes, as far as a stat
-    /// can tell -- so the file need not be hashed. Its size and mtime must be
-    /// the row's, and so must its identity when both sides have one (issue
-    /// #228): a swap or a rotation of files of one size and mtime changes
-    /// every path's inode and ctime. A row recorded before identities were,
-    /// or a platform without them, falls back to size and mtime alone.
+    /// can tell -- so the file need not be hashed. See [`Self::agrees_with`].
     fn is_recorded_by(&self, row: &MediaFile) -> bool {
-        let identity_agrees = match (self.identity, row.identity) {
-            (Some(found), Some(recorded)) => found == recorded,
+        self.agrees_with(row.size_bytes, row.mtime, row.identity)
+    }
+
+    /// Whether `earlier`, another stat of the same path, found the file as
+    /// this one does: it did not change in between.
+    fn is_same_as(&self, earlier: &FileStat) -> bool {
+        self.agrees_with(earlier.size, earlier.mtime, earlier.identity)
+    }
+
+    /// The single "unchanged" rule. The size and mtime must be `size` and
+    /// `mtime`, and the identity must be `identity` when both sides have one
+    /// (issue #228): a swap or a rotation of files of one size and mtime
+    /// changes every path's inode and ctime. Where inodes are
+    /// [`Inodes::Unstable`], only the ctime of an identity is compared. An
+    /// identity recorded before identities were, or a platform without them,
+    /// falls back to size and mtime alone.
+    fn agrees_with(
+        &self,
+        size: u64,
+        mtime: Option<DateTime<Utc>>,
+        identity: Option<FileIdentity>,
+    ) -> bool {
+        let identity_agrees = match (self.identity, identity) {
+            (Some(found), Some(recorded)) => match self.inodes {
+                Inodes::Stable => found == recorded,
+                Inodes::Unstable => found.ctime == recorded.ctime,
+            },
             _ => true,
         };
-        self.size == row.size_bytes && self.mtime == row.mtime && identity_agrees
+        self.size == size && self.mtime == mtime && identity_agrees
     }
 }
 
-/// Stat `path` for what a row records of it (see [`FileStat`]).
-fn read_stat(path: &Path) -> std::io::Result<FileStat> {
+/// Stat `path` for what a row records of it (see [`FileStat`]), on a
+/// filesystem whose inodes are `inodes`.
+fn read_stat(path: &Path, inodes: Inodes) -> std::io::Result<FileStat> {
     let meta = std::fs::metadata(path)?;
     Ok(FileStat {
         size: meta.len(),
         mtime: stored_mtime(&meta),
         identity: stored_identity(&meta),
+        inodes,
     })
 }
 
@@ -384,12 +437,13 @@ fn path_is_absent(path: &Path) -> bool {
 }
 
 /// A walked file's size, modification time, identity and content hash, read
-/// together once it had settled.
+/// together once it had settled, on a filesystem whose inodes are `inodes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fingerprint {
     size: u64,
     mtime: Option<DateTime<Utc>>,
     identity: Option<FileIdentity>,
+    inodes: Inodes,
     hash: u64,
 }
 
@@ -400,6 +454,7 @@ impl Fingerprint {
             size: self.size,
             mtime: self.mtime,
             identity: self.identity,
+            inodes: self.inodes,
         }
     }
 }
@@ -463,12 +518,13 @@ fn choose_relink_candidate<'a>(
 /// or what is there now -- by a stat that does not follow links -- is not
 /// what the row recorded. A path that cannot be stat'ed says nothing, so it
 /// may have moved too. The watcher leaves a file whose content matches such
-/// a row to the next scan rather than guess (issue #180).
-fn may_have_moved(row: &MediaFile) -> bool {
+/// a row to the next scan rather than guess (issue #180). `inodes` is what
+/// the row's library's filesystem keeps.
+fn may_have_moved(row: &MediaFile, inodes: Inodes) -> bool {
     row.missing_since.is_some()
         || match std::fs::symlink_metadata(&row.path) {
             Ok(meta) if meta.is_file() => {
-                !read_stat(&row.path).is_ok_and(|stat| stat.is_recorded_by(row))
+                !read_stat(&row.path, inodes).is_ok_and(|stat| stat.is_recorded_by(row))
             }
             _ => true,
         }
@@ -998,6 +1054,8 @@ pub struct LocalIndexService {
     missing_file_grace: Duration,
     /// How long a file must go unwritten before it is hashed (issue #181).
     settle_window: Duration,
+    /// Which libraries' inode numbers are compared ([`Inodes`]).
+    filesystem_probe: Arc<dyn FilesystemProbe>,
     /// Whether [`LocalIndexService::backfill_identity_keys`] and then
     /// [`LocalIndexService::rekey_stale_titles`] have both succeeded in this
     /// process; until they have, no file classified by older rules is
@@ -1044,6 +1102,7 @@ impl LocalIndexService {
             id_generator: Arc::new(UuidGenerator),
             missing_file_grace: DEFAULT_MISSING_FILE_GRACE,
             settle_window: Duration::ZERO,
+            filesystem_probe: Arc::new(StatfsFilesystemProbe),
             identity_passes_succeeded: AtomicBool::new(false),
             scans: ScanCoordinator::new(),
         }
@@ -1071,6 +1130,14 @@ impl LocalIndexService {
     /// every file on sight.
     pub fn with_settle_window(mut self, window: Duration) -> Self {
         self.settle_window = window;
+        self
+    }
+
+    /// Override how a library root's filesystem is classified, which decides
+    /// whether its files' inode numbers are compared ([`Inodes`]). Defaults
+    /// to [`StatfsFilesystemProbe`], the watcher's own classification.
+    pub fn with_filesystem_probe(mut self, probe: Arc<dyn FilesystemProbe>) -> Self {
+        self.filesystem_probe = probe;
         self
     }
 
@@ -1506,17 +1573,19 @@ impl LocalIndexService {
     /// neither probed nor classified (issue #180).
     ///
     /// `known` is what a scan found at the path before, reused when the file
-    /// still has its size and modification time rather than hashed again.
+    /// is still as it was found ([`FileStat::is_same_as`]) rather than hashed
+    /// again. `inodes` is what the library's filesystem keeps.
     async fn process_new_file(
         &self,
         path: &Path,
         library: &Library,
         relink: RelinkSource,
         known: Option<&Fingerprint>,
+        inodes: Inodes,
     ) -> Result<FileOutcome, IndexError> {
         info!("Processing new file: {}", path.display());
 
-        let stat = read_stat(path).map_err(|e| {
+        let stat = read_stat(path, inodes).map_err(|e| {
             warn!(path = %path.display(), error = %e, "Failed to read file metadata");
             IndexError::PathNotFound(format!("Could not read file metadata: {e}"))
         })?;
@@ -1524,6 +1593,7 @@ impl LocalIndexService {
             size,
             mtime,
             identity,
+            inodes: _,
         } = stat;
 
         if let Settle::Unsettled { retry_after } =
@@ -1534,7 +1604,7 @@ impl LocalIndexService {
         }
 
         let hash = match known {
-            Some(found) if found.stat() == stat => Some(found.hash),
+            Some(found) if stat.is_same_as(&found.stat()) => Some(found.hash),
             _ => self.hash_settled(path, stat).await.map_err(|e| {
                 error!(path = %path.display(), error = %e, "Failed to hash file");
                 IndexError::PathNotFound(format!("Hash failed: {}", e))
@@ -1558,6 +1628,7 @@ impl LocalIndexService {
                 size,
                 mtime,
                 identity,
+                inodes,
                 hash,
             };
             if let Some(row) =
@@ -1570,7 +1641,7 @@ impl LocalIndexService {
             // A row whose path now holds something else may be this file,
             // moved in a swap or a rotation whose other halves have not
             // reached the watcher: the scan sees them all.
-            if hash != 0 && candidates.iter().any(may_have_moved) {
+            if hash != 0 && candidates.iter().any(|row| may_have_moved(row, inodes)) {
                 info!(
                     path = %path.display(),
                     "a new file matches a file of the library that may have moved; leaving it to the next scan"
@@ -1654,11 +1725,29 @@ impl LocalIndexService {
         if self.settle_window.is_zero() {
             return Ok(Some(hash));
         }
-        let after = read_stat(path)?;
-        if after != stat {
+        let after = read_stat(path, stat.inodes)?;
+        if !after.is_same_as(&stat) {
             return Ok(None);
         }
         Ok(Some(hash))
+    }
+
+    /// Whether `library`'s filesystem keeps its files' inode numbers
+    /// ([`Inodes`]), asked once per scan or watcher event. A root that cannot
+    /// be classified is taken as local, as the watcher takes it: its inodes
+    /// are compared, which at worst hashes a file that did not change.
+    fn inodes_of(&self, library: &Library) -> Inodes {
+        match self.filesystem_probe.kind(&library.root_path) {
+            Ok(kind) => Inodes::from(kind),
+            Err(e) => {
+                warn!(
+                    library_id = %library.id,
+                    error = %e,
+                    "could not classify a library's filesystem; comparing its inode numbers"
+                );
+                Inodes::Stable
+            }
+        }
     }
 
     /// Clear `missing_since` on a row whose path is back on disk, returning
@@ -1809,8 +1898,13 @@ impl LocalIndexService {
     /// as it is ([`FileStat::is_recorded_by`]). `None` for a file that is as
     /// recorded, still being written, or cannot be read -- whoever reconciles
     /// it next finds out which, and reports a failure.
-    async fn fingerprint(&self, path: &Path, recorded: Option<&MediaFile>) -> Option<Fingerprint> {
-        let stat = read_stat(path).ok()?;
+    async fn fingerprint(
+        &self,
+        path: &Path,
+        recorded: Option<&MediaFile>,
+        inodes: Inodes,
+    ) -> Option<Fingerprint> {
+        let stat = read_stat(path, inodes).ok()?;
         if recorded.is_some_and(|row| stat.is_recorded_by(row)) {
             return None;
         }
@@ -1824,11 +1918,13 @@ impl LocalIndexService {
             size,
             mtime,
             identity,
+            inodes,
         } = stat;
         Some(Fingerprint {
             size,
             mtime,
             identity,
+            inodes,
             hash,
         })
     }
@@ -1853,8 +1949,9 @@ impl LocalIndexService {
     ///
     /// A changed file is hashed only once it has settled; until then it is
     /// [`FileOutcome::Deferred`] and its row is left as it is. `known` is
-    /// what a scan found at the path before, reused when the file still has
-    /// its size and modification time rather than hashed again.
+    /// what a scan found at the path before, reused when the file is still
+    /// as it was found ([`FileStat::is_same_as`]) rather than hashed again.
+    /// `inodes` is what the library's filesystem keeps.
     async fn reconcile_existing_file(
         &self,
         existing: &MediaFile,
@@ -1862,12 +1959,13 @@ impl LocalIndexService {
         library: &Library,
         reclassify: bool,
         known: Option<&Fingerprint>,
+        inodes: Inodes,
     ) -> Result<FileOutcome, IndexError> {
         if reclassify && awaits_reclassification(existing) {
             self.reclassify_existing(existing, path, library).await?;
         }
 
-        let stat = match read_stat(path) {
+        let stat = match read_stat(path, inodes) {
             Ok(stat) => stat,
             Err(e) => {
                 // A transient stat failure must not delete or corrupt the row.
@@ -1879,6 +1977,7 @@ impl LocalIndexService {
             size,
             mtime,
             identity,
+            inodes: _,
         } = stat;
 
         let moved = !stat.is_recorded_by(existing);
@@ -1920,7 +2019,7 @@ impl LocalIndexService {
         }
 
         let known = known
-            .filter(|found| found.stat() == stat)
+            .filter(|found| stat.is_same_as(&found.stat()))
             .map(|found| found.hash);
         let new_hash = if let Some(hash) = known {
             hash
@@ -2004,6 +2103,7 @@ impl LocalIndexService {
             size,
             mtime,
             identity,
+            inodes: _,
         } = stat;
         let content_changed = new_hash != existing.hash;
         if content_changed {
@@ -2078,8 +2178,8 @@ impl LocalIndexService {
                 // record them, so the next visit sees the file as it is and
                 // does not hash it again only to find the same content. A
                 // row with no identity yet is given the file's.
-                if (size, mtime, identity)
-                    != (existing.size_bytes, existing.mtime, existing.identity)
+                if !stat.is_recorded_by(existing)
+                    || (existing.identity.is_none() && identity.is_some())
                 {
                     self.file_repo
                         .update(UpdateMediaFile {
@@ -3251,10 +3351,13 @@ impl LocalIndexService {
 
         let outcome = match meta {
             Some(meta) if meta.is_file() => {
-                self.reconcile_file(&path, &library, reclassify).await?
+                let inodes = self.inodes_of(&library);
+                self.reconcile_file(&path, &library, reclassify, inodes)
+                    .await?
             }
             Some(meta) if meta.is_dir() => {
-                return self.reconcile_directory(&path, &library).await;
+                let inodes = self.inodes_of(&library);
+                return self.reconcile_directory(&path, &library, inodes).await;
             }
             _ => {
                 self.reconcile_gone(&path, &library).await?;
@@ -3274,11 +3377,13 @@ impl LocalIndexService {
 
     /// Reconcile the file at `path` for a watcher event: restore and
     /// reconcile its row, or index it -- relinking a moved file to its row.
+    /// `inodes` is what the library's filesystem keeps.
     async fn reconcile_file(
         &self,
         path: &Path,
         library: &Library,
         reclassify: bool,
+        inodes: Inodes,
     ) -> Result<FileOutcome, IndexError> {
         let path_str = path.to_string_lossy().to_string();
         // A file the policy keeps out of the library is not indexed. One that
@@ -3307,7 +3412,7 @@ impl LocalIndexService {
                 // this row's path. Which row is which needs every path at
                 // once, so the next scan decides (issue #180); the row is not
                 // even restored meanwhile.
-                let found = self.fingerprint(path, Some(&existing)).await;
+                let found = self.fingerprint(path, Some(&existing), inodes).await;
                 if let Some(found) = &found
                     && found.hash != existing.hash
                     && found.hash != 0
@@ -3319,7 +3424,7 @@ impl LocalIndexService {
                         .any(|row| {
                             row.id != existing.id
                                 && row.size_bytes == found.size
-                                && may_have_moved(row)
+                                && may_have_moved(row, inodes)
                         })
                 {
                     info!(
@@ -3329,12 +3434,19 @@ impl LocalIndexService {
                     return Ok(FileOutcome::LeftToScan);
                 }
                 self.restore_if_missing(&existing).await?;
-                self.reconcile_existing_file(&existing, path, library, reclassify, found.as_ref())
-                    .await
+                self.reconcile_existing_file(
+                    &existing,
+                    path,
+                    library,
+                    reclassify,
+                    found.as_ref(),
+                    inodes,
+                )
+                .await
             }
             None => {
                 let outcome = self
-                    .process_new_file(path, library, RelinkSource::Repository, None)
+                    .process_new_file(path, library, RelinkSource::Repository, None, inodes)
                     .await?;
                 match outcome {
                     FileOutcome::Added => {
@@ -3463,6 +3575,7 @@ impl LocalIndexService {
         &self,
         dir: &Path,
         library: &Library,
+        inodes: Inodes,
     ) -> Result<ReconcileOutcome, IndexError> {
         if dir == library.root_path {
             debug!(root = %dir.display(), "an event for the library root is left to the scan");
@@ -3496,7 +3609,7 @@ impl LocalIndexService {
         let mut retry_after: Option<Duration> = None;
         let mut left_to_scan: Vec<PathBuf> = Vec::new();
         for path in &files {
-            let outcome = match self.reconcile_file(path, library, false).await {
+            let outcome = match self.reconcile_file(path, library, false, inodes).await {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     // One file that cannot be indexed does not stop the rest.
@@ -3825,7 +3938,8 @@ impl LocalIndexService {
     /// left its path: a row the walk did not see, or one whose path
     /// changed. With neither, nothing moved, and
     /// each file is hashed, if at all, when it is reconciled; with both, the
-    /// hash taken here is the one reconciling it reuses.
+    /// hash taken here is the one reconciling it reuses. `inodes` is what the
+    /// library's filesystem keeps.
     async fn fingerprint_walk(
         &self,
         walked_files: &[PathBuf],
@@ -3833,12 +3947,13 @@ impl LocalIndexService {
         walked: &std::collections::HashSet<&Path>,
         is_shielded: &impl Fn(&Path) -> bool,
         ticket: &ScanTicket,
+        inodes: Inodes,
     ) -> Result<HashMap<PathBuf, Fingerprint>, IndexError> {
         let mut changed = 0usize;
         let mut to_hash: Vec<&PathBuf> = Vec::new();
         for path in walked_files {
             let row = rows.get(path);
-            let Ok(stat) = read_stat(path) else {
+            let Ok(stat) = read_stat(path, inodes) else {
                 continue;
             };
             match row {
@@ -3860,7 +3975,7 @@ impl LocalIndexService {
                 info!("Scan cancelled");
                 return Err(IndexError::Cancelled);
             }
-            if let Some(found) = self.fingerprint(path, rows.get(path)).await {
+            if let Some(found) = self.fingerprint(path, rows.get(path), inodes).await {
                 fingerprints.insert(path.clone(), found);
             }
         }
@@ -4024,8 +4139,16 @@ impl LocalIndexService {
                     .iter()
                     .any(|failed| path.starts_with(failed))
         };
+        let inodes = self.inodes_of(library);
         let fingerprints = self
-            .fingerprint_walk(&walked_files, &existing_map, &walked, &is_shielded, ticket)
+            .fingerprint_walk(
+                &walked_files,
+                &existing_map,
+                &walked,
+                &is_shielded,
+                ticket,
+                inodes,
+            )
             .await?;
         let matches = content_matches(&existing_map, &walked, &fingerprints, is_shielded);
         // The rows that may be paired, and the rows at the paths they may
@@ -4079,6 +4202,7 @@ impl LocalIndexService {
                             library,
                             reclassify,
                             known,
+                            inodes,
                         )
                         .await
                     }
@@ -4095,7 +4219,7 @@ impl LocalIndexService {
             } else {
                 // A new file: phase 3a relinked every moved one it found.
                 match self
-                    .process_new_file(path, library, RelinkSource::Planned, known)
+                    .process_new_file(path, library, RelinkSource::Planned, known, inodes)
                     .await
                 {
                     Ok(outcome) => {
@@ -5693,6 +5817,7 @@ mod tests {
                 &test_library(lib_id, temp_dir.path()),
                 RelinkSource::Repository,
                 None,
+                Inodes::Stable,
             )
             .await;
         assert!(result.is_ok());
@@ -5862,6 +5987,7 @@ mod tests {
                 &test_library(lib_id, temp_dir.path()),
                 RelinkSource::Repository,
                 None,
+                Inodes::Stable,
             )
             .await;
         assert!(result.is_ok());
@@ -5893,6 +6019,7 @@ mod tests {
                 &test_library(Uuid::new_v4(), temp_dir.path()),
                 RelinkSource::Repository,
                 None,
+                Inodes::Stable,
             )
             .await
             .expect_err("a file that cannot be stat'ed must be refused");
@@ -5943,6 +6070,7 @@ mod tests {
                 &test_library(Uuid::new_v4(), temp_dir.path()),
                 RelinkSource::Repository,
                 None,
+                Inodes::Stable,
             )
             .await
             .expect_err("a file that cannot be hashed must be refused");

@@ -34,7 +34,9 @@ pub fn mtime_as_stored(mtime: DateTime<Utc>) -> DateTime<Utc> {
 /// (`cp -p`, `rsync -a`). An inode cannot: a file renamed over a path brings
 /// its own. Nor can a ctime: the kernel sets it on every rename and write,
 /// and no copy tool can set it back. So a file whose identity is not its
-/// row's may hold other content, and is hashed.
+/// row's may hold other content, and is hashed. On a network or FUSE
+/// filesystem, which may renumber inodes between scans, the indexer
+/// compares only the ctime.
 ///
 /// Read only on Unix, Beam's first-class platforms (Linux and macOS);
 /// elsewhere a file has none and only its size and mtime are compared.
