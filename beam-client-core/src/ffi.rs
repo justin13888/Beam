@@ -1401,7 +1401,7 @@ impl BeamClient {
     /// `/v1/admin/events/stream`. Kynos now describes the streaming endpoint
     /// with OpenAPI 3.2's `itemSchema`, and spargen lowers it to
     /// `Client::stream_admin_events` returning
-    /// `support::EventStream<types::AdminEventDto>`. Nothing on the UniFFI
+    /// `support::EventStream<types::AdminEvent>`. Nothing on the UniFFI
     /// surface consumes a stream yet -- UniFFI has no async-iterator type, so
     /// exposing it needs a callback-interface subscription rather than a return
     /// value -- so the feed still polls.
@@ -2506,7 +2506,7 @@ mod tests {
     async fn a_signed_in_call_carries_the_session_cookie_exactly_once() {
         let (client, _, backend) = signed_in_client().await;
 
-        // The canned body is a `MeResponse`, so this decodes to nothing
+        // The canned body is a `CurrentUser`, so this decodes to nothing
         // useful; what matters is that the request left at all, and how.
         let _ = client.media_sources("7".to_owned()).await;
 

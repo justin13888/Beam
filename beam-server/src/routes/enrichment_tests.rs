@@ -305,7 +305,7 @@ async fn one_titles_enrichment_is_read_by_its_id() {
         .json();
     assert_eq!(detail.media_id, id);
     assert_eq!(detail.status, crate::models::EnrichmentStatus::Unmatched);
-    assert_eq!(detail.kind, crate::models::MediaTypeFilter::Movie);
+    assert_eq!(detail.kind, crate::models::TitleKind::Movie);
     assert!(detail.locked_fields.is_empty());
 
     f.client

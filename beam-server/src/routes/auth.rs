@@ -62,7 +62,7 @@ pub(crate) const DEVICE_LOGIN_MAX_SECS: u64 = 1800;
 // ── Wire types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct MeResponse {
+pub struct CurrentUser {
     pub id: String,
     pub email: Option<String>,
     pub is_admin: bool,
@@ -159,7 +159,7 @@ pub struct DeviceLoginComplete {
     /// The session's hard lifetime from now, in seconds.
     pub session_expires_in_secs: u64,
     /// Who signed in.
-    pub user: MeResponse,
+    pub user: CurrentUser,
 }
 
 /// The two answers a device-login poll can give.
@@ -595,8 +595,8 @@ impl ClientHeaders {
 }
 
 /// The wire shape of a user, shared by `GET /v1/me` and a device login.
-fn me_from(user: User) -> MeResponse {
-    MeResponse {
+fn me_from(user: User) -> CurrentUser {
+    CurrentUser {
         id: user.id.to_string(),
         email: user.email,
         is_admin: user.is_admin,
@@ -1001,7 +1001,7 @@ pub async fn poll_device_login(
 pub async fn oidc_me(
     auth: SessionAuth,
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
-) -> Result<Json<MeResponse>, CurrentUserError> {
+) -> Result<Json<CurrentUser>, CurrentUserError> {
     let user_uuid =
         Uuid::parse_str(&auth.0.user_id).map_err(|e| CurrentUserError::Internal(e.to_string()))?;
 

@@ -7,6 +7,7 @@ use tracing::warn;
 
 /// File indexing status
 #[derive(Clone, Copy, Debug, Serialize, Schema, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum FileIndexStatus {
     /// File is indexed and metadata matches
     Known,
@@ -28,6 +29,7 @@ impl From<beam_domain::models::file::FileStatus> for FileIndexStatus {
 
 /// The kind of content a media file represents
 #[derive(Clone, Copy, Debug, Serialize, Schema, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum FileContentType {
     /// File is associated with a movie
     Movie,

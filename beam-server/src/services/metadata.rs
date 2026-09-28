@@ -13,8 +13,8 @@ use crate::models::{
 use crate::services::cursor;
 use crate::services::sources::{PrimarySource, SourceCatalog};
 use beam_domain::models::catalog::{
-    CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
-    ShowChildCounts, SortDirection, TitleKind,
+    self, CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
+    ShowChildCounts, SortDirection,
 };
 use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
@@ -500,14 +500,14 @@ impl DbMetadataService {
     /// A fixed number of reads per page, however long it is: the titles of
     /// each kind, their genres, and the shows' season and episode counts.
     async fn hydrate(&self, page: &[CatalogPosition]) -> Result<Vec<MediaMetadata>, MetadataError> {
-        let ids_of = |kind: TitleKind| -> Vec<Uuid> {
+        let ids_of = |kind: catalog::TitleKind| -> Vec<Uuid> {
             page.iter()
                 .filter(|p| p.kind == kind)
                 .map(|p| p.id)
                 .collect()
         };
-        let movie_ids = ids_of(TitleKind::Movie);
-        let show_ids = ids_of(TitleKind::Show);
+        let movie_ids = ids_of(catalog::TitleKind::Movie);
+        let show_ids = ids_of(catalog::TitleKind::Show);
 
         let mut movies: HashMap<Uuid, beam_domain::models::Movie> = self
             .movie_repo
@@ -544,11 +544,11 @@ impl DbMetadataService {
         Ok(page
             .iter()
             .filter_map(|position| match position.kind {
-                TitleKind::Movie => movies.remove(&position.id).map(|movie| {
+                catalog::TitleKind::Movie => movies.remove(&position.id).map(|movie| {
                     let genres = movie_genres.remove(&movie.id).unwrap_or_default();
                     movie_metadata(movie, genres, MovieFiles::default())
                 }),
-                TitleKind::Show => shows.remove(&position.id).map(|show| {
+                catalog::TitleKind::Show => shows.remove(&position.id).map(|show| {
                     let genres = show_genres.remove(&show.id).unwrap_or_default();
                     let counts = counts.get(&show.id).copied().unwrap_or_default();
                     show_metadata(show, genres, counts, vec![])
@@ -579,11 +579,11 @@ impl From<SortOrder> for SortDirection {
     }
 }
 
-impl From<MediaTypeFilter> for TitleKind {
-    fn from(kind: MediaTypeFilter) -> Self {
+impl From<TitleKind> for catalog::TitleKind {
+    fn from(kind: TitleKind) -> Self {
         match kind {
-            MediaTypeFilter::Movie => Self::Movie,
-            MediaTypeFilter::Show => Self::Show,
+            TitleKind::Movie => Self::Movie,
+            TitleKind::Show => Self::Show,
         }
     }
 }
@@ -600,7 +600,7 @@ impl From<MediaSearchFilters> for CatalogFilters {
             min_rating,
         } = filters;
         Self {
-            kind: media_type.map(TitleKind::from),
+            kind: media_type.map(catalog::TitleKind::from),
             query,
             // A genre is matched by slug, so `Science Fiction`,
             // `science fiction` and `science-fiction` all name one genre.
@@ -871,14 +871,12 @@ pub enum MetadataError {
     Unsupported(String),
 }
 
-pub use crate::models::search::{
-    MediaConnection, MediaSortField, MediaTypeFilter, PageInfo, SortOrder,
-};
+pub use crate::models::search::{MediaConnection, MediaSortField, PageInfo, SortOrder, TitleKind};
 
 /// Search filters for media
 #[derive(Clone, Debug, Default)]
 pub struct MediaSearchFilters {
-    pub media_type: Option<MediaTypeFilter>,
+    pub media_type: Option<TitleKind>,
     pub genre: Option<String>,
     pub year: Option<u32>,
     pub year_from: Option<u32>,

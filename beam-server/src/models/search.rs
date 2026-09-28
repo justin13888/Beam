@@ -39,13 +39,15 @@ pub enum SortOrder {
     Desc,
 }
 
-/// Media type filter.
+/// Which kind of title something is: a movie, or a show. The one enum for it on
+/// the wire -- the `media_type` browse filter, a continue-watching or history
+/// item's `media_type`, and an enrichment row's `kind` all use it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
 #[serde(rename_all = "snake_case")]
-pub enum MediaTypeFilter {
-    /// Movies only
+pub enum TitleKind {
+    /// A movie.
     Movie,
-    /// TV Shows only
+    /// A TV show.
     Show,
 }
 
@@ -131,7 +133,7 @@ impl SortOrder {
     }
 }
 
-impl MediaTypeFilter {
+impl TitleKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -153,7 +155,7 @@ impl std::fmt::Display for SortOrder {
     }
 }
 
-impl std::fmt::Display for MediaTypeFilter {
+impl std::fmt::Display for TitleKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -192,7 +194,7 @@ impl std::str::FromStr for SortOrder {
     }
 }
 
-impl std::str::FromStr for MediaTypeFilter {
+impl std::str::FromStr for TitleKind {
     type Err = UnknownVariant;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -211,7 +213,7 @@ impl std::str::FromStr for MediaTypeFilter {
 // Kynos asks for the opt-in because it cannot see that from the schema alone.
 impl kynos::schema::ParamValue for MediaSortField {}
 impl kynos::schema::ParamValue for SortOrder {}
-impl kynos::schema::ParamValue for MediaTypeFilter {}
+impl kynos::schema::ParamValue for TitleKind {}
 
 #[cfg(test)]
 mod tests {
@@ -258,10 +260,10 @@ mod tests {
 
     #[test]
     fn every_documented_media_type_parses() {
-        for kind in [MediaTypeFilter::Movie, MediaTypeFilter::Show] {
+        for kind in [TitleKind::Movie, TitleKind::Show] {
             let json = serde_json::to_string(&kind).expect("serializes");
             let wire = json.trim_matches('"');
-            assert_eq!(MediaTypeFilter::from_str(wire).expect("round-trips"), kind);
+            assert_eq!(TitleKind::from_str(wire).expect("round-trips"), kind);
             assert_eq!(kind.to_string(), wire);
         }
     }
@@ -270,6 +272,6 @@ mod tests {
     fn an_unknown_variant_is_rejected_rather_than_defaulted() {
         assert!(MediaSortField::from_str("popularity").is_err());
         assert!(SortOrder::from_str("ascending").is_err());
-        assert!(MediaTypeFilter::from_str("episode").is_err());
+        assert!(TitleKind::from_str("episode").is_err());
     }
 }

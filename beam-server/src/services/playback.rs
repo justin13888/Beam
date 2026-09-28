@@ -34,7 +34,7 @@ use beam_domain::utils::next_up::{EpisodeWatch, NextUp, OutlineEpisode, next_up}
 use beam_domain::utils::progress_validation::{ReportFault, validate_report};
 
 use crate::models::{
-    ArtworkKind, ArtworkVariant, EpisodeDetail, MediaMetadata, MediaTypeFilter, SeasonDetail,
+    ArtworkKind, ArtworkVariant, EpisodeDetail, MediaMetadata, SeasonDetail, TitleKind,
     UserGroupState, UserTitleState, artwork_path,
 };
 use crate::services::sources::{PlayableFile, SourceCatalog};
@@ -285,7 +285,7 @@ fn episode_display(show: &Show, season: &Season, episode: &Episode) -> Display {
 /// A title's row, resolved: what it shows, what it plays, and which title.
 struct Row {
     media_id: Uuid,
-    media_type: MediaTypeFilter,
+    media_type: TitleKind,
     episode_id: Option<Uuid>,
     file: PlayableFile,
     display: Display,
@@ -406,7 +406,7 @@ impl DbPlaybackService {
         let files = self.sources.movie_files(movie_id).await?;
         Ok(PlayableFile::pick(&files, last_file_id).map(|file| Row {
             media_id: movie_id,
-            media_type: MediaTypeFilter::Movie,
+            media_type: TitleKind::Movie,
             episode_id: None,
             file: file.clone(),
             display: movie_display(&movie),
@@ -431,7 +431,7 @@ impl DbPlaybackService {
         let files = self.sources.episode_files(&episode).await?;
         Ok(PlayableFile::pick(&files, last_file_id).map(|file| Row {
             media_id: show.id,
-            media_type: MediaTypeFilter::Show,
+            media_type: TitleKind::Show,
             episode_id: Some(episode.id),
             file: file.clone(),
             display: episode_display(&show, &season, &episode),

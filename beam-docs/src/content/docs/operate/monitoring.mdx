@@ -11,9 +11,15 @@ import { Aside } from "@astrojs/starlight/components";
 curl http://localhost:8000/v1/health
 ```
 
-Returns the server's status, its dependency checks, version and uptime. A healthy server answers
-`200`; a degraded one answers **`503`** with the same body shape, and the `checks` object names
-what is wrong — in practice, the database.
+Returns the server's status, its dependency checks, when they ran (`checked_at`), version and
+uptime. A healthy server answers `200`; a degraded one answers **`503`** with the same body shape,
+and the `checks` object names what is wrong — in practice, the database. Each check reports a
+`status` of `ok` or `error`, and a failing one says why in `detail`:
+
+```json
+{"status":"degraded","checks":{"database":{"status":"error","detail":"connection refused"}},
+ "checked_at":"2026-03-01T12:00:00Z","version":"0.1.0","uptime_secs":42}
+```
 
 This is the endpoint the Compose healthcheck uses, so a container stuck unhealthy is telling you
 this call is failing.

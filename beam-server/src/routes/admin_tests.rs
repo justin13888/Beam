@@ -38,8 +38,8 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 use crate::models::{
-    AdminLogEntryDto, AdminStatusResponse, AdminUserListResponse, CreateLibraryRequest, Library,
-    ScanJob, ScanState, ScanTrigger, UpdateAdminUserRequest,
+    AdminLogEntry, AdminStatus, AdminUserList, CreateLibraryRequest, Library, ScanJob, ScanState,
+    ScanTrigger, UpdateAdminUserRequest,
 };
 use crate::routes::admin::{
     create_library, delete_library, get_admin_events, get_admin_log_count, get_admin_logs,
@@ -1159,7 +1159,7 @@ async fn an_admin_reads_the_seeded_log_entries() {
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let logs: Vec<AdminLogEntryDto> = response.json();
+    let logs: Vec<AdminLogEntry> = response.json();
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].message, "server started");
 }
@@ -1554,7 +1554,7 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
         .send()
         .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let body: AdminUserListResponse = response.json();
+    let body: AdminUserList = response.json();
     assert_eq!(body.total, 4);
     assert_eq!(body.items.len(), 4);
     assert!(body.items.iter().all(|u| !u.disabled));
@@ -1562,13 +1562,13 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
 
     // Two pages of two cover all four users exactly once, and `total` stays the
     // full count on every page.
-    let page1: AdminUserListResponse = client
+    let page1: AdminUserList = client
         .get("/v1/admin/users?limit=2&offset=0")
         .cookie("beam_session", &token)
         .send()
         .await
         .json();
-    let page2: AdminUserListResponse = client
+    let page2: AdminUserList = client
         .get("/v1/admin/users?limit=2&offset=2")
         .cookie("beam_session", &token)
         .send()
@@ -1589,7 +1589,7 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
     assert_eq!(ids.len(), 4, "pages must cover every user exactly once");
 
     // limit is clamped to at least 1.
-    let clamped: AdminUserListResponse = client
+    let clamped: AdminUserList = client
         .get("/v1/admin/users?limit=0")
         .cookie("beam_session", &token)
         .send()
@@ -1834,7 +1834,7 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
         .send()
         .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let body: AdminStatusResponse = response.json();
+    let body: AdminStatus = response.json();
 
     // uptime_secs deserialized as u64 (its presence is shape-verified);
     // version is the crate's own.
@@ -1995,7 +1995,7 @@ async fn the_status_endpoint_reports_how_each_library_is_watched() {
             .cookie("beam_session", &token)
             .send()
             .await
-            .json::<AdminStatusResponse>()
+            .json::<AdminStatus>()
             .watcher
     };
 

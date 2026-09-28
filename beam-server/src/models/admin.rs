@@ -1,11 +1,15 @@
-//! REST-facing DTOs for the admin API. These wrap beam-index's
+//! Wire types for the admin API. These wrap beam-index's
 //! `AdminEvent`/`EventLevel`/`EventCategory` and beam-domain's
 //! `AdminLog`/`AdminLogLevel`/`AdminLogCategory` rather than adding
-//! `serde`/`salvo::oapi` derives directly to those crates, which would pull a
+//! `serde`/`kynos` derives directly to those crates, which would pull a
 //! web-framework dependency into the indexer/domain layers.
+//!
+//! Named without `Dto`/`Response` suffixes, per the wire conventions
+//! (`routes/conventions_tests.rs`). Where a wire type shares its name with the
+//! domain type it mirrors, the domain type is reached through its module.
 
-use beam_domain::models::admin_log::{AdminLog, AdminLogCategory, AdminLogLevel};
-use beam_index::services::notification::{AdminEvent, EventCategory, EventLevel};
+use beam_domain::models::admin_log::{self, AdminLog, AdminLogLevel};
+use beam_index::services::notification::{self, EventCategory, EventLevel};
 use beam_index::services::scan as index_scan;
 use beam_index::services::watch_status::{PollReason, WatchMode, WatchStatusSnapshot};
 use chrono::{DateTime, Utc};
@@ -13,27 +17,39 @@ use kynos::Schema;
 use kynos::schema::unchecked::Unchecked;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Serialize, Schema)]
+/// How severe an admin event or admin log entry is. One enum for both: the
+/// live event stream and the persisted log speak the same three levels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
 #[serde(rename_all = "snake_case")]
-pub enum AdminEventLevelDto {
+pub enum LogLevel {
     Info,
     Warning,
     Error,
 }
 
-impl From<EventLevel> for AdminEventLevelDto {
+impl From<EventLevel> for LogLevel {
     fn from(level: EventLevel) -> Self {
         match level {
-            EventLevel::Info => AdminEventLevelDto::Info,
-            EventLevel::Warning => AdminEventLevelDto::Warning,
-            EventLevel::Error => AdminEventLevelDto::Error,
+            EventLevel::Info => LogLevel::Info,
+            EventLevel::Warning => LogLevel::Warning,
+            EventLevel::Error => LogLevel::Error,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Schema)]
+impl From<AdminLogLevel> for LogLevel {
+    fn from(level: AdminLogLevel) -> Self {
+        match level {
+            AdminLogLevel::Info => LogLevel::Info,
+            AdminLogLevel::Warning => LogLevel::Warning,
+            AdminLogLevel::Error => LogLevel::Error,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Schema)]
 #[serde(rename_all = "snake_case")]
-pub enum AdminEventCategoryDto {
+pub enum AdminEventCategory {
     LibraryScan,
     /// A scan job's structured progress; the event carries `scan`. Sent on
     /// the live stream only, never kept in the recent-event snapshot.
@@ -45,23 +61,23 @@ pub enum AdminEventCategoryDto {
     System,
 }
 
-impl From<EventCategory> for AdminEventCategoryDto {
+impl From<EventCategory> for AdminEventCategory {
     fn from(category: EventCategory) -> Self {
         match category {
-            EventCategory::LibraryScan => AdminEventCategoryDto::LibraryScan,
-            EventCategory::ScanProgress => AdminEventCategoryDto::ScanProgress,
-            EventCategory::Enrichment => AdminEventCategoryDto::Enrichment,
-            EventCategory::System => AdminEventCategoryDto::System,
+            EventCategory::LibraryScan => AdminEventCategory::LibraryScan,
+            EventCategory::ScanProgress => AdminEventCategory::ScanProgress,
+            EventCategory::Enrichment => AdminEventCategory::Enrichment,
+            EventCategory::System => AdminEventCategory::System,
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Schema)]
-pub struct AdminEventDto {
+pub struct AdminEvent {
     pub id: String,
     pub timestamp: DateTime<Utc>,
-    pub level: AdminEventLevelDto,
-    pub category: AdminEventCategoryDto,
+    pub level: LogLevel,
+    pub category: AdminEventCategory,
     pub message: String,
     pub library_id: Option<String>,
     pub library_name: Option<String>,
@@ -73,9 +89,9 @@ pub struct AdminEventDto {
     pub enrichment: Option<crate::models::enrichment::EnrichmentEvent>,
 }
 
-impl From<AdminEvent> for AdminEventDto {
-    fn from(event: AdminEvent) -> Self {
-        let AdminEvent {
+impl From<notification::AdminEvent> for AdminEvent {
+    fn from(event: notification::AdminEvent) -> Self {
+        let notification::AdminEvent {
             id,
             timestamp,
             level,
@@ -299,38 +315,36 @@ impl From<index_scan::ScanEvent> for ScanEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Schema)]
+/// What part of the server wrote an admin log entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
 #[serde(rename_all = "snake_case")]
-pub enum AdminLogLevelDto {
-    Info,
-    Warning,
-    Error,
+pub enum AdminLogCategory {
+    /// Library scanning and indexing.
+    LibraryScan,
+    /// The server itself.
+    System,
+    /// Sign-in and sessions.
+    Auth,
+    /// Metadata enrichment.
+    Enrichment,
 }
 
-impl From<AdminLogLevel> for AdminLogLevelDto {
-    fn from(level: AdminLogLevel) -> Self {
-        match level {
-            AdminLogLevel::Info => AdminLogLevelDto::Info,
-            AdminLogLevel::Warning => AdminLogLevelDto::Warning,
-            AdminLogLevel::Error => AdminLogLevelDto::Error,
+impl From<admin_log::AdminLogCategory> for AdminLogCategory {
+    fn from(category: admin_log::AdminLogCategory) -> Self {
+        match category {
+            admin_log::AdminLogCategory::LibraryScan => AdminLogCategory::LibraryScan,
+            admin_log::AdminLogCategory::System => AdminLogCategory::System,
+            admin_log::AdminLogCategory::Auth => AdminLogCategory::Auth,
+            admin_log::AdminLogCategory::Enrichment => AdminLogCategory::Enrichment,
         }
     }
 }
 
-fn category_to_str(category: &AdminLogCategory) -> &'static str {
-    match category {
-        AdminLogCategory::LibraryScan => "library_scan",
-        AdminLogCategory::System => "system",
-        AdminLogCategory::Auth => "auth",
-        AdminLogCategory::Enrichment => "enrichment",
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
-pub struct AdminLogEntryDto {
+pub struct AdminLogEntry {
     pub id: String,
-    pub level: AdminLogLevelDto,
-    pub category: String,
+    pub level: LogLevel,
+    pub category: AdminLogCategory,
     pub message: String,
     /// Structured context an operator can read, whose shape depends on the
     /// event that produced it.
@@ -345,15 +359,23 @@ pub struct AdminLogEntryDto {
     pub created_at: String,
 }
 
-impl From<AdminLog> for AdminLogEntryDto {
+impl From<AdminLog> for AdminLogEntry {
     fn from(log: AdminLog) -> Self {
+        let AdminLog {
+            id,
+            level,
+            category,
+            message,
+            details,
+            created_at,
+        } = log;
         Self {
-            id: log.id.to_string(),
-            level: log.level.into(),
-            category: category_to_str(&log.category).to_string(),
-            message: log.message,
-            details: log.details.map(Unchecked),
-            created_at: log.created_at.to_rfc3339(),
+            id: id.to_string(),
+            level: level.into(),
+            category: category.into(),
+            message,
+            details: details.map(Unchecked),
+            created_at: created_at.to_rfc3339(),
         }
     }
 }
@@ -365,7 +387,7 @@ pub struct CreateLibraryRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct AdminLogCountResponse {
+pub struct AdminLogCount {
     pub count: u64,
 }
 
@@ -375,7 +397,7 @@ pub struct AdminLogCountResponse {
 /// read-only here: admin is derived from the IdP-asserted claim on every
 /// login, so there is deliberately no endpoint to change it.
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
-pub struct AdminUserDto {
+pub struct AdminUser {
     pub id: String,
     pub display_name: String,
     pub email: Option<String>,
@@ -387,7 +409,7 @@ pub struct AdminUserDto {
     pub created_at: DateTime<Utc>,
 }
 
-impl From<beam_auth::utils::models::User> for AdminUserDto {
+impl From<beam_auth::utils::models::User> for AdminUser {
     fn from(user: beam_auth::utils::models::User) -> Self {
         let beam_auth::utils::models::User {
             id,
@@ -414,8 +436,8 @@ impl From<beam_auth::utils::models::User> for AdminUserDto {
 }
 
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct AdminUserListResponse {
-    pub items: Vec<AdminUserDto>,
+pub struct AdminUserList {
+    pub items: Vec<AdminUser>,
     /// Total number of users across all pages.
     pub total: u64,
 }
@@ -466,13 +488,13 @@ impl From<beam_domain::models::enrichment::EnrichmentStatusCounts> for Enrichmen
 /// One recent library-scan admin log entry, slimmed to what the system
 /// status tab renders.
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct RecentScanDto {
-    pub level: AdminLogLevelDto,
+pub struct RecentScan {
+    pub level: LogLevel,
     pub message: String,
     pub timestamp: DateTime<Utc>,
 }
 
-impl From<AdminLog> for RecentScanDto {
+impl From<AdminLog> for RecentScan {
     fn from(log: AdminLog) -> Self {
         let AdminLog {
             id: _,
@@ -491,7 +513,7 @@ impl From<AdminLog> for RecentScanDto {
 }
 
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct AdminStatusResponse {
+pub struct AdminStatus {
     /// Whole seconds since the server process built its state.
     pub uptime_secs: u64,
     /// Server crate version (`CARGO_PKG_VERSION`).
@@ -502,7 +524,7 @@ pub struct AdminStatusResponse {
     /// an unconfigured provider could match stays un-enriched.
     pub enrichment_providers: Vec<crate::models::enrichment::EnrichmentProviderStatus>,
     /// Most recent `library_scan` admin log entries, newest first.
-    pub recent_scans: Vec<RecentScanDto>,
+    pub recent_scans: Vec<RecentScan>,
     /// How the filesystem watcher observes each library.
     pub watcher: WatcherStatus,
 }
@@ -615,8 +637,8 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn admin_event_dto_maps_all_fields() {
-        let event = AdminEvent {
+    fn admin_event_maps_all_fields() {
+        let event = notification::AdminEvent {
             id: "evt-1".to_string(),
             timestamp: Utc::now(),
             level: EventLevel::Warning,
@@ -627,28 +649,47 @@ mod tests {
             scan: None,
             enrichment: None,
         };
-        let dto = AdminEventDto::from(event.clone());
-        assert_eq!(dto.id, "evt-1");
-        assert!(matches!(dto.level, AdminEventLevelDto::Warning));
-        assert!(matches!(dto.category, AdminEventCategoryDto::LibraryScan));
-        assert_eq!(dto.message, "scan finished");
-        assert_eq!(dto.library_id, Some("lib-1".to_string()));
+        let wire = AdminEvent::from(event.clone());
+        assert_eq!(wire.id, "evt-1");
+        assert_eq!(wire.level, LogLevel::Warning);
+        assert_eq!(wire.category, AdminEventCategory::LibraryScan);
+        assert_eq!(wire.message, "scan finished");
+        assert_eq!(wire.library_id, Some("lib-1".to_string()));
+    }
+
+    /// An admin log category is spelled on the wire exactly as it is stored:
+    /// both are what an operator filters and reads, and the web client
+    /// compares them as strings. Derived from the entity's own column values,
+    /// so neither side is restated here.
+    #[test]
+    fn every_admin_log_category_is_spelled_on_the_wire_as_it_is_stored() {
+        use sea_orm::{ActiveEnum, Iterable};
+
+        for stored in beam_entity::admin_log::AdminLogCategory::iter() {
+            let column = stored.to_value();
+            let wire = AdminLogCategory::from(admin_log::AdminLogCategory::from(stored));
+            assert_eq!(
+                serde_json::to_value(wire).expect("serializes"),
+                serde_json::Value::String(column.clone()),
+                "{column} is spelled differently on the wire"
+            );
+        }
     }
 
     #[test]
-    fn admin_log_entry_dto_maps_category_to_snake_case_string() {
+    fn admin_log_entry_carries_the_typed_category_and_level() {
         let log = AdminLog {
             id: Uuid::new_v4(),
             level: AdminLogLevel::Error,
-            category: AdminLogCategory::Enrichment,
+            category: admin_log::AdminLogCategory::Enrichment,
             message: "match failed".to_string(),
             details: None,
             created_at: Utc::now(),
         };
-        let dto = AdminLogEntryDto::from(log);
-        assert_eq!(dto.category, "enrichment");
-        assert!(matches!(dto.level, AdminLogLevelDto::Error));
-        assert_eq!(dto.message, "match failed");
+        let entry = serde_json::to_value(AdminLogEntry::from(log)).expect("serializes");
+        assert_eq!(entry["category"], "enrichment");
+        assert_eq!(entry["level"], "error");
+        assert_eq!(entry["message"], "match failed");
     }
 
     #[test]

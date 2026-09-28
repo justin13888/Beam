@@ -7,7 +7,7 @@ use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::models::search::{MediaConnection, MediaSortField, MediaTypeFilter, SortOrder};
+use crate::models::search::{MediaConnection, MediaSortField, SortOrder, TitleKind};
 use crate::models::{EpisodeDetail, MediaMetadata, MediaSourceConnection, SeasonDetail};
 use crate::routes::api_error::{
     MediaBrowseError, MediaLookupError, MediaRefLookupError, MediaSourcesError, SessionAuth,
@@ -50,7 +50,7 @@ pub struct BrowseQuery {
     /// Sort order (default `asc`).
     pub sort_order: Option<SortOrder>,
     /// Filter by media type.
-    pub media_type: Option<MediaTypeFilter>,
+    pub media_type: Option<TitleKind>,
     /// Filter by genre, by name or slug: `Science Fiction` and
     /// `science-fiction` name the same genre.
     pub genre: Option<String>,
