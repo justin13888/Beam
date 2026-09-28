@@ -228,14 +228,8 @@ impl Fixture {
             })
             .await
             .unwrap();
-        self.file(
-            MediaFileContent::Movie {
-                movie_entry_id: entry.id,
-            },
-            size_bytes,
-            100,
-        )
-        .await
+        self.file(MediaFileContent::movie(entry.id), size_bytes, 100)
+            .await
     }
 
     async fn show(&self, title: &str) -> Uuid {
@@ -481,13 +475,7 @@ async fn a_report_for_a_file_that_is_no_title_is_a_404() {
     let client = client(&fixture);
     let token = session(&fixture).await;
     let orphan = fixture
-        .file(
-            MediaFileContent::Movie {
-                movie_entry_id: Uuid::new_v4(),
-            },
-            1_000,
-            100,
-        )
+        .file(MediaFileContent::movie(Uuid::new_v4()), 1_000, 100)
         .await;
 
     for file in [Uuid::new_v4(), orphan] {

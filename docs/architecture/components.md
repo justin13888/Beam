@@ -199,7 +199,7 @@ This crate is what lets services be tested purely against in-memory fakes.
   image URLs. Ships `InMemoryEnrichmentProvider` (test-utils) and `NoopEnrichmentProvider` (a
   production-safe "not found" default). Concrete provider SDKs live in `beam-index`, never here.
 - `utils/` — pure helpers: `hash.rs` (XXH3), `file.rs` (`FileType`), `identity.rs` (title identity
-  keys), `filename.rs` (scene-filename title/year/episode/edition parsing of one stem),
+  keys), `filename.rs` (scene-filename title/year/episode/edition/part parsing of one stem),
   `media_path.rs` (`infer_media`: what a path relative to a library root is, folders included --
   season folders, absolute numbering -- versioned by `CLASSIFIER_VERSION`), `nfo.rs` (Kodi NFO
   parsing), `classification.rs` (`classify`: path inference refined by an NFO and container tags,

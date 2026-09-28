@@ -1595,6 +1595,38 @@ mod title_identity {
         );
     }
 
+    /// A retitle compares and replaces the title in one statement, on the one
+    /// row, so a title written in between is never overwritten (issue #233).
+    #[tokio::test]
+    async fn retitle_sets_the_title_only_where_it_is_still_the_expected_one() {
+        let db = connection(empty_mock());
+        let movies = SqlMovieRepository::new(db.clone());
+        let _ = movies
+            .retitle_from(Uuid::from_u128(88), "Movie - CD1", "Movie")
+            .await;
+        drop(movies);
+
+        let sql = statements(db);
+        assert_eq!(sql.len(), 1, "one statement: {sql:?}");
+        let statement = &sql[0];
+        assert!(statement.sql.starts_with("UPDATE"), "{}", statement.sql);
+        assert_contains(statement, r#""title" = $1"#);
+        assert_filters(statement, "movies", "id", "=");
+        assert_filters(statement, "movies", "title", "=");
+        let values = bound_values(statement);
+        assert!(values[0].contains("\"Movie\""), "the new title: {values:?}");
+        assert!(
+            values.iter().any(|v| v.contains("\"Movie - CD1\"")),
+            "the expected title is compared: {values:?}"
+        );
+        assert!(
+            values
+                .iter()
+                .any(|v| v.contains(&Uuid::from_u128(88).to_string())),
+            "{values:?}"
+        );
+    }
+
     /// The rekey pass reads keyed titles whose key older rules derived,
     /// oldest first, never a keyless one.
     #[tokio::test]

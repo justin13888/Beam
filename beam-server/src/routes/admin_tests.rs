@@ -60,10 +60,10 @@ struct StubHashService;
 
 #[async_trait::async_trait]
 impl HashService for StubHashService {
-    fn hash_sync(&self, _path: &std::path::Path) -> std::io::Result<u64> {
+    fn hash_sync(&self, _file: std::fs::File) -> std::io::Result<u64> {
         unimplemented!("not called in admin route tests")
     }
-    async fn hash_async(&self, _path: PathBuf) -> std::io::Result<u64> {
+    async fn hash_async(&self, _file: std::fs::File) -> std::io::Result<u64> {
         unimplemented!("not called in admin route tests")
     }
 }
@@ -200,6 +200,12 @@ enum Gate {
     Closed,
 }
 
+/// A hash distinct for each file, standing in for its content's.
+fn stand_in_hash(file: &std::fs::File) -> std::io::Result<u64> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok(file.metadata()?.ino())
+}
+
 /// The indexer's hasher, held at a gate the test controls. The hash itself
 /// is a stand-in: nothing here compares file contents.
 #[derive(Debug)]
@@ -209,17 +215,17 @@ struct GatedHashService {
 
 #[async_trait::async_trait]
 impl HashService for GatedHashService {
-    fn hash_sync(&self, path: &std::path::Path) -> std::io::Result<u64> {
-        Ok(path.as_os_str().len() as u64)
+    fn hash_sync(&self, file: std::fs::File) -> std::io::Result<u64> {
+        stand_in_hash(&file)
     }
 
-    async fn hash_async(&self, path: PathBuf) -> std::io::Result<u64> {
+    async fn hash_async(&self, file: std::fs::File) -> std::io::Result<u64> {
         self.gate
             .acquire()
             .await
             .expect("the gate is never closed")
             .forget();
-        Ok(path.as_os_str().len() as u64)
+        stand_in_hash(&file)
     }
 }
 

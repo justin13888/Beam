@@ -1,15 +1,20 @@
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+use crate::library_file::LibraryFile;
 use crate::probe::metadata::{MetadataError, VideoFileMetadata};
 
 /// Service for extracting media information from files.
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait MediaInfoService: Send + Sync + std::fmt::Debug {
-    /// Extract video metadata from a file path
-    async fn get_video_metadata(&self, path: &Path) -> Result<VideoFileMetadata, MetadataError>;
+    /// Extract video metadata from a library file, reading the open handle
+    /// alone -- never its path, which a link may have been swapped into
+    /// since it was opened (issue #238).
+    async fn get_video_metadata(
+        &self,
+        file: LibraryFile,
+    ) -> Result<VideoFileMetadata, MetadataError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -30,7 +35,10 @@ impl LocalMediaInfoService {
 
 #[async_trait::async_trait]
 impl MediaInfoService for LocalMediaInfoService {
-    async fn get_video_metadata(&self, path: &Path) -> Result<VideoFileMetadata, MetadataError> {
+    async fn get_video_metadata(
+        &self,
+        file: LibraryFile,
+    ) -> Result<VideoFileMetadata, MetadataError> {
         let _permit = if let Some(sem) = &self.semaphore {
             Some(sem.acquire().await.map_err(|e| {
                 MetadataError::UnknownError(format!("Failed to acquire semaphore: {e}"))
@@ -39,8 +47,7 @@ impl MediaInfoService for LocalMediaInfoService {
             None
         };
 
-        let path_buf = path.to_path_buf();
-        tokio::task::spawn_blocking(move || VideoFileMetadata::from_path(&path_buf))
+        tokio::task::spawn_blocking(move || VideoFileMetadata::from_library_file(file))
             .await
             .map_err(|e| MetadataError::UnknownError(format!("Blocking task join error: {e}")))?
     }

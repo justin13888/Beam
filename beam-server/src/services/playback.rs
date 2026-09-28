@@ -710,7 +710,7 @@ impl PlaybackService for DbPlaybackService {
 
         let mut span = None;
         let target = match file.content {
-            Some(MediaFileContent::Movie { movie_entry_id }) => {
+            Some(MediaFileContent::Movie { movie_entry_id, .. }) => {
                 let entry = self
                     .movies
                     .find_entry_by_id(movie_entry_id)

@@ -20,7 +20,7 @@ use beam_domain::models::show::Show;
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::utils::nfo::{MAX_NFO_BYTES, Nfo, NfoKind, parse_nfo};
 
-use crate::library_file::{open_regular_file, relative_to};
+use crate::library_file::{FileMeta, open_regular_file, relative_to, stat_regular_file};
 
 use super::*;
 
@@ -55,17 +55,18 @@ const STAMP_SETTLE: chrono::Duration = chrono::Duration::seconds(2);
 /// moves on every write, so an unchanged stamp means an unwritten file.
 /// `None` where the platform has no change time: the file is then read every
 /// time.
-pub(super) fn change_stamp(meta: &std::fs::Metadata) -> Option<String> {
+pub(super) fn change_stamp(meta: &FileMeta) -> Option<String> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
+        let (mtime, mtime_nsec) = meta.mtime();
+        let (ctime, ctime_nsec) = meta.ctime();
         Some(format!(
             "{}:{}.{:09}:{}.{:09}",
-            meta.len(),
-            meta.mtime(),
-            meta.mtime_nsec(),
-            meta.ctime(),
-            meta.ctime_nsec()
+            meta.size(),
+            mtime,
+            mtime_nsec,
+            ctime,
+            ctime_nsec
         ))
     }
     #[cfg(not(unix))]
@@ -77,12 +78,12 @@ pub(super) fn change_stamp(meta: &std::fs::Metadata) -> Option<String> {
 
 /// When a file was last written, by its modification or change time,
 /// whichever is later.
-fn last_write(meta: &std::fs::Metadata) -> Option<DateTime<Utc>> {
-    let modified: Option<DateTime<Utc>> = meta.modified().ok().map(Into::into);
+fn last_write(meta: &FileMeta) -> Option<DateTime<Utc>> {
+    let modified: Option<DateTime<Utc>> = meta.modified().map(Into::into);
     #[cfg(unix)]
     let changed = {
-        use std::os::unix::fs::MetadataExt;
-        DateTime::from_timestamp(meta.ctime(), meta.ctime_nsec().clamp(0, 999_999_999) as u32)
+        let (secs, nanos) = meta.ctime();
+        DateTime::from_timestamp(secs, nanos)
     };
     #[cfg(not(unix))]
     let changed: Option<DateTime<Utc>> = None;
@@ -147,17 +148,14 @@ thread_local! {
 
 /// Read the NFO at `path` in the library rooted at `root`: `None` when there
 /// is no regular file there, or it is larger than [`MAX_NFO_BYTES`], or
-/// cannot be read. Opened read-only and never through a link, the NFO's own
-/// or a folder's above it beneath the root ([`open_regular_file`]); a
-/// failure is logged, never raised -- a broken NFO leaves the file
-/// classified by its path.
+/// cannot be read. Stat'ed and opened read-only never through a link, the
+/// NFO's own or a folder's above it beneath the root ([`stat_regular_file`],
+/// [`open_regular_file`]); a failure is logged, never raised -- a broken NFO
+/// leaves the file classified by its path.
 pub(super) fn read_nfo_file(root: &Path, path: &Path) -> Option<NfoRead> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    if meta.len() > MAX_NFO_BYTES {
-        warn!(path = %path.display(), bytes = meta.len(), "NFO is larger than Beam reads; ignored");
+    let meta = stat_regular_file(root, path).ok()?;
+    if meta.size() > MAX_NFO_BYTES {
+        warn!(path = %path.display(), bytes = meta.size(), "NFO is larger than Beam reads; ignored");
         return None;
     }
     // The open file is statted before it is read: a write after this stat
@@ -182,6 +180,7 @@ pub(super) fn read_nfo_file(root: &Path, path: &Path) -> Option<NfoRead> {
         warn!(path = %path.display(), "NFO grew past the size Beam reads; ignored");
         return None;
     }
+    let meta = FileMeta::from(&meta);
     let content = NfoContent {
         size_bytes: bytes.len() as u64,
         content_hash: format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&bytes)),
@@ -650,7 +649,7 @@ impl LocalIndexService {
             return Ok(outcome);
         }
         for file in files {
-            let Some(MediaFileContent::Movie { movie_entry_id }) = file.content else {
+            let Some(MediaFileContent::Movie { movie_entry_id, .. }) = file.content else {
                 continue;
             };
             if !is_this(locate_file_nfo(root, &file.path)) {

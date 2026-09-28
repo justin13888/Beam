@@ -95,6 +95,15 @@ strength. Each requirement is independently testable. See `product.md` for narra
     only release noise (never the library root's); each edition (a `{edition-...}` tag, or edition
     words such as `Director's Cut` or `Extended` after the title or its parenthesised year) of it in
     a library MUST be one `movie_entries` row however many copies exist;
+  - one part of a movie split across files -- a trailing `cd`, `disc`, `disk`, `part` or `pt` and a
+    number, set off by a space, dot, dash or underscore (`Movie (2019) - CD1`, `- Part 2`, `.pt1`,
+    `disc1`) with nothing after it but release noise -- MUST key the movie its name spells without
+    the token and record the number as its part; `part` and `pt` MUST count only after a release
+    year in the name itself, never on the strength of the folder, since a title can end in them
+    (`Harry Potter and the Deathly Hallows Part 1 (2010)`, `The Hunger Games Mockingjay Pt 1`) and
+    one folder may hold two films of one year (`Che (2008)/Che Part 1.mkv`, `Che Part 2.mkv`) or
+    a sequel beside its predecessor (`The Godfather (1972)/The Godfather Part 2.mkv`), and a token
+    that opens the name or is followed by title words (`Part 2: The Sequel (2020)`) is the title's;
   - a file in a season folder with no episode number, a file in a range-only folder with no season
     and episode marker, a `<title> - <n>` name no folder names as a show, and a fractional
     `<title> - <n>.<d>` (`Show - 12.5`), MUST be indexed without a title
@@ -139,20 +148,25 @@ strength. Each requirement is independently testable. See `product.md` for narra
   `library-path-overlaps-data-dir` (400), compared by whole components after canonicalization. At
   startup the server MUST refuse to start if `BEAM_DATA_DIR` overlaps a stored library root, and
   MUST log a warning, not refuse, for stored library roots that overlap each other. The
-  indexer, the watcher and file delivery MUST NOT follow symbolic links beneath a library root,
-  except where the indexer hashes and probes a video, a known gap tracked in
-  [#238](https://github.com/justin13888/Beam/issues/238) and stated at the end of this
-  requirement; a link is not a library file, so a row whose path has become one is treated as
-  missing (FR-211). The walk never follows a link. Every read of a library file's contents that
-  Beam parses or serves -- an NFO read by the indexer, a video or a subtitle file delivered -- MUST
-  open it relative to its library root with no symbolic link followed at any component beneath
-  the root: neither the file nor any folder between it and the root. The root itself is opened as
+  indexer, the watcher and file delivery MUST NOT follow symbolic links beneath a library root; a
+  link is not a library file, so a row whose path has become one is treated as missing (FR-211).
+  The walk never follows a link. Every read of a library file that Beam parses, serves or records
+  MUST resolve it relative to its library root with no symbolic link followed at any component
+  beneath the root: neither the file nor any folder between it and the root. A file whose contents
+  are read -- an NFO read by the indexer, a video the indexer hashes and probes, a video or a
+  subtitle file delivered -- MUST be opened so; a file whose stat alone is recorded -- the stat of
+  each entry the walk lists (a video's size, modification time and identity, a subtitle's size and
+  modification time, an NFO's change stamp) and every later stat the indexer or the watcher compares
+  with a row -- MUST be stat'ed so, from its folder so resolved, without following a link at the
+  file itself. The root itself is opened as
   configured, so a root that is itself a link is followed. Delivery serves only a regular file so opened, read from that one handle,
   answering a link at any of those components, or a FIFO or device in the file's place, as
-  `source-file-missing`. The indexer's hashing and probing of a video open its full stored path, so
-  a link swapped in at the file or at any folder above it, between the walk and that read, is
-  followed for that read. Its hash and stream metadata are recorded, and delivery still refuses
-  the file. This is a known gap, tracked in [#238](https://github.com/justin13888/Beam/issues/238).
+  `source-file-missing`. The indexer hashes and probes a video from one such handle, so nothing is
+  ever recorded from a file that a link swapped in at the file or at any folder above it leads to.
+  A stat or open that meets such a link fails, and the path is treated as missing, as a link the
+  walk saw is. A folder, or a file, that the indexer's current pass already holds open is read as
+  it was when opened, so for the rest of that pass its files may still read as present; the next
+  pass meets the link, refuses it and marks the path missing.
 - **FR-213**: A library whose root is on a network filesystem, or whose native watch hit the OS
   watch limit, MUST be polled every `BEAM_WATCH_POLL_INTERVAL_SECS` instead of relying on native
   events, with no configuration switch, and MUST be scanned once when it starts being polled so
@@ -452,6 +466,10 @@ strength. Each requirement is independently testable. See `product.md` for narra
   naming its real codec as FFmpeg does, with language, title and default/forced flags — so the
   client can present a source-quality picker and choose tracks. A value the file does not state
   MUST be absent, never a substituted default. A file holding a run of episodes MUST say so. The
+  parts of a multi-part movie that share an edition and a folder MUST be one version listing every
+  part's file in part order, each with its own stream URL, so a client can play them in sequence
+  without the server joining them, when their numbers run 1..n with no gap or repeat (otherwise
+  each file MUST be a version of its own); its size and duration are all the parts'. The
   endpoint accepts a movie id or an episode id; a show id is rejected, since shows have no files of
   their own.
 - **FR-506**: Switching between file versions during the source-selection scenario MUST result in
@@ -506,7 +524,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-513**: Of a title's file versions, exactly one MUST be marked primary and listed first: the
   default edition before a named one, then the tallest picture, the highest video bit rate, the
   largest file, and the lowest file id. The choice MUST be computed from the files when read, and
-  the detail endpoint's `file_id` and duration MUST be the primary's.
+  the detail endpoint's `file_id` and duration MUST be the primary's. A multi-part version is ranked
+  by its first part's picture and all its parts' size, and its `file_id` is its first part's.
 - **FR-514**: The server MUST let a user mark a movie, an episode, a season or a whole show watched
   -- a season or show marking each of its episodes, idempotently -- or unwatched, forgetting its
   played state and position; and MUST carry the user's state on detail payloads: played, position

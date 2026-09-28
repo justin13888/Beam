@@ -211,7 +211,8 @@ impl Harness {
         let probe_fails = Arc::new(AtomicBool::new(false));
         let prober_fails = probe_fails.clone();
         let mut prober = MockMediaInfoService::new();
-        prober.expect_get_video_metadata().returning(move |path| {
+        prober.expect_get_video_metadata().returning(move |file| {
+            let path = file.path();
             if prober_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(MetadataError::UnknownError("not probeable yet".to_string()));
             }
@@ -336,7 +337,7 @@ impl Harness {
     }
 
     fn movie_of(&self, rel: &str) -> Movie {
-        let Some(MediaFileContent::Movie { movie_entry_id }) = self.file(rel).content else {
+        let Some(MediaFileContent::Movie { movie_entry_id, .. }) = self.file(rel).content else {
             panic!("{rel} is not a movie file");
         };
         let movie_id = self.movie_repo.entries.lock().unwrap()[&movie_entry_id].movie_id;
@@ -1984,7 +1985,9 @@ async fn an_nfo_whose_stat_stamp_is_unchanged_is_not_read_again() {
     // A record whose content no longer matches the NFO, but whose stamp
     // does: only a read would find the difference.
     let nfo = h.root.join("Matrix/movie.nfo");
-    let stamp = hints::change_stamp(&std::fs::symlink_metadata(&nfo).unwrap());
+    let stamp = hints::change_stamp(&crate::library_file::FileMeta::from(
+        &std::fs::symlink_metadata(&nfo).unwrap(),
+    ));
     let stale = |stamp: Option<String>| {
         let mut rows = h.applied_nfo_repo.rows.lock().unwrap();
         let row = rows.get_mut(&nfo).unwrap();
@@ -2113,7 +2116,9 @@ async fn a_settled_nfos_stamp_is_recorded_and_spares_the_next_scan_a_read() {
     h.scan().await;
 
     let nfo = h.root.join("Matrix/movie.nfo");
-    let stamp = hints::change_stamp(&std::fs::symlink_metadata(&nfo).unwrap());
+    let stamp = hints::change_stamp(&crate::library_file::FileMeta::from(
+        &std::fs::symlink_metadata(&nfo).unwrap(),
+    ));
     assert!(stamp.is_some());
     assert_eq!(
         h.applied("Matrix/movie.nfo")

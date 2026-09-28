@@ -14013,6 +14013,150 @@
         ],
         "description": "The episodes one file holds, first and last inclusive."
       },
+      "SubtitleOrigin": {
+        "type": "string",
+        "enum": [
+          "embedded",
+          "sidecar"
+        ],
+        "description": "Where a subtitle track lives."
+      },
+      "SubtitleTrack": {
+        "properties": {
+          "origin": {
+            "$ref": "#/components/schemas/SubtitleOrigin"
+          },
+          "index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "The stream's index in its file; present exactly for an embedded\ntrack."
+          },
+          "sidecar_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The subtitle file's identifier; present exactly for a sidecar."
+          },
+          "codec": {
+            "type": "string",
+            "description": "FFmpeg's codec name: `subrip`, `webvtt`, `ass`, `ssa`, `mov_text`, or\nan image format such as `hdmv_pgs_subtitle`."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ISO 639-2/B language code (`eng`, `spa`)."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The track's own title (`Commentary`, `pt-BR`)."
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "is_forced": {
+            "type": "boolean",
+            "description": "Subtitles only for foreign-language dialogue."
+          },
+          "is_hearing_impaired": {
+            "type": "boolean",
+            "description": "Subtitles for the deaf and hard of hearing (SDH)."
+          },
+          "is_text": {
+            "type": "boolean",
+            "description": "Text a client can render itself, as opposed to an image format it\nmust decode."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to fetch the track as stored; present exactly for a sidecar."
+          },
+          "webvtt_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to fetch the track as WebVTT, which a browser's `<track>`\nelement reads; present for a SubRip or WebVTT sidecar small enough to\nconvert."
+          }
+        },
+        "type": "object",
+        "required": [
+          "origin",
+          "codec",
+          "is_default",
+          "is_forced",
+          "is_hearing_impaired",
+          "is_text"
+        ],
+        "description": "A subtitle track of a source file."
+      },
+      "SourcePart": {
+        "properties": {
+          "file_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "part_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 1.0,
+            "format": "uint32",
+            "description": "The part the filename names (`CD2` is `2`), from 1; absent for a\nwhole file."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          },
+          "duration_secs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "subtitle_tracks": {
+            "items": {
+              "$ref": "#/components/schemas/SubtitleTrack"
+            },
+            "type": "array",
+            "description": "This file's subtitle tracks, as the source's `subtitle_tracks` lists\nthe first part's: a subtitle file beside a part times that part."
+          },
+          "stream_url": {
+            "type": "string",
+            "description": "Direct-play stream URL for this file."
+          },
+          "download_url": {
+            "type": "string",
+            "description": "Download URL for this file."
+          }
+        },
+        "type": "object",
+        "required": [
+          "file_id",
+          "size_bytes",
+          "subtitle_tracks",
+          "stream_url",
+          "download_url"
+        ],
+        "description": "One file of a source, played in the order the source's `parts` lists it."
+      },
       "VideoTrack": {
         "properties": {
           "index": {
@@ -14149,101 +14293,12 @@
         ],
         "description": "An audio stream of a source file."
       },
-      "SubtitleOrigin": {
-        "type": "string",
-        "enum": [
-          "embedded",
-          "sidecar"
-        ],
-        "description": "Where a subtitle track lives."
-      },
-      "SubtitleTrack": {
-        "properties": {
-          "origin": {
-            "$ref": "#/components/schemas/SubtitleOrigin"
-          },
-          "index": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "maximum": 4294967295.0,
-            "minimum": 0.0,
-            "format": "uint32",
-            "description": "The stream's index in its file; present exactly for an embedded\ntrack."
-          },
-          "sidecar_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "The subtitle file's identifier; present exactly for a sidecar."
-          },
-          "codec": {
-            "type": "string",
-            "description": "FFmpeg's codec name: `subrip`, `webvtt`, `ass`, `ssa`, `mov_text`, or\nan image format such as `hdmv_pgs_subtitle`."
-          },
-          "language": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The ISO 639-2/B language code (`eng`, `spa`)."
-          },
-          "title": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The track's own title (`Commentary`, `pt-BR`)."
-          },
-          "is_default": {
-            "type": "boolean"
-          },
-          "is_forced": {
-            "type": "boolean",
-            "description": "Subtitles only for foreign-language dialogue."
-          },
-          "is_hearing_impaired": {
-            "type": "boolean",
-            "description": "Subtitles for the deaf and hard of hearing (SDH)."
-          },
-          "is_text": {
-            "type": "boolean",
-            "description": "Text a client can render itself, as opposed to an image format it\nmust decode."
-          },
-          "url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Where to fetch the track as stored; present exactly for a sidecar."
-          },
-          "webvtt_url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Where to fetch the track as WebVTT, which a browser's `<track>`\nelement reads; present for a SubRip or WebVTT sidecar small enough to\nconvert."
-          }
-        },
-        "type": "object",
-        "required": [
-          "origin",
-          "codec",
-          "is_default",
-          "is_forced",
-          "is_hearing_impaired",
-          "is_text"
-        ],
-        "description": "A subtitle track of a source file."
-      },
       "MediaSource": {
         "properties": {
           "file_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The file this source starts with: its only file, or its first part."
           },
           "is_primary": {
             "type": "boolean",
@@ -14267,10 +14322,18 @@
             ],
             "description": "Present when this file holds a run of episodes (`S01E01-E03`): its\nduration is then the whole run's, not one episode's."
           },
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/SourcePart"
+            },
+            "type": "array",
+            "description": "The files this source plays, in order: one for a whole file, each\npart of a multi-part movie otherwise. Never empty."
+          },
           "size_bytes": {
             "type": "integer",
             "minimum": 0.0,
-            "format": "uint64"
+            "format": "uint64",
+            "description": "Every part's size, together."
           },
           "mime_type": {
             "type": [
@@ -14289,7 +14352,8 @@
               "number",
               "null"
             ],
-            "format": "double"
+            "format": "double",
+            "description": "Every part's duration, together; absent while any part's is unknown."
           },
           "video_tracks": {
             "items": {
@@ -14325,6 +14389,7 @@
         "required": [
           "file_id",
           "is_primary",
+          "parts",
           "size_bytes",
           "video_tracks",
           "audio_tracks",
@@ -14332,7 +14397,7 @@
           "stream_url",
           "download_url"
         ],
-        "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.\n\nThe one track model Beam has (issue #189): every video, audio and\nsubtitle track here is tied to this file, addressed by its stream index,\nand names its codec as FFmpeg does (`h264`, `eac3`, `subrip`)."
+        "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.\n\nThe one track model Beam has (issue #189): every video, audio and\nsubtitle track here is tied to this file, addressed by its stream index,\nand names its codec as FFmpeg does (`h264`, `eac3`, `subrip`).\n\nA movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`) is one\nsource whose `parts` play in sequence (issue #233): a client is expected\nto play each part's `stream_url` in turn -- a concatenated playlist -- and\nBeam never joins them (ADR-0004). A whole file is a source of one part. The fields\nthat name one file -- `file_id`, the tracks, `stream_url`,\n`download_url`, `mime_type` and `container_format` -- are the first\npart's; `size_bytes` and `duration_secs` are the whole source's."
       },
       "PageInfo": {
         "properties": {

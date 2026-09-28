@@ -2589,7 +2589,13 @@ mod tests {
     async fn sources_become_views_of_their_first_video_track() {
         const SOURCES: &str = r#"{"items":[
             {"file_id":"f1f1f1f1-0000-4000-8000-000000000001","is_primary":true,
-             "edition":null,"episode_span":null,"size_bytes":4000,
+             "edition":null,"episode_span":null,
+             "parts":[
+                {"file_id":"f1f1f1f1-0000-4000-8000-000000000001","part_number":null,
+                 "size_bytes":4000,"duration_secs":6300.0,"subtitle_tracks":[],
+                 "stream_url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/stream",
+                 "download_url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/download"}],
+             "size_bytes":4000,
              "mime_type":"video/x-matroska","container_format":"matroska",
              "duration_secs":6300.0,
              "video_tracks":[
@@ -2615,7 +2621,13 @@ mod tests {
              "stream_url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/stream",
              "download_url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/download"},
             {"file_id":"f2f2f2f2-0000-4000-8000-000000000002","is_primary":false,
-             "edition":"Director's Cut","episode_span":null,"size_bytes":1000,
+             "edition":"Director's Cut","episode_span":null,
+             "parts":[
+                {"file_id":"f2f2f2f2-0000-4000-8000-000000000002","part_number":null,
+                 "size_bytes":1000,"duration_secs":null,"subtitle_tracks":[],
+                 "stream_url":"/v1/files/f2f2f2f2-0000-4000-8000-000000000002/stream",
+                 "download_url":"/v1/files/f2f2f2f2-0000-4000-8000-000000000002/download"}],
+             "size_bytes":1000,
              "mime_type":null,"container_format":null,"duration_secs":null,
              "video_tracks":[],"audio_tracks":[],"subtitle_tracks":[],
              "stream_url":"/v1/files/f2f2f2f2-0000-4000-8000-000000000002/stream",

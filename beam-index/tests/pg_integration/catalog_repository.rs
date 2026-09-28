@@ -161,9 +161,7 @@ impl PgFixture {
                 })
                 .await
                 .unwrap();
-            contents.push(MediaFileContent::Movie {
-                movie_entry_id: entry.id,
-            });
+            contents.push(MediaFileContent::movie(entry.id));
         }
         for show in self.shows.find_all().await.unwrap() {
             let season = self.shows.find_or_create_season(show.id, 1).await.unwrap();

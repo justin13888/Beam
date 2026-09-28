@@ -84,9 +84,7 @@ async fn seeded_store() -> InMemoryLibraryShapeRepository {
             mime_type: Some("video/x-matroska".to_string()),
             duration: None,
             container_format: Some("matroska,webm".to_string()),
-            content: Some(MediaFileContent::Movie {
-                movie_entry_id: entry.id,
-            }),
+            content: Some(MediaFileContent::movie(entry.id)),
             status: FileStatus::Known,
             classifier_version: 0,
             container_tags: None,

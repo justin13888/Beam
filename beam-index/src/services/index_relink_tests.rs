@@ -573,7 +573,10 @@ struct CountingProber {
 
 #[async_trait::async_trait]
 impl MediaInfoService for CountingProber {
-    async fn get_video_metadata(&self, path: &Path) -> Result<VideoFileMetadata, MetadataError> {
+    async fn get_video_metadata(
+        &self,
+        file: LibraryFile,
+    ) -> Result<VideoFileMetadata, MetadataError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fails.load(Ordering::SeqCst) {
             return Err(MetadataError::UnknownError(
@@ -581,7 +584,7 @@ impl MediaInfoService for CountingProber {
             ));
         }
         Ok(VideoFileMetadata {
-            file_path: path.to_path_buf(),
+            file_path: file.path().to_path_buf(),
             metadata: HashMap::default(),
             best_video_stream: None,
             best_audio_stream: None,
@@ -606,14 +609,14 @@ struct CountingHasher {
 
 #[async_trait::async_trait]
 impl HashService for CountingHasher {
-    fn hash_sync(&self, path: &Path) -> std::io::Result<u64> {
+    fn hash_sync(&self, file: std::fs::File) -> std::io::Result<u64> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.hash_sync(path)
+        self.inner.hash_sync(file)
     }
 
-    async fn hash_async(&self, path: PathBuf) -> std::io::Result<u64> {
+    async fn hash_async(&self, file: std::fs::File) -> std::io::Result<u64> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.hash_async(path).await
+        self.inner.hash_async(file).await
     }
 }
 
@@ -1163,7 +1166,7 @@ async fn an_unprobed_file_touched_is_hashed_once_not_on_every_visit() {
         .unwrap();
     h.scan().await;
     assert_eq!(h.hashes(), 2, "a moved mtime is hashed once");
-    let (_, mtime) = read_fs_meta(&path).unwrap();
+    let (_, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
     assert_eq!(h.present(&path).await.mtime, mtime, "and recorded");
 
     h.scan().await;
@@ -1193,7 +1196,9 @@ async fn an_unprobed_file_chmodded_is_hashed_once_not_on_every_visit() {
     assert_eq!((after.id, after.hash), (before.id, before.hash));
     assert_eq!(
         after.identity,
-        read_stat(&path, Inodes::Stable).unwrap().identity,
+        read_stat(path.parent().unwrap(), &path, Inodes::Stable)
+            .unwrap()
+            .identity,
         "and the identity found is recorded"
     );
 
@@ -1225,7 +1230,9 @@ async fn an_unprobed_row_without_an_identity_is_given_one_without_a_hash() {
     assert_eq!(h.hashes(), hashes, "nothing is hashed");
     let after = h.present(&path).await;
     assert_eq!((after.id, after.hash), (before.id, before.hash));
-    let found = read_stat(&path, Inodes::Stable).unwrap().identity;
+    let found = read_stat(path.parent().unwrap(), &path, Inodes::Stable)
+        .unwrap()
+        .identity;
     assert!(found.is_some(), "a Unix file has an identity");
     assert_eq!(after.identity, found, "and the identity found is recorded");
 }
@@ -1486,7 +1493,7 @@ async fn assert_size_and_mtime_match_every_row(h: &Harness, paths: &[&PathBuf]) 
     for path in paths {
         let row = h.present(path).await;
         assert_eq!(
-            read_fs_meta(path).unwrap(),
+            read_fs_meta(path.parent().unwrap(), path).unwrap(),
             (row.size_bytes, row.mtime),
             "{} looks unchanged by size and mtime",
             path.display()
@@ -1578,7 +1585,9 @@ async fn a_row_without_an_identity_is_given_one_without_a_hash() {
 
     assert_eq!(h.hashes(), hashes, "nothing is hashed");
     for path in [&heat, &ronin] {
-        let found = read_stat(path, Inodes::Stable).unwrap().identity;
+        let found = read_stat(path.parent().unwrap(), path, Inodes::Stable)
+            .unwrap()
+            .identity;
         assert!(found.is_some(), "a Unix file has an identity");
         assert_eq!(h.present(path).await.identity, found, "{}", path.display());
     }
@@ -1677,7 +1686,9 @@ fn chmod_until_ctime_moves(path: &Path, recorded: DateTime<Utc>) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     for mode in [0o600, 0o644].into_iter().cycle() {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-        let identity = read_stat(path, Inodes::Stable).unwrap().identity;
+        let identity = read_stat(path.parent().unwrap(), path, Inodes::Stable)
+            .unwrap()
+            .identity;
         if identity.expect("a Unix file has an identity").ctime != recorded {
             return;
         }
@@ -1713,7 +1724,9 @@ async fn a_chmod_costs_one_hash(kind: FilesystemKind) {
     assert_eq!((after.id, after.hash), (before.id, before.hash));
     assert_eq!(
         after.identity,
-        read_stat(&path, Inodes::Stable).unwrap().identity,
+        read_stat(path.parent().unwrap(), &path, Inodes::Stable)
+            .unwrap()
+            .identity,
         "and the identity found is recorded"
     );
 

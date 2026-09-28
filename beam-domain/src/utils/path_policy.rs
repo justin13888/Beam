@@ -352,6 +352,16 @@ mod tests {
             ),
             ("Movie (2019)/Sample/movie.mkv", Excluded(ExtrasDirectory)),
             ("Movie (2019)/Trailers/t.mkv", Excluded(ExtrasDirectory)),
+            // A part token does not make an extra a part of the film
+            // (issue #233): it is excluded before anything reads it.
+            (
+                "Movie (2019)/Extras/Movie (2019) - CD2.mkv",
+                Excluded(ExtrasDirectory),
+            ),
+            (
+                "Movie (2019)/Trailers/Movie (2019) - Part 2.mkv",
+                Excluded(ExtrasDirectory),
+            ),
             ("TV/Show/Extras/Making Of.mkv", Excluded(ExtrasDirectory)),
             ("Season 1/Featurettes/x.mkv", Excluded(ExtrasDirectory)),
             // A name that can only mean extras is excluded under any folder:

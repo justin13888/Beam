@@ -67,9 +67,9 @@ impl Harness {
             .expect_hash_async()
             .returning(move |_| Ok(next_hash.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let mut prober = MockMediaInfoService::new();
-        prober.expect_get_video_metadata().returning(|path| {
+        prober.expect_get_video_metadata().returning(|file| {
             Ok(VideoFileMetadata {
-                file_path: path.to_path_buf(),
+                file_path: file.path().to_path_buf(),
                 metadata: HashMap::default(),
                 best_video_stream: None,
                 best_audio_stream: None,
@@ -191,7 +191,7 @@ impl Harness {
     /// matching the disk so reconciling it touches no hasher or prober.
     async fn legacy_file(&self, rel: &str, content: Option<MediaFileContent>, runtime: Duration) {
         let path = self.write(rel);
-        let (size_bytes, mtime) = read_fs_meta(&path).unwrap();
+        let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
         let hash = u64::MAX - self.file_repo.files.lock().unwrap().len() as u64;
         self.file_repo
             .create(CreateMediaFile {
@@ -473,13 +473,65 @@ async fn copies_of_one_edition_share_an_entry_and_another_edition_gets_its_own()
     editions.sort();
     assert_eq!(editions, vec![None, Some("Director's Cut".to_string())]);
     let entry = |rel: &str| match h.file(rel).content {
-        Some(MediaFileContent::Movie { movie_entry_id }) => movie_entry_id,
+        Some(MediaFileContent::Movie { movie_entry_id, .. }) => movie_entry_id,
         other => panic!("{rel} is not a movie file: {other:?}"),
     };
     assert_eq!(
         entry("Movie (2019)/Movie.2019.1080p.mkv"),
         entry("Movie (2019)/Movie.2019.2160p.mkv")
     );
+}
+
+/// The parts of a multi-part movie (issue #233) are one movie, one entry per
+/// edition, each file carrying its part; a part's runtime is not the
+/// movie's, so a movie first seen through its parts has none.
+#[tokio::test]
+async fn the_parts_of_a_movie_are_one_movie_with_numbered_files() {
+    let h = Harness::new().await;
+    let parts = [
+        "Movie (2019)/Movie (2019) - CD2.avi",
+        "Movie (2019)/Movie (2019) - CD1.avi",
+        "Movie (2019)/Movie (2019) {edition-Director's Cut} - Part 1.mkv",
+        "Movie (2019)/Movie (2019) {edition-Director's Cut} - Part 2.mkv",
+    ];
+    for rel in parts {
+        h.write(rel);
+    }
+
+    assert_eq!(h.scan().await, 4);
+
+    let movies: Vec<_> = h
+        .movie_repo
+        .movies
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    assert_eq!(movies.len(), 1, "{movies:?}");
+    assert_eq!(
+        (movies[0].title.as_str(), movies[0].year, movies[0].runtime),
+        ("Movie", Some(2019), None)
+    );
+    let entries = h.movie_repo.entries.lock().unwrap().clone();
+    let content = |rel: &str| match h.file(rel).content {
+        Some(MediaFileContent::Movie {
+            movie_entry_id,
+            part_number,
+        }) => (entries[&movie_entry_id].edition.clone(), part_number),
+        other => panic!("{rel} is not a movie file: {other:?}"),
+    };
+    let cut = Some("Director's Cut".to_string());
+    assert_eq!(
+        parts.map(content),
+        [
+            (None, Some(2)),
+            (None, Some(1)),
+            (cut.clone(), Some(1)),
+            (cut, Some(2)),
+        ]
+    );
+    assert_eq!(entries.len(), 2, "one entry per edition, not per part");
 }
 
 // ─── the path policy ─────────────────────────────────────────────────────────
@@ -523,7 +575,7 @@ async fn a_legacy_sidecar_row_is_marked_missing() {
     h.write("Movie (2019)/Movie.2019.mkv");
     // A build before issue #182 indexed sidecars as `Unknown` rows.
     let nfo = h.write("Movie (2019)/movie.nfo");
-    let (size_bytes, mtime) = read_fs_meta(&nfo).unwrap();
+    let (size_bytes, mtime) = read_fs_meta(nfo.parent().unwrap(), &nfo).unwrap();
     h.file_repo
         .create(CreateMediaFile {
             library_id: h.library.id,
@@ -694,9 +746,7 @@ async fn a_row_already_on_the_current_rules_is_not_reclassified() {
         .set_classification(
             before.id,
             FileClassification {
-                content: Some(MediaFileContent::Movie {
-                    movie_entry_id: entry.id,
-                }),
+                content: Some(MediaFileContent::movie(entry.id)),
                 status: FileStatus::Known,
                 classifier_version: CLASSIFIER_VERSION,
             },
@@ -708,7 +758,7 @@ async fn a_row_already_on_the_current_rules_is_not_reclassified() {
 
     assert!(matches!(
         h.file(rel).content,
-        Some(MediaFileContent::Movie { movie_entry_id }) if movie_entry_id == entry.id
+        Some(MediaFileContent::Movie { movie_entry_id, .. }) if movie_entry_id == entry.id
     ));
 }
 
@@ -736,9 +786,7 @@ async fn a_legacy_movie_that_now_reads_as_unclassifiable_loses_its_title() {
         .unwrap();
     h.legacy_file(
         rel,
-        Some(MediaFileContent::Movie {
-            movie_entry_id: entry.id,
-        }),
+        Some(MediaFileContent::movie(entry.id)),
         Duration::from_secs(600),
     )
     .await;

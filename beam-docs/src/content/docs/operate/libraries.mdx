@@ -87,14 +87,15 @@ deleting one and registering a disjoint root clears it.
 When Beam walks a library — to scan it, when the watcher reports a change, or when it polls — it
 never follows a symbolic link beneath the library root, to a file or to a directory. A link is
 simply not part of the library: a symlinked video is not indexed, and a symlinked folder is not
-descended into. Nor is a link followed at any component beneath the root when Beam reads an NFO or
-delivers a file -- a video it streams, a subtitle it serves: a file, or a folder above it, replaced
-by a link since the scan is treated as missing. This keeps every NFO Beam parses and every file it
-serves inside the root you registered (the root itself may be a link) and rules out link cycles.
-One gap remains: the indexer's hashing and probing of a video open its full stored path, so a link
-swapped in at the file or at any folder above it, between the walk and that read, is followed for
-that read. Its hash and stream metadata are recorded, and delivery still refuses the file. This is
-a known gap, tracked in [#238](https://github.com/justin13888/Beam/issues/238).
+descended into. Nor is a link followed at any component beneath the root when Beam reads a file: an NFO
+it parses, a video or subtitle it measures, a video it hashes and probes while indexing, or a video
+or subtitle it delivers. Nothing is ever recorded from a file that a link leads to. A file, or a
+folder above it, replaced by a link since the walk is treated as missing -- at once, or, if the scan
+already had that folder open, by the next scan, which finds the link. This keeps every file Beam
+reads, records or serves inside the root you registered (the root itself may be a link) and rules
+out link cycles. Measuring a file does not open it: a scan opens only the videos it hashes or
+probes, so rescanning an unchanged library opens none of them, except a video Beam holds no
+duration for (one whose earlier probe failed, say), which is probed again.
 
 If you relied on symlinks before, a file that was indexed through a link is now
 [missing](#when-files-go-missing): hidden, with its progress kept, until the grace period ends. To
@@ -367,6 +368,47 @@ words after the title or its year (`Movie (2019) Director's Cut.mkv`): *Director
 `Movie.2019.Extended.Remastered.1080p.mkv` is the *Extended, Remastered* edition. Every copy of the
 same edition — a 1080p and a 4K file — is a version of that one edition (see
 [Multiple versions](#multiple-versions)).
+
+### Multi-part movies
+
+A film split across files is one movie, not one per file:
+
+```
+Movies/
+└── Movie (2019)/
+    ├── Movie (2019) - CD1.avi
+    └── Movie (2019) - CD2.avi
+```
+
+Beam reads a part from the end of the name: `cd`, `disc`, `disk`, `part` or `pt` and a number,
+after a space, dot, dash or underscore — `- CD1`, `- Part 2`, `.pt1`, `_disc_1`. Only release
+details such as `1080p` or a `[GROUP]` tag may follow it. `part` and `pt` count only after the
+year in the file name itself (`Movie (2019) - Part 1.mkv`); the folder never makes them a part, so
+`Movie (2019)/Movie - Part 1.mkv` is a film of its own until it is renamed
+`Movie (2019) - Part 1.mkv`. That is because some titles end in them: *Harry Potter and the
+Deathly Hallows Part 1 (2010)* and *The Hunger Games Mockingjay Pt 1* are films of their own, and
+one folder may hold two films, as `Che (2008)/Che Part 1.mkv` and `Che Part 2.mkv` do, or a sequel
+filed beside its predecessor, as `The Godfather (1972)/The Godfather Part 2.mkv` is. A number that
+opens the name (`Part 2: The Sequel (2020).mkv`) or is followed by more of the title is part of the
+title. A file in an extras folder (`Extras/`, `Trailers/`) is never a part.
+
+The parts of one edition in one folder are one version of the movie, listed in part order, and its
+size and length are all the parts' together. Parts of different editions — `{edition-Director's
+Cut} - CD1` — are a version of that edition. The parts must run from 1 with no gap: if two files
+in one folder claim the same part, or the folder has parts 2 and 3 but no part 1, or parts 1 and 3
+but no part 2, Beam cannot play them as one film, so it lists each of that folder's parts as a
+version of its own.
+
+A library indexed by an earlier Beam, which listed each part as a film (*Movie - CD1*, *Movie -
+CD2*), is merged on the first scan after the upgrade: the films become one, named *Movie*, and
+every file keeps its watch progress. A title a provider matched or you renamed keeps its name. Two
+titles a provider matched to different films are never merged, even when their names now read as
+one: both are kept as they were, and the admin log names the pair so you can rename the files or
+correct a match. Once one title's match is corrected to the other's film, the two are merged the
+next time Beam starts, and each part keeps its place in the movie.
+
+The web player and the apps start a multi-part version at its first part; they do not yet move on
+to the next part by themselves.
 
 ### Directory layout for TV
 

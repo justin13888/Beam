@@ -75,6 +75,20 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
         identity_key: Option<String>,
         version: u16,
     ) -> Result<bool, DbErr>;
+    /// Replace the display title of `movie_id` with `title`, but only while
+    /// it is still `expected`: a title an NFO, enrichment or an administrator
+    /// set since `expected` was read is never overwritten. The indexer uses it
+    /// when a change to the naming rules changes the title a movie's files
+    /// spell (`Movie - CD1` is `Movie`, issue #233). Returns `false`,
+    /// changing nothing, when the movie does not exist or its title is not
+    /// `expected`. Touches nothing but the title: the identity key is
+    /// [`Self::rekey`]'s.
+    async fn retitle_from(
+        &self,
+        movie_id: Uuid,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, DbErr>;
     /// The movie `pin` names (issue #184): the one pinned to it, else the
     /// oldest one enrichment matched to that provider id (its `tmdb_id`,
     /// `imdb_id`, `tvdb_id` or `anilist_id`). A file whose NFO names `pin`
@@ -202,7 +216,9 @@ pub mod in_memory {
                     .values()
                     .filter(|f| !present_only || f.missing_since.is_none())
                     .filter_map(|f| match &f.content {
-                        Some(MediaFileContent::Movie { movie_entry_id }) => Some(*movie_entry_id),
+                        Some(MediaFileContent::Movie { movie_entry_id, .. }) => {
+                            Some(*movie_entry_id)
+                        }
                         _ => None,
                     })
                     .collect(),
@@ -368,6 +384,23 @@ pub mod in_memory {
             movie.identity_key = identity_key;
             self.key_versions.lock().unwrap().insert(movie_id, version);
             Ok(true)
+        }
+
+        async fn retitle_from(
+            &self,
+            movie_id: Uuid,
+            expected: &str,
+            title: &str,
+        ) -> Result<bool, DbErr> {
+            let mut movies = self.movies.lock().unwrap();
+            match movies.get_mut(&movie_id) {
+                Some(movie) if movie.title == expected => {
+                    movie.title = title.to_string();
+                    movie.updated_at = Utc::now();
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
         }
 
         async fn find_by_pin(&self, pin: &ProviderPin) -> Result<Option<Movie>, DbErr> {

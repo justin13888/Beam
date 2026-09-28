@@ -42,25 +42,27 @@ const SETTLE: Duration = Duration::from_secs(30);
 struct ScriptedHasher {
     calls: AtomicUsize,
     gate: Arc<tokio::sync::Semaphore>,
-    grow_file: AtomicBool,
+    /// The file to append to while it is hashed, if any.
+    grow_file: parking_lot::Mutex<Option<PathBuf>>,
     clock: Arc<TestClock>,
     advance_per_hash: parking_lot::Mutex<Duration>,
 }
 
 #[async_trait::async_trait]
 impl HashService for ScriptedHasher {
-    fn hash_sync(&self, _path: &Path) -> std::io::Result<u64> {
+    fn hash_sync(&self, _file: std::fs::File) -> std::io::Result<u64> {
         unreachable!("the indexer hashes asynchronously")
     }
 
-    async fn hash_async(&self, path: PathBuf) -> std::io::Result<u64> {
+    async fn hash_async(&self, _file: std::fs::File) -> std::io::Result<u64> {
         self.gate
             .acquire()
             .await
             .expect("the gate is never closed")
             .forget();
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.grow_file.load(Ordering::SeqCst) {
+        let grow = self.grow_file.lock().clone();
+        if let Some(path) = grow {
             use std::io::Write as _;
             let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
             file.write_all(b" and more")?;
@@ -81,7 +83,10 @@ struct ScriptedProber {
 
 #[async_trait::async_trait]
 impl MediaInfoService for ScriptedProber {
-    async fn get_video_metadata(&self, path: &Path) -> Result<VideoFileMetadata, MetadataError> {
+    async fn get_video_metadata(
+        &self,
+        file: LibraryFile,
+    ) -> Result<VideoFileMetadata, MetadataError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fails.load(Ordering::SeqCst) {
             return Err(MetadataError::UnknownError(
@@ -89,7 +94,7 @@ impl MediaInfoService for ScriptedProber {
             ));
         }
         Ok(VideoFileMetadata {
-            file_path: path.to_path_buf(),
+            file_path: file.path().to_path_buf(),
             metadata: HashMap::default(),
             best_video_stream: None,
             best_audio_stream: None,
@@ -145,7 +150,7 @@ impl Harness {
             gate: Arc::new(tokio::sync::Semaphore::new(
                 tokio::sync::Semaphore::MAX_PERMITS,
             )),
-            grow_file: AtomicBool::new(false),
+            grow_file: parking_lot::Mutex::new(None),
             clock: clock.clone(),
             advance_per_hash: parking_lot::Mutex::new(Duration::ZERO),
         });
@@ -750,7 +755,7 @@ async fn a_watcher_event_for_an_unsettled_file_is_deferred_for_the_rest_of_the_w
 async fn a_file_that_changes_while_it_is_hashed_is_deferred() {
     let h = Harness::settled().await;
     let path = h.write("Heat (1995).mkv");
-    h.hasher.grow_file.store(true, Ordering::SeqCst);
+    *h.hasher.grow_file.lock() = Some(path.clone());
 
     let progress = h.scan().await;
 
@@ -953,7 +958,7 @@ async fn a_changed_file_whose_probe_failed_is_probed_again_until_one_succeeds() 
 async fn an_unhashed_row_is_hashed_when_it_is_probed_again() {
     let h = Harness::settled().await;
     let path = h.write("Heat (1995).mkv");
-    let (size_bytes, mtime) = read_fs_meta(&path).unwrap();
+    let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
     h.file_repo
         .create(CreateMediaFile {
             library_id: h.library.id,

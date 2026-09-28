@@ -261,7 +261,7 @@ impl Harness {
         let path = self.root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, rel.as_bytes()).unwrap();
-        let (size_bytes, mtime) = read_fs_meta(&path).unwrap();
+        let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
         let row = MediaFile {
             id: Uuid::new_v4(),
             library_id: self.library.id,

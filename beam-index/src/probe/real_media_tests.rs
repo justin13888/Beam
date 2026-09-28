@@ -1,7 +1,7 @@
-//! Real-media coverage for [`VideoFileMetadata::from_path`].
+//! Real-media coverage for [`VideoFileMetadata::from_library_file`].
 //!
 //! The rest of the probe suite only exercises enum conversions
-//! ([`super::color`], [`super::format`]). This module drives `from_path`
+//! ([`super::color`], [`super::format`]). This module drives `from_library_file`
 //! against *actual demuxed containers* so the FFmpeg-facing metadata path
 //! (stream enumeration, decoder-context opening, codec/color/duration
 //! extraction) is covered end-to-end without any external service. See
@@ -16,7 +16,7 @@
 //!    codecs the LGPL/CI builds can *decode* but not *encode* (H.264, HEVC,
 //!    AV1, VP9, plus AAC/Opus audio). See that directory's `README.md`.
 //!
-//! Live synthesis is deliberately video-only: `from_path` is agnostic to how
+//! Live synthesis is deliberately video-only: the probe is agnostic to how
 //! a file was produced, so audio-stream probing is covered just as well (and
 //! far more robustly) by the committed AAC/Opus fixtures than by hand-rolling
 //! a second native audio-encode + interleave pipeline here.
@@ -26,9 +26,10 @@ use std::sync::{Mutex, Once};
 
 use ffmpeg_next as ffmpeg;
 
+use crate::library_file::LibraryFile;
 use crate::probe::color::PixelFormat;
 use crate::probe::media::CodecId;
-use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
+use crate::probe::metadata::{MetadataError, StreamMetadata, VideoFileMetadata};
 
 static FFMPEG_INIT: Once = Once::new();
 
@@ -231,9 +232,17 @@ fn assert_audio_fixture(meta: &VideoFileMetadata, expected: CodecId) {
     }
 }
 
+/// Probe `path` as the indexer does: opened beneath its folder with no link
+/// followed, and read from that handle alone.
+fn probe(path: &Path) -> Result<VideoFileMetadata, MetadataError> {
+    let root = path.parent().expect("a file has a folder");
+    let file = LibraryFile::open(root, path).expect("open the file to probe");
+    VideoFileMetadata::from_library_file(file)
+}
+
 fn probe_committed(name: &str) -> VideoFileMetadata {
     init_ffmpeg();
-    VideoFileMetadata::from_path(&committed_fixture(name))
+    probe(&committed_fixture(name))
         .unwrap_or_else(|e| panic!("probing committed fixture {name} failed: {e}"))
 }
 
@@ -244,7 +253,7 @@ fn probe_committed(name: &str) -> VideoFileMetadata {
 #[test]
 fn synth_mpeg4_mp4() {
     let path = synth_fixture("mpeg4.mp4", ffmpeg::codec::Id::MPEG4);
-    let meta = VideoFileMetadata::from_path(&path).expect("probe synth mpeg4 mp4");
+    let meta = probe(&path).expect("probe synth mpeg4 mp4");
     assert_video_fixture(&meta, CodecId::MPEG4);
     assert!(meta.format_name.contains("mp4") || meta.format_name.contains("mov"));
 }
@@ -252,7 +261,7 @@ fn synth_mpeg4_mp4() {
 #[test]
 fn synth_mpeg2video_mkv() {
     let path = synth_fixture("mpeg2video.mkv", ffmpeg::codec::Id::MPEG2VIDEO);
-    let meta = VideoFileMetadata::from_path(&path).expect("probe synth mpeg2video mkv");
+    let meta = probe(&path).expect("probe synth mpeg2video mkv");
     assert_video_fixture(&meta, CodecId::MPEG2VIDEO);
     assert!(meta.format_name.contains("matroska"));
 }
@@ -353,7 +362,7 @@ fn corrupt_random_bytes_mkv_returns_err() {
     // Non-container random bytes: ffmpeg cannot identify a demuxer.
     std::fs::write(&path, [0x00, 0x11, 0x22, 0xde, 0xad, 0xbe, 0xef].repeat(64)).unwrap();
 
-    let result = VideoFileMetadata::from_path(&path);
+    let result = probe(&path);
     assert!(
         result.is_err(),
         "random bytes must not parse as a container"
@@ -372,7 +381,7 @@ fn truncated_fixture_does_not_panic() {
 
     // The contract is only "no panic / process stays healthy"; a truncated
     // moov-less MP4 may either error or return degraded-but-Ok metadata.
-    let outcome = VideoFileMetadata::from_path(&path);
+    let outcome = probe(&path);
     // Reaching here at all proves it did not panic/abort. In practice a
     // truncated MP4 parses Ok with degraded metadata (container recognised,
     // stream parameters incomplete); an Err is equally acceptable.
@@ -380,4 +389,128 @@ fn truncated_fixture_does_not_panic() {
         // If it parsed, the header we kept should still describe MP4.
         assert!(meta.format_name.contains("mp4") || meta.format_name.contains("mov"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Probing a handle reads what probing the path did (issue #238)
+// ---------------------------------------------------------------------------
+
+/// What each committed fixture probed as when FFmpeg still opened the path
+/// itself (`ffmpeg::format::input`), recorded from that build before the
+/// probe moved to reading the opened handle: container, duration, overall
+/// bitrate, probe score, size and stream count. Reading the handle through a
+/// custom I/O context must change none of it -- a file indexed before would
+/// otherwise read as reprobed with different metadata.
+#[test]
+fn a_handle_probes_as_its_path_did() {
+    let before: [(&str, &str, i64, i64, i32, u64, usize); 8] = [
+        ("av1.mkv", "matroska,webm", 600_000, 30_040, 100, 2_253, 1),
+        (
+            "av1.mp4",
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            600_000,
+            26_666,
+            100,
+            2_000,
+            1,
+        ),
+        ("av1.webm", "matroska,webm", 600_000, 29_133, 100, 2_185, 1),
+        (
+            "h264_aac.mp4",
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            600_000,
+            82_506,
+            100,
+            6_188,
+            2,
+        ),
+        ("h264.mkv", "matroska,webm", 600_000, 45_973, 100, 3_448, 1),
+        ("hevc.mkv", "matroska,webm", 600_000, 53_226, 100, 3_992, 1),
+        (
+            "hevc.mp4",
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            600_000,
+            57_493,
+            100,
+            4_312,
+            1,
+        ),
+        (
+            "vp9_opus.webm",
+            "matroska,webm",
+            608_000,
+            62_973,
+            100,
+            4_786,
+            2,
+        ),
+    ];
+    for (name, format_name, duration, bit_rate, probe_score, file_size, streams) in before {
+        let meta = probe_committed(name);
+        assert_eq!(meta.format_name, format_name, "{name}");
+        assert_eq!(meta.duration, duration, "{name}");
+        assert_eq!(meta.bit_rate, bit_rate, "{name}");
+        assert_eq!(meta.probe_score, probe_score, "{name}");
+        assert_eq!(meta.file_size, file_size, "{name}");
+        assert_eq!(meta.streams.len(), streams, "{name}");
+        assert_eq!(meta.file_path, committed_fixture(name), "{name}");
+    }
+}
+
+/// A container whose index comes after its media -- an MP4 written without
+/// `faststart`, its `moov` beyond the probe's 32 KiB I/O buffer -- is probed
+/// through the handle as FFmpeg probed the path. FFmpeg seeks the handle:
+/// past the buffer to the index and back, and to its end for its size, from
+/// which it reckons the overall bitrate. Through a handle it could only read
+/// forward it would find the streams all the same, by reading through the
+/// media, but not the size -- the bitrate would read as zero.
+#[test]
+fn a_container_indexed_at_its_end_is_probed_by_seeking_the_handle() {
+    let name = "h264_aac_moov_at_end.mp4";
+    let fixture = std::fs::read(committed_fixture(name)).unwrap();
+    let moov = fixture
+        .windows(4)
+        .position(|window| window == b"moov")
+        .expect("the fixture has a moov box");
+    assert!(
+        moov > 32 * 1024,
+        "the index lies beyond the I/O buffer, at {moov}"
+    );
+
+    let meta = probe_committed(name);
+    assert_eq!(meta.format_name, "mov,mp4,m4a,3gp,3g2,mj2");
+    assert_eq!(meta.file_size, fixture.len() as u64);
+    assert_eq!(meta.streams.len(), 2);
+    match &meta.streams[meta.best_video_stream.expect("a video stream")] {
+        StreamMetadata::Video(v) => {
+            assert_eq!((v.video.width, v.video.height), (160, 120));
+            assert_eq!(v.codec_id, CodecId::H264);
+        }
+        other => panic!("best video stream index resolved to {other:?}"),
+    }
+    assert_audio_fixture(&meta, CodecId::AAC);
+    assert!(
+        (3.9..=4.1).contains(&meta.duration_seconds()),
+        "duration {}",
+        meta.duration_seconds()
+    );
+    // FFmpeg's overall bitrate: the size it sought to, over the duration.
+    let size_bits = fixture.len() as i64 * 8;
+    assert_eq!(meta.bit_rate, size_bits * 1_000_000 / meta.duration);
+}
+
+/// The probe reads from wherever the handle stands: a handle the hash has
+/// just read to its end is probed from its start, as the indexer hands it
+/// over.
+#[test]
+fn a_handle_read_to_its_end_is_probed_from_its_start() {
+    init_ffmpeg();
+    let path = committed_fixture("h264_aac.mp4");
+    let file = LibraryFile::open(path.parent().unwrap(), &path).unwrap();
+    let mut hashed = file.try_clone_file().unwrap();
+    std::io::copy(&mut hashed, &mut std::io::sink()).unwrap();
+
+    let meta = VideoFileMetadata::from_library_file(file).expect("probe after a hash");
+    assert_video_fixture(&meta, CodecId::H264);
+    assert_audio_fixture(&meta, CodecId::AAC);
 }

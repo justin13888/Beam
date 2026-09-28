@@ -138,9 +138,7 @@ async fn seed_hevc_file(fixture: &Fixture) -> Uuid {
             container_format: Some("matroska,webm".to_string()),
             // A known file is always some title's content; which title does
             // not matter here, since telemetry never records it.
-            content: Some(MediaFileContent::Movie {
-                movie_entry_id: Uuid::new_v4(),
-            }),
+            content: Some(MediaFileContent::movie(Uuid::new_v4())),
             status: FileStatus::Known,
             classifier_version: 0,
             container_tags: None,

@@ -79,8 +79,17 @@ would be waiving the whole document's authority.
 every source and neither `has_*_page` flag is ever `true` -- listing a title's sources primary first:
 the default edition, then the tallest picture, the highest video bit rate, the largest file, the
 lowest file id -- ranked when read, not stored. Each source carries `is_primary`, its `edition`, an
-`episode_span` when the file holds a run of episodes (its duration is then the run's), and its
-`video_tracks`, `audio_tracks` and `subtitle_tracks`. Every track has its stream `index` and
+`episode_span` when the file holds a run of episodes (its duration is then the run's), its `parts`,
+and its `video_tracks`, `audio_tracks` and `subtitle_tracks`. `parts` lists the files the source
+plays, in order: one for a whole file, and each part of a movie split across files (`Movie (2019) -
+CD1.avi`, `- CD2.avi`, [#233](https://github.com/justin13888/beam/issues/233)) otherwise, each with
+its `part_number`, size, duration, subtitle tracks, `stream_url` and `download_url`. A client is
+expected to play a multi-part source as a playlist of its parts' streams; the server never joins
+them ([ADR-0004](decisions/ADR-0004-never-transcode.md)). No current client does so yet -- each
+plays the source's top-level `stream_url`, its first part -- and advancing through the parts is the
+client-playback work split from #233. The parts of a folder are one source only as the whole run
+1, 2, ... n; any other set leaves each file a source of its own. The source's `size_bytes` and
+`duration_secs` are all its parts'; its `file_id`, tracks and URLs are its first part's. Every track has its stream `index` and
 FFmpeg's own `codec` name (`h264`, `hevc`, `eac3`, `truehd`, `subrip`, `hdmv_pgs_subtitle`); a value
 the file does not state -- a frame rate, a bit rate, a sample rate -- is absent rather than a
 default. Subtitle tracks are the file's own, by index, then the subtitle files beside it
