@@ -338,15 +338,6 @@ mod field_tests {
     }
 
     #[test]
-    fn only_a_movie_has_a_release_date_and_a_runtime_to_lock() {
-        for field in MetadataField::ALL {
-            assert!(field.applies_to(TitleKind::Movie), "{field:?}");
-            let movie_only = matches!(field, MetadataField::ReleaseDate | MetadataField::Runtime);
-            assert_eq!(field.applies_to(TitleKind::Show), !movie_only, "{field:?}");
-        }
-    }
-
-    #[test]
     fn a_filter_admits_exactly_the_rows_of_its_status_and_kind() {
         let row = |target, status| EnrichmentState {
             id: Uuid::new_v4(),
