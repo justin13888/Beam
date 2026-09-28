@@ -21,7 +21,7 @@
 //!   follow it. The latest job of each library is kept in memory only: it is
 //!   what an administrator watches, not a history, and a restart forgets it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -92,6 +92,9 @@ pub struct ScanProgress {
     pub marked_missing: u64,
     /// Missing rows whose path came back.
     pub restored: u64,
+    /// Files found at a new path -- moved or renamed -- whose row was
+    /// pointed there rather than a new one indexed (issue #180).
+    pub relinked: u64,
     /// Rows missing for the whole grace period, removed.
     pub purged: u64,
 }
@@ -129,9 +132,14 @@ pub struct ScanEvent {
     pub progress: ScanProgress,
 }
 
-/// A scan is already queued or running for the library.
+/// Why a scan could not be registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScanInProgress;
+pub enum ScanRefused {
+    /// A scan is already queued or running for the library.
+    InProgress,
+    /// The library is being deleted (see [`ScanCoordinator::retire`]).
+    Retired,
+}
 
 /// The failure text of a job whose task went away without finishing it --
 /// a panic, or a runtime shutting down.
@@ -172,6 +180,88 @@ impl LibrarySlot {
 pub struct ScanCoordinator {
     libraries: parking_lot::Mutex<HashMap<Uuid, Arc<LibrarySlot>>>,
     catalog: Arc<RwLock<()>>,
+    /// Libraries being deleted, or deleted: nothing scans or reconciles them
+    /// while they are here. See [`Retirements`].
+    retired: Arc<parking_lot::Mutex<Retirements>>,
+}
+
+/// Which libraries are retired, and how. A deleted library stays retired for
+/// the life of the process -- a library id is a v4 UUID, never reused -- so a
+/// slot forgotten after the delete cannot be re-created by a late caller and
+/// scan a library that is gone. A library being deleted is retired only for
+/// as long as some delete of it is in flight: one whose delete fails comes
+/// back.
+#[derive(Debug, Default)]
+struct Retirements {
+    /// Deletes in flight per library, each holding a [`Retirement`].
+    deleting: HashMap<Uuid, usize>,
+    /// Libraries whose delete succeeded.
+    deleted: HashSet<Uuid>,
+}
+
+impl Retirements {
+    fn contains(&self, library_id: Uuid) -> bool {
+        self.deleted.contains(&library_id) || self.deleting.contains_key(&library_id)
+    }
+}
+
+/// A library [retired](ScanCoordinator::retire) while it is deleted.
+///
+/// [Commit](Self::commit) it once the library's delete has succeeded, and the
+/// library stays retired for good. Dropped uncommitted -- the delete failed,
+/// and the library is still stored and listed -- it gives the library back:
+/// it is scanned and its watcher events reconciled again, as though the
+/// delete had never been asked for.
+#[derive(Debug)]
+#[must_use = "dropping a retirement un-retires the library; commit it once the delete succeeds"]
+pub struct Retirement {
+    retired: Arc<parking_lot::Mutex<Retirements>>,
+    library_id: Uuid,
+    committed: bool,
+}
+
+impl Retirement {
+    /// The library is deleted: it stays retired for the life of the process.
+    pub fn commit(mut self) {
+        let mut retired = self.retired.lock();
+        release(&mut retired, self.library_id);
+        retired.deleted.insert(self.library_id);
+        drop(retired);
+        self.committed = true;
+    }
+
+    pub fn library_id(&self) -> Uuid {
+        self.library_id
+    }
+}
+
+impl Drop for Retirement {
+    fn drop(&mut self) {
+        if !self.committed {
+            release(&mut self.retired.lock(), self.library_id);
+        }
+    }
+}
+
+/// What stopping a library's scan before its delete leaves the caller with
+/// (see [`crate::services::index::IndexService::stop_scan`]).
+#[derive(Debug)]
+pub struct StoppedScan {
+    /// Whether no scan of the library is still queued or running.
+    pub in_time: bool,
+    /// The library's retirement: commit it once the delete succeeds, drop it
+    /// if the delete fails.
+    pub retirement: Retirement,
+}
+
+/// One delete of `library_id` is no longer in flight.
+fn release(retired: &mut Retirements, library_id: Uuid) {
+    if let Some(count) = retired.deleting.get_mut(&library_id) {
+        *count -= 1;
+        if *count == 0 {
+            retired.deleting.remove(&library_id);
+        }
+    }
 }
 
 /// What a scan holds while it runs: its library's lock, and the catalog gate
@@ -206,14 +296,14 @@ impl ScanCoordinator {
     }
 
     /// Register `job` as its library's current job, unless one is already
-    /// queued or running. The check and the registration are one step: two
-    /// callers racing for one library cannot both succeed.
-    pub fn register(
-        &self,
-        job: ScanJob,
-        clock: Arc<dyn Clock>,
-    ) -> Result<ScanTicket, ScanInProgress> {
+    /// queued or running, or the library is [retired](Self::retire). The
+    /// check and the registration are one step: two callers racing for one
+    /// library cannot both succeed.
+    pub fn register(&self, job: ScanJob, clock: Arc<dyn Clock>) -> Result<ScanTicket, ScanRefused> {
         let library_id = job.library_id;
+        if self.is_retired(library_id) {
+            return Err(ScanRefused::Retired);
+        }
         let slot = self.slot(library_id);
         let job_id = job.id;
         let mut incoming = Some(job);
@@ -225,7 +315,7 @@ impl ScanCoordinator {
             true
         });
         if !registered {
-            return Err(ScanInProgress);
+            return Err(ScanRefused::InProgress);
         }
         let cancel = Arc::new(AtomicBool::new(false));
         *slot.cancel.lock() = cancel.clone();
@@ -250,10 +340,35 @@ impl ScanCoordinator {
         self.slot(library_id).job.subscribe()
     }
 
-    /// Ask `library_id`'s active job to stop. The scan checks between files,
-    /// so it stops after the file it is on; it then fails as
-    /// [`CANCELLED`]. Returns whether there was an active job to ask.
-    pub fn cancel(&self, library_id: Uuid) -> bool {
+    /// Stop `library_id` from being scanned or reconciled: it is being
+    /// deleted. While the returned [`Retirement`] is held, and for good once
+    /// it is [committed](Retirement::commit), [`Self::register`] refuses the
+    /// library and [`Self::try_acquire_for_reconcile`] never gets it, so no
+    /// scan -- a periodic one, an administrator's, a newly polled library's
+    /// -- and no watcher event can start on it between the caller stopping
+    /// its scan and deleting its rows. A job registered before is not
+    /// affected; [`Self::cancel`] it.
+    pub fn retire(&self, library_id: Uuid) -> Retirement {
+        *self.retired.lock().deleting.entry(library_id).or_insert(0) += 1;
+        Retirement {
+            retired: self.retired.clone(),
+            library_id,
+            committed: false,
+        }
+    }
+
+    fn is_retired(&self, library_id: Uuid) -> bool {
+        self.retired.lock().contains(library_id)
+    }
+
+    /// Ask `library_id`'s active job to stop. A running scan checks between
+    /// files, so it stops after the file it is on; it then fails as
+    /// [`CANCELLED`]. A job still queued has nothing to finish, so it fails
+    /// as [`CANCELLED`] at once, stamped `now`: a caller waiting for it to
+    /// stop is not held behind whatever it was queued behind. Its task, when
+    /// it gets the library, finds it cancelled and does nothing. Returns
+    /// whether there was an active job to ask.
+    pub fn cancel(&self, library_id: Uuid, now: DateTime<Utc>) -> bool {
         let Some(slot) = self.existing_slot(library_id) else {
             return false;
         };
@@ -264,6 +379,15 @@ impl ScanCoordinator {
             .is_some_and(|job| job.state.is_active());
         if active {
             slot.cancel.lock().store(true, Ordering::SeqCst);
+            slot.job.send_if_modified(|current| match current {
+                Some(job) if job.state == ScanState::Queued => {
+                    job.state = ScanState::Failed;
+                    job.finished_at = Some(now);
+                    job.failure = Some(CANCELLED.to_string());
+                    true
+                }
+                _ => false,
+            });
         }
         active
     }
@@ -289,9 +413,12 @@ impl ScanCoordinator {
 
     /// Take `library_id`'s lock and the catalog gate for a watcher reconcile
     /// without waiting: `None` when a scan job is registered for the library,
-    /// or either is held. A watcher that waited would stall every other
-    /// library's events behind one scan.
+    /// either is held, or the library is [retired](Self::retire). A watcher
+    /// that waited would stall every other library's events behind one scan.
     pub fn try_acquire_for_reconcile(&self, library_id: Uuid) -> Option<ScanGuard> {
+        if self.is_retired(library_id) {
+            return None;
+        }
         let slot = self.slot(library_id);
         if slot
             .job
@@ -373,9 +500,12 @@ impl ScanTicket {
         self.cancel.load(Ordering::SeqCst)
     }
 
+    /// Apply `change` to the job while it is still active. A finished job
+    /// -- one cancelled while it was queued, above all -- keeps the ending
+    /// it was given: its task, still running, cannot revive it.
     fn update(&self, change: impl FnOnce(&mut ScanJob)) {
         self.slot.job.send_if_modified(|current| match current {
-            Some(job) if job.id == self.job_id => {
+            Some(job) if job.id == self.job_id && job.state.is_active() => {
                 change(job);
                 true
             }
@@ -423,11 +553,9 @@ impl Drop for ScanTicket {
     fn drop(&mut self) {
         let now = self.clock.now();
         self.update(|job| {
-            if job.state.is_active() {
-                job.state = ScanState::Failed;
-                job.finished_at = Some(now);
-                job.failure = Some(INTERRUPTED.to_string());
-            }
+            job.state = ScanState::Failed;
+            job.finished_at = Some(now);
+            job.failure = Some(INTERRUPTED.to_string());
         });
     }
 }

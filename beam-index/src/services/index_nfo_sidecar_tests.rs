@@ -76,6 +76,24 @@ impl FileRepository for CountingFileRepository {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.find_all_under(library_id, dir).await
     }
+    async fn find_by_library_and_hash_including_missing(
+        &self,
+        library_id: Uuid,
+        hash: u64,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner
+            .find_by_library_and_hash_including_missing(library_id, hash)
+            .await
+    }
+    async fn find_beneath_including_missing(
+        &self,
+        library_id: Uuid,
+        dir: &Path,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner
+            .find_beneath_including_missing(library_id, dir)
+            .await
+    }
     async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
         self.inner.find_by_movie_entry_id(movie_entry_id).await
     }
@@ -97,6 +115,14 @@ impl FileRepository for CountingFileRepository {
     }
     async fn mark_missing(&self, ids: Vec<Uuid>, at: DateTime<Utc>) -> Result<u64, DbErr> {
         self.inner.mark_missing(ids, at).await
+    }
+    async fn relink(
+        &self,
+        relinks: Vec<FileRelink>,
+        displaced: Vec<Uuid>,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbErr> {
+        self.inner.relink(relinks, displaced, at).await
     }
     async fn restore(&self, id: Uuid) -> Result<(), DbErr> {
         self.inner.restore(id).await
@@ -226,6 +252,7 @@ impl Harness {
             Arc::new(LocalAdminLogService::new(
                 admin_log_repo.clone() as Arc<dyn AdminLogRepository>
             )),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         )
         .with_enrichment_repo(enrichment_repo.clone())
         .with_sidecar_repo(sidecar_repo.clone())

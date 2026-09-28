@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::file::{CreateMediaFile, FileClassification, MediaFile, UpdateMediaFile};
+use crate::models::file::{
+    CreateMediaFile, FileClassification, FileRelink, MediaFile, UpdateMediaFile, displaced_path,
+};
 
 /// Persistence for indexed media files.
 ///
@@ -46,6 +48,25 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     /// `/a/bc.mkv`. Used to find the files one NFO can describe without
     /// reading the whole library (issue #184).
     async fn find_all_under(&self, library_id: Uuid, dir: &Path) -> Result<Vec<MediaFile>, DbErr>;
+    /// Reconcile read: every file in the library whose content hash is
+    /// `hash`, missing ones included. The indexer asks it for the row a new
+    /// path might be a moved or renamed file of (issue #180); a file in
+    /// another library is never one.
+    async fn find_by_library_and_hash_including_missing(
+        &self,
+        library_id: Uuid,
+        hash: u64,
+    ) -> Result<Vec<MediaFile>, DbErr>;
+    /// Reconcile read: every file in the library whose path lies strictly
+    /// beneath the directory `dir`, missing ones included. Beneath by whole
+    /// path components: `/a/S1` holds `/a/S1/x.mkv` but not `/a/S10/x.mkv`.
+    /// The watcher asks it which rows a changed or removed directory held
+    /// (issue #180), rather than reading the whole library per event.
+    async fn find_beneath_including_missing(
+        &self,
+        library_id: Uuid,
+        dir: &Path,
+    ) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read.
     async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read.
@@ -79,6 +100,27 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     /// Clear `missing_since` on `id`: the file is back on disk. The row keeps
     /// its id, so everything keyed on it (playback progress) is still there.
     async fn restore(&self, id: Uuid) -> Result<(), DbErr>;
+    /// Point each row of `relinks` at the path its file now has -- moved,
+    /// renamed, or swapped with another (issue #180) -- recording the size and
+    /// modification time found there and clearing `missing_since`; and move
+    /// each row of `displaced` to its [`displaced_path`], stamping it missing
+    /// at `at` unless it already is. All or nothing.
+    ///
+    /// Everything else about a relinked row, its id above all, is kept, so
+    /// what is keyed on it (playback progress, its movie or episode, its
+    /// streams) follows the file to its new path. Rows may trade paths -- a
+    /// swap, a rotation -- within one call: one row per path (issue #181)
+    /// holds once the call is done, not step by step.
+    ///
+    /// Fails, changing nothing, when an id has no row or is named twice, when
+    /// two relinks name one path, or when a relink's path is held by a row
+    /// neither relinked nor displaced.
+    async fn relink(
+        &self,
+        relinks: Vec<FileRelink>,
+        displaced: Vec<Uuid>,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbErr>;
     /// Hard-delete every listed row that is missing, returning how many went.
     /// A listed row that is present is left alone, so a caller racing a
     /// restore cannot purge a file that came back. An empty list touches
@@ -186,6 +228,36 @@ pub mod in_memory {
                 .values()
                 .filter(|f| f.missing_since.is_none() && f.library_id == library_id)
                 .filter(|f| f.path != dir && f.path.starts_with(dir))
+                .cloned()
+                .collect())
+        }
+
+        async fn find_by_library_and_hash_including_missing(
+            &self,
+            library_id: Uuid,
+            hash: u64,
+        ) -> Result<Vec<MediaFile>, DbErr> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|f| f.library_id == library_id && f.hash == hash)
+                .cloned()
+                .collect())
+        }
+
+        async fn find_beneath_including_missing(
+            &self,
+            library_id: Uuid,
+            dir: &Path,
+        ) -> Result<Vec<MediaFile>, DbErr> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|f| f.library_id == library_id && f.path != dir && f.path.starts_with(dir))
                 .cloned()
                 .collect())
         }
@@ -345,6 +417,62 @@ pub mod in_memory {
         async fn restore(&self, id: Uuid) -> Result<(), DbErr> {
             if let Some(file) = self.files.lock().unwrap().get_mut(&id) {
                 file.missing_since = None;
+            }
+            Ok(())
+        }
+
+        async fn relink(
+            &self,
+            relinks: Vec<FileRelink>,
+            displaced: Vec<Uuid>,
+            at: DateTime<Utc>,
+        ) -> Result<(), DbErr> {
+            let mut files = self.files.lock().unwrap();
+            let mut moving = std::collections::HashSet::new();
+            for id in relinks
+                .iter()
+                .map(|relink| relink.id)
+                .chain(displaced.iter().copied())
+            {
+                if !files.contains_key(&id) {
+                    return Err(DbErr::RecordNotFound(format!("File {id} not found")));
+                }
+                if !moving.insert(id) {
+                    return Err(DbErr::Custom(format!("file {id} is named twice")));
+                }
+            }
+            let mut targets = std::collections::HashSet::new();
+            for relink in &relinks {
+                let held = files
+                    .values()
+                    .any(|stored| stored.path == relink.path && !moving.contains(&stored.id));
+                if held || !targets.insert(relink.path.clone()) {
+                    return Err(DbErr::Custom(format!(
+                        "idx_files_path_unique: a file is already stored at {}",
+                        relink.path.display()
+                    )));
+                }
+            }
+            let now = chrono::Utc::now();
+            for id in displaced {
+                let stored = files.get_mut(&id).expect("checked above");
+                stored.path = displaced_path(&stored.path, id);
+                stored.missing_since.get_or_insert(at);
+                stored.updated_at = now;
+            }
+            for FileRelink {
+                id,
+                path,
+                size_bytes,
+                mtime,
+            } in relinks
+            {
+                let stored = files.get_mut(&id).expect("checked above");
+                stored.path = path;
+                stored.size_bytes = size_bytes;
+                stored.mtime = mtime;
+                stored.missing_since = None;
+                stored.updated_at = now;
             }
             Ok(())
         }

@@ -9,8 +9,9 @@ use uuid::Uuid;
 use crate::models::{Library, LibraryFile, ScanJob};
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_domain::models::Library as DomainLibrary;
+use beam_index::runtime::LibraryWatchHook;
 use beam_index::services::index::{IndexError, IndexService};
-use beam_index::services::scan::ScanTrigger;
+use beam_index::services::scan::{ScanTrigger, StoppedScan};
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
     /// Validates a *library root* at registration, returning the canonical
@@ -340,7 +341,8 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// differently (400 against 404).
     async fn get_file_by_id(&self, file_id: String) -> Result<Option<LocatedFile>, LibraryError>;
 
-    /// Create a new library
+    /// Create a new library, watched by the filesystem watcher from the
+    /// moment it exists.
     async fn create_library(
         &self,
         name: String,
@@ -359,8 +361,9 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     async fn get_scan(&self, library_id: Uuid) -> Result<Option<ScanJob>, LibraryError>;
 
     /// Delete a library by ID. A scan of it that is queued or running is
-    /// cancelled and waited for first (see [`IndexService::stop_scan`]), and
-    /// the indexer forgets the library's latest job after.
+    /// cancelled and waited for first, and no new one starts (see
+    /// [`IndexService::stop_scan`]); the indexer forgets the library's latest
+    /// job after, and the watcher stops watching it.
     async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError>;
 }
 
@@ -374,11 +377,15 @@ pub struct LocalLibraryService {
     notification_service: Arc<dyn NotificationService>,
     index_service: Arc<dyn IndexService>,
     path_validator: Arc<dyn PathValidator>,
+    /// Told when a library is created or deleted, so the filesystem watcher
+    /// follows at once (issue #180).
+    watch_hook: Arc<dyn LibraryWatchHook>,
 }
 
 impl LocalLibraryService {
     /// `data_dir` must be canonical: it is compared component-wise against
     /// canonical library roots.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
         file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
@@ -387,6 +394,7 @@ impl LocalLibraryService {
         notification_service: Arc<dyn NotificationService>,
         index_service: Arc<dyn IndexService>,
         path_validator: Arc<dyn PathValidator>,
+        watch_hook: Arc<dyn LibraryWatchHook>,
     ) -> Self {
         LocalLibraryService {
             library_repo,
@@ -396,6 +404,7 @@ impl LocalLibraryService {
             notification_service,
             index_service,
             path_validator,
+            watch_hook,
         }
     }
 }
@@ -530,6 +539,17 @@ impl LibraryService for LocalLibraryService {
             description: None,
         };
 
+        let created = self.library_repo.create(create).await?;
+        // Watched from now, not from the next maintenance cycle -- but on a
+        // task of its own: registering walks the library's tree (a native
+        // watch per directory, or a poller's first snapshot of a network
+        // share), which can take minutes the request should not wait for.
+        // A failure is logged by the hook, and the cycle registers the
+        // library instead; a library deleted before its registration lands
+        // is unwatched by that cycle too.
+        let watch_hook = self.watch_hook.clone();
+        let watched = created.clone();
+        tokio::spawn(async move { watch_hook.library_created(&watched).await });
         let DomainLibrary {
             id,
             name,
@@ -540,7 +560,7 @@ impl LibraryService for LocalLibraryService {
             last_scan_started_at,
             last_scan_finished_at,
             last_scan_file_count,
-        } = self.library_repo.create(create).await?;
+        } = created;
 
         self.notification_service.publish(AdminEvent::info(
             EventCategory::System,
@@ -600,14 +620,25 @@ impl LibraryService for LocalLibraryService {
         // job as an internal error. A scan held on one file past the timeout
         // does not hold the delete: whatever it then writes is refused with
         // the library, or left for the orphan sweep.
-        if !self.index_service.stop_scan(lib_uuid).await {
+        //
+        // The library stays retired -- nothing scans or reconciles it -- only
+        // once the delete has succeeded. A delete that fails returns early
+        // and drops the retirement, so the library, still stored and listed,
+        // is scanned and watched again.
+        let StoppedScan {
+            in_time,
+            retirement,
+        } = self.index_service.stop_scan(lib_uuid).await;
+        if !in_time {
             warn!(
                 library_id = %lib_uuid,
                 "a scan of the library did not stop in time; deleting the library anyway"
             );
         }
         self.library_repo.delete(lib_uuid).await?;
+        retirement.commit();
         self.index_service.forget_library(lib_uuid);
+        self.watch_hook.library_deleted(lib_uuid).await;
 
         self.notification_service.publish(AdminEvent::info(
             EventCategory::System,

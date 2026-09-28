@@ -43,7 +43,9 @@ startup, or the periodic rescan. Asking for a scan while one is running is refus
 skips a library that is already being scanned. While a scan runs, changes the watcher sees in that
 library wait for it to finish and are then picked up. Deleting a library while it is being scanned
 stops the scan after the file it is on and waits for it — up to 30 seconds — before the library is
-removed; the scan ends as cancelled.
+removed; the scan ends as cancelled. A scan still waiting its turn is cancelled at once, and
+nothing new starts on a library once its deletion has begun. If the deletion then fails, the
+library is scanned and watched again as before.
 
 Beam keeps the latest scan of each library in memory. A restart forgets it — the library's *last
 scanned* time is kept — and a scan running when the server stops is not resumed; the next periodic
@@ -110,8 +112,12 @@ past the watch limit — Beam scans it once, so files added before polling began
 season whose folder could not get a watch) are not left waiting for the periodic rescan. At
 startup, Beam sets up every watch before its startup scan begins, so that scan is the one a share
 polled from the start gets — it is not scanned twice — and polling begins once the startup scan
-has finished. A deleted library stops being watched or polled, and a library Beam could not move
-to polling is watched again, after the next `BEAM_SCAN_INTERVAL_SECS` interval and its rescan.
+has finished. A new library starts being watched as soon as it is added — in the background, so
+adding a large network share does not wait for Beam to walk it — and a deleted one stops being
+watched or polled as soon as it is deleted. A library Beam could not start watching, or could not
+move to polling, is tried again after the next `BEAM_SCAN_INTERVAL_SECS` interval and its rescan.
+Watching a new library does not index what is already in it: scan it, or wait for the periodic
+rescan.
 
 The admin status endpoint (`GET /v1/admin/status`, field `watcher`) reports, for every library,
 whether it is watched natively, polled (and why), or not watched at all, together with the watch
@@ -161,6 +167,50 @@ offline for longer, raise `BEAM_MISSING_FILE_GRACE_DAYS`, or give it a library o
 </Aside>
 
 To remove every video from a library on purpose, delete the library.
+
+## Renaming and moving files
+
+Rename a file, move it to another folder, or rename a whole folder — a season folder from `S01` to
+`Season 1`, say — and Beam recognises the file by its contents rather than indexing it as new. It
+keeps the same record, so everyone's resume point, its place in its movie or show, and its audio
+and subtitle tracks all follow it, and it is not probed again. This works whether the watcher sees
+the move as it happens or the next scan finds it, and for a file moved out of the library and back
+in, as long as it comes back within the grace period.
+
+The same holds when files trade names. Swap two files' names, rotate three, or rename a file onto
+the name of one you deleted earlier, and each record follows its file's contents rather than its
+old name — your place in *Heat* stays with *Heat*. The watcher sees such a change one name at a
+time and cannot tell which file is which yet, so it leaves those files as they were and the next
+scan sorts them out; scan the library to have it done at once. If a file takes over the name of one
+whose contents are nowhere in the library any more, that old record is kept as missing, not
+deleted, and goes after the grace period like any other missing file.
+
+One exception keeps a common habit working: replacing a film you have been watching by renaming
+another file onto its name — a better copy downloaded beside it, say. When someone has played the
+file whose name is taken, its contents are not still somewhere else in the library (as they would be
+after a swap of two names), and nobody has played the file renamed onto it, Beam keeps the watched
+record at that name, with everyone's resume point, and treats the new contents as a change to it.
+The renamed file's own record is marked missing, like any file that is gone.
+
+What counts as the same file:
+
+- **The same contents, in the same library.** Beam compares a hash of the whole file and its size,
+  so a file you re-encoded or edited is a different file. A file moved to another library is new
+  there.
+- **The old copy is gone.** Copying a file leaves the original in place, so the copy is a new file
+  — and Beam writes an info entry to the admin log noting the duplicate.
+- **Two identical files moved at once** keep their own records, matched by file name, then by
+  folder. When that still does not tell them apart — one of two identical copies moved and the
+  other deleted, say — the record someone has watched most recently wins, and failing that Beam
+  picks the same one every time.
+
+Each move is written to the admin log as an info entry naming the old and new paths, and a scan's
+progress counts the files it recognised as moved. Beam still never renames or moves anything
+itself: it only follows what you do.
+
+A moved file keeps the title it had, even if its new name points at a different one — renaming
+`Heat (1995).mkv` to `Ronin (1998).mkv` leaves it a file of *Heat*. Beam treats a move as the same
+file, not a new one to classify.
 
 ## Which files get indexed
 

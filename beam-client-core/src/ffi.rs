@@ -3372,7 +3372,7 @@ mod tests {
         let backend = Arc::new(CannedBackend::answering(
             202,
             "application/json",
-            r#"{"id":"00000000-0000-0000-0000-000000000001","library_id":"00000000-0000-0000-0000-000000000002","trigger":"manual","state":"queued","queued_at":"2026-09-27T00:00:00Z","started_at":null,"finished_at":null,"progress":{"total_count":null,"processed_count":0,"added_count":0,"changed_count":0,"unchanged_count":0,"deferred_count":0,"failed_count":0,"marked_missing_count":0,"restored_count":0,"purged_count":0},"failure":null}"#,
+            r#"{"id":"00000000-0000-0000-0000-000000000001","library_id":"00000000-0000-0000-0000-000000000002","trigger":"manual","state":"queued","queued_at":"2026-09-27T00:00:00Z","started_at":null,"finished_at":null,"progress":{"total_count":null,"processed_count":0,"added_count":0,"changed_count":0,"unchanged_count":0,"deferred_count":0,"failed_count":0,"marked_missing_count":0,"restored_count":0,"relinked_count":0,"purged_count":0},"failure":null}"#,
         ));
         client
             .use_transport(

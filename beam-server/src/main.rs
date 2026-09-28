@@ -93,10 +93,14 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(beam_domain::services::RealClock);
 
     // Initialize App Services and State
-    let (services, index_service, enrichment_service) =
-        beam_server::state::AppServices::new(&config, db, clock.clone())
-            .await
-            .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
+    let beam_server::state::BuiltServices {
+        services,
+        index_service,
+        enrichment_service,
+        library_watches,
+    } = beam_server::state::AppServices::build(&config, db, clock.clone())
+        .await
+        .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
 
     // Start in-process indexing (startup scan, filesystem watcher, periodic
     // rescan backstop). There is no separate indexer process.
@@ -104,14 +108,13 @@ async fn main() -> Result<()> {
         index_service,
         beam_index::runtime::BackgroundIndexingConfig {
             scan_interval_secs: config.scan_interval_secs,
-            watch_enabled: config.watch_enabled,
             watch_debounce_ms: config.watch_debounce_ms,
             watch_poll_interval_secs: config.watch_poll_interval_secs,
         },
-        services.watch_status.clone(),
+        &library_watches,
     );
 
-    // Start the metadata-enrichment sweep loop. `AppServices::new` wires this
+    // Start the metadata-enrichment sweep loop. `AppServices::build` wires this
     // to the cameo-backed provider when TMDB/AniList are configured, falling
     // back to a no-op (fast, harmless skip) otherwise.
     beam_index::runtime::spawn_enrichment_worker(

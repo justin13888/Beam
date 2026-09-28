@@ -29,7 +29,9 @@ pub use notification::InMemoryNotificationService;
 pub use notification::{
     AdminEvent, EventCategory, EventLevel, LocalNotificationService, NotificationService,
 };
-pub use scan::{ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger};
+pub use scan::{
+    Retirement, ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, StoppedScan,
+};
 pub use watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer, WatchError};
 #[cfg(any(test, feature = "test-utils"))]
 pub use watcher::{InMemoryFsWatcher, MockFsWatcher};

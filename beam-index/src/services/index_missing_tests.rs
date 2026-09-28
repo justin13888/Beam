@@ -237,6 +237,7 @@ impl Harness {
             Arc::new(LocalAdminLogService::new(
                 admin_log_repo.clone() as Arc<dyn AdminLogRepository>
             )),
+            Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
         )
         .with_clock(clock.clone())
         .with_missing_file_grace(grace);

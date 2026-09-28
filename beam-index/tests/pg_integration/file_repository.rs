@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use beam_domain::models::{CreateMediaFile, FileStatus, MediaFileContent};
+use beam_domain::models::{CreateMediaFile, FileRelink, FileStatus, MediaFileContent};
 use beam_domain::repositories::FileRepository;
 use beam_index::repositories::SqlFileRepository;
 use beam_test_support::{postgres, seed};
@@ -173,6 +173,93 @@ async fn purging_a_missing_file_cascades_to_its_playback_progress() {
     assert_eq!(repo.purge_missing(vec![file]).await.unwrap(), 1);
 
     assert_eq!(progress_rows(db.as_ref(), file).await, 0);
+}
+
+/// A relinked file keeps its playback progress (issue #180): the relink is
+/// an update of the row the `playback_progress.file_id` foreign key points
+/// at, never a delete and re-insert that would cascade the progress away.
+#[tokio::test]
+async fn relinking_a_missing_file_keeps_its_playback_progress() {
+    let db = postgres::connection().await;
+    let user = seed::user(db.as_ref()).await.unwrap();
+    let file = seed::file(db.as_ref()).await.unwrap();
+    insert_progress(db.as_ref(), user, file).await;
+
+    let repo = SqlFileRepository::new(db.clone());
+    repo.mark_missing(vec![file], chrono::Utc::now())
+        .await
+        .unwrap();
+    let moved_to = PathBuf::from(format!("/videos/{}/moved.mkv", uuid::Uuid::new_v4()));
+    repo.relink(
+        vec![FileRelink {
+            id: file,
+            path: moved_to.clone(),
+            size_bytes: 2048,
+            mtime: None,
+        }],
+        Vec::new(),
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("relink against the real schema");
+
+    let relinked = repo.find_by_id(file).await.unwrap().expect("visible again");
+    assert_eq!(relinked.path, moved_to);
+    assert_eq!(relinked.missing_since, None);
+    assert_eq!(progress_rows(db.as_ref(), file).await, 1);
+}
+
+/// Two files that swapped names swap paths (issue #180) under the real
+/// `idx_files_path_unique`, which Postgres checks per statement: moving one
+/// row straight onto the other's path is refused, and the swap -- one call
+/// -- goes through, each row keeping its playback progress.
+#[tokio::test]
+async fn a_swap_exchanges_paths_under_the_unique_path_index() {
+    let db = postgres::connection().await;
+    let user = seed::user(db.as_ref()).await.unwrap();
+    let heat = seed::file(db.as_ref()).await.unwrap();
+    let ronin = seed::file(db.as_ref()).await.unwrap();
+    insert_progress(db.as_ref(), user, heat).await;
+    insert_progress(db.as_ref(), user, ronin).await;
+    let repo = SqlFileRepository::new(db.clone());
+    let path_of = |id| {
+        let repo = &repo;
+        async move { repo.find_by_id(id).await.unwrap().unwrap().path }
+    };
+    let (heat_path, ronin_path) = (path_of(heat).await, path_of(ronin).await);
+    let onto = |id, path: &PathBuf| FileRelink {
+        id,
+        path: path.clone(),
+        size_bytes: 1024,
+        mtime: None,
+    };
+
+    let alone = repo
+        .relink(
+            vec![onto(heat, &ronin_path)],
+            Vec::new(),
+            chrono::Utc::now(),
+        )
+        .await;
+    let err = alone.expect_err("the path is held by a row outside the call");
+    assert!(
+        err.to_string().contains("idx_files_path_unique"),
+        "refused by the unique index, got: {err}"
+    );
+    assert_eq!(path_of(heat).await, heat_path, "and nothing moved");
+
+    repo.relink(
+        vec![onto(heat, &ronin_path), onto(ronin, &heat_path)],
+        Vec::new(),
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("the swap goes through");
+
+    assert_eq!(path_of(heat).await, ronin_path);
+    assert_eq!(path_of(ronin).await, heat_path);
+    assert_eq!(progress_rows(db.as_ref(), heat).await, 1);
+    assert_eq!(progress_rows(db.as_ref(), ronin).await, 1);
 }
 
 async fn insert_progress(db: &sea_orm::DatabaseConnection, user: uuid::Uuid, file: uuid::Uuid) {
