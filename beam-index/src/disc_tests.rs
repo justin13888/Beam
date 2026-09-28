@@ -302,16 +302,131 @@ proptest! {
         );
     }
 
-    /// No bytes make either parser panic -- a disc is read as found.
+    /// An IFO whose pointers point anywhere -- inside it, at its end, past
+    /// it, at the largest values their widths hold -- is read without a
+    /// panic, and any duration it yields is one four BCD bytes can spell.
     #[test]
-    fn parsing_any_bytes_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {
-        let _ = dvd_title_set_duration(&bytes);
-        let _ = blu_ray_playlist(&bytes);
-        let mut ifo = b"DVDVIDEO-VTS".to_vec();
-        ifo.extend_from_slice(&bytes);
-        let _ = dvd_title_set_duration(&ifo);
-        let mut mpls = b"MPLS0200".to_vec();
-        mpls.extend_from_slice(&bytes);
-        let _ = blu_ray_playlist(&mpls);
+    fn an_ifo_with_wild_pointers_reads_safely(
+        sector in prop_oneof![Just(0u32), Just(1), Just(2), 0u32..8, Just(u32::MAX)],
+        chains in prop_oneof![Just(0u16), 1u16..8, Just(u16::MAX)],
+        offsets in prop::collection::vec(
+            prop_oneof![0u32..64, 2040u32..2100, 4000u32..5000, Just(u32::MAX)],
+            0..8,
+        ),
+        len in prop_oneof![0usize..0xD0, 0xD0usize..2100, 2100usize..6000],
+        filler in any::<u8>(),
+    ) {
+        let mut ifo = vec![filler; len.max(12)];
+        ifo[..12].copy_from_slice(b"DVDVIDEO-VTS");
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(slot) = ifo.get_mut(at..at + bytes.len()) {
+                slot.copy_from_slice(bytes);
+            }
+        };
+        put(0xCC, &sector.to_be_bytes());
+        let table = sector as usize * DVD_SECTOR_BYTES;
+        put(table, &chains.to_be_bytes());
+        for (at, offset) in offsets.iter().enumerate() {
+            put(table + 8 + 8 * at + 4, &offset.to_be_bytes());
+        }
+        if let Some(longest) = dvd_title_set_duration(&ifo) {
+            prop_assert!(longest < Duration::from_secs(100 * 3600));
+            prop_assert!(!longest.is_zero());
+        }
+    }
+
+    /// A playlist whose play list starts, counts and lengths point anywhere
+    /// is read without a panic, and whatever it yields names each play item
+    /// it read by five digits, never more items than it counts.
+    #[test]
+    fn a_playlist_with_wild_pointers_reads_safely(
+        start in prop_oneof![0u32..16, 16u32..200, 200u32..400, Just(u32::MAX)],
+        items in prop_oneof![Just(0u16), 1u16..6, Just(u16::MAX)],
+        lengths in prop::collection::vec(prop_oneof![Just(0u16), 18u16..24, Just(u16::MAX)], 0..6),
+        len in prop_oneof![0usize..16, 16usize..200, 200usize..600],
+        digits in any::<bool>(),
+    ) {
+        let mut playlist = vec![if digits { b'7' } else { 0 }; len.max(4)];
+        playlist[..4].copy_from_slice(b"MPLS");
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(slot) = playlist.get_mut(at..at + bytes.len()) {
+                slot.copy_from_slice(bytes);
+            }
+        };
+        put(8, &start.to_be_bytes());
+        let list = start as usize;
+        put(list.saturating_add(6), &items.to_be_bytes());
+        let mut at = list.saturating_add(10);
+        for length in &lengths {
+            put(at, &length.to_be_bytes());
+            at = at.saturating_add(2 + usize::from(*length));
+        }
+        if let Some(read) = blu_ray_playlist(&playlist) {
+            prop_assert!(!read.clips.is_empty());
+            prop_assert!(read.clips.len() <= usize::from(items));
+            for clip in &read.clips {
+                prop_assert!(clip.len() == 5 && clip.bytes().all(|b| b.is_ascii_digit()));
+            }
+        }
+    }
+}
+
+/// Only the folders the choice needs are listed: a Blu-ray folder that
+/// cannot be read and that the main title does not need (`BACKUP/`, `JAR/`)
+/// changes nothing, while an unreadable `PLAYLIST/` or `VIDEO_TS/` fails the
+/// disc, so its rows are left as they are.
+#[cfg(unix)]
+#[test]
+fn only_a_folder_the_main_title_needs_can_fail_a_disc() {
+    use std::os::unix::fs::PermissionsExt;
+    let lock = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let blu_ray = write_blu_ray(
+        &root.join("Heat (1995)"),
+        &[("00001", 1000), ("00800", 4000)],
+        &[("00800.mpls", mpls(&[("00800", 0, ticks(6000))]))],
+    );
+    for companion in ["BACKUP", "JAR", "AUXDATA"] {
+        write_sized(&blu_ray.join(companion).join("00800.mpls"), 64);
+        lock(&blu_ray.join(companion), 0o000);
+    }
+    if std::fs::read_dir(blu_ray.join("BACKUP")).is_ok() {
+        for companion in ["BACKUP", "JAR", "AUXDATA"] {
+            lock(&blu_ray.join(companion), 0o755);
+        }
+        eprintln!("skipped: running as root, which ignores file permissions");
+        return;
+    }
+
+    let found = read(root, &blu_ray, DiscKind::BluRay);
+    assert_eq!(names(&found.title), ["00800.m2ts"]);
+    assert!(
+        !found.failed,
+        "an unreadable BACKUP, JAR or AUXDATA is never read"
+    );
+
+    lock(&blu_ray.join("PLAYLIST"), 0o000);
+    let found = read(root, &blu_ray, DiscKind::BluRay);
+    lock(&blu_ray.join("PLAYLIST"), 0o755);
+    assert!(found.failed, "the playlists decide the main title");
+    assert!(found.title.is_empty());
+
+    let dvd = write_dvd(
+        &root.join("Ronin (1998)"),
+        &[TitleSet {
+            set: 1,
+            parts: &[1000],
+            duration: Some(100 * MINUTE),
+        }],
+    );
+    lock(&dvd, 0o000);
+    let found = read(root, &dvd, DiscKind::Dvd);
+    lock(&dvd, 0o755);
+    assert!(found.failed);
+    for companion in ["BACKUP", "JAR", "AUXDATA"] {
+        lock(&blu_ray.join(companion), 0o755);
     }
 }

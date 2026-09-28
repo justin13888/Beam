@@ -16,6 +16,11 @@
 //!   its clips are played in the playlist's order, each once. With no such
 //!   playlist, the largest clip alone is taken.
 //!
+//! Only the folders the choice needs are listed: `VIDEO_TS/` itself, or a
+//! Blu-ray's `PLAYLIST/` and `STREAM/`. A disc one of those cannot be listed
+//! in is not read; a `BACKUP/`, `JAR/` or `AUXDATA/` folder is never looked
+//! into, so one that cannot be read changes nothing.
+//!
 //! Everything here reads, and nothing writes: a disc is listed with no link
 //! followed, its stream files are stat'ed with a [`StatCursor`], and an IFO
 //! or a playlist is read through the no-follow opener ([`LibraryFile`]).
@@ -93,12 +98,24 @@ pub(crate) fn read_disc(root: &Path, disc: &Path, kind: DiscKind, policy: &PathP
     let mut metadata: Vec<PathBuf> = Vec::new();
     let mut failed = false;
     let mut seen = 0usize;
+    // A DVD's files are all in `VIDEO_TS/`; a Blu-ray's main title needs
+    // only its `PLAYLIST/` and `STREAM/` folders, so no other is listed.
     let walk = WalkDir::new(disc)
         .follow_links(false)
         .follow_root_links(false)
         .min_depth(1)
-        .max_depth(2)
-        .sort_by_file_name();
+        .max_depth(match kind {
+            DiscKind::Dvd => 1,
+            DiscKind::BluRay => 2,
+        })
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() != 1
+                || !entry.file_type().is_dir()
+                || entry.file_name().eq_ignore_ascii_case("playlist")
+                || entry.file_name().eq_ignore_ascii_case("stream")
+        });
     for entry in walk {
         let entry = match entry {
             Ok(entry) => entry,
