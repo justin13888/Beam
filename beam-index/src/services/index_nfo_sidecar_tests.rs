@@ -1396,6 +1396,97 @@ async fn an_nfo_whose_pin_another_title_holds_is_tried_again_until_it_applies() 
     );
 }
 
+/// A harness whose clock runs an hour ahead of the files it writes, so a scan
+/// records every NFO's stat stamp and a later scan with the same stamp reads
+/// no NFO bytes.
+async fn harness_ahead_of_its_files() -> Harness {
+    let clock = Arc::new(beam_domain::services::TestClock::starting_at(
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    ));
+    Harness::build(Probe::Double, clock).await
+}
+
+/// The warnings that say an NFO describes several titles.
+async fn several_titles_warnings(h: &Harness) -> Vec<String> {
+    h.warnings()
+        .await
+        .into_iter()
+        .filter(|w| w.contains("An NFO pins several"))
+        .collect()
+}
+
+/// A `movie.nfo` added to a folder of two already-indexed movies can pin only
+/// one of them: the other is refused by the unique pin because its sibling now
+/// holds the id -- from this very NFO, so no retry could ever succeed. The NFO
+/// is settled at once: recorded after one scan, never read again while
+/// unchanged, and the administrator told exactly once.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_movie_nfo_describing_two_movies_is_settled_once_and_the_administrator_told() {
+    let h = harness_ahead_of_its_files().await;
+    h.video("Collection/Heat (1995).mkv");
+    h.video("Collection/Alien (1979).mkv");
+    h.scan().await;
+    assert_eq!(h.movie_pins(), vec![None, None], "two movies");
+
+    h.write("Collection/movie.nfo", &tmdb_movie(949));
+    h.scan().await;
+
+    assert_eq!(
+        h.movie_pins(),
+        vec![None, Some("tmdb:949".to_string())],
+        "an id pins one title"
+    );
+    assert!(
+        h.applied("Collection/movie.nfo").await.is_some(),
+        "recorded as applied after one scan"
+    );
+    let warnings = several_titles_warnings(&h).await;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("movies") && warnings[0].contains("tmdb:949"));
+
+    let before = nfo_reads();
+    h.scan().await;
+    h.scan().await;
+    assert_eq!(nfo_reads(), before, "a settled NFO is not read again");
+    assert_eq!(several_titles_warnings(&h).await.len(), 1, "told once");
+    assert_eq!(h.movie_pins(), vec![None, Some("tmdb:949".to_string())]);
+}
+
+/// The same for a `tvshow.nfo` added to a flat show folder whose episodes key
+/// to two shows.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tvshow_nfo_describing_two_shows_is_settled_once_and_the_administrator_told() {
+    let h = harness_ahead_of_its_files().await;
+    h.video("Lost/Lost.S01E01.mkv");
+    h.video("Lost/The.Wire.S01E01.mkv");
+    h.scan().await;
+    assert_eq!(h.show_pins(), vec![None, None], "two shows");
+
+    h.write("Lost/tvshow.nfo", &tmdb_show(4607));
+    h.scan().await;
+
+    assert_eq!(
+        h.show_pins(),
+        vec![None, Some("tmdb:4607".to_string())],
+        "an id pins one title"
+    );
+    assert!(
+        h.applied("Lost/tvshow.nfo").await.is_some(),
+        "recorded as applied after one scan"
+    );
+    let warnings = several_titles_warnings(&h).await;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("shows") && warnings[0].contains("tmdb:4607"));
+
+    let before = nfo_reads();
+    h.scan().await;
+    h.scan().await;
+    assert_eq!(nfo_reads(), before, "a settled NFO is not read again");
+    assert_eq!(several_titles_warnings(&h).await.len(), 1, "told once");
+}
+
 /// An edited `<stem>.nfo` re-pins the movie of its own video at the next
 /// scan.
 #[tokio::test]

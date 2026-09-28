@@ -549,7 +549,11 @@ impl LocalIndexService {
     /// NFO's pin replaces the one it set before, but never an
     /// administrator's (FR-312). An NFO that pins nothing leaves the pin as
     /// it is: the title stays fetched by the id it was last given.
-    /// [`PinOutcome::Refused`] when the unique pin refused any of the titles.
+    /// [`PinOutcome::Refused`] when the unique pin refused any of the titles
+    /// because a title this NFO does not describe holds the id. When the
+    /// holder is another of its own titles -- a `movie.nfo` beside two
+    /// movies, a `tvshow.nfo` over episodes of two shows -- no retry could
+    /// ever succeed, so the NFO is settled and the administrator told once.
     pub(super) async fn repin_from_nfo(
         &self,
         library: &Library,
@@ -592,7 +596,8 @@ impl LocalIndexService {
                     targets.insert(season.show_id);
                 }
             }
-            for show_id in targets {
+            let mut shares_pin = false;
+            for &show_id in &targets {
                 let Some(show) = self.show_repo.find_by_id(show_id).await? else {
                     continue;
                 };
@@ -616,8 +621,20 @@ impl LocalIndexService {
                     .await?
                     == PinOutcome::Refused
                 {
-                    outcome = PinOutcome::Refused;
+                    // Held by another of this NFO's own titles: no retry can
+                    // free it, so the NFO is settled and the administrator
+                    // told. Held by a title outside it: tried again later.
+                    let holder = self.show_repo.find_by_pin(&pin).await?;
+                    if holder.is_some_and(|holder| targets.contains(&holder.id)) {
+                        shares_pin = true;
+                    } else {
+                        outcome = PinOutcome::Refused;
+                    }
                 }
+            }
+            if shares_pin {
+                self.log_nfo_describes_several_titles(nfo_path, &pin, "shows")
+                    .await;
             }
             return Ok(outcome);
         }
@@ -636,7 +653,8 @@ impl LocalIndexService {
                 targets.insert(entry.movie_id);
             }
         }
-        for movie_id in targets {
+        let mut shares_pin = false;
+        for &movie_id in &targets {
             let Some(movie) = self.movie_repo.find_by_id(movie_id).await? else {
                 continue;
             };
@@ -660,10 +678,54 @@ impl LocalIndexService {
                 .await?
                 == PinOutcome::Refused
             {
-                outcome = PinOutcome::Refused;
+                // As for shows above.
+                let holder = self.movie_repo.find_by_pin(&pin).await?;
+                if holder.is_some_and(|holder| targets.contains(&holder.id)) {
+                    shares_pin = true;
+                } else {
+                    outcome = PinOutcome::Refused;
+                }
             }
         }
+        if shares_pin {
+            self.log_nfo_describes_several_titles(nfo_path, &pin, "movies")
+                .await;
+        }
         Ok(outcome)
+    }
+
+    /// Tell the administrator, once per application, that the NFO at
+    /// `nfo_path` describes several `titles` (`"movies"` or `"shows"`) and
+    /// only one of them could take its `pin`: an id pins one title, so the
+    /// others keep the pin they had.
+    async fn log_nfo_describes_several_titles(
+        &self,
+        nfo_path: &Path,
+        pin: &ProviderPin,
+        titles: &str,
+    ) {
+        let stored = pin.to_ref_string();
+        warn!(
+            path = %nfo_path.display(),
+            pin = %stored,
+            "an NFO describes several titles; only one of them is pinned to its id"
+        );
+        let _ = self
+            .admin_log
+            .log(
+                AdminLogLevel::Warning,
+                AdminLogCategory::LibraryScan,
+                format!(
+                    "An NFO pins several {titles} to {stored}; an id pins one title, so only one \
+                     of them is pinned: {}",
+                    nfo_path.display()
+                ),
+                Some(serde_json::json!({
+                    "path": nfo_path.display().to_string(),
+                    "nfo": stored,
+                })),
+            )
+            .await;
     }
 
     /// Record, as applied, the NFOs classification just read for a file

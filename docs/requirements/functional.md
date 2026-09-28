@@ -222,9 +222,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   per NFO (`applied_nfos`), so an NFO whose modification time is old (`cp -p`), skewed by another
   host's clock, or older than a scan that died is still applied, and one whose content did not
   change is never applied again. An NFO whose pin is refused because another title already holds
-  that id MUST NOT be recorded as applied, so a later scan tries it again. Deleting an NFO forgets
-  its record and leaves the pin it set; an NFO created at that path again is one added after
-  indexing and re-pins, so a kept, conflicting NFO deleted and recreated replaces the title's pin.
+  that id MUST NOT be recorded as applied, so a later scan tries it again -- unless the title
+  holding it got it from that same NFO (one describing several titles: a `movie.nfo` beside two
+  movies, a `tvshow.nfo` over episodes of two shows), which no retry can change: such an NFO MUST
+  be recorded as applied, pin the one title, and be reported once through the admin log. Deleting
+  an NFO forgets its record and leaves the pin it set; an NFO created at that path again is one
+  added after indexing and re-pins, so a kept, conflicting NFO deleted and recreated replaces the
+  title's pin.
   A walk that could not read where an NFO lives, or a removal reported while the library root is
   gone, MUST NOT forget its record. A watcher event MUST read only the files beneath the NFO's
   folder. Every NFO MUST be read with a read-only open of a regular file (never through a
