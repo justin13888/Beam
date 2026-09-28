@@ -146,15 +146,17 @@ backstop for all of them.
 ## When files go missing
 
 A file that is gone from disk is not removed at once. Beam marks it **missing**: it drops out of its
-title's sources, continue-watching and history, and cannot be streamed — but Beam keeps its record,
-and with it every viewer's resume point. A movie or show whose files are **all** missing drops out
+title's sources and cannot be streamed, and a title with no other file drops out of continue-watching
+and history — but Beam keeps its record. Every viewer's resume point belongs to the title, not the
+file, so it is kept either way. A movie or show whose files are **all** missing drops out
 of browsing and search at once, since it has nothing to play; its own page still opens, so a
 bookmark does not break. If the file comes back at the same path, the next scan (or the filesystem
 watcher) restores it exactly as it was, progress included, and the title is listed again.
 
 A missing file is removed for good only when a scan still cannot find it after a grace period — 30
 days unless `BEAM_MISSING_FILE_GRACE_DAYS` says otherwise (see
-[Configuration](/reference/configuration/)). Removing it also removes everyone's progress for it.
+[Configuration](/reference/configuration/)). Removing it keeps everyone's progress on its title;
+only the note of which file they last played is forgotten.
 Set the grace to `0` to remove missing files at the next scan. A title left with no files at all
 is removed by the same scan, together with its metadata; the scan's completion entry in the admin
 log counts it under `titles_removed`. A scan that could not read the whole library removes no

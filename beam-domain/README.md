@@ -10,10 +10,10 @@ current architecture.
 ## Structure
 
 - **`models`** -- plain data structs: `Library`, `MediaFile`, `Movie`/`MovieEntry`, `Show`/
-  `Season`/`Episode`, `Genre`, `AdminLog`, `PlaybackProgress`, `MediaStream`, and the enrichment
+  `Season`/`Episode`, `Genre`, `AdminLog`, `WatchState`, `MediaStream`, and the enrichment
   queue's row type.
 - **`repositories`** -- one trait per aggregate (`LibraryRepository`, `FileRepository`,
-  `MovieRepository`, `ShowRepository`, `GenreRepository`, `PlaybackProgressRepository`,
+  `MovieRepository`, `ShowRepository`, `GenreRepository`, `WatchStateRepository`,
   `MediaStreamRepository`, `AdminLogRepository`, `EnrichmentStateRepository`), each with an
   `InMemory*` fake alongside the trait definition. `beam-index`/`beam-server` provide the
   sea-orm-backed implementations.

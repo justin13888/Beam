@@ -21,9 +21,9 @@ use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRep
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use tempfile::TempDir;
 
 struct Harness {
@@ -36,7 +36,7 @@ struct Harness {
     show_repo: Arc<InMemoryShowRepository>,
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
     enrichment_repo: Arc<InMemoryEnrichmentStateRepository>,
-    progress_repo: Arc<InMemoryPlaybackProgressRepository>,
+    watch_state: Arc<InMemoryWatchStateRepository>,
     service: LocalIndexService,
 }
 
@@ -78,10 +78,7 @@ impl Harness {
         let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
         let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
-        let progress_repo = Arc::new(InMemoryPlaybackProgressRepository::new(
-            Arc::new(RealClock),
-            file_repo.clone(),
-        ));
+        let watch_state = Arc::new(InMemoryWatchStateRepository::default());
         let library = library_repo
             .create(CreateLibrary {
                 name: "Identity".to_string(),
@@ -129,7 +126,7 @@ impl Harness {
             Arc::new(LocalAdminLogService::new(
                 admin_log_repo.clone() as Arc<dyn AdminLogRepository>
             )),
-            progress_repo.clone(),
+            watch_state.clone(),
         )
         .with_missing_file_grace(grace)
         .with_enrichment_repo(enrichment_repo.clone());
@@ -144,7 +141,7 @@ impl Harness {
             show_repo,
             admin_log_repo,
             enrichment_repo,
-            progress_repo,
+            watch_state,
             service,
         }
     }
@@ -940,7 +937,7 @@ async fn a_failed_backfill_does_not_hold_up_the_scan_and_is_retried() {
         Arc::new(LocalAdminLogService::new(
             Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
         )),
-        Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 
     service
@@ -1380,7 +1377,8 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
 /// -- and with it the progress a user had on part 2.
 #[tokio::test]
 async fn an_upgrade_merges_the_parts_a_pre_stacking_build_indexed_as_films() {
-    use beam_domain::models::UpsertPlaybackProgress;
+    use beam_domain::models::watch_state::{RecordProgress, TitleRef, WatchTarget};
+    use beam_domain::repositories::WatchStateRepository;
 
     let h = Harness::keeping_missing_files().await;
     let base = chrono::Utc::now() - chrono::Duration::days(30);
@@ -1419,12 +1417,16 @@ async fn an_upgrade_merges_the_parts_a_pre_stacking_build_indexed_as_films() {
     };
     let (cd1_id, cd2_id) = (file_id(cd1), file_id(cd2));
     let user = Uuid::new_v4();
-    h.progress_repo
-        .upsert(UpsertPlaybackProgress {
+    // Played as the film part 2 was indexed as.
+    h.watch_state
+        .record_progress(RecordProgress {
             user_id: user,
+            target: WatchTarget::Movie { movie_id: films[1] },
             file_id: cd2_id,
             position_secs: 600.0,
             duration_secs: Some(3000.0),
+            // Part 2 of 2 plays the end.
+            finishes_title: true,
         })
         .await
         .unwrap();
@@ -1474,21 +1476,22 @@ async fn an_upgrade_merges_the_parts_a_pre_stacking_build_indexed_as_films() {
     );
 
     let progress = h
-        .progress_repo
-        .find_by_user_and_file(user, cd2_id)
+        .watch_state
+        .find(user, WatchTarget::Movie { movie_id: movie.id })
         .await
         .unwrap()
-        .expect("the progress on part 2 survives the merge");
+        .expect("the progress on part 2 survives the merge, on the kept movie");
     assert_eq!(progress.position_secs, 600.0);
+    assert_eq!(progress.last_file_id, Some(cd2_id), "at part 2");
     assert_eq!(
-        h.progress_repo
-            .find_in_progress_by_user(user, 10)
+        h.watch_state
+            .find_continue_candidates(user, None, 10)
             .await
             .unwrap()
             .into_iter()
-            .map(|p| p.file_id)
+            .map(|c| c.title)
             .collect::<Vec<_>>(),
-        vec![cd2_id],
+        vec![TitleRef::Movie(movie.id)],
         "and is still listed to continue"
     );
 
@@ -1978,6 +1981,150 @@ async fn a_rekey_never_merges_shows_matched_to_different_entries() {
     );
 }
 
+/// A merge moves each viewer's watch state from the retired title onto the
+/// kept one (issue #188): the retired title goes, and its rows would go with
+/// it. A viewer with state on both keeps one row per title.
+#[tokio::test]
+async fn a_merge_carries_each_viewers_watch_state_to_the_kept_title() {
+    use beam_domain::models::watch_state::{RecordProgress, WatchTarget};
+    use beam_domain::repositories::WatchStateRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let scene = h
+        .keyed_show(
+            "Greys Anatomy",
+            "greys anatomy|",
+            &["Greys.Anatomy.S01E01.720p.mkv", "Greys.Anatomy.S01E02.mkv"],
+            base,
+        )
+        .await;
+    let folder = h
+        .keyed_show(
+            "Grey's Anatomy",
+            "grey s anatomy|",
+            &["Grey's Anatomy/Season 1/Greys.Anatomy.S01E01.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    h.enrich_show(folder, 1416).await;
+    let older = h
+        .keyed_movie(
+            "Ocean's Eleven",
+            Some(2001),
+            "ocean s eleven|2001",
+            &["Ocean's Eleven (2001)/Ocean's Eleven (2001).mkv"],
+            base,
+        )
+        .await;
+    let newer = h
+        .keyed_movie(
+            "Oceans Eleven",
+            Some(2001),
+            "oceans eleven|2001",
+            &["Oceans.Eleven.2001.1080p.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    let scene_season = h.show_repo.find_seasons_by_show_id(scene).await.unwrap()[0].id;
+    let mut scene_episodes = h
+        .show_repo
+        .find_episodes_by_season_id(scene_season)
+        .await
+        .unwrap();
+    scene_episodes.sort_by_key(|e| e.episode_number);
+    let (viewer, both) = (Uuid::new_v4(), Uuid::new_v4());
+    let report = |user_id, target, position_secs| RecordProgress {
+        user_id,
+        target,
+        file_id: Uuid::new_v4(),
+        position_secs,
+        duration_secs: Some(100.0),
+        finishes_title: true,
+    };
+    let movie = |movie_id| WatchTarget::Movie { movie_id };
+    for (user, target, position) in [
+        (viewer, movie(newer), 40.0),
+        (both, movie(newer), 99.0),
+        (both, movie(older), 30.0),
+        (
+            viewer,
+            WatchTarget::Episode {
+                episode_id: scene_episodes[0].id,
+                show_id: scene,
+            },
+            20.0,
+        ),
+        (
+            viewer,
+            WatchTarget::Episode {
+                episode_id: scene_episodes[1].id,
+                show_id: scene,
+            },
+            99.0,
+        ),
+    ] {
+        h.watch_state
+            .record_progress(report(user, target, position))
+            .await
+            .unwrap();
+    }
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+    assert_eq!(h.only_movie().id, older);
+    assert_eq!(h.only_show().id, folder);
+
+    let place = |row: Option<beam_domain::models::watch_state::WatchState>| {
+        let row = row.expect("a row");
+        (row.position_secs, row.completed, row.play_count)
+    };
+    assert_eq!(
+        place(h.watch_state.find(viewer, movie(older)).await.unwrap()),
+        (40.0, false, 0)
+    );
+    assert!(
+        h.watch_state
+            .find(viewer, movie(newer))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        place(h.watch_state.find(both, movie(older)).await.unwrap()),
+        (30.0, true, 1),
+        "two rows of one viewer fold into one"
+    );
+    let mut episodes: Vec<(u32, f64, bool)> = Vec::new();
+    for row in h.watch_state.find_for_show(viewer, folder).await.unwrap() {
+        let WatchTarget::Episode { episode_id, .. } = row.target else {
+            panic!("a show's row is an episode's");
+        };
+        let episode = h
+            .show_repo
+            .find_episode_by_id(episode_id)
+            .await
+            .unwrap()
+            .expect("an episode of the kept show");
+        episodes.push((episode.episode_number, row.position_secs, row.completed));
+    }
+    episodes.sort_by_key(|(number, _, _)| *number);
+    assert_eq!(
+        episodes,
+        vec![(1, 20.0, false), (2, 0.0, true)],
+        "each episode's state is on the kept show's episode of that number"
+    );
+    assert!(
+        h.watch_state
+            .find_for_show(viewer, scene)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// What an administrator set on a title a merge retires survives it (issue
 /// #185): its pin moves to the survivor, which is queued to be fetched by
 /// it, and its field locks join the survivor's. Of two titles an
@@ -2189,7 +2336,7 @@ async fn a_merge_whose_survivor_loses_the_key_moves_no_file() {
         Arc::new(LocalAdminLogService::new(
             h.admin_log_repo.clone() as Arc<dyn AdminLogRepository>
         )),
-        Arc::new(beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository::default()),
+        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 
     let report = service.rekey_stale_titles().await.unwrap();

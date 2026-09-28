@@ -45,7 +45,13 @@ class HistoryTest {
         runTest {
             val playback =
                 FakePlaybackRepository().apply {
-                    historyPage = HistoryPage(listOf(Fixtures.historyEntry()), total = 1uL)
+                    historyPage =
+                        HistoryPage(
+                            listOf(Fixtures.historyEntry()),
+                            total = 1uL,
+                            endCursor = "c1",
+                            hasNextPage = false,
+                        )
                 }
             val viewModel = HistoryViewModel(playback)
             testScheduler.advanceUntilIdle()
@@ -54,13 +60,19 @@ class HistoryTest {
         }
 
     @Test
-    fun `a further page is requested from the right offset`() =
+    fun `a further page is requested after the cursor the last one ended on`() =
         runTest {
-            // Offsets must count entries already held, not pages fetched: getting
-            // this wrong silently skips or repeats entries.
+            // Paging on from anything but the last page's end cursor silently
+            // skips or repeats entries.
             val playback =
                 FakePlaybackRepository().apply {
-                    historyPage = HistoryPage(List(3) { Fixtures.historyEntry() }, total = 9uL)
+                    historyPage =
+                        HistoryPage(
+                            List(3) { Fixtures.historyEntry() },
+                            total = 9uL,
+                            endCursor = "page-1",
+                            hasNextPage = true,
+                        )
                 }
             val viewModel = HistoryViewModel(playback)
             testScheduler.advanceUntilIdle()
@@ -70,6 +82,7 @@ class HistoryTest {
             testScheduler.advanceUntilIdle()
 
             assertEquals(6, viewModel.state.value.entries.size)
+            assertEquals(listOf(null, "page-1"), playback.historyAfters)
         }
 
     @Test
@@ -77,7 +90,13 @@ class HistoryTest {
         runTest {
             val playback =
                 FakePlaybackRepository().apply {
-                    historyPage = HistoryPage(List(3) { Fixtures.historyEntry() }, total = 9uL)
+                    historyPage =
+                        HistoryPage(
+                            List(3) { Fixtures.historyEntry() },
+                            total = 9uL,
+                            endCursor = "page-1",
+                            hasNextPage = true,
+                        )
                 }
             val viewModel = HistoryViewModel(playback)
             testScheduler.advanceUntilIdle()

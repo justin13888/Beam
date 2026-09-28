@@ -1,6 +1,6 @@
 ---
 title: Resume and history
-description: Beam remembers where you stopped, without you saving anything.
+description: Beam remembers where you stopped and what you have watched, without you saving anything.
 ---
 
 Beam records your position as you watch. There is nothing to press — it reports periodically
@@ -10,27 +10,56 @@ close to where you were.
 ## Continue watching
 
 Titles you are partway through appear in a continue-watching row on the home page, so the thing
-you are most likely to want next is the first thing you see. Finish something and it drops off
-the row.
+you are most likely to want next is the first thing you see. The row holds one entry per movie and
+one per show, most recently played first:
+
+- **A movie** you stopped partway through, to resume.
+- **A show** at the episode to watch next: the one you stopped partway through, or — once you
+  finish an episode — the next one, even across the end of a season. Episodes you have already
+  watched, and episodes Beam has no file for, are stepped over; one you had already started
+  resumes where you left it. When you are caught up, the show leaves the row.
+
+Finish a movie and it drops off the row. To take something off the row yourself, remove it: it
+stays away until you next play it, and keeps your place meanwhile.
+
+Beam builds the row from the 1,000 titles you played most recently, counting shows you have
+finished. Something you are partway through but have not touched since playing a thousand other
+titles falls outside that and leaves the row; it keeps your place, and playing it again brings it
+back.
 
 ## Resuming
 
 Reopening a partly-watched title picks up where you stopped rather than starting from the
 beginning. If you would rather start over, seek back — the resume point is a starting position,
-not a restriction.
+not a restriction. You can also clear it, which forgets where you were without forgetting that
+you have watched the title before.
+
+## Watched and unwatched
+
+Watching to within the last 5% of a title marks it **watched** and puts its resume point back at
+the start. A movie in several parts is watched when you reach the end of its last part; stopping
+near the end of an earlier part keeps your place in that part. Rewinding afterwards does not unmark it — that is a rewatch, and it resumes like any
+other title. Beam counts how many times you have watched each one.
+
+You can also mark a movie, an episode, a whole season or a whole show watched without playing it,
+or unwatched to forget it entirely. Marking a show watched marks the episodes it has now; an
+episode added later is unwatched.
+
+Title pages show what you have watched: each movie and episode says whether it is watched and where
+you stopped, and each season and show how many of its episodes you have seen.
 
 ## Watch history
 
-The history page lists what you have watched and when, across every title, in one place.
+The history page lists every movie and episode you have watched or started, newest first.
 
 ## Three things that surprise people
 
 - **Your position is yours alone.** Every user's progress is tracked separately, so watching
   something on a shared server does not affect anyone else's resume point.
-- **Position is tracked per file, not per title.** Switching to a different quality version of
-  the same title means switching to a different file, so your place may not carry across. Pick
-  the source you want before settling in — see [Watching](/using/watching/).
-- **A file that goes offline leaves the row — for a while.** If the disk holding a file is
-  disconnected, the title leaves continue-watching and history. Your position is kept, and comes
-  back with the file when the disk does, unless it stays away longer than the server's grace
-  period (30 days by default).
+- **Your place follows the title, not the file.** Switching to a different quality version of the
+  same title keeps your place, and Beam remembers which version you last chose and offers it
+  again while it is still there.
+- **A file that goes offline leaves the row — for a while.** If the disk holding the only file of a
+  title is disconnected, the title leaves continue-watching and history. Your position is kept, and
+  comes back with the file when the disk does. If another version of the title is still there,
+  the row offers that one instead.

@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::search::{MediaConnection, MediaSortField, MediaTypeFilter, SortOrder};
-use crate::models::{MediaMetadata, MediaSourceConnection};
+use crate::models::{EpisodeDetail, MediaMetadata, MediaSourceConnection, SeasonDetail};
 use crate::routes::api_error::{
-    MediaBrowseError, MediaLookupError, MediaSourcesError, SessionAuth,
+    MediaBrowseError, MediaLookupError, MediaRefLookupError, MediaSourcesError, SessionAuth,
 };
+use crate::routes::playback::parse_user_id;
 use crate::routes::tags::Media;
 use crate::services::metadata::{BrowseRequest, MediaSearchFilters, MetadataError};
 use crate::state::AppState;
@@ -74,16 +75,26 @@ pub struct MediaPath {
     pub id: String,
 }
 
+/// What `/v1/episodes/{id}` and `/v1/seasons/{id}` capture.
+#[derive(Debug, Schema, PathParams)]
+pub struct ChildPath {
+    /// Episode or season id.
+    pub id: Uuid,
+}
+
 /// Browse/search the media library with cursor-based pagination, sorting, and
 /// filtering.
 ///
-/// Only titles with at least one present file are listed.
+/// Only titles with at least one present file are listed. Each movie carries
+/// the caller's state for it; a show carries none here.
 #[kynos::get("/media", tag = Media, operation_id = "browseMedia")]
 pub async fn browse_media(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Query(params): Query<BrowseQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaConnection>, MediaBrowseError> {
+    let user_id = parse_user_id(&auth.0.user_id)
+        .map_err(|err| MediaBrowseError::Internal(err.to_string()))?;
     let BrowseQuery {
         first,
         after,
@@ -125,7 +136,15 @@ pub async fn browse_media(
         .await;
 
     match result {
-        Ok(connection) => Ok(Json(connection)),
+        Ok(mut connection) => {
+            state
+                .services
+                .playback
+                .overlay_titles(user_id, &mut connection.items)
+                .await
+                .map_err(|err| MediaBrowseError::Internal(err.to_string()))?;
+            Ok(Json(connection))
+        }
         Err(MetadataError::InvalidCursor(detail)) => Err(MediaBrowseError::InvalidCursor(detail)),
         Err(MetadataError::InvalidPagination(detail)) => {
             Err(MediaBrowseError::InvalidPagination(detail))
@@ -142,10 +161,11 @@ pub async fn browse_media(
     }
 }
 
-/// Fetch a single media item's full metadata by id.
+/// Fetch a single media item's full metadata by id, with the caller's state
+/// for the movie, or for the show and each of its seasons and episodes.
 #[kynos::get("/media/{id}", tag = Media, operation_id = "getMediaDetail")]
 pub async fn get_media_detail(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaMetadata>, MediaLookupError> {
@@ -158,10 +178,20 @@ pub async fn get_media_detail(
         )));
     };
 
+    let user_id = parse_user_id(&auth.0.user_id)?;
+
     // A failed lookup is a 500: answering 404 would tell the client the
     // title is gone when the server only failed to read it.
     match state.services.metadata.get_media_metadata(id).await {
-        Ok(Some(metadata)) => Ok(Json(metadata)),
+        Ok(Some(mut metadata)) => {
+            state
+                .services
+                .playback
+                .overlay_media(user_id, &mut metadata)
+                .await
+                .map_err(|err| MediaLookupError::Internal(err.to_string()))?;
+            Ok(Json(metadata))
+        }
         Ok(None) => Err(MediaLookupError::MediaNotFound(format!(
             "media {} not found",
             path.id
@@ -206,6 +236,60 @@ pub async fn get_media_sources(
             | MetadataError::InvalidSearchQuery(msg),
         ) => Err(MediaSourcesError::Internal(msg)),
     }
+}
+
+/// One episode: its metadata and the caller's state for it, its season, its
+/// show, and the episodes either side of it in the show.
+#[kynos::get("/episodes/{id}", tag = Media, operation_id = "getEpisodeDetail")]
+pub async fn get_episode_detail(
+    auth: SessionAuth,
+    Path(path): Path<ChildPath>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<EpisodeDetail>, MediaRefLookupError> {
+    let user_id = parse_user_id(&auth.0.user_id)?;
+    let mut detail = state
+        .services
+        .metadata
+        .get_episode_detail(path.id)
+        .await
+        .map_err(|err| MediaRefLookupError::Internal(err.to_string()))?
+        .ok_or_else(|| {
+            MediaRefLookupError::MediaNotFound(format!("episode {} not found", path.id))
+        })?;
+    state
+        .services
+        .playback
+        .overlay_episode(user_id, &mut detail)
+        .await
+        .map_err(|err| MediaRefLookupError::Internal(err.to_string()))?;
+    Ok(Json(detail))
+}
+
+/// One season: its episodes with the caller's state for each and for the
+/// season, and its show.
+#[kynos::get("/seasons/{id}", tag = Media, operation_id = "getSeasonDetail")]
+pub async fn get_season_detail(
+    auth: SessionAuth,
+    Path(path): Path<ChildPath>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<SeasonDetail>, MediaRefLookupError> {
+    let user_id = parse_user_id(&auth.0.user_id)?;
+    let mut detail = state
+        .services
+        .metadata
+        .get_season_detail(path.id)
+        .await
+        .map_err(|err| MediaRefLookupError::Internal(err.to_string()))?
+        .ok_or_else(|| {
+            MediaRefLookupError::MediaNotFound(format!("season {} not found", path.id))
+        })?;
+    state
+        .services
+        .playback
+        .overlay_season(user_id, &mut detail)
+        .await
+        .map_err(|err| MediaRefLookupError::Internal(err.to_string()))?;
+    Ok(Json(detail))
 }
 
 #[cfg(test)]

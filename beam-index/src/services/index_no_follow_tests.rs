@@ -25,10 +25,10 @@ use beam_domain::models::CreateLibrary;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::playback_progress::in_memory::InMemoryPlaybackProgressRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use beam_domain::services::TestClock;
 use tempfile::TempDir;
 
@@ -143,7 +143,7 @@ impl Harness {
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(NoOpAdminLogService),
-            Arc::new(InMemoryPlaybackProgressRepository::default()),
+            Arc::new(InMemoryWatchStateRepository::default()),
         )
         .with_filesystem_probe(probe.clone())
         .with_sidecar_repo(sidecar_repo.clone())

@@ -185,7 +185,8 @@ hiding it is tracked in [#183](https://github.com/justin13888/beam/issues/183).)
 1. Bring the disk or share back, then rescan (or just wait: the watcher and the periodic rescan
    restore files as they reappear at the same path).
 2. Do it within the grace period — 30 days unless `BEAM_MISSING_FILE_GRACE_DAYS` is set. A scan
-   after that removes the files, and everyone's progress on them, for good.
+   after that removes the files for good. Everyone's progress is kept on the titles, and resumes
+   on whatever version of each title is left.
 3. If a scan reported that it **could not read** part of the library, the admin Logs tab has a
    warning listing the folders or files (`failed_paths` in its **Details**). Files at or beneath
    them were left alone; fix the permissions or the share and rescan.

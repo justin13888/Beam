@@ -12,7 +12,7 @@ feature (row ↔ domain-model conversions). See
 One module per entity, each re-exporting the conventional sea-orm `Entity`/`Model`/`ActiveModel`/
 `Column`/`Relation` types: `admin_log`, `episode`, `files`, `genre`, `library`, `library_movie`,
 `library_show`, `media_stream`, `metadata_enrichment`, `movie`, `movie_entry`, `movie_genre`,
-`pending_auth`, `playback_progress`, `season`, `session`, `show`, `show_genre`, `user`.
+`pending_auth`, `season`, `session`, `show`, `show_genre`, `user`, `watch_state`.
 
 Keep this crate and `beam-migration` in lockstep: a schema change needs a migration here *and* a
 matching entity update, in the same commit.

@@ -421,13 +421,19 @@ public final class FakePlaybackRepository: PlaybackRepository, @unchecked Sendab
         }
     }
 
-    public func history(limit: UInt32?, offset: UInt32?) async throws -> HistoryPage {
+    /// Pages over the list; the fake's cursor is the index a page ends at.
+    public func history(first: UInt32?, after: String?) async throws -> HistoryPage {
         try state.withLock { state in
             try state.check()
-            let start = Int(offset ?? 0)
-            let end = min(state.history.count, start + Int(limit ?? 50))
+            let start = after.flatMap { Int($0) } ?? 0
+            let end = min(state.history.count, start + Int(first ?? 50))
             let slice = start < end ? Array(state.history[start..<end]) : []
-            return HistoryPage(items: slice, total: UInt64(state.history.count))
+            return HistoryPage(
+                items: slice,
+                total: UInt64(state.history.count),
+                endCursor: slice.isEmpty ? nil : String(end),
+                hasNextPage: end < state.history.count
+            )
         }
     }
 }

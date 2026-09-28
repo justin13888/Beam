@@ -157,8 +157,8 @@ public struct BeamRepositories: ServerRepository, CatalogRepository, PlaybackRep
         try await mapping { try await client.continueWatching(limit: limit) }
     }
 
-    public func history(limit: UInt32?, offset: UInt32?) async throws -> HistoryPage {
-        try await mapping { try await client.history(limit: limit, offset: offset) }
+    public func history(first: UInt32?, after: String?) async throws -> HistoryPage {
+        try await mapping { try await client.history(first: first, after: after) }
     }
 
     // MARK: - SessionRepository

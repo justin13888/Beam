@@ -6,8 +6,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{
-    ArtworkKind, ArtworkVariant, EpisodeMetadata, ExternalIdentifiers, MediaMetadata, MediaSource,
-    MovieMetadata, Ratings, SeasonMetadata, ShowDates, ShowMetadata, Title, artwork_path,
+    ArtworkKind, ArtworkVariant, EpisodeDetail, EpisodeMetadata, ExternalIdentifiers,
+    MediaMetadata, MediaSource, MovieMetadata, Ratings, SeasonDetail, SeasonMetadata, ShowDates,
+    ShowMetadata, ShowRef, Title, UserTitleState, artwork_path,
 };
 use crate::services::cursor;
 use crate::services::sources::{PrimarySource, SourceCatalog};
@@ -19,6 +20,7 @@ use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
     CatalogRepository, GenreRepository, MovieRepository, ShowRepository,
 };
+use beam_domain::utils::next_up::{Neighbours, neighbours};
 
 #[async_trait::async_trait]
 pub trait MetadataService: Send + Sync + std::fmt::Debug {
@@ -49,6 +51,20 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     /// distinct from `MediaNotFound` because the routes answer them 400 and
     /// 404 respectively.
     async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError>;
+
+    /// One episode by id, with its season, its show and its neighbours:
+    /// `Ok(None)` when no episode has that id (issue #188).
+    async fn get_episode_detail(
+        &self,
+        episode_id: Uuid,
+    ) -> Result<Option<EpisodeDetail>, MetadataError>;
+
+    /// One season by id, with its episodes and its show: `Ok(None)` when no
+    /// season has that id.
+    async fn get_season_detail(
+        &self,
+        season_id: Uuid,
+    ) -> Result<Option<SeasonDetail>, MetadataError>;
 }
 
 /// Everything one browse or search request asks, in the Relay vocabulary the
@@ -191,7 +207,7 @@ impl From<PrimarySource> for MovieFiles {
         let PrimarySource {
             file_id,
             duration_secs,
-            spans_episodes: _,
+            last_episode_number: _,
             source_count,
         } = primary;
         Self {
@@ -255,6 +271,7 @@ fn movie_metadata(
         identifiers: identifiers(imdb_id, tmdb_id, tvdb_id),
         file_id,
         source_count,
+        user_state: UserTitleState::default(),
     })
 }
 
@@ -305,7 +322,53 @@ fn show_metadata(
         season_count,
         episode_count,
         seasons,
+        user_state: None,
     })
+}
+
+/// The show heading an episode's or a season's detail.
+fn show_ref(show: &beam_domain::models::Show) -> ShowRef {
+    ShowRef {
+        id: show.id,
+        title: Title {
+            original: show.title.clone(),
+            localized: show.title_localized.clone(),
+            alternatives: None,
+        },
+        poster_url: show
+            .poster_url
+            .as_ref()
+            .map(|_| artwork_path(ArtworkKind::Show, show.id, ArtworkVariant::Poster)),
+        backdrop_url: show
+            .backdrop_url
+            .as_ref()
+            .map(|_| artwork_path(ArtworkKind::Show, show.id, ArtworkVariant::Backdrop)),
+    }
+}
+
+fn season_metadata(
+    season: beam_domain::models::Season,
+    episodes: Vec<EpisodeMetadata>,
+) -> SeasonMetadata {
+    let dates = ShowDates {
+        first_aired: season.first_aired.map(midnight),
+        last_aired: season.last_aired.map(midnight),
+    };
+    SeasonMetadata {
+        id: season.id,
+        season_number: season.season_number,
+        dates,
+        episode_runtime: None,
+        episodes,
+        poster_url: season
+            .poster_url
+            .as_ref()
+            .map(|_| artwork_path(ArtworkKind::Season, season.id, ArtworkVariant::Poster)),
+        genres: vec![],
+        ratings: None,
+        identifiers: None,
+        user_state: None,
+    }
 }
 
 impl DbMetadataService {
@@ -370,51 +433,10 @@ impl DbMetadataService {
 
             let mut episodes = Vec::new();
             for ep in episodes_domain {
-                let PrimarySource {
-                    file_id,
-                    duration_secs,
-                    spans_episodes,
-                    source_count,
-                } = self.sources.episode_primary(&ep).await.map_err(internal)?;
-                // A file holding a run of episodes lasts the whole run, which
-                // is not this episode's duration.
-                let duration = duration_secs.filter(|_| !spans_episodes);
-
-                episodes.push(EpisodeMetadata {
-                    id: ep.id,
-                    episode_number: ep.episode_number,
-                    title: ep.title,
-                    description: ep.description,
-                    air_date: ep.air_date,
-                    thumbnail_url: ep.thumbnail_url.as_ref().map(|_| {
-                        artwork_path(ArtworkKind::Episode, ep.id, ArtworkVariant::Thumbnail)
-                    }),
-                    duration,
-                    file_id,
-                    source_count,
-                });
+                episodes.push(self.episode_metadata(ep).await?);
             }
             episode_count += episodes.len() as u32;
-
-            let dates = ShowDates {
-                first_aired: season.first_aired.map(midnight),
-                last_aired: season.last_aired.map(midnight),
-            };
-
-            seasons.push(SeasonMetadata {
-                id: season.id,
-                season_number: season.season_number,
-                dates,
-                episode_runtime: None,
-                episodes,
-                poster_url: season
-                    .poster_url
-                    .as_ref()
-                    .map(|_| artwork_path(ArtworkKind::Season, season.id, ArtworkVariant::Poster)),
-                genres: vec![],
-                ratings: None,
-                identifiers: None,
-            });
+            seasons.push(season_metadata(season, episodes));
         }
 
         let genres = self
@@ -429,6 +451,47 @@ impl DbMetadataService {
             episodes: episode_count,
         };
         Ok(show_metadata(show, genres, counts, seasons))
+    }
+
+    /// One episode's metadata, its primary source read from its files.
+    async fn episode_metadata(
+        &self,
+        ep: beam_domain::models::Episode,
+    ) -> Result<EpisodeMetadata, MetadataError> {
+        let PrimarySource {
+            file_id,
+            duration_secs,
+            last_episode_number,
+            source_count,
+        } = self.sources.episode_primary(&ep).await.map_err(internal)?;
+        // A file holding a run of episodes lasts the whole run, which is not
+        // this episode's duration.
+        let duration = duration_secs.filter(|_| last_episode_number.is_none());
+        let beam_domain::models::Episode {
+            id,
+            season_id: _,
+            episode_number,
+            title,
+            description,
+            air_date,
+            runtime: _,
+            thumbnail_url,
+            created_at: _,
+        } = ep;
+        Ok(EpisodeMetadata {
+            id,
+            episode_number,
+            title,
+            description,
+            air_date,
+            thumbnail_url: thumbnail_url
+                .as_ref()
+                .map(|_| artwork_path(ArtworkKind::Episode, id, ArtworkVariant::Thumbnail)),
+            duration,
+            file_id,
+            source_count,
+            user_state: UserTitleState::default(),
+        })
     }
 
     /// The titles behind one page of catalogue positions, in page order. A
@@ -685,6 +748,96 @@ impl MetadataService for DbMetadataService {
         }
 
         Err(MetadataError::MediaNotFound)
+    }
+
+    async fn get_episode_detail(
+        &self,
+        episode_id: Uuid,
+    ) -> Result<Option<EpisodeDetail>, MetadataError> {
+        let Some(episode) = self
+            .show_repo
+            .find_episode_by_id(episode_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(None);
+        };
+        let Some(season) = self
+            .show_repo
+            .find_season_by_id(episode.season_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(None);
+        };
+        let Some(show) = self
+            .show_repo
+            .find_by_id(season.show_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(None);
+        };
+        // Neighbours by next-up's rules: playable episodes only, and the
+        // next after the run the episode's primary file holds.
+        let outline = self
+            .show_repo
+            .episode_outline(show.id)
+            .await
+            .map_err(internal)?;
+        let run_end = self
+            .sources
+            .episode_primary(&episode)
+            .await
+            .map_err(internal)?
+            .last_episode_number;
+        let Neighbours {
+            previous: previous_episode_id,
+            next: next_episode_id,
+        } = neighbours(&outline, episode_id, run_end);
+        Ok(Some(EpisodeDetail {
+            episode: self.episode_metadata(episode).await?,
+            season_id: season.id,
+            season_number: season.season_number,
+            show: show_ref(&show),
+            previous_episode_id,
+            next_episode_id,
+        }))
+    }
+
+    async fn get_season_detail(
+        &self,
+        season_id: Uuid,
+    ) -> Result<Option<SeasonDetail>, MetadataError> {
+        let Some(season) = self
+            .show_repo
+            .find_season_by_id(season_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(None);
+        };
+        let Some(show) = self
+            .show_repo
+            .find_by_id(season.show_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(None);
+        };
+        let mut episodes = Vec::new();
+        for ep in self
+            .show_repo
+            .find_episodes_by_season_id(season.id)
+            .await
+            .map_err(internal)?
+        {
+            episodes.push(self.episode_metadata(ep).await?);
+        }
+        Ok(Some(SeasonDetail {
+            season: season_metadata(season, episodes),
+            show: show_ref(&show),
+        }))
     }
 }
 

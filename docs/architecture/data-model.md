@@ -367,9 +367,9 @@ is written once: marking an already-missing row keeps the first instant, because
 runs from when the file was first found gone. `purge_missing` is the only delete, it removes only
 rows that are already missing, and a scan calls it only for rows its walk could vouch for (no walk
 error above them, and not refused by the empty-root guard) once they have been missing for
-`BEAM_MISSING_FILE_GRACE_DAYS`. The `ON DELETE CASCADE` foreign keys from `media_streams` and
-`playback_progress` therefore fire only on that purge — a transient absence no longer takes every
-user's resume point with it. A *title* whose every file is missing is hidden from browse and search
+`BEAM_MISSING_FILE_GRACE_DAYS`. The `ON DELETE CASCADE` foreign key from `media_streams`, and the
+`ON DELETE SET NULL` one from `watch_state.last_file_id`, therefore fire only on that purge; a
+user's resume point belongs to the title and survives even that. A *title* whose every file is missing is hidden from browse and search
 by the liveness check above, and retired once its last file is purged.
 
 **Relink** (FR-221): a row follows its file's content within its library — through a move or a
@@ -377,7 +377,7 @@ rename, two files swapping names, a rotation, or a rename onto the path of a row
 path whose content hash (never the unhashed `0`) and `file_size` match a row of the same library
 whose own content has left its `file_path` is that row. `FileRepository::relink` takes every such
 move of one scan at once, in one transaction: it rewrites `file_path`, `file_size`, `mtime`, `inode` and `ctime` and
-clears `missing_since`, so `id`, and with it `playback_progress`, `movie_entry_id`/`episode_id` and
+clears `missing_since`, so `id`, and with it `watch_state.last_file_id`, `movie_entry_id`/`episode_id` and
 `media_streams`, is kept, and the file is not probed or classified again. Because
 `idx_files_path_unique` is checked per statement, each relinked row first steps aside to
 `<old path>.beam-relinking-<id>` and only then takes its new path, so rows can trade paths and the
@@ -392,8 +392,8 @@ watcher's candidates come from `find_by_library_and_hash_including_missing`, a r
 served by `idx_files_hash` and scoped to one library: a movie entry belongs to its library, so a
 file moved to another library is that library's new file. A row whose file is still at its path is
 never a candidate — the new path is a copy, and gets a row of its own. Ties between identical
-copies are broken by `PlaybackProgressRepository::last_played_at`, the latest `updated_at` of a
-file's `playback_progress` rows. The same read declines a replace-by-rename: a relink that would
+copies are broken by `WatchStateRepository::last_played_at`, the latest `last_played_at` of the
+`watch_state` rows whose last report named the file. The same read declines a replace-by-rename: a relink that would
 displace a played row for a row never played is not made, so the path keeps its row, with its new
 content read as a change, and the other row is paired elsewhere or marked missing. The rows beneath a directory a watcher event names come from
 `find_beneath_including_missing`: one `LIKE` on `file_path` scoped to the library, with the
@@ -474,26 +474,55 @@ and a watcher event record the ones they re-apply.
 Index on `library_id`. The row of an NFO no scan finds any more, or that the watcher reports
 removed, is deleted outright.
 
-### `playback_progress`
-Resume/continue-watching state, one row per (user, file) the user has started.
+### `watch_state`
+A user's watched state per title (issue #188): one row per (user, movie) or (user, episode) the user
+has played or marked, whichever of the title's files they played.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
 | `id` | UUID | no | PK |
 | `user_id` | UUID | no | FK → `users.id`, cascade |
-| `file_id` | UUID | no | FK → `files.id`, cascade |
-| `position_secs` | DOUBLE PRECISION | no | last reported playback position |
-| `duration_secs` | DOUBLE PRECISION | yes | denormalized snapshot of the file's duration, so percent-complete needs no join |
-| `completed` | BOOLEAN | no | default `false`; set once position crosses a near-end threshold, removes the row from continue-watching |
-| `updated_at` | TIMESTAMPTZ | no | |
+| `movie_id` | UUID | yes | FK → `movies.id`, cascade |
+| `episode_id` | UUID | yes | FK → `episodes.id`, cascade |
+| `show_id` | UUID | yes | FK → `shows.id`, cascade; the episode's show, denormalised so a show's rows are read, dismissed and collapsed without a join |
+| `last_file_id` | UUID | yes | FK → `files.id`, `ON DELETE SET NULL`; the file the last report named, which a client resumes on while it is present |
+| `position_secs` | DOUBLE PRECISION | no | default `0`; where to resume. `CHECK` finite and `>= 0` |
+| `duration_secs` | DOUBLE PRECISION | yes | the duration the position was measured against. `CHECK` finite and `> 0` |
+| `completed` | BOOLEAN | no | default `false`; played. Sticky: a report never clears it, only marking the title unwatched (which deletes the row) |
+| `play_count` | INTEGER | no | default `0`, `CHECK >= 0`; one per watch to the end or mark |
+| `last_played_at` | TIMESTAMPTZ | no | stamped from the injected clock |
+| `dismissed_at` | TIMESTAMPTZ | yes | when the user removed the title from continue-watching |
 
-Unique index on `(user_id, file_id)`; index on `(user_id, updated_at)` for the continue-watching
-query. Progress is tracked per concrete file, not per abstract title — cross-file progress
-carryover is deliberately not attempted. A row outlives its file going missing (the `files` row is
-only soft-deleted) and is dropped from continue-watching and history while the file is missing; it
-is removed only when the file is purged. The list reads join `files` and filter
-`missing_since IS NULL` in the same statement as their `LIMIT`/`OFFSET` and `COUNT`, so missing
-rows neither take a page slot nor inflate the history total.
+`CHECK ((movie_id IS NULL) <> (episode_id IS NULL))` and `CHECK ((episode_id IS NULL) = (show_id IS
+NULL))`. Unique indexes on `(user_id, movie_id)` and `(user_id, episode_id)` -- the conflict targets
+of the single-statement upserts -- and indexes on `(user_id, last_played_at DESC, id DESC)` for
+history's keyset pages and `(user_id, show_id)`.
+
+A report reaching 95% of the duration (`COMPLETED_THRESHOLD`) sets `completed`, puts the position
+back to `0` and counts a play -- unless the row already sat played at `0`, so a player reporting
+past the end repeatedly counts once. A report short of the end moves the position and leaves
+`completed` alone, so a rewind is a rewatch. Marking a season or show watched writes one row per
+episode it has then; a later episode has none.
+
+Continue-watching groups a user's rows by `(movie_id, show_id)` -- a movie, or all of one show's
+episodes -- and keeps a group played after its last dismissal (`max(last_played_at) >
+max(dismissed_at)`) that is a show, or a movie with a position. A show's row is the episode
+`beam_domain::utils::next_up` picks from the show's outline, and a title with no present file to
+play is skipped, as is a show whose viewer is caught up. The groups are read newest
+`(max(last_played_at), coalesce(movie_id, show_id))` first, 100 at a time, each page seeking past
+the last group read rather than skipping an offset; each page's rows and outlines are read in one
+query per kind (`WatchStateRepository::find_for_movies` and `find_for_shows`,
+`ShowRepository::episode_outlines`), and a request examines at most 1,000 groups. History lists
+every row, and skips (but counts) one whose title has no present file. Purging a file keeps the
+rows that last played it, without it; deleting a movie or episode takes its rows, so a merge of
+two titles by the indexer first carries the retired title's rows onto the kept one
+(`WatchStateRepository::carry`), folding a user's two rows into one -- the newer row's position
+and file, played if either was, the plays of both. Migration
+`m20261011_000001_watch_state` built this table from `playback_progress` (one row per user and
+file), merging each user's rows per title -- the newest row's position (clamped to its duration),
+duration and file, a tie going to the larger file id, played if any row was, a play per played row
+-- playing the rest of the run of each finished multi-episode file as a report now does, and
+dropping rows of files that belonged to no title.
 
 ### `playback_start_counts` / `playback_rebuffer_counts` / `playback_switch_counts`
 Operator-local playback telemetry (issue #143, [ADR-0019](decisions/ADR-0019-telemetry-posture.md)):

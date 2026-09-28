@@ -4,6 +4,7 @@ pub mod cursor;
 pub mod enrichment_cursor;
 pub mod hash;
 pub mod health;
+pub mod history_cursor;
 pub mod library;
 pub mod media_info;
 pub mod metadata;

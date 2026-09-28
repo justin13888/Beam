@@ -5,9 +5,9 @@ import Foundation
 
 /// Everything this person has watched, newest first.
 ///
-/// Offset paged rather than cursor paged, because that is what
-/// `GET /v1/history` offers -- the catalogue's Relay cursors do not extend to
-/// it. The page size matches `beam-web` and `beam-android`.
+/// Cursor paged: `GET /v1/history` returns a `HistoryConnection`, and each
+/// page carries on from the last one's `end_cursor`. The page size matches
+/// `beam-web` and `beam-android`.
 @MainActor
 @Observable
 public final class HistoryModel {
@@ -22,9 +22,9 @@ public final class HistoryModel {
     public private(set) var isLoadingMore = false
 
     /// Whether there is another page to fetch.
-    public var hasMore: Bool {
-        UInt64(entries.value?.count ?? 0) < total
-    }
+    public private(set) var hasMore = false
+    /// Where the pages loaded so far end, to page on from.
+    @ObservationIgnored private var endCursor: String?
 
     @ObservationIgnored private let playback: any PlaybackRepository
 
@@ -37,9 +37,11 @@ public final class HistoryModel {
     public func load() async {
         entries = .loading
         do {
-            let page = try await playback.history(limit: Self.pageSize, offset: 0)
+            let page = try await playback.history(first: Self.pageSize, after: nil)
             entries = .loaded(page.items)
             total = page.total
+            endCursor = page.endCursor
+            hasMore = page.hasNextPage
         } catch {
             entries = .failed(BeamFailure.from(error).message)
         }
@@ -51,16 +53,15 @@ public final class HistoryModel {
         isLoadingMore = true
         defer { isLoadingMore = false }
         do {
-            let page = try await playback.history(
-                limit: Self.pageSize,
-                offset: UInt32(existing.count)
-            )
+            let page = try await playback.history(first: Self.pageSize, after: endCursor)
             entries = .loaded(existing + page.items)
             total = page.total
+            endCursor = page.endCursor
+            hasMore = page.hasNextPage
         } catch {
             // Keep what is on screen; a failed next page is not a reason to
             // discard the pages that already arrived.
-            total = UInt64(existing.count)
+            hasMore = false
         }
     }
 }
