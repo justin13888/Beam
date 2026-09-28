@@ -192,7 +192,7 @@ impl LocalIndexService {
             }
             return Ok(());
         }
-        let Ok((size, mtime)) = read_fs_meta(path) else {
+        let Ok((size, mtime)) = read_fs_meta(&library.root_path, path) else {
             // A failed stat says nothing about the file: leave its row.
             return Ok(());
         };
@@ -318,7 +318,11 @@ impl LocalIndexService {
             if adjacent.contains(&row.path) {
                 continue;
             }
-            let is_file = std::fs::symlink_metadata(&row.path).is_ok_and(|meta| meta.is_file());
+            // Stat'ed with no link followed beneath the root (issue #238), as
+            // a watcher event's path is: one reached through a folder that
+            // has become a link is no file of the library, and its record is
+            // dropped.
+            let is_file = stat_regular_file(&library.root_path, &row.path).is_ok();
             self.reconcile_sidecar_event(library, &row.path, is_file)
                 .await?;
         }
@@ -502,7 +506,9 @@ impl LocalIndexService {
             .any(|video| hints::may_describe(path, video))
             || {
                 let inodes = self.inodes_of(library);
-                candidates.iter().any(|file| may_have_moved(file, inodes))
+                candidates
+                    .iter()
+                    .any(|file| may_have_moved(&library.root_path, file, inodes))
             }
         {
             return Ok(true);

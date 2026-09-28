@@ -1,13 +1,11 @@
 use ffmpeg_next as ffmpeg;
 use num::rational::Ratio;
 use num::traits::cast::ToPrimitive;
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io::Seek, path::PathBuf};
 use thiserror::Error;
 use tracing::trace;
 
+use crate::library_file::LibraryFile;
 use crate::probe::{
     color::{
         ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
@@ -415,11 +413,26 @@ fn format_long_name(format: &ffmpeg::format::format::Input) -> String {
 }
 
 impl VideoFileMetadata {
-    // TODO: See if this should be async anyways vv
-    /// From file path
-    pub fn from_path(file_path: &Path) -> Result<Self, MetadataError> {
+    /// Probe a library file from its open handle (issue #238).
+    ///
+    /// FFmpeg reads the handle through a custom I/O context
+    /// ([`ffmpeg::format::context::StreamIo`]) and never opens a path, so
+    /// what it probes is the file [`LibraryFile::open`] opened beneath its
+    /// root with no link followed -- not whatever the path names by the time
+    /// FFmpeg would have opened it. The path is only FFmpeg's hint at the
+    /// container, from its extension, as it was when FFmpeg opened the path
+    /// itself; the file size is the handle's.
+    pub fn from_library_file(file: LibraryFile) -> Result<Self, MetadataError> {
+        let (mut handle, handle_metadata, file_path) = file.into_parts();
+        let file_path = file_path.as_path();
         trace!("Opening file for metadata extraction: {:?}", file_path);
-        let context = ffmpeg::format::input(file_path)?;
+        // A handle shares its offset with the one it was cloned from, which
+        // may have been read to its end (hashed).
+        handle.rewind().map_err(|e| {
+            MetadataError::UnknownError(format!("Failed to rewind {}: {e}", file_path.display()))
+        })?;
+        let io = ffmpeg::format::context::StreamIo::from_read_seek(handle)?;
+        let context = ffmpeg::format::input_from_stream(io, file_path.to_str(), None)?;
 
         // Collect file-level metadata
         let metadata: HashMap<String, String> = context
@@ -686,7 +699,7 @@ impl VideoFileMetadata {
         // Get format information
         let format_name = context.format().name().to_string();
         let format_long_name = format_long_name(&context.format());
-        let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+        let file_size = handle_metadata.len();
         let bit_rate = context.bit_rate();
         let probe_score = context.probe_score();
 

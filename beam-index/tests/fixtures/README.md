@@ -30,6 +30,13 @@ full-featured system FFmpeg and committed. They are a few KB each
 | `av1.mkv`       | AV1   | —     | Matroska  |
 | `av1.webm`      | AV1   | —     | WebM      |
 | `vp9_opus.webm` | VP9   | Opus  | WebM      |
+| `h264_aac_moov_at_end.mp4` | H.264 | AAC | MP4 (`moov` after `mdat`) |
+
+`h264_aac_moov_at_end.mp4` is the one larger fixture (90 KB, 160x120, 4s):
+it is written without `+faststart`, so its `moov` index sits after a `mdat`
+bigger than the probe's 32 KiB I/O buffer. Probing it has FFmpeg seek the
+opened handle past that buffer and back (issue #238); the other fixtures are
+small enough to be read whole without a seek.
 
 Audio streams are included in `h264_aac.mp4` (AAC-in-MP4) and `vp9_opus.webm`
 (Opus-in-WebM) so audio probing is covered on real streams in both major
@@ -58,4 +65,10 @@ $FF -f lavfi -i "$V" -c:v libaom-av1 -cpu-used 8 -crf 50 -b:v 0 -pix_fmt yuv420p
 $FF -f lavfi -i "$V" -c:v libaom-av1 -cpu-used 8 -crf 50 -b:v 0 -pix_fmt yuv420p av1.webm
 $FF -f lavfi -i "$V" -f lavfi -i "$A" -c:v libvpx-vp9 -crf 50 -b:v 0 -pix_fmt yuv420p \
     -c:a libopus -b:a 24k vp9_opus.webm
+# No +faststart: the moov index is written after the mdat (FFmpeg 8.1.2).
+$FF -f lavfi -i "testsrc2=size=160x120:rate=15:duration=4" \
+    -f lavfi -i "sine=frequency=440:duration=4:sample_rate=44100" \
+    -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p -c:a aac -b:a 24k \
+    -map_metadata -1 -fflags +bitexact -flags:v +bitexact -flags:a +bitexact \
+    h264_aac_moov_at_end.mp4
 ```
