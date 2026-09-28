@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
+# Subtitle text in whatever encoding it was saved in (issue #189): UTF-16 with
+# a byte-order mark, or Windows-1252 when it is not UTF-8.
+encoding_rs = "0.8.35"
 glob = "0.3.4"
 mutants = { workspace = true }
 num = { version = "0.4.3", features = ["serde"] }

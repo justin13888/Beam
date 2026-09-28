@@ -3,7 +3,8 @@
 //! `Movie.en.forced.srt` next to `Movie.mkv` is a subtitle stream of that
 //! video that lives in its own file. The indexer records it here -- which
 //! video it belongs to, its format, and the language and flags its name
-//! carries -- and never writes to it. Serving it is issue #189's.
+//! carries -- and never writes to it. The subtitle routes serve it, read-only
+//! (issue #189).
 
 use std::path::PathBuf;
 
@@ -35,6 +36,18 @@ impl SubtitleFormat {
         match self {
             SubtitleFormat::Srt => "srt",
             SubtitleFormat::Vtt => "vtt",
+            SubtitleFormat::Ass => "ass",
+            SubtitleFormat::Ssa => "ssa",
+        }
+    }
+
+    /// The FFmpeg name of this format's codec -- the vocabulary an embedded
+    /// subtitle stream's codec is recorded in, so a sidecar and an embedded
+    /// track of one format read the same (issue #189).
+    pub fn codec_name(self) -> &'static str {
+        match self {
+            SubtitleFormat::Srt => "subrip",
+            SubtitleFormat::Vtt => "webvtt",
             SubtitleFormat::Ass => "ass",
             SubtitleFormat::Ssa => "ssa",
         }
@@ -176,6 +189,22 @@ mod tests {
         }
         for image_based in ["sub", "idx", "sup", "smi", "nfo"] {
             assert_eq!(SubtitleFormat::from_extension(image_based), None);
+        }
+    }
+
+    /// Every indexed sidecar is text, which is why it is indexed at all; its
+    /// codec name has to say so too, or the sources route would call it an
+    /// image and offer no way to read it.
+    #[test]
+    fn every_format_names_a_distinct_text_codec() {
+        let mut seen = std::collections::HashSet::new();
+        for format in SubtitleFormat::ALL {
+            let codec = format.codec_name();
+            assert!(
+                crate::utils::subtitle::is_text_subtitle_codec(codec),
+                "{format:?} -> {codec}"
+            );
+            assert!(seen.insert(codec), "{codec} named twice");
         }
     }
 }
