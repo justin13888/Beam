@@ -929,7 +929,9 @@ mod tests {
             .await
             .unwrap();
 
-        let shape: Vec<(Uuid, Vec<(Uuid, Option<u32>)>)> = sources
+        /// A source's first file and its parts.
+        type Shape = (Uuid, Vec<(Uuid, Option<u32>)>);
+        let shape: Vec<Shape> = sources
             .iter()
             .map(|s| {
                 (
