@@ -15,13 +15,22 @@
 //!   finished it;
 //! * `completed` is whether any of them had finished it, and `play_count`
 //!   how many had;
-//! * `last_played_at` is the newest row's time.
+//! * `last_played_at` is the newest row's time; a tie goes to the larger
+//!   file id, so the merge does not depend on the order rows are read in.
+//!
+//! A file holding a run of episodes (`last_episode_number`) keys by its first
+//! episode, and finishing it finished the run. So, as a report reaching the
+//! end of such a file does from now on, each finished row of one also plays
+//! the season's other episodes of the run: a play each, and -- unless the
+//! episode was played on its own file since -- its place back at the start.
 //!
 //! A row for a file that belongs to no title cannot be kept -- there is no
-//! title to key it by -- and is dropped. A position or duration no player
-//! could have produced (negative, infinite, NaN, a duration of zero) is
-//! stored as the start and as unknown respectively; the new table's CHECKs
-//! refuse them from then on.
+//! title to key it by -- and is dropped; a row for a file the indexer has
+//! marked missing is kept, as the file may return. A position or duration no
+//! player could have produced (negative, infinite, NaN, a duration of zero)
+//! is stored as the start and as unknown respectively, and a position past
+//! the duration as the duration; the new table's CHECKs refuse the former
+//! from then on.
 //!
 //! `down` recreates `playback_progress` from each row's last file. That is
 //! lossy by construction -- the per-file rows the merge collapsed, and every
@@ -110,9 +119,12 @@ SELECT gen_random_uuid(),
        show_id,
        file_id,
        CASE WHEN completed THEN 0
-            WHEN position_secs >= 0 AND position_secs < 'Infinity'::double precision
-                THEN position_secs
-            ELSE 0
+            WHEN NOT (position_secs >= 0 AND position_secs < 'Infinity'::double precision)
+                THEN 0
+            WHEN duration_secs > 0 AND duration_secs < 'Infinity'::double precision
+                 AND position_secs > duration_secs
+                THEN duration_secs
+            ELSE position_secs
        END,
        CASE WHEN duration_secs > 0 AND duration_secs < 'Infinity'::double precision
                 THEN duration_secs
@@ -123,6 +135,41 @@ SELECT gen_random_uuid(),
        NULL
   FROM ranked
  WHERE recency = 1
+"#;
+
+/// Play the rest of each finished multi-episode file's run: the episodes of
+/// its season numbered after the file's own, up to its last. As
+/// `WatchStateRepository::mark_played` does at runtime, an episode gains a
+/// played row at the start, or its existing row is played and counts a play;
+/// its place goes back to the start unless the viewer played it since.
+const SPREAD: &str = r#"
+WITH spread AS (
+    SELECT p.user_id,
+           x.id AS episode_id,
+           se.show_id,
+           count(*) AS completions,
+           max(p.updated_at) AS latest
+      FROM playback_progress p
+      JOIN files f ON f.id = p.file_id
+      JOIN episodes e ON e.id = f.episode_id
+      JOIN seasons se ON se.id = e.season_id
+      JOIN episodes x ON x.season_id = e.season_id
+                     AND x.episode_number > e.episode_number
+                     AND x.episode_number <= f.last_episode_number
+     WHERE p.completed
+       AND f.movie_entry_id IS NULL
+     GROUP BY p.user_id, x.id, se.show_id
+)
+INSERT INTO watch_state (id, user_id, episode_id, show_id, position_secs, completed, play_count,
+                         last_played_at)
+SELECT gen_random_uuid(), user_id, episode_id, show_id, 0, true, completions, latest
+  FROM spread
+ON CONFLICT (user_id, episode_id) DO UPDATE SET
+    completed = true,
+    play_count = watch_state.play_count + excluded.play_count,
+    position_secs = CASE WHEN excluded.last_played_at >= watch_state.last_played_at THEN 0
+                         ELSE watch_state.position_secs END,
+    last_played_at = greatest(watch_state.last_played_at, excluded.last_played_at)
 "#;
 
 /// `playback_progress` as `m20260704_000006` created it.
@@ -170,6 +217,7 @@ impl MigrationTrait for Migration {
             db.execute_unprepared(index).await?;
         }
         db.execute_unprepared(COPY).await?;
+        db.execute_unprepared(SPREAD).await?;
         db.execute_unprepared("DROP TABLE playback_progress")
             .await?;
         Ok(())

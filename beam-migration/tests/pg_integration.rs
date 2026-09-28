@@ -1422,10 +1422,12 @@ async fn the_enrichment_locks_migration_defaults_constrains_and_reverses() {
 }
 
 /// Issue #188's migration: every user's per-file progress merges into one
-/// row per title -- the newest row's place and file, played if any row had
-/// finished, a play per finished row -- a row with no title is dropped,
-/// positions and durations no player could produce are cleaned, and `down()`
-/// puts each row back on the file it last played.
+/// row per title -- the newest row's place and file (a tie to the larger file
+/// id), played if any row had finished, a play per finished row -- a finished
+/// multi-episode file plays its whole run, a row with no title is dropped
+/// but one on a missing file is kept, positions and durations no player
+/// could produce are cleaned, and `down()` puts each row back on the file it
+/// last played.
 #[tokio::test]
 async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
     use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
@@ -1445,14 +1447,18 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
         .expect("every migration before this one applies");
 
     // Movie b1 has two editions, each with a file (f1, f2); movie b2 has one
-    // (f3); episode 1 of show d1 has one (f4); f5 belongs to no title.
+    // (f3), which the indexer has marked missing (#179). Season 1 of show d1
+    // has episodes 1-3 (d3, d4, d5): episode 1 has a file of its own (f4)
+    // and one holding episodes 1-3 (f6); episodes 2 and 3 have one each (f7,
+    // f8). f5 belongs to no title.
     let seed = [
         "INSERT INTO libraries (id, name, root_path, created_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-00000000000a', 'lib', '/videos', now(), now())",
         "INSERT INTO users (id, display_name, is_admin, oidc_issuer, oidc_subject, created_at, \
                             updated_at) VALUES \
          ('00000000-0000-0000-0000-0000000000c1', 'one', false, 'iss', 'one', now(), now()), \
-         ('00000000-0000-0000-0000-0000000000c2', 'two', false, 'iss', 'two', now(), now())",
+         ('00000000-0000-0000-0000-0000000000c2', 'two', false, 'iss', 'two', now(), now()), \
+         ('00000000-0000-0000-0000-0000000000c3', 'three', false, 'iss', 'three', now(), now())",
         "INSERT INTO movies (id, title, identity_key, created_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-0000000000b1', 'One', 'one|', now(), now()), \
          ('00000000-0000-0000-0000-0000000000b2', 'Two', 'two|', now(), now())",
@@ -1469,7 +1475,11 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
          ('00000000-0000-0000-0000-0000000000d2', '00000000-0000-0000-0000-0000000000d1', 1)",
         "INSERT INTO episodes (id, season_id, episode_number, title, created_at) VALUES \
          ('00000000-0000-0000-0000-0000000000d3', '00000000-0000-0000-0000-0000000000d2', 1, \
-          'Pilot', now())",
+          'Pilot', now()), \
+         ('00000000-0000-0000-0000-0000000000d4', '00000000-0000-0000-0000-0000000000d2', 2, \
+          'Two', now()), \
+         ('00000000-0000-0000-0000-0000000000d5', '00000000-0000-0000-0000-0000000000d2', 3, \
+          'Three', now())",
         "INSERT INTO files (id, movie_entry_id, episode_id, library_id, file_path, file_size, \
                             hash_xxh3, file_status, scanned_at, updated_at) VALUES \
          ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000e1', NULL, \
@@ -1481,11 +1491,23 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
          ('00000000-0000-0000-0000-0000000000f4', NULL, '00000000-0000-0000-0000-0000000000d3', \
           '00000000-0000-0000-0000-00000000000a', '/videos/4.mkv', 1, 4, 'known', now(), now()), \
          ('00000000-0000-0000-0000-0000000000f5', NULL, NULL, \
-          '00000000-0000-0000-0000-00000000000a', '/videos/5.mkv', 1, 5, 'unknown', now(), now())",
+          '00000000-0000-0000-0000-00000000000a', '/videos/5.mkv', 1, 5, 'unknown', now(), now()), \
+         ('00000000-0000-0000-0000-0000000000f7', NULL, '00000000-0000-0000-0000-0000000000d4', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/7.mkv', 1, 7, 'known', now(), now()), \
+         ('00000000-0000-0000-0000-0000000000f8', NULL, '00000000-0000-0000-0000-0000000000d5', \
+          '00000000-0000-0000-0000-00000000000a', '/videos/8.mkv', 1, 8, 'known', now(), now())",
+        "INSERT INTO files (id, episode_id, last_episode_number, library_id, file_path, \
+                            file_size, hash_xxh3, file_status, scanned_at, updated_at) VALUES \
+         ('00000000-0000-0000-0000-0000000000f6', '00000000-0000-0000-0000-0000000000d3', 3, \
+          '00000000-0000-0000-0000-00000000000a', '/videos/6.mkv', 1, 6, 'known', now(), now())",
+        "UPDATE files SET missing_since = now() \
+          WHERE id = '00000000-0000-0000-0000-0000000000f3'",
         // User 1: two sources of b1, the newer in progress; b2 with a
         // negative position and a zero duration; the episode finished; the
         // titleless file. User 2: b1 finished on one source, then started
-        // on the other; b2 at NaN.
+        // on the other; b2 at NaN; episode 2 started on its own file, then
+        // the episode 1-3 file finished, then episode 3 started on its own.
+        // User 3: both sources of b1 at the same instant; b2 past its end.
         "INSERT INTO playback_progress (id, user_id, file_id, position_secs, duration_secs, \
                                         completed, updated_at) VALUES \
          (gen_random_uuid(), '00000000-0000-0000-0000-0000000000c1', \
@@ -1504,7 +1526,19 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
           '00000000-0000-0000-0000-0000000000f2', 20, 7200, false, '2026-01-06T00:00:00Z'), \
          (gen_random_uuid(), '00000000-0000-0000-0000-0000000000c2', \
           '00000000-0000-0000-0000-0000000000f3', 'NaN', 'Infinity', false, \
-          '2026-01-07T00:00:00Z')",
+          '2026-01-07T00:00:00Z'), \
+         (gen_random_uuid(), '00000000-0000-0000-0000-0000000000c2', \
+          '00000000-0000-0000-0000-0000000000f7', 50, 1200, false, '2026-01-02T00:00:00Z'), \
+         (gen_random_uuid(), '00000000-0000-0000-0000-0000000000c2', \
+          '00000000-0000-0000-0000-0000000000f6', 3590, 3600, true, '2026-01-08T00:00:00Z'), \
+         (gen_random_uuid(), '00000000-0000-0000-0000-0000000000c2', \
+          '00000000-0000-0000-0000-0000000000f8', 30, 1200, false, '2026-01-09T00:00:00Z'), \
+         (gen_random_uuid(), '00000000-0000-0000-0000-0000000000c3', \
+          '00000000-0000-0000-0000-0000000000f1', 10, 7200, false, '2026-01-03T00:00:00Z'), \
+         (gen_random_uuid(), '00000000-0000-0000-0000-0000000000c3', \
+          '00000000-0000-0000-0000-0000000000f2', 20, 7200, false, '2026-01-03T00:00:00Z'), \
+         (gen_random_uuid(), '00000000-0000-0000-0000-0000000000c3', \
+          '00000000-0000-0000-0000-0000000000f3', 500, 100, false, '2026-01-04T00:00:00Z')",
     ];
     for sql in seed {
         db.execute_unprepared(sql).await.expect("seed legacy rows");
@@ -1527,7 +1561,8 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
             "SELECT concat_ws(' ', right(user_id::text, 2), \
                               right(coalesce(movie_id, episode_id)::text, 2), \
                               coalesce(right(show_id::text, 2), '-'), \
-                              right(last_file_id::text, 2), position_secs::text, \
+                              coalesce(right(last_file_id::text, 2), '-'), \
+                              position_secs::text, \
                               coalesce(duration_secs::text, '-'), completed::text, \
                               play_count::text, \
                               to_char(last_played_at AT TIME ZONE 'UTC', 'MM-DD'), \
@@ -1548,6 +1583,18 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
             "c2 b1 - f2 20 7200 true 1 01-06 -",
             // NaN and Infinity are no position and no duration.
             "c2 b2 - f3 0 - false 0 01-07 -",
+            // The run's file keys by its first episode...
+            "c2 d3 d1 f6 0 3600 true 1 01-08 -",
+            // ...and plays the rest of the run: an episode started before
+            // goes back to the start, played...
+            "c2 d4 d1 f7 0 1200 true 1 01-08 -",
+            // ...and one started since keeps its place, played.
+            "c2 d5 d1 f8 30 1200 true 1 01-09 -",
+            // A tie goes to the larger file id.
+            "c3 b1 - f2 20 7200 false 0 01-03 -",
+            // A position past the duration is the duration; the file is
+            // missing, and the row is kept.
+            "c3 b2 - f3 100 100 false 0 01-04 -",
         ],
         "one row per user and title; the titleless file's row is dropped"
     );
@@ -1604,16 +1651,21 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
               WHERE movie_id = '00000000-0000-0000-0000-0000000000b2' AND last_file_id IS NULL"
         )
         .await,
-        vec!["2"]
+        vec!["3"]
     );
     db.execute_unprepared(
-        "DELETE FROM files WHERE id = '00000000-0000-0000-0000-0000000000f4'; \
+        "DELETE FROM files WHERE id IN ('00000000-0000-0000-0000-0000000000f4', \
+                                        '00000000-0000-0000-0000-0000000000f6'); \
          DELETE FROM episodes WHERE id = '00000000-0000-0000-0000-0000000000d3'",
     )
     .await
     .expect("delete an episode");
     assert_eq!(
-        text("SELECT count(*)::text AS v FROM watch_state WHERE show_id IS NOT NULL").await,
+        text(
+            "SELECT count(*)::text AS v FROM watch_state \
+              WHERE episode_id = '00000000-0000-0000-0000-0000000000d3'"
+        )
+        .await,
         vec!["0"]
     );
 
@@ -1627,7 +1679,13 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
                FROM playback_progress ORDER BY 1"
         )
         .await,
-        vec!["c1 f2 300 false", "c2 f2 20 true"],
+        vec![
+            "c1 f2 300 false",
+            "c2 f2 20 true",
+            "c2 f7 0 true",
+            "c2 f8 30 true",
+            "c3 f2 20 false",
+        ],
         "each row goes back to the file it last played; one whose file is gone cannot"
     );
     up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
@@ -1635,7 +1693,7 @@ async fn the_watch_state_migration_merges_progress_per_title_and_reverses() {
         .expect("the migration reapplies over the rolled-back schema");
     assert_eq!(
         text("SELECT count(*)::text AS v FROM watch_state").await,
-        vec!["2"]
+        vec!["5"]
     );
 
     scoped.drop_schema().await.expect("drop schema");

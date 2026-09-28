@@ -41,8 +41,9 @@ Do not upgrade a Beam instance you depend on without one.
 One upgrade moves watch progress rather than discarding it: from the version that keeps progress
 per title (issue [#188](https://github.com/justin13888/beam/issues/188)), each person's positions
 in the different files of one movie or episode are merged into one — the most recent position and
-file, watched if any of them was finished. Progress on a file that belongs to no movie or episode
-has no title to move to and is dropped. The old per-file table is gone afterwards, so a dump from
+file, watched if any of them was finished. A finished file holding several episodes marks each of
+them watched. Progress on a file that belongs to no movie or episode has no title to move to and is
+dropped. The old per-file table is gone afterwards, so a dump from
 before the upgrade is the only way back.
 
 Re-indexing is cheap, and your media is untouched. Treat the catalogue as reproducible and the

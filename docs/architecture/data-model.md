@@ -493,8 +493,10 @@ present file to play is skipped, as is a show whose viewer is caught up. History
 and skips (but counts) one whose title has no present file. Purging a file keeps the rows that
 last played it, without it; deleting a movie or episode takes its rows. Migration
 `m20261011_000001_watch_state` built this table from `playback_progress` (one row per user and
-file), merging each user's rows per title -- the newest row's position, duration and file, played if
-any row was, a play per played row -- and dropping rows of files that belonged to no title.
+file), merging each user's rows per title -- the newest row's position (clamped to its duration),
+duration and file, a tie going to the larger file id, played if any row was, a play per played row
+-- playing the rest of the run of each finished multi-episode file as a report now does, and
+dropping rows of files that belonged to no title.
 
 ### `playback_start_counts` / `playback_rebuffer_counts` / `playback_switch_counts`
 Operator-local playback telemetry (issue #143, [ADR-0019](decisions/ADR-0019-telemetry-posture.md)):
