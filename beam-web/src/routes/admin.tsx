@@ -437,9 +437,9 @@ function RecentScanRow({ scan }: { scan: RecentScan }) {
 				<LevelBadge level={scan.level} />
 				<span
 					className="text-xs text-gray-500 ml-auto"
-					title={formatTimestamp(scan.timestamp)}
+					title={formatTimestamp(scan.created_at)}
 				>
-					{formatRelativeTime(scan.timestamp)}
+					{formatRelativeTime(scan.created_at)}
 				</span>
 			</div>
 			<p className="text-gray-200 text-sm">{scan.message}</p>
@@ -550,7 +550,7 @@ function StatusTab() {
 					<div className="divide-y divide-gray-700/30 max-h-96 overflow-y-auto">
 						{recent_scans.map((scan) => (
 							<RecentScanRow
-								key={`${scan.timestamp}-${scan.message}`}
+								key={`${scan.created_at}-${scan.message}`}
 								scan={scan}
 							/>
 						))}
@@ -678,7 +678,7 @@ function LogsTab() {
 										</span>
 									)}
 									<span className="text-xs text-gray-500 ml-auto">
-										{formatTimestamp(event.timestamp)}
+										{formatTimestamp(event.occurred_at)}
 									</span>
 								</div>
 								<p className="text-gray-200 text-sm">{event.message}</p>

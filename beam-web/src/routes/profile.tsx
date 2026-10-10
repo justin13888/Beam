@@ -32,17 +32,17 @@ export const Route = createFileRoute("/profile")({
 	component: ProfilePage,
 });
 
-/** `created_at`/`last_active` arrive as int64 Unix *seconds* from the backend. */
-function formatDateTime(unixSeconds: number): string {
-	return new Date(unixSeconds * 1000).toLocaleString(undefined, {
+/** `created_at`/`last_active_at` arrive as RFC 3339 date-times. */
+function formatDateTime(at: string): string {
+	return new Date(at).toLocaleString(undefined, {
 		dateStyle: "medium",
 		timeStyle: "short",
 	});
 }
 
-/** Short relative label for a Unix-seconds timestamp (falls back to a date). */
-function formatRelative(unixSeconds: number): string {
-	const diffSecs = Math.floor(Date.now() / 1000 - unixSeconds);
+/** Short relative label for an RFC 3339 date-time (falls back to a date). */
+function formatRelative(at: string): string {
+	const diffSecs = Math.floor((Date.now() - new Date(at).getTime()) / 1000);
 	if (diffSecs < 60) return "Just now";
 	const diffMins = Math.floor(diffSecs / 60);
 	if (diffMins < 60) return `${diffMins}m ago`;
@@ -50,7 +50,7 @@ function formatRelative(unixSeconds: number): string {
 	if (diffHrs < 24) return `${diffHrs}h ago`;
 	const diffDays = Math.floor(diffHrs / 24);
 	if (diffDays < 30) return `${diffDays}d ago`;
-	return new Date(unixSeconds * 1000).toLocaleDateString();
+	return new Date(at).toLocaleDateString();
 }
 
 function SessionRow({
@@ -84,8 +84,8 @@ function SessionRow({
 					<span title={formatDateTime(session.created_at)}>
 						Created {formatDateTime(session.created_at)}
 					</span>
-					<span title={formatDateTime(session.last_active)}>
-						Last active {formatRelative(session.last_active)}
+					<span title={formatDateTime(session.last_active_at)}>
+						Last active {formatRelative(session.last_active_at)}
 					</span>
 				</div>
 			</div>

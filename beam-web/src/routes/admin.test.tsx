@@ -39,12 +39,12 @@ const statusResponse: AdminStatus = {
 		{
 			level: "info",
 			message: "Scanned Movies library",
-			timestamp: "2024-06-01T12:00:00Z",
+			created_at: "2024-06-01T12:00:00Z",
 		},
 		{
 			level: "error",
 			message: "Failed to read /media/broken.mkv",
-			timestamp: "2024-06-01T11:00:00Z",
+			created_at: "2024-06-01T11:00:00Z",
 		},
 	],
 };

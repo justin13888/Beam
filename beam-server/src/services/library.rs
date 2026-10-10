@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::models::{Library, LibraryFile, ScanJob};
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
-use beam_domain::models::Library as DomainLibrary;
 use beam_index::runtime::LibraryWatchHook;
 use beam_index::services::index::{IndexError, IndexService};
 use beam_index::services::scan::{ScanTrigger, StoppedScan};
@@ -333,19 +332,13 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     async fn get_libraries(&self, user_id: String) -> Result<Vec<Library>, LibraryError>;
 
     /// Get a single library by ID
-    async fn get_library_by_id(&self, library_id: String) -> Result<Option<Library>, LibraryError>;
+    async fn get_library_by_id(&self, library_id: Uuid) -> Result<Option<Library>, LibraryError>;
 
     /// Get all files within a library
-    async fn get_library_files(&self, library_id: String)
-    -> Result<Vec<LibraryFile>, LibraryError>;
+    async fn get_library_files(&self, library_id: Uuid) -> Result<Vec<LibraryFile>, LibraryError>;
 
-    /// Get a single file by its ID.
-    ///
-    /// A `file_id` that is not a UUID is [`LibraryError::InvalidId`], not
-    /// `Ok(None)`: the caller sent something malformed rather than named a
-    /// file that does not exist, and the delivery routes answer the two
-    /// differently (400 against 404).
-    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LocatedFile>, LibraryError>;
+    /// Get a single file by its ID: `Ok(None)` when no file has it.
+    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<LocatedFile>, LibraryError>;
 
     /// Create a new library, watched by the filesystem watcher from the
     /// moment it exists.
@@ -370,7 +363,7 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// cancelled and waited for first, and no new one starts (see
     /// [`IndexService::stop_scan`]); the indexer forgets the library's latest
     /// job after, and the watcher stops watching it.
-    async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError>;
+    async fn delete_library(&self, library_id: Uuid) -> Result<bool, LibraryError>;
 }
 
 #[derive(Debug)]
@@ -422,60 +415,26 @@ impl LibraryService for LocalLibraryService {
 
         let mut result = Vec::new();
         for lib in domain_libraries {
-            let DomainLibrary {
-                id,
-                name,
-                root_path: _,
-                description,
-                created_at: _,
-                updated_at: _,
-                last_scan_started_at,
-                last_scan_finished_at,
-                last_scan_file_count,
-            } = lib;
-            let size = self.library_repo.count_files(lib.id).await?;
-
-            result.push(Library {
-                id: id.to_string(),
-                name,
-                description,
-                size: size as u32,
-                last_scan_started_at: last_scan_started_at.map(|d| d.with_timezone(&chrono::Utc)),
-                last_scan_finished_at: last_scan_finished_at.map(|d| d.with_timezone(&chrono::Utc)),
-                last_scan_file_count,
-            });
+            let file_count = self.library_repo.count_files(lib.id).await?;
+            result.push(Library::from_domain(lib, file_count));
         }
 
         Ok(result)
     }
 
-    async fn get_library_by_id(&self, library_id: String) -> Result<Option<Library>, LibraryError> {
-        let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
+    async fn get_library_by_id(&self, lib_uuid: Uuid) -> Result<Option<Library>, LibraryError> {
         let library = self.library_repo.find_by_id(lib_uuid).await?;
 
         match library {
             Some(lib) => {
-                let size = self.library_repo.count_files(lib.id).await?;
-                Ok(Some(Library {
-                    id: lib.id.to_string(),
-                    name: lib.name,
-                    description: lib.description,
-                    size: size as u32,
-                    last_scan_started_at: lib.last_scan_started_at,
-                    last_scan_finished_at: lib.last_scan_finished_at,
-                    last_scan_file_count: lib.last_scan_file_count,
-                }))
+                let file_count = self.library_repo.count_files(lib.id).await?;
+                Ok(Some(Library::from_domain(lib, file_count)))
             }
             None => Ok(None),
         }
     }
 
-    async fn get_library_files(
-        &self,
-        library_id: String,
-    ) -> Result<Vec<LibraryFile>, LibraryError> {
-        let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
-
+    async fn get_library_files(&self, lib_uuid: Uuid) -> Result<Vec<LibraryFile>, LibraryError> {
         let library = self
             .library_repo
             .find_by_id(lib_uuid)
@@ -491,8 +450,7 @@ impl LibraryService for LocalLibraryService {
             .collect())
     }
 
-    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LocatedFile>, LibraryError> {
-        let file_uuid = Uuid::parse_str(&file_id).map_err(|_| LibraryError::InvalidId)?;
+    async fn get_file_by_id(&self, file_uuid: Uuid) -> Result<Option<LocatedFile>, LibraryError> {
         let Some(file) = self.file_repo.find_by_id(file_uuid).await? else {
             return Ok(None);
         };
@@ -563,34 +521,16 @@ impl LibraryService for LocalLibraryService {
         let watch_hook = self.watch_hook.clone();
         let watched = created.clone();
         tokio::spawn(async move { watch_hook.library_created(&watched).await });
-        let DomainLibrary {
-            id,
-            name,
-            root_path: _,
-            description,
-            created_at: _,
-            updated_at: _,
-            last_scan_started_at,
-            last_scan_finished_at,
-            last_scan_file_count,
-        } = created;
 
         self.notification_service.publish(AdminEvent::info(
             EventCategory::System,
-            format!("Library '{}' created", name),
-            Some(id.to_string()),
-            Some(name.clone()),
+            format!("Library '{}' created", created.name),
+            Some(created.id),
+            Some(created.name.clone()),
         ));
 
-        Ok(Library {
-            id: id.to_string(),
-            name,
-            description,
-            size: 0,
-            last_scan_started_at,
-            last_scan_finished_at,
-            last_scan_file_count,
-        })
+        // Nothing is indexed until its first scan.
+        Ok(Library::from_domain(created, 0))
     }
 
     async fn start_scan(&self, library_id: Uuid) -> Result<ScanJob, LibraryError> {
@@ -618,9 +558,7 @@ impl LibraryService for LocalLibraryService {
         Ok(self.index_service.scan_job(library_id).map(ScanJob::from))
     }
 
-    async fn delete_library(&self, library_id: String) -> Result<bool, LibraryError> {
-        let lib_uuid = Uuid::parse_str(&library_id).map_err(|_| LibraryError::InvalidId)?;
-
+    async fn delete_library(&self, lib_uuid: Uuid) -> Result<bool, LibraryError> {
         let library = self
             .library_repo
             .find_by_id(lib_uuid)
@@ -656,7 +594,7 @@ impl LibraryService for LocalLibraryService {
         self.notification_service.publish(AdminEvent::info(
             EventCategory::System,
             format!("Library '{}' deleted", library.name),
-            Some(lib_uuid.to_string()),
+            Some(lib_uuid),
             Some(library.name),
         ));
 
@@ -670,8 +608,6 @@ pub enum LibraryError {
     Db(#[from] DbErr),
     #[error("Library not found")]
     LibraryNotFound,
-    #[error("Invalid Library ID")]
-    InvalidId,
     #[error("Path not found: {0}")]
     PathNotFound(String),
     #[error("Library path is outside the permitted root: {0}")]
@@ -691,13 +627,15 @@ impl From<IndexError> for LibraryError {
         match e {
             IndexError::Db(db_err) => LibraryError::Db(db_err),
             IndexError::LibraryNotFound => LibraryError::LibraryNotFound,
-            IndexError::InvalidId => LibraryError::InvalidId,
             IndexError::PathNotFound(s) => LibraryError::PathNotFound(s),
             IndexError::ScanInProgress => LibraryError::ScanInProgress,
             // Unreachable: a cancelled scan is reported through its job,
-            // never by the call that starts it. An internal error rather
-            // than a plausible 4xx if that ever changes.
-            IndexError::Cancelled => LibraryError::Db(DbErr::Custom(e.to_string())),
+            // never by the call that starts it, and only the indexer's
+            // test-only string entry point parses an id. An internal error
+            // rather than a plausible 4xx if either ever changes.
+            IndexError::Cancelled | IndexError::InvalidId => {
+                LibraryError::Db(DbErr::Custom(e.to_string()))
+            }
         }
     }
 }

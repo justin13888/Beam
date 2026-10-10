@@ -63,15 +63,16 @@ impl MetadataService for StubMetadataService {
         })
     }
 
-    async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError> {
-        // Part of the trait's contract rather than a shortcut: a malformed id
-        // is `InvalidId`, which the route owes a 400.
-        uuid::Uuid::parse_str(media_id).map_err(|_| MetadataError::InvalidId)?;
-        if let Some(msg) = self.unsupported.get(media_id) {
+    async fn get_media_sources(
+        &self,
+        media_id: uuid::Uuid,
+    ) -> Result<Vec<MediaSource>, MetadataError> {
+        let media_id = media_id.to_string();
+        if let Some(msg) = self.unsupported.get(&media_id) {
             return Err(MetadataError::Unsupported(msg.clone()));
         }
         self.sources
-            .get(media_id)
+            .get(&media_id)
             .cloned()
             .ok_or(MetadataError::MediaNotFound)
     }
@@ -186,8 +187,8 @@ fn movie_metadata(id: &str, title: &str) -> MediaMetadata {
         description: None,
         year: Some(1999),
         release_date: None,
-        runtime: Some(136),
-        duration: Some(8160.0),
+        runtime_mins: Some(136),
+        duration_secs: Some(8160.0),
         poster_url: None,
         backdrop_url: None,
         genres: vec![],
@@ -259,22 +260,18 @@ async fn an_unknown_id_is_a_404_problem_document() {
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#media-not-found");
 }
 
-/// The detail route used to answer this 404: `get_media_metadata` returns an
-/// `Option`, and the failed parse was folded into the miss while `/sources`
-/// answered the same typo with 400. The parse now happens in the handler, and
-/// this is the test that reaches it -- every other detail test uses a
-/// well-formed id.
+/// A malformed id is a 400 on both routes over one title, answered by the
+/// `Path` extractor before the handler runs -- the detail route once folded
+/// it into the 404 and `/sources` into a 500 (issue #123). `/v1/media/{id}`
+/// is typed `Uuid`, so the two cannot drift apart again.
 #[tokio::test]
-async fn a_malformed_id_on_the_detail_route_is_a_400_not_a_404() {
+async fn a_malformed_id_is_a_400_on_the_detail_and_sources_routes() {
     let (client, token) = signed_in(StubMetadataService::default()).await;
 
-    client
-        .get("/v1/media/not-a-uuid")
-        .cookie("beam_session", &token)
-        .send()
-        .await
-        .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
+    for path in ["/v1/media/not-a-uuid", "/v1/media/not-a-uuid/sources"] {
+        let response = client.get(path).cookie("beam_session", &token).send().await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
 }
 
 #[tokio::test]
@@ -740,11 +737,78 @@ async fn a_browsed_show_carries_its_genres_rating_identifiers_and_counts_on_the_
     let show = &body["items"][0]["Show"];
     assert_eq!(show["id"], id.to_string());
     assert_eq!(show["genres"], serde_json::json!(["Thriller"]));
-    assert_eq!(show["ratings"]["tmdb"], 84);
+    // On TMDB's own 0-10 scale, and the decimal it was stored as rather than
+    // the single-precision float's exact expansion (8.399999618530273).
+    assert_eq!(show["ratings"]["tmdb"], 8.4);
     assert_eq!(show["identifiers"]["tmdb_id"], 95396);
     assert_eq!(show["season_count"], 1);
     assert_eq!(show["episode_count"], 1);
     assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
+}
+
+/// `min_rating` is on the scale `Ratings.tmdb` is shown on, and a title rated
+/// exactly the minimum is kept: the bound is compared in the precision the
+/// rating is stored in, so 8.4 is not 8.39999... short of itself.
+#[tokio::test]
+async fn min_rating_filters_on_the_scale_the_rating_is_shown_on() {
+    let library = Library::new();
+    let id = library.indexed_show("Severance").await;
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    for (query, expected) in [
+        ("min_rating=8.4", vec![id]),
+        ("min_rating=8.5", vec![]),
+        ("min_rating=0", vec![id]),
+    ] {
+        let body: MediaConnection = client
+            .get(&format!("/v1/media?{query}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::OK)
+            .json();
+        let listed: Vec<uuid::Uuid> = body.items.iter().map(item_id).collect();
+        assert_eq!(listed, expected, "{query}");
+    }
+}
+
+/// A numeric filter outside the range it can take is refused, never bound.
+/// `year_from=4294967295` used to reach the store as `-1` (a `u32` cast to
+/// the column's `i32`) and match every title; a `min_rating` off the 0-10
+/// scale, `NaN` included, would match everything or nothing silently.
+#[tokio::test]
+async fn an_out_of_range_numeric_filter_is_a_400_invalid_filter() {
+    let library = Library::new();
+    library.indexed_show("Severance").await;
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    for query in [
+        "year=4294967295",
+        "year_from=4294967295",
+        "year_to=2147483648",
+        "min_rating=10.5",
+        "min_rating=-1",
+        "min_rating=NaN",
+        "min_rating=inf",
+    ] {
+        client
+            .get(&format!("/v1/media?{query}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-filter");
+    }
+
+    // The largest bounds each filter can take are answered, not refused.
+    for query in ["year_from=2147483647", "min_rating=10"] {
+        client
+            .get(&format!("/v1/media?{query}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::OK);
+    }
 }
 
 // ── GET /v1/media/{id}/sources ───────────────────────────────────────────────
@@ -919,25 +983,6 @@ async fn sources_for_a_show_id_are_a_400() {
         .assert_problem_type(
             "https://beam.justinchung.net/reference/errors/#sources-not-available-for-show",
         );
-}
-
-/// A malformed media id is a 400, where it used to be a 500.
-///
-/// The service folded the failed UUID parse into `InternalError`, so a typo in
-/// a URL was reported as a server fault on this route while the very same typo
-/// on `/v1/media/{id}` answered 404 -- three operations over one resource
-/// giving three answers to one condition (issue #123).
-#[tokio::test]
-async fn sources_for_a_malformed_id_are_a_400_not_a_500() {
-    let (client, token) = signed_in(StubMetadataService::default()).await;
-
-    client
-        .get("/v1/media/not-a-uuid/sources")
-        .cookie("beam_session", &token)
-        .send()
-        .await
-        .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
 }
 
 #[tokio::test]

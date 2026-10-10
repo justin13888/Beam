@@ -90,7 +90,7 @@ impl MetadataService for StubMetadataService {
 
     async fn get_media_sources(
         &self,
-        _media_id: &str,
+        _media_id: uuid::Uuid,
     ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
         unimplemented!("not called in stream route tests")
     }
@@ -135,13 +135,13 @@ impl LibraryService for StubLibraryService {
     }
     async fn get_library_by_id(
         &self,
-        _library_id: String,
+        _library_id: uuid::Uuid,
     ) -> Result<Option<crate::models::Library>, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
     async fn get_library_files(
         &self,
-        _library_id: String,
+        _library_id: uuid::Uuid,
     ) -> Result<Vec<LibraryFile>, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
@@ -164,14 +164,13 @@ impl LibraryService for StubLibraryService {
     ) -> Result<Option<crate::models::ScanJob>, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
-    async fn delete_library(&self, _library_id: String) -> Result<bool, LibraryError> {
+    async fn delete_library(&self, _library_id: uuid::Uuid) -> Result<bool, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
-    async fn get_file_by_id(&self, file_id: String) -> Result<Option<LocatedFile>, LibraryError> {
-        // The trait's contract, not a convenience: a malformed id is
-        // `InvalidId` rather than a miss, and the delivery routes answer the
-        // two with different statuses.
-        let file_id = uuid::Uuid::parse_str(&file_id).map_err(|_| LibraryError::InvalidId)?;
+    async fn get_file_by_id(
+        &self,
+        file_id: uuid::Uuid,
+    ) -> Result<Option<LocatedFile>, LibraryError> {
         Ok(self.files.iter().find(|f| f.id == file_id).cloned())
     }
 }

@@ -366,7 +366,7 @@ export function LibrariesPage() {
 									<div className="flex items-center gap-4 text-sm text-gray-400 mb-4">
 										<span className="flex items-center gap-1.5">
 											<FileVideo size={14} className="text-gray-500" />
-											{lib.size} files
+											{lib.file_count} files
 										</span>
 										{lib.last_scan_file_count != null && (
 											<span className="flex items-center gap-1.5">

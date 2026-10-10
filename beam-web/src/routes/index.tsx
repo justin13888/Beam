@@ -32,7 +32,7 @@ function DashboardPage() {
 		enabled: isAuthenticated,
 	});
 	const libraries = data ?? [];
-	const totalFiles = libraries.reduce((sum, lib) => sum + lib.size, 0);
+	const totalFiles = libraries.reduce((sum, lib) => sum + lib.file_count, 0);
 
 	return (
 		<div className="min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950">
@@ -157,7 +157,7 @@ function DashboardPage() {
 											{lib.name}
 										</h4>
 										<p className="text-xs text-gray-500 mt-1">
-											{lib.size} files
+											{lib.file_count} files
 											{lib.description && ` • ${lib.description}`}
 										</p>
 									</div>

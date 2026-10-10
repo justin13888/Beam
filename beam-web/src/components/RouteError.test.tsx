@@ -43,19 +43,24 @@ describe("RouteError", () => {
 		vi.unstubAllEnvs();
 	});
 
-	// A 400 rather than a 404: the media route turns a 404 into "no such
-	// title" itself (`media.$id.tsx`) and never reaches the error boundary.
+	// A coded 403 rather than a 404: the media route turns a 404 into "no such
+	// title" itself (`media.$id.tsx`) and never reaches the error boundary, and
+	// a malformed id is an uncoded 400 whose detail is not Beam's to show.
 	it("shows the server's explanation for a client error in production", async () => {
 		vi.stubEnv("DEV", false);
 		server.use(
 			http.get(`${BASE_URL}/v1/media/:id`, () =>
-				problem(400, "movie-1 is not a valid id", "#invalid-media-id"),
+				problem(
+					403,
+					"the request came from another origin",
+					"#cross-origin-rejected",
+				),
 			),
 		);
 		renderRoute("/media/movie-1");
 
 		expect(
-			await screen.findByText("movie-1 is not a valid id"),
+			await screen.findByText("the request came from another origin"),
 		).toBeInTheDocument();
 	});
 

@@ -46,11 +46,7 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     /// id is not -- it has no files of its own; callers use its episode ids
     /// instead). An episode with no files yet resolves to an empty list
     /// rather than an error.
-    ///
-    /// A `media_id` that is not a UUID is [`MetadataError::InvalidId`], kept
-    /// distinct from `MediaNotFound` because the routes answer them 400 and
-    /// 404 respectively.
-    async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError>;
+    async fn get_media_sources(&self, media_id: Uuid) -> Result<Vec<MediaSource>, MetadataError>;
 
     /// One episode by id, with its season, its show and its neighbours:
     /// `Ok(None)` when no episode has that id (issue #188).
@@ -167,11 +163,23 @@ fn internal(err: impl std::fmt::Display) -> MetadataError {
     MetadataError::InternalError(err.to_string())
 }
 
-/// A provider rating on its 0-10 scale as the wire's percentage.
+/// A provider rating as the wire carries it: on its own 0-10 scale.
 fn ratings(rating_tmdb: Option<f32>) -> Option<Ratings> {
     rating_tmdb.map(|r| Ratings {
-        tmdb: Some((r * 10.0) as u32),
+        tmdb: Some(widen_rating(r)),
     })
+}
+
+/// The stored single-precision rating as the decimal it was stored from.
+///
+/// `f64::from(7.2_f32)` is `7.199999809265137`: exact, and not the number
+/// anyone wrote down. The shortest decimal that reads back as the same `f32`
+/// is -- that is what `f32`'s `Display` prints -- so the wire carries `7.2`.
+pub(crate) fn widen_rating(rating: f32) -> f64 {
+    rating
+        .to_string()
+        .parse()
+        .unwrap_or_else(|_| f64::from(rating))
 }
 
 fn identifiers(
@@ -184,13 +192,6 @@ fn identifiers(
         tmdb_id,
         tvdb_id,
     })
-}
-
-fn midnight(date: chrono::NaiveDate) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_naive_utc_and_offset(
-        date.and_hms_opt(0, 0, 0).unwrap_or_default(),
-        chrono::Utc,
-    )
 }
 
 /// The parts of a movie's metadata that come from files, which browse does
@@ -259,9 +260,9 @@ fn movie_metadata(
         },
         description,
         year,
-        release_date: release_date.map(midnight),
-        runtime: runtime.map(|d| (d.as_secs() / 60) as u32),
-        duration,
+        release_date,
+        runtime_mins: runtime.map(|d| (d.as_secs() / 60) as u32),
+        duration_secs: duration,
         poster_url: poster_url
             .map(|_| artwork_path(ArtworkKind::Movie, id, ArtworkVariant::Poster)),
         backdrop_url: backdrop_url
@@ -351,14 +352,14 @@ fn season_metadata(
     episodes: Vec<EpisodeMetadata>,
 ) -> SeasonMetadata {
     let dates = ShowDates {
-        first_aired: season.first_aired.map(midnight),
-        last_aired: season.last_aired.map(midnight),
+        first_aired: season.first_aired,
+        last_aired: season.last_aired,
     };
     SeasonMetadata {
         id: season.id,
         season_number: season.season_number,
         dates,
-        episode_runtime: None,
+        episode_runtime_mins: None,
         episodes,
         poster_url: season
             .poster_url
@@ -487,7 +488,7 @@ impl DbMetadataService {
             thumbnail_url: thumbnail_url
                 .as_ref()
                 .map(|_| artwork_path(ArtworkKind::Episode, id, ArtworkVariant::Thumbnail)),
-            duration,
+            duration_secs: duration,
             file_id,
             source_count,
             user_state: UserTitleState::default(),
@@ -588,8 +589,46 @@ impl From<TitleKind> for catalog::TitleKind {
     }
 }
 
-impl From<MediaSearchFilters> for CatalogFilters {
-    fn from(filters: MediaSearchFilters) -> Self {
+/// A year filter as the catalogue's signed `year` column holds it, or
+/// [`MetadataError::InvalidFilter`] naming the parameter when it cannot.
+///
+/// Checked rather than cast: `4294967295 as i32` is `-1`, which as a
+/// `year_from` would have matched every title.
+fn year_filter(name: &str, year: Option<u32>) -> Result<Option<i32>, MetadataError> {
+    year.map(|year| {
+        i32::try_from(year).map_err(|_| {
+            MetadataError::InvalidFilter(format!("{name} {year} is not a year a title can have"))
+        })
+    })
+    .transpose()
+}
+
+/// The largest `min_rating`: ratings are on the provider's 0-10 scale.
+pub const MAX_RATING: f64 = 10.0;
+
+/// A minimum rating in the single precision ratings are stored in, or
+/// [`MetadataError::InvalidFilter`] when it is off the 0-10 scale -- `NaN`
+/// and the infinities included, which a query string can spell.
+fn rating_filter(min_rating: Option<f64>) -> Result<Option<f32>, MetadataError> {
+    min_rating
+        .map(|rating| {
+            if (0.0..=MAX_RATING).contains(&rating) {
+                // In range, so the narrowing loses only precision the stored
+                // rating does not have.
+                Ok(rating as f32)
+            } else {
+                Err(MetadataError::InvalidFilter(format!(
+                    "min_rating {rating} is not on the 0-{MAX_RATING} scale"
+                )))
+            }
+        })
+        .transpose()
+}
+
+impl TryFrom<MediaSearchFilters> for CatalogFilters {
+    type Error = MetadataError;
+
+    fn try_from(filters: MediaSearchFilters) -> Result<Self, MetadataError> {
         let MediaSearchFilters {
             media_type,
             genre,
@@ -599,17 +638,17 @@ impl From<MediaSearchFilters> for CatalogFilters {
             query,
             min_rating,
         } = filters;
-        Self {
+        Ok(Self {
             kind: media_type.map(catalog::TitleKind::from),
             query,
             // A genre is matched by slug, so `Science Fiction`,
             // `science fiction` and `science-fiction` all name one genre.
             genre_slug: genre.as_deref().map(slugify),
-            year,
-            year_from,
-            year_to,
-            min_rating,
-        }
+            year: year_filter("year", year)?,
+            year_from: year_filter("year_from", year_from)?,
+            year_to: year_filter("year_to", year_to)?,
+            min_rating: rating_filter(min_rating)?,
+        })
     }
 }
 
@@ -663,7 +702,7 @@ impl MetadataService for DbMetadataService {
         // One row past the page says whether another page lies that way.
         let size_usize = size.get() as usize;
         let query = CatalogQuery {
-            filters: filters.into(),
+            filters: CatalogFilters::try_from(filters)?,
             sort: CatalogSort {
                 field: sort_by.into(),
                 direction: sort_order.into(),
@@ -704,9 +743,7 @@ impl MetadataService for DbMetadataService {
         })
     }
 
-    async fn get_media_sources(&self, media_id: &str) -> Result<Vec<MediaSource>, MetadataError> {
-        let id = Uuid::parse_str(media_id).map_err(|_| MetadataError::InvalidId)?;
-
+    async fn get_media_sources(&self, id: Uuid) -> Result<Vec<MediaSource>, MetadataError> {
         if self
             .movie_repo
             .find_by_id(id)
@@ -843,14 +880,6 @@ impl MetadataService for DbMetadataService {
 
 #[derive(Debug, Error)]
 pub enum MetadataError {
-    /// The caller's media id is not a UUID.
-    ///
-    /// Its own variant because it is the caller's mistake, not the server's:
-    /// folding it into `InternalError` is what made a malformed id a 500 on
-    /// `/v1/media/{id}/sources` and `/v1/admin/media/{id}/refresh` (issue
-    /// #123).
-    #[error("invalid media id")]
-    InvalidId,
     #[error("Media not found")]
     MediaNotFound,
     #[error("Internal metadata service error: {0}")]
@@ -865,6 +894,10 @@ pub enum MetadataError {
     /// A search text no title can contain: one holding a NUL character.
     #[error("invalid search query: {0}")]
     InvalidSearchQuery(String),
+    /// A numeric filter outside the range it can take: a year the catalogue's
+    /// signed column cannot hold, or a minimum rating off the 0-10 scale.
+    #[error("invalid filter: {0}")]
+    InvalidFilter(String),
     /// The request was well-formed and the target exists, but this operation
     /// doesn't apply to it (e.g. requesting sources for a show id).
     #[error("unsupported operation: {0}")]
@@ -882,7 +915,8 @@ pub struct MediaSearchFilters {
     pub year_from: Option<u32>,
     pub year_to: Option<u32>,
     pub query: Option<String>,
-    pub min_rating: Option<u32>,
+    /// Minimum rating on the provider's 0-10 scale.
+    pub min_rating: Option<f64>,
 }
 
 #[cfg(test)]

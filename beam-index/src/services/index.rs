@@ -2050,7 +2050,7 @@ impl LocalIndexService {
             self.notification_service.publish(AdminEvent::info(
                 EventCategory::LibraryScan,
                 message.clone(),
-                Some(library.id.to_string()),
+                Some(library.id),
                 Some(library.name.clone()),
             ));
             let _ = self
@@ -2524,7 +2524,7 @@ impl LocalIndexService {
         self.notification_service.publish(AdminEvent::info(
             EventCategory::LibraryScan,
             message.clone(),
-            Some(file.library_id.to_string()),
+            Some(file.library_id),
             None,
         ));
         let _ = self
@@ -2697,7 +2697,7 @@ impl LocalIndexService {
         self.notification_service.publish(AdminEvent::warning(
             EventCategory::LibraryScan,
             message.clone(),
-            Some(file.library_id.to_string()),
+            Some(file.library_id),
             None,
         ));
         let siblings_json: Vec<serde_json::Value> = diverging
@@ -2742,7 +2742,7 @@ impl LocalIndexService {
         self.notification_service.publish(AdminEvent::warning(
             EventCategory::LibraryScan,
             format!("Failed to process file '{}': {}", path.display(), err),
-            Some(lib_uuid.to_string()),
+            Some(lib_uuid),
             Some(library_name.to_string()),
         ));
         let _ = self
@@ -2786,7 +2786,7 @@ impl LocalIndexService {
                 failed_subtrees.len(),
                 shielded
             ),
-            Some(lib_uuid.to_string()),
+            Some(lib_uuid),
             Some(library_name.to_string()),
         ));
         let reported: Vec<String> = failed_subtrees
@@ -3442,9 +3442,7 @@ impl LocalIndexService {
                             episode_number,
                             title,
                             runtime,
-                            air_date: air_date.as_deref().and_then(|d| {
-                                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()
-                            }),
+                            air_date,
                         })
                         .await?;
                     let moved = episode_files.remove(&episode_id).unwrap_or_default();
@@ -4337,7 +4335,7 @@ impl LocalIndexService {
                 library.name,
                 library.root_path.display()
             ),
-            Some(library.id.to_string()),
+            Some(library.id),
             Some(library.name.clone()),
         ));
         let _ = self
@@ -4377,7 +4375,7 @@ impl LocalIndexService {
             ScanPhase::Completed => format!("Scan of '{name}' finished"),
             ScanPhase::Failed => format!("Scan of '{name}' failed"),
         };
-        let library_id = Some(library.id.to_string());
+        let library_id = Some(library.id);
         let library_name = Some(name.clone());
         let event = match phase {
             ScanPhase::Failed => AdminEvent::error(
@@ -4641,7 +4639,7 @@ impl LocalIndexService {
         self.notification_service.publish(AdminEvent::info(
             EventCategory::LibraryScan,
             format!("Library scan started for '{}'", library.name),
-            Some(lib_uuid.to_string()),
+            Some(lib_uuid),
             Some(library.name.clone()),
         ));
         let _ = self
@@ -4722,7 +4720,7 @@ impl LocalIndexService {
                     indexed_video_files,
                     library.root_path.display()
                 ),
-                Some(lib_uuid.to_string()),
+                Some(lib_uuid),
                 Some(library.name.clone()),
             ));
             let _ = self
@@ -5047,7 +5045,7 @@ impl LocalIndexService {
                 purged_count,
                 total_files
             ),
-            Some(lib_uuid.to_string()),
+            Some(lib_uuid),
             Some(library.name.clone()),
         ));
         let _ = self

@@ -21,7 +21,7 @@ class MockEventSource {
 function makeEvent(overrides: Partial<Record<string, unknown>> = {}) {
 	return {
 		id: "evt-1",
-		timestamp: "2026-01-01T00:00:00Z",
+		occurred_at: "2026-01-01T00:00:00Z",
 		level: "info",
 		category: "system",
 		message: "hello",

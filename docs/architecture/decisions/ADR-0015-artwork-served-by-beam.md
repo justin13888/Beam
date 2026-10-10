@@ -136,9 +136,11 @@ but not that a downloaded title renders on a plane.
   only a provider outage could. The failure is bounded to a placeholder: a title with no art, an
   unknown id, an inapplicable variant and a provider that has dropped the image are all `404`, which
   every client already renders as a placeholder. (An id that is not a UUID is not "an unknown id":
-  it is the caller's mistake and answers `400` `invalid-media-id`, as every other route taking a
-  media id does -- the route originally folded it into the `404`, and was aligned with its siblings
-  under [#123](https://github.com/justin13888/beam/issues/123).) The bound was later drawn more
+  it is the caller's mistake and answers `400`, as every other route taking a media id does -- the
+  route originally folded it into the `404`, and was aligned with its siblings under
+  [#123](https://github.com/justin13888/beam/issues/123). It answered with the `invalid-media-id`
+  code until [#190](https://github.com/justin13888/beam/issues/190) typed every path id as a UUID,
+  since when the framework's path rejection answers it before the handler runs.) The bound was later drawn more
   precisely under the same issue: a provider that has *dropped* the image is still a `404`, but a
   provider that answers unusably or not at all -- a non-image body, one over the size ceiling, an
   error status, a transport failure -- is a `502` `artwork-upstream-failed`. Clients still draw the
