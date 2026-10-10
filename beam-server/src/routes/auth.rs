@@ -93,7 +93,7 @@ impl SessionSummary {
     /// The store keeps whole Unix seconds, which a `DateTime` holds for any
     /// time a session can have; one it cannot is a corrupt row, reported as
     /// such rather than rendered as some other instant.
-    fn from_store(id: Uuid, data: SessionData) -> Result<Self, String> {
+    pub(crate) fn from_store(id: Uuid, data: SessionData) -> Result<Self, String> {
         let SessionData {
             user_id: _,
             device_hash,

@@ -1343,6 +1343,24 @@ mod tests {
         assert_eq!(seasons[0].episodes[1].file_id, None);
     }
 
+    /// The server sends a session's instants as date-times; the core hands
+    /// the apps whole Unix seconds. Two distinct instants, so a swapped pair
+    /// cannot pass.
+    #[test]
+    fn a_device_session_carries_its_instants_as_unix_seconds() {
+        let session: wire::SessionSummary = serde_json::from_str(
+            r#"{"id":"5e551011-0000-4000-8000-000000000001","device_hash":"d","ip":"127.0.0.1",
+                "created_at":"2023-11-14T22:13:20Z","last_active_at":"2023-11-15T00:13:20Z"}"#,
+        )
+        .expect("the fixture should match the generated type");
+
+        let session = DeviceSession::from_generated(session);
+
+        assert_eq!(session.id, "5e551011-0000-4000-8000-000000000001");
+        assert_eq!(session.created_at_unix, 1_700_000_000);
+        assert_eq!(session.last_active_unix, 1_700_007_200);
+    }
+
     #[test]
     fn movie_detail_lowers_to_the_movie_branch() {
         let detail = MediaDetail::from_generated(node(MOVIE), &record());

@@ -922,6 +922,78 @@ mod tests {
             .assert_status(StatusCode::BAD_REQUEST);
     }
 
+    /// The store keeps epoch seconds; the list reports them as the instants
+    /// they are. Sign-in and last use are two hours apart, so a swapped or
+    /// mis-scaled conversion cannot pass.
+    #[tokio::test]
+    async fn listed_sessions_report_when_they_were_signed_in_and_last_used() {
+        let signed_in_at =
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("a representable instant");
+        let clock = Arc::new(beam_domain::services::TestClock::starting_at(signed_in_at));
+        let harness = make_harness_sharing_store(
+            FakeOidcClient::with_identity(identity("instants@example.com", true)),
+            Arc::new(InMemoryUserRepository::default()),
+            Arc::new(InMemorySessionStore::new(clock.clone())),
+            test_config(),
+        );
+        let session_cookie = login_and_get_session_cookie(&harness, "instants@example.com").await;
+
+        // Past the touch throttle, so this request slides `last_active`.
+        clock.advance(std::time::Duration::from_secs(2 * 3600));
+        assert_eq!(
+            get_me(&harness, &session_cookie).await.status(),
+            StatusCode::OK
+        );
+
+        let response = harness
+            .client
+            .get("/v1/sessions")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let sessions = response.json::<Vec<Value>>();
+        assert_eq!(sessions.len(), 1);
+        let instant = |field: &str| {
+            sessions[0][field]
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} is a date-time string"))
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap_or_else(|_| panic!("{field} parses as RFC 3339"))
+        };
+        assert_eq!(instant("created_at"), signed_in_at);
+        assert_eq!(
+            instant("last_active_at"),
+            signed_in_at + chrono::Duration::hours(2)
+        );
+    }
+
+    /// A stored second no `DateTime` can hold is a corrupt row: reported as
+    /// an error rather than rendered as some other instant. The in-memory
+    /// store stamps from a `DateTime` clock, so only the SQL store can hold
+    /// such a row, and the conversion is exercised directly.
+    #[test]
+    fn a_session_with_an_unrepresentable_timestamp_is_an_error() {
+        use crate::routes::auth::SessionSummary;
+        use beam_auth::utils::session_store::SessionData;
+
+        let id = uuid::Uuid::nil();
+        let data = |created_at: i64, last_active: i64| SessionData {
+            user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            device_hash: "device".to_string(),
+            ip: "127.0.0.1".to_string(),
+            created_at,
+            last_active,
+        };
+
+        assert!(SessionSummary::from_store(id, data(i64::MAX, 0)).is_err());
+        assert!(SessionSummary::from_store(id, data(0, i64::MAX)).is_err());
+        let summary = SessionSummary::from_store(id, data(1_700_000_000, 1_700_007_200))
+            .expect("representable seconds convert");
+        assert_eq!(summary.created_at.timestamp(), 1_700_000_000);
+        assert_eq!(summary.last_active_at.timestamp(), 1_700_007_200);
+    }
+
     #[tokio::test]
     async fn logging_out_everywhere_revokes_every_session_of_that_user_only() {
         // The mutant this pins: replacing the handler body with `Ok(())`
