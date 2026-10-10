@@ -797,6 +797,30 @@ const CORPUS: &[(&str, &str)] = &[
         "Heat (1995)/Main Feature Disc/BDMV/STREAM/00001.m2ts",
         "movie Heat|1995",
     ),
+    // A disc label whose words carry a year names the film they spell, so
+    // two films' `Disc 1 - <film>` folders in one folder are two titles.
+    (
+        "Movies/Disc 1 - Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    (
+        "Movies/Disc 1 - Ronin (1998)/VIDEO_TS/VTS_01_1.VOB",
+        "movie Ronin|1998",
+    ),
+    (
+        "Movies/DISC 2 [Heat (1995)]/BDMV/STREAM/00001.m2ts",
+        "movie Heat|1995",
+    ),
+    (
+        "Movies/Disc 2: Ronin 1998/BDMV/STREAM/00001.m2ts",
+        "movie Ronin|1998",
+    ),
+    (
+        "Disc 1 - Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+        "movie Heat|1995",
+    ),
+    // A label's year-less words still name no film.
+    ("Disc 1 - Heat/VIDEO_TS/VTS_01_1.VOB", "unclassifiable disc"),
     // One of a film's parts or volumes with its own words names that film.
     (
         "Lord of the Rings/Part 1 - The Fellowship of the Ring/VIDEO_TS/VTS_01_1.VOB",
@@ -917,6 +941,12 @@ fn two_discs_with_same_named_files_key_apart() {
         (
             "Heat (1995)/CD2/VIDEO_TS/VTS_01_1.VOB",
             "Ronin (1998)/CD2/VIDEO_TS/VTS_01_1.VOB",
+        ),
+        // A disc label naming a dated film is that film, not the folder
+        // above it that two films' labels share.
+        (
+            "Movies/Disc 1 - Heat (1995)/VIDEO_TS/VTS_01_1.VOB",
+            "Movies/Disc 1 - Ronin (1998)/VIDEO_TS/VTS_01_1.VOB",
         ),
     ] {
         assert_ne!(key(a), key(b), "{a} and {b}");

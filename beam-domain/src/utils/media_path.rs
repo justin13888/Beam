@@ -218,12 +218,15 @@ static BARE_DISC_FOLDER_REGEX: LazyLock<Regex> =
 /// `Blu-ray Disc 1`, `Disc 1 of 2`, with or without a label after it (`Disc
 /// 1 - Feature`, `DISC 1 [Feature]`) -- or which side, volume or part (`Side
 /// A`, `Vol 1`, `Part Two`). A part or volume with words after it is left a
-/// title: `Part 1 - The Fellowship of the Ring` names a film.
+/// title: `Part 1 - The Fellowship of the Ring` names a film. A disc label's
+/// words are captured (`tail` after a dash or colon, `bracketed` with its
+/// bracket), because words with a year name a film after all
+/// ([`dated_piece_tail`]).
 static PIECE_FOLDER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     let number = r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)";
     let medium = r"(?:cd|dis[ck]|dvd|bd|blu[ -]?ray)";
     let disc = format!(
-        r"(?:{medium}[ ._-]*)?{medium}[ ._-]*{number}(?:[ ._-]*of[ ._-]*{number})?(?:\s*[-:]\s*.*|\s*[\[(].*)?"
+        r"(?:{medium}[ ._-]*)?{medium}[ ._-]*{number}(?:[ ._-]*of[ ._-]*{number})?(?:\s*[-:]\s*(?P<tail>.*)|\s*(?P<bracketed>[\[(].*))?"
     );
     let side = format!(r"side[ ._-]*(?:[a-d]|{number})");
     let volume = format!(r"(?:vol(?:ume)?|part|pt)[ ._-]*{number}");
@@ -582,7 +585,9 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
 /// A folder that says only which piece of a release it is (`Disc 1`, `Disc
 /// One`, `DVD 1`, `Disc 1 of 2`, `Side A`, `Vol 1`), only which edition
 /// (`Theatrical`, `Extended Edition`), or is nothing but release noise
-/// (`DVD9`) names no film at all, so `Heat/Disc One/VIDEO_TS` is *Heat* too.
+/// (`DVD9`) names no film at all, so `Heat/Disc One/VIDEO_TS` is *Heat* too
+/// -- unless a disc label's words carry a year, when they name the film
+/// themselves: `Movies/Disc 1 - Heat (1995)/VIDEO_TS` is *Heat (1995)*.
 /// No file inside a disc is named for its title, so its own name is never
 /// read.
 ///
@@ -600,19 +605,18 @@ fn disc_title(enclosing: &[String]) -> MediaInference {
     {
         return untitled;
     }
-    let names_a_film = |folder: &str| {
-        !names_a_piece_only(folder)
-            && !is_edition_only(folder)
-            && title_of(folder).is_some_and(|guess| !is_noise_only(&guess.title))
-    };
     let mut films = enclosing
         .iter()
         .enumerate()
         .rev()
-        .filter(|(_, folder)| names_a_film(folder))
-        .map(|(at, folder)| {
+        .filter_map(|(at, folder)| {
+            let film = film_named_by(folder)?;
             let parent = at.checked_sub(1).map(|above| enclosing[above].as_str());
-            movie_of(parse_media_filename(folder), folder.clone(), parent)
+            Some(movie_of(
+                parse_media_filename(film),
+                film.to_owned(),
+                parent,
+            ))
         })
         .peekable();
     let Some(nearest) = films.peek().cloned() else {
@@ -631,6 +635,46 @@ fn disc_title(enclosing: &[String]) -> MediaInference {
 /// disc, side, volume or part -- and so names no film ([`PIECE_FOLDER_REGEX`]).
 fn names_a_piece_only(name: &str) -> bool {
     PIECE_FOLDER_REGEX.is_match(name.trim())
+}
+
+/// The words of a folder above a disc that name its film, if any: the whole
+/// name, unless it is only a piece label, only an edition, or release noise.
+/// A disc label whose words carry a year names the film they spell
+/// ([`dated_piece_tail`]), so `Disc 1 - Heat (1995)` is *Heat (1995)* and
+/// never one title with `Disc 1 - Ronin (1998)`.
+fn film_named_by(folder: &str) -> Option<&str> {
+    let film = if names_a_piece_only(folder) {
+        dated_piece_tail(folder)?
+    } else if is_edition_only(folder) {
+        return None;
+    } else {
+        folder
+    };
+    title_of(film)
+        .is_some_and(|guess| !is_noise_only(&guess.title))
+        .then_some(film)
+}
+
+/// The words after a disc label's number (`Heat (1995)` in `Disc 1 - Heat
+/// (1995)` or `Disc 1 [Heat (1995)]`), when they hold a year: a year is what
+/// tells a film's name from a label's own words (`Disc 1 - Feature`), as it
+/// is for an edition's ([`is_edition_only`]).
+fn dated_piece_tail(folder: &str) -> Option<&str> {
+    let caps = PIECE_FOLDER_REGEX.captures(folder.trim())?;
+    let tail = match (caps.name("tail"), caps.name("bracketed")) {
+        (Some(tail), _) => tail.as_str(),
+        (None, Some(bracketed)) => {
+            let bracketed = bracketed.as_str();
+            let inner = &bracketed[1..];
+            inner
+                .strip_suffix(']')
+                .or_else(|| inner.strip_suffix(')'))
+                .unwrap_or(inner)
+        }
+        (None, None) => return None,
+    };
+    let tail = tail.trim();
+    parse_media_filename(tail).year.is_some().then_some(tail)
 }
 
 /// The disc a folder's name is nothing but: `Disc 2` is disc 2.
