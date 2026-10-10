@@ -1499,14 +1499,20 @@ impl BeamClient {
     ///
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn refresh_media_metadata(&self, media_id: String) -> Result<(), BeamError> {
+        let wire_media_id = parse_uuid("media_id", &media_id)?;
         let (server_id, client, _) = self.active_context()?;
         self.send(
             &server_id,
-            client.refresh_media_metadata(parse_uuid("media_id", &media_id)?, None),
+            client.refresh_media_metadata(wire_media_id, None),
         )
         .await?;
         if let Ok(cache) = self.metadata_cache(&server_id) {
-            cache.write().expect("metadata lock").remove(&media_id);
+            // Evict under the key `fetch_detail` inserts with, the canonical
+            // spelling: `parse_uuid` also accepts uppercase and braced forms.
+            cache
+                .write()
+                .expect("metadata lock")
+                .remove(&wire_media_id.to_string());
         }
         Ok(())
     }
@@ -2459,6 +2465,56 @@ mod tests {
 
     /// What `GET /v1/media/{id}/sources` answers for a title with no file.
     const NO_SOURCES: &str = r#"{"items":[],"page_info":{"has_next_page":false,"has_previous_page":false,"start_cursor":null,"end_cursor":null}}"#;
+
+    /// What `GET /v1/media/{id}` answers for [`MEDIA_ID`].
+    const MOVIE_DETAIL: &str = r#"{"Movie":{"id":"00000000-0000-0000-0000-000000000007","title":{"original":"Le Samourai"},"genres":[],"user_state":{"played":false,"position_secs":0.0,"play_count":0}}}"#;
+
+    /// A refresh named by a non-canonical spelling of the id still evicts the
+    /// detail cached under the canonical one, so the next read goes back to
+    /// the server instead of serving the stale title.
+    #[tokio::test]
+    async fn refreshing_by_a_non_canonical_id_evicts_the_cached_detail() {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering_in_turn(vec![
+            (200, "application/json", MOVIE_DETAIL),
+            (204, "application/json", ""),
+            (200, "application/json", MOVIE_DETAIL),
+        ]));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        client
+            .media_detail(MEDIA_ID.to_owned())
+            .await
+            .expect("the canned detail is served");
+        client
+            .refresh_media_metadata(format!("{{{}}}", MEDIA_ID.to_uppercase()))
+            .await
+            .expect("a braced uppercase id is still a valid identifier");
+        client
+            .media_detail(MEDIA_ID.to_owned())
+            .await
+            .expect("the canned detail is served again");
+
+        let methods: Vec<reqwest::Method> = backend
+            .recorded()
+            .into_iter()
+            .map(|request| request.method)
+            .collect();
+        assert_eq!(
+            methods,
+            vec![
+                reqwest::Method::GET,
+                reqwest::Method::POST,
+                reqwest::Method::GET
+            ],
+            "the read after the refresh must reach the server, not the cache"
+        );
+    }
 
     /// Sign in to a registered server against a canned `/v1/me`, through the
     /// production path: `complete_login` registers the cookie with the client
