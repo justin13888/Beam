@@ -4387,13 +4387,21 @@ impl LocalIndexService {
         // Each file is asked after rather than assumed gone with its
         // directory: the directory may be gone while a file of it is not --
         // a rename the watcher reports as two events, the new name
-        // reconciled first, has already moved the rows along.
+        // reconciled first, has already moved the rows along. A file reached
+        // only through a link -- the directory swapped for a link to one
+        // holding files of the same names -- is gone too: it is no file of
+        // the library (issue #238).
         let gone: Vec<MediaFile> = self
             .file_repo
             .find_beneath_including_missing(library.id, path)
             .await?
             .into_iter()
-            .filter(|row| row.missing_since.is_none() && path_is_absent(&row.path))
+            .filter(|row| {
+                row.missing_since.is_none()
+                    && (path_is_absent(&row.path)
+                        || stat_regular_file(&library.root_path, &row.path)
+                            .is_err_and(|err| is_refusal(&err)))
+            })
             .collect();
         if !gone.is_empty() {
             let video_files_seen = usize::from(root_holds_a_video_file(
