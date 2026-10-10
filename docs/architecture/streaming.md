@@ -49,7 +49,8 @@ A DVD or Blu-ray folder rip ([#234](https://github.com/justin13888/beam/issues/2
 source of its film the same way: its `parts` are the stream files the disc's main title plays --
 the main title set's VOBs, or the main playlist's `.m2ts` clips -- and its `disc_structure` is `dvd`
 or `blu_ray`. The discs of a set of one film (`Disc 1`, `Disc 2`, ... side by side, decision
-D234-7) are one source whose parts run through each disc's main title in disc order. They are
+D234-7) are one source whose parts run through each disc's main title in disc order; a set of a
+DVD and a Blu-ray has no `disc_structure`, since no one kind describes it (decision D234-12). They are
 served as they are, like any file. Whether they play is the client's to say
 ([ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md)): a VOB is an MPEG program stream
 (`container_format` `mpeg`), usually MPEG-2 video with AC-3 or MPEG audio, which no browser and not

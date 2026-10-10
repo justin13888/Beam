@@ -391,7 +391,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
   (FR-211), and neither MUST a set one of whose discs cannot be. A watcher event at or inside a disc
   MUST reconcile the disc whole. A disc's files are served by direct play as they are -- MPEG
   program stream VOBs and BDAV MPEG transport stream clips -- and never remuxed or transcoded
-  (ADR-0004); the source MUST name its disc structure (`disc_structure`), so a client that checks
+  (ADR-0004); the source MUST name its disc structure (`disc_structure`) when every part is of one
+  kind of disc, and MUST name none when a set's discs differ (a DVD and a Blu-ray), so a client that checks
   what it can play lists the source as not directly playable, with its reason (ADR-0014). The web
   player does not yet check ([#138](https://github.com/justin13888/beam/issues/138)): it tries a
   disc source and fails to play it.

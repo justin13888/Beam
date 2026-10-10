@@ -1024,6 +1024,59 @@ mod tests {
         );
     }
 
+    /// A set whose disc 1 is a DVD and disc 2 a Blu-ray is still one source
+    /// (decision D234-7), but no one disc kind describes it: it names none
+    /// rather than the lead part's `dvd` while carrying a BDAV clip
+    /// (decision D234-12).
+    #[tokio::test]
+    async fn a_set_of_a_dvd_and_a_blu_ray_names_no_one_disc_kind() {
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie = make_movie("Heat", Some(1995));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let file = |path: &str, part_number: Option<u32>| {
+            let id = file_of(
+                &file_repo,
+                MediaFileContent::Movie {
+                    movie_entry_id: theatrical,
+                    part_number,
+                },
+                9_000,
+                3000,
+            );
+            file_repo.files.lock().unwrap().get_mut(&id).unwrap().path = path.into();
+            id
+        };
+        let vob_a = file("/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB", Some(1));
+        let vob_b = file("/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_2.VOB", Some(2));
+        let clip = file("/m/Heat (1995)/Disc 2/BDMV/STREAM/00001.m2ts", Some(3));
+
+        let service = service_with_sidecars(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(InMemorySidecarSubtitleRepository::default()),
+            Arc::default(),
+        );
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        let found: Vec<_> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.disc_structure,
+                    s.parts.iter().map(|p| p.file_id).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(found, [(None, vec![vob_a, vob_b, clip])]);
+    }
+
     /// A folder's parts are one source only as the whole run 1..n (C2 of
     /// the #233 review): parts 2 and 3 with no part 1, or 1 and 3 with no
     /// part 2, are missing a part -- or are two films whose names end alike

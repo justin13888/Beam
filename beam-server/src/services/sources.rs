@@ -348,6 +348,22 @@ fn episode_span(file: &MediaFile, episode_number: Option<u32>) -> Option<Episode
     })
 }
 
+/// The kind of disc a source's parts were all copied from (issue #234), read
+/// from every part's path: the parts of a set of discs may come from a DVD
+/// and a Blu-ray alike (decision D234-7), and a source that is not all of one
+/// kind -- or not all disc files -- names none, rather than the kind of
+/// whichever part happens to lead (decision D234-12).
+fn disc_structure_of(parts: &[PartFile]) -> Option<DiscStructure> {
+    let mut kinds = parts.iter().map(|part| disc_stream_kind(&part.file.path));
+    let first = kinds.next()??;
+    kinds
+        .all(|kind| kind == Some(first))
+        .then_some(match first {
+            DiscKind::Dvd => DiscStructure::Dvd,
+            DiscKind::BluRay => DiscStructure::BluRay,
+        })
+}
+
 /// `sidecars` holds each part's subtitle files, in `ranked.parts`' order.
 fn build_source(
     ranked: RankedSource,
@@ -361,15 +377,7 @@ fn build_source(
     let episode_span = parts
         .first()
         .and_then(|lead| episode_span(&lead.file, episode_number));
-    // A disc's main title is its stream files, all of one disc; its first
-    // says which kind (issue #234).
-    let disc_structure = parts
-        .first()
-        .and_then(|lead| disc_stream_kind(&lead.file.path))
-        .map(|kind| match kind {
-            DiscKind::Dvd => DiscStructure::Dvd,
-            DiscKind::BluRay => DiscStructure::BluRay,
-        });
+    let disc_structure = disc_structure_of(&parts);
 
     let mut lead = None;
     let mut source_parts = Vec::with_capacity(parts.len());

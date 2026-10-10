@@ -92,7 +92,8 @@ client-playback work split from #233. The parts of a folder are one source only 
 source too ([#234](https://github.com/justin13888/beam/issues/234), FR-222): its `parts` are the
 stream files the disc's main title plays -- VOBs or `.m2ts` clips, served as they are, and across
 the discs of a set of one film each disc's in disc order (decision D234-7) -- and its
-`disc_structure` (`dvd` or `blu_ray`, absent for any other source) says so, so a client that cannot
+`disc_structure` (`dvd` or `blu_ray`, absent for any other source, and for a set whose discs are
+not all of one kind) says so, so a client that cannot
 play MPEG program streams or BDAV transport streams lists it as not directly playable. The source's `size_bytes` and
 `duration_secs` are all its parts'; its `file_id`, tracks and URLs are its first part's. Every track has its stream `index` and
 FFmpeg's own `codec` name (`h264`, `hevc`, `eac3`, `truehd`, `subrip`, `hdmv_pgs_subtitle`); a value
