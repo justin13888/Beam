@@ -145,6 +145,18 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   the administrator's control of it -- the list by status, candidates, fix-match as an
   administrator's pin, locks and refreshes, issue #185); `media_info.rs`, `hash.rs`, `clock.rs`, `admin_log.rs`,
   `notification.rs` (the latter two back the admin log and SSE progress events).
+- `disc.rs` — reads a DVD or Blu-ray folder rip for its main title (FR-222, issue #234): the
+  title set whose `VTS_nn_0.IFO` lasts longest, else the largest, and the longest `*.mpls` playlist
+  whose clips are all present, else the largest clip, listing only `VIDEO_TS/` or a Blu-ray's
+  `PLAYLIST/` and `STREAM/`. `read_source` joins the discs of a set of one film (`Disc 1`, `Disc 2`)
+  into one run of parts in disc order. The walk reads a `VIDEO_TS/` or `BDMV/` folder whole through
+  it rather than descending it, classification numbers a source's files as parts from it, every
+  scan or reconcile that reads a disc re-derives the parts of its source and of every other disc of
+  its set, and a watcher event anywhere in a disc reconciles the disc whole. Read-only, with no link
+  followed: listed with `walkdir`, stat'ed with `StatCursor`, and read through
+  `library_file`'s no-follow opener. Tested over `TempDir` discs of minimal IFOs and playlists
+  (`disc_fixtures.rs`), with properties that the parsers stay in bounds on pointers near and past
+  the end of their bytes.
 - `providers/cameo.rs` — the `cameo`-backed `EnrichmentProvider` implementation hitting TMDB and
   AniList ([ADR-0006](decisions/ADR-0006-cameo-enrichment.md)). `providers/artwork.rs` and
   `providers/telemetry.rs` are the `reqwest` adapters for artwork fetching and for delivering the
@@ -205,8 +217,10 @@ This crate is what lets services be tested purely against in-memory fakes.
   parsing), `classification.rs` (`classify`: path inference refined by an NFO and container tags,
   keys always the path's), `sidecar.rs` (which video a subtitle file belongs to, and its language
   and flags), and `path_policy.rs`
-  (`PathPolicy`: which paths are media, sidecars, excluded or ignored, including the
-  `BEAM_SCAN_IGNORE` globs). The scan and the watcher both decide through these (FR-204, FR-216).
+  (`PathPolicy`: which paths are media, sidecars, a disc structure's candidate stream files,
+  excluded or ignored, including the `BEAM_SCAN_IGNORE` globs; `disc_root` names the `VIDEO_TS/` or
+  `BDMV/` folder a path is in). The scan and the watcher both decide through these (FR-204, FR-216,
+  FR-222).
 
 **Testing:** every trait is usable without a database or network; all fakes are gated
 `#[cfg(any(test, feature = "test-utils"))]` so release builds never include test-only code.

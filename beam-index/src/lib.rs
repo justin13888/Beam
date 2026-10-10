@@ -1,3 +1,4 @@
+pub(crate) mod disc;
 pub mod library_file;
 pub mod probe;
 pub mod providers;

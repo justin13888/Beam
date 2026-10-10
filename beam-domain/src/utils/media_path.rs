@@ -8,16 +8,18 @@
 //! combines the two. Pure and deterministic: the input is the path relative to
 //! the library root, and nothing is read from disk.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use chrono::{Datelike, NaiveDate};
 use regex::Regex;
 
 use crate::utils::filename::{
-    ParsedFilename, episode_title_after, is_noise_only, normalized_stem, parse_media_filename,
+    ParsedFilename, episode_title_after, is_edition_only, is_noise_only, normalized_stem,
+    parse_media_filename, part_token,
 };
 use crate::utils::identity::{normalize_title, title_identity_key};
+use crate::utils::path_policy::DiscKind;
 
 /// The version of the rules [`infer_media`] classifies by, and of the title
 /// fold ([`crate::utils::identity`]) that turns its titles into identity
@@ -39,6 +41,12 @@ use crate::utils::identity::{normalize_title, title_identity_key};
 ///   its own; every part now keys `movie|2019`, so the re-derivation this
 ///   bump triggers merges them into one title, and the reclassification
 ///   records each file's part.
+///
+/// Reading a disc structure's files as its enclosing folder's film (issue
+/// #234) moved no version: every build at version 3 kept those files out of
+/// the library, so no row at that version is one, and a row an older build
+/// made of one is below it and reclassified when its disc's main title plays
+/// it again.
 pub const CLASSIFIER_VERSION: u16 = 3;
 
 /// A title and year as a path spells them -- what a movie or show is keyed by.
@@ -118,6 +126,11 @@ pub enum UnclassifiableReason {
     /// carries no season and episode marker: the range cannot supply the
     /// season a season folder would.
     NoEpisodeMarkerInMultiSeasonFolder,
+    /// The file is inside a DVD or Blu-ray disc structure (issue #234) that
+    /// no folder names a film for: the disc is at the library root, or in a
+    /// season folder -- a show's disc, whose episodes its title sets do not
+    /// tell apart by any name.
+    DiscWithoutTitleFolder,
 }
 
 /// What a library path is.
@@ -194,6 +207,31 @@ static SEASON_EPISODE_DIGITS_REGEX: LazyLock<Regex> =
 
 static YEAR_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:19|20)\d{2}$").expect("valid regex"));
+
+/// A folder named for nothing but one disc of a set: `Disc 1`, `DISC1`,
+/// `CD2`, `Disk_2`.
+static BARE_DISC_FOLDER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(?:cd|disc|disk)[ ._-]?(\d{1,2})$").expect("valid regex"));
+
+/// A folder that says only which piece of a release it is, and so names no
+/// film: which disc -- `Disc 1`, `Disc One`, `DVD 1`, `BD1`, `Blu-ray 2`,
+/// `Blu-ray Disc 1`, `Disc 1 of 2`, with or without a label after it (`Disc
+/// 1 - Feature`, `DISC 1 [Feature]`) -- or which side, volume or part (`Side
+/// A`, `Vol 1`, `Part Two`). A part or volume with words after it is left a
+/// title: `Part 1 - The Fellowship of the Ring` names a film. A disc label's
+/// words are captured (`tail` after a dash or colon, `bracketed` with its
+/// bracket), because words with a year name a film after all
+/// ([`dated_piece_tail`]).
+static PIECE_FOLDER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    let number = r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)";
+    let medium = r"(?:cd|dis[ck]|dvd|bd|blu[ -]?ray)";
+    let disc = format!(
+        r"(?:{medium}[ ._-]*)?{medium}[ ._-]*{number}(?:[ ._-]*of[ ._-]*{number})?(?:\s*[-:]\s*(?P<tail>.*)|\s*(?P<bracketed>[\[(].*))?"
+    );
+    let side = format!(r"side[ ._-]*(?:[a-d]|{number})");
+    let volume = format!(r"(?:vol(?:ume)?|part|pt)[ ._-]*{number}");
+    Regex::new(&format!(r"(?i)^(?:{disc}|{side}|{volume})$")).expect("valid regex")
+});
 
 /// A season folder: which season it designates, and the text before its
 /// season token (`The.Office.US.` in `The.Office.US.S02.1080p`), which may
@@ -392,6 +430,12 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
         return MediaInference::Movie(movie_reading(rel_path));
     };
     let dirs = dirs.as_slice();
+    if let Some(at) = dirs
+        .iter()
+        .position(|dir| DiscKind::of_folder(dir).is_some())
+    {
+        return disc_title(&dirs[..at]);
+    }
     let parsed = parse_media_filename(&stem);
 
     let parent = dirs.last().map(String::as_str);
@@ -526,6 +570,174 @@ pub fn infer_media(rel_path: &Path) -> MediaInference {
     }
 
     MediaInference::Movie(movie_of(parsed, stem, parent))
+}
+
+/// What a file inside a disc structure is (issue #234), given the folders
+/// above the disc's root (`VIDEO_TS/`, `BDMV/`), root first: the movie a
+/// folder above it names, read as a filename would be and completed from the
+/// folder above it the same way (decision D234-8). The nearest folder that
+/// names a film *with a year* names it -- so `Heat (1995)/VIDEO_TS`,
+/// `Heat (1995)/Disc 1/VIDEO_TS` and `Heat (1995)/Bonus Feature/VIDEO_TS`
+/// are all *Heat (1995)*, and no label a folder inside a film's carries can
+/// make two films' discs one title. Only when no folder above names a year
+/// does the nearest folder naming anything name the film (`Heat/VIDEO_TS`).
+///
+/// A folder that says only which piece of a release it is (`Disc 1`, `Disc
+/// One`, `DVD 1`, `Disc 1 of 2`, `Side A`, `Vol 1`), only which edition
+/// (`Theatrical`, `Extended Edition`), or is nothing but release noise
+/// (`DVD9`) names no film at all, so `Heat/Disc One/VIDEO_TS` is *Heat* too
+/// -- unless a disc label's words carry a year, when they name the film
+/// themselves: `Movies/Disc 1 - Heat (1995)/VIDEO_TS` is *Heat (1995)*.
+/// No file inside a disc is named for its title, so its own name is never
+/// read.
+///
+/// Its part is not a path's to say either: which of the disc's files its
+/// main title plays, and in what order, is read from the disc itself. A disc
+/// structure is always a movie: a show's disc holds its episodes in title
+/// sets no path tells apart, so one with a season folder anywhere above it
+/// (`Show/Season 1/Disc 1/VIDEO_TS`), like one with no folder naming a film
+/// around it at all, names no title.
+fn disc_title(enclosing: &[String]) -> MediaInference {
+    let untitled = MediaInference::Unclassifiable(UnclassifiableReason::DiscWithoutTitleFolder);
+    if enclosing
+        .iter()
+        .any(|folder| season_folder(folder).is_some() || is_bare_season_range(folder))
+    {
+        return untitled;
+    }
+    let mut films = enclosing
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(at, folder)| {
+            let film = film_named_by(folder)?;
+            let parent = at.checked_sub(1).map(|above| enclosing[above].as_str());
+            Some(movie_of(
+                parse_media_filename(film),
+                film.to_owned(),
+                parent,
+            ))
+        })
+        .peekable();
+    let Some(nearest) = films.peek().cloned() else {
+        return untitled;
+    };
+    let movie = films
+        .find(|movie| movie.title.year.is_some())
+        .unwrap_or(nearest);
+    MediaInference::Movie(MovieInference {
+        part_number: None,
+        ..movie
+    })
+}
+
+/// Whether a folder's name says only which piece of a release it is -- a
+/// disc, side, volume or part -- and so names no film ([`PIECE_FOLDER_REGEX`]).
+fn names_a_piece_only(name: &str) -> bool {
+    PIECE_FOLDER_REGEX.is_match(name.trim())
+}
+
+/// The words of a folder above a disc that name its film, if any: the whole
+/// name, unless it is only a piece label, only an edition, or release noise.
+/// A disc label whose words carry a year names the film they spell
+/// ([`dated_piece_tail`]), so `Disc 1 - Heat (1995)` is *Heat (1995)* and
+/// never one title with `Disc 1 - Ronin (1998)`.
+fn film_named_by(folder: &str) -> Option<&str> {
+    let film = if names_a_piece_only(folder) {
+        dated_piece_tail(folder)?
+    } else if is_edition_only(folder) {
+        return None;
+    } else {
+        folder
+    };
+    title_of(film)
+        .is_some_and(|guess| !is_noise_only(&guess.title))
+        .then_some(film)
+}
+
+/// The words after a disc label's number (`Heat (1995)` in `Disc 1 - Heat
+/// (1995)` or `Disc 1 [Heat (1995)]`), when they hold a year: a year is what
+/// tells a film's name from a label's own words (`Disc 1 - Feature`), as it
+/// is for an edition's ([`is_edition_only`]).
+fn dated_piece_tail(folder: &str) -> Option<&str> {
+    let caps = PIECE_FOLDER_REGEX.captures(folder.trim())?;
+    let tail = match (caps.name("tail"), caps.name("bracketed")) {
+        (Some(tail), _) => tail.as_str(),
+        (None, Some(bracketed)) => {
+            let bracketed = bracketed.as_str();
+            let inner = &bracketed[1..];
+            inner
+                .strip_suffix(']')
+                .or_else(|| inner.strip_suffix(')'))
+                .unwrap_or(inner)
+        }
+        (None, None) => return None,
+    };
+    let tail = tail.trim();
+    parse_media_filename(tail).year.is_some().then_some(tail)
+}
+
+/// The disc a folder's name is nothing but: `Disc 2` is disc 2.
+fn bare_disc_number(name: &str) -> Option<u32> {
+    let caps = BARE_DISC_FOLDER_REGEX.captures(name.trim())?;
+    caps[1].parse().ok().filter(|disc| *disc >= 1)
+}
+
+/// Where a disc folder sits in a set of discs of one film (decision
+/// D234-7): which disc of the set it is, and what every disc of the set
+/// shares -- the folder they are in, and what their names say besides the
+/// disc number. `Heat (1995)/Disc 2` is disc 2 of the set of bare `Disc N`
+/// folders in `Heat (1995)`; `Movies/Heat (1995) - CD2` is disc 2 of the set
+/// of `Heat (1995) - CDn` folders in `Movies`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DiscSetPlace {
+    /// The folder the set's disc folders are in, as the path given was
+    /// (relative to a library root, or absolute).
+    pub container: PathBuf,
+    /// What the disc folder's name says besides its disc number, folded so
+    /// that `Heat (1995) - Disc 1` and `Heat.1995.DISC2` agree: empty for a
+    /// bare `Disc N`.
+    pub name: String,
+    /// Which disc of the set it is, from 1.
+    pub disc: u32,
+}
+
+/// Where `folder` -- a folder enclosing a disc structure's root, relative to
+/// a library root or absolute -- sits in a set of discs, if its name numbers
+/// a disc: a bare `Disc 2`, `DISC2`, `CD2` or `Disk 2`, or a film's name with
+/// a disc token (`Heat (1995) - Disc 2`, `Heat.1995.CD2`) as a filename's
+/// part token is read ([`parse_media_filename`]).
+pub fn disc_set_member(folder: &Path) -> Option<DiscSetPlace> {
+    let name = folder.file_name()?.to_string_lossy();
+    let container = folder.parent()?.to_path_buf();
+    if let Some(disc) = bare_disc_number(&name) {
+        return Some(DiscSetPlace {
+            container,
+            name: String::new(),
+            disc,
+        });
+    }
+    let token = part_token(&name).filter(|token| token.confirmed)?;
+    // Every run of letters and digits, lowercased: separators, brackets and
+    // dashes differ between the discs of one set as often as not.
+    let folded: Vec<String> = token
+        .stripped
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    (!folded.is_empty()).then(|| DiscSetPlace {
+        container,
+        name: folded.join(" "),
+        disc: token.number,
+    })
+}
+
+/// Where the disc structure rooted at `disc_root` (a `VIDEO_TS/` or `BDMV/`
+/// folder) sits in a set of discs: [`disc_set_member`] of the folder
+/// enclosing it.
+pub fn disc_set_place(disc_root: &Path) -> Option<DiscSetPlace> {
+    disc_set_member(disc_root.parent()?)
 }
 
 /// The movie a filename parse names, completed from its parent folder.

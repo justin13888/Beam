@@ -740,6 +740,7 @@ fn a_walk_beneath_a_folder_link_lists_nothing_through_it() {
         unscoped_failure,
         subtitles,
         nfos,
+        discs,
     } = walk_under(
         &root,
         &root.join("Show/Linked/Season 01"),
@@ -753,4 +754,5 @@ fn a_walk_beneath_a_folder_link_lists_nothing_through_it() {
     assert!(!unscoped_failure);
     assert!(subtitles.is_empty());
     assert!(nfos.is_empty());
+    assert!(discs.is_empty());
 }

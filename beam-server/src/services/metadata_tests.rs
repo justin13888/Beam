@@ -886,6 +886,197 @@ mod tests {
         );
     }
 
+    /// A DVD or Blu-ray folder rip is one source of its title (issue #234):
+    /// the main title's stream files are its parts, in order, and the source
+    /// names the disc it was copied from. A file that is no disc's names
+    /// none.
+    #[tokio::test]
+    async fn a_disc_rips_main_title_is_one_source_naming_its_disc() {
+        use crate::models::DiscStructure;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie = make_movie("Heat", Some(1995));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let file = |path: &str, part_number: Option<u32>, size_bytes: u64| {
+            let id = file_of(
+                &file_repo,
+                MediaFileContent::Movie {
+                    movie_entry_id: theatrical,
+                    part_number,
+                },
+                size_bytes,
+                3000,
+            );
+            file_repo.files.lock().unwrap().get_mut(&id).unwrap().path = path.into();
+            id
+        };
+        let vob2 = file("/m/Heat (1995)/VIDEO_TS/VTS_02_2.VOB", Some(2), 9_000);
+        let vob1 = file("/m/Heat (1995)/VIDEO_TS/VTS_02_1.VOB", Some(1), 9_000);
+        let clip = file("/m/Heat (1995) BD/BDMV/STREAM/00800.m2ts", None, 30_000);
+        let mkv = file("/m/Heat (1995)/Heat (1995).mkv", None, 1_000);
+
+        let service = service_with_sidecars(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(InMemorySidecarSubtitleRepository::default()),
+            Arc::default(),
+        );
+        let mut sources: Vec<(Uuid, Option<DiscStructure>, Vec<Uuid>)> = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| {
+                (
+                    s.file_id,
+                    s.disc_structure,
+                    s.parts.iter().map(|p| p.file_id).collect(),
+                )
+            })
+            .collect();
+        sources.sort_by_key(|(file_id, _, _)| *file_id);
+        let mut expected = vec![
+            (vob1, Some(DiscStructure::Dvd), vec![vob1, vob2]),
+            (clip, Some(DiscStructure::BluRay), vec![clip]),
+            (mkv, None, vec![mkv]),
+        ];
+        expected.sort_by_key(|(file_id, _, _)| *file_id);
+        assert_eq!(sources, expected);
+    }
+
+    /// The discs of a set of one film are one source (decision D234-7),
+    /// playing disc 1's main title and then disc 2's as the indexer numbers
+    /// them; a set missing a disc is a source per disc.
+    #[tokio::test]
+    async fn a_multi_disc_set_is_one_source_in_disc_order() {
+        use crate::models::DiscStructure;
+
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie = make_movie("Heat", Some(1995));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let file = |path: &str, part_number: Option<u32>| {
+            let id = file_of(
+                &file_repo,
+                MediaFileContent::Movie {
+                    movie_entry_id: theatrical,
+                    part_number,
+                },
+                9_000,
+                3000,
+            );
+            file_repo.files.lock().unwrap().get_mut(&id).unwrap().path = path.into();
+            id
+        };
+        // Disc 2 is the larger, so were the discs two sources it could rank
+        // first and the play button would start the film's second half.
+        let second = file("/m/Heat (1995)/Disc 2/VIDEO_TS/VTS_01_1.VOB", Some(3));
+        let first_b = file("/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_2.VOB", Some(2));
+        let first_a = file("/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB", Some(1));
+        // Another release, missing its disc 2: each disc its own.
+        let lone_1 = file("/m/Heat.1995.PAL - CD1/VIDEO_TS/VTS_01_1.VOB", None);
+        let lone_3 = file("/m/Heat.1995.PAL - CD3/VIDEO_TS/VTS_01_1.VOB", None);
+
+        let service = service_with_sidecars(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(InMemorySidecarSubtitleRepository::default()),
+            Arc::default(),
+        );
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        let mut found: Vec<(Option<DiscStructure>, Vec<Uuid>)> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.disc_structure,
+                    s.parts.iter().map(|p| p.file_id).collect(),
+                )
+            })
+            .collect();
+        found.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut expected = vec![
+            (Some(DiscStructure::Dvd), vec![first_a, first_b, second]),
+            (Some(DiscStructure::Dvd), vec![lone_1]),
+            (Some(DiscStructure::Dvd), vec![lone_3]),
+        ];
+        expected.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(found, expected);
+        assert_eq!(
+            sources[0]
+                .parts
+                .iter()
+                .map(|p| p.file_id)
+                .collect::<Vec<_>>(),
+            [first_a, first_b, second],
+            "the whole set ranks first and starts at disc 1"
+        );
+    }
+
+    /// A set whose disc 1 is a DVD and disc 2 a Blu-ray is still one source
+    /// (decision D234-7), but no one disc kind describes it: it names none
+    /// rather than the lead part's `dvd` while carrying a BDAV clip
+    /// (decision D234-12).
+    #[tokio::test]
+    async fn a_set_of_a_dvd_and_a_blu_ray_names_no_one_disc_kind() {
+        let movie_repo = Arc::new(InMemoryMovieRepository::default());
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie = make_movie("Heat", Some(1995));
+        let movie_id = movie.id;
+        movie_repo.movies.lock().unwrap().insert(movie.id, movie);
+        let theatrical = entry(&movie_repo, movie_id, None);
+        let file = |path: &str, part_number: Option<u32>| {
+            let id = file_of(
+                &file_repo,
+                MediaFileContent::Movie {
+                    movie_entry_id: theatrical,
+                    part_number,
+                },
+                9_000,
+                3000,
+            );
+            file_repo.files.lock().unwrap().get_mut(&id).unwrap().path = path.into();
+            id
+        };
+        let vob_a = file("/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB", Some(1));
+        let vob_b = file("/m/Heat (1995)/Disc 1/VIDEO_TS/VTS_01_2.VOB", Some(2));
+        let clip = file("/m/Heat (1995)/Disc 2/BDMV/STREAM/00001.m2ts", Some(3));
+
+        let service = service_with_sidecars(
+            movie_repo,
+            Arc::new(InMemoryShowRepository::default()),
+            file_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(InMemorySidecarSubtitleRepository::default()),
+            Arc::default(),
+        );
+        let sources = service
+            .get_media_sources(&movie_id.to_string())
+            .await
+            .unwrap();
+        let found: Vec<_> = sources
+            .iter()
+            .map(|s| {
+                (
+                    s.disc_structure,
+                    s.parts.iter().map(|p| p.file_id).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(found, [(None, vec![vob_a, vob_b, clip])]);
+    }
+
     /// A folder's parts are one source only as the whole run 1..n (C2 of
     /// the #233 review): parts 2 and 3 with no part 1, or 1 and 3 with no
     /// part 2, are missing a part -- or are two films whose names end alike

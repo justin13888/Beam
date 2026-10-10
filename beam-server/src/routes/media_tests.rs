@@ -205,6 +205,7 @@ fn movie_source(file_id: &str) -> MediaSource {
         is_primary: true,
         edition: None,
         episode_span: None,
+        disc_structure: None,
         parts: vec![crate::models::SourcePart {
             file_id: uuid::Uuid::parse_str(file_id).expect("a UUID"),
             part_number: None,
