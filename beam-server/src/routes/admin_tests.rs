@@ -528,6 +528,47 @@ async fn an_authenticated_caller_sees_an_empty_library_list() {
     assert!(response.json::<Vec<Library>>().is_empty());
 }
 
+/// The stored scan count is a signed column; a negative one is reported as
+/// unknown rather than wrapped into a huge unsigned count, while a real count
+/// is reported as it is.
+#[tokio::test]
+async fn a_negative_stored_scan_count_is_listed_as_unknown() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let library: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+    let listed_count = || async {
+        let listed = client
+            .get("/v1/libraries")
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .json::<Vec<Value>>();
+        assert_eq!(listed.len(), 1);
+        listed[0]["last_scan_file_count"].clone()
+    };
+    let repo = &fixture.state.services.library_repo;
+
+    repo.update_scan_progress(library.id, None, None, Some(-1))
+        .await
+        .expect("the in-memory repository does not fail");
+    assert_eq!(listed_count().await, Value::Null);
+
+    repo.update_scan_progress(library.id, None, None, Some(7))
+        .await
+        .expect("the in-memory repository does not fail");
+    assert_eq!(listed_count().await, serde_json::json!(7));
+}
+
 /// Every route naming a library by id types it `Uuid`, so a malformed id is
 /// the `Path` extractor's 400 on each. Table-driven because the interesting
 /// thing is that the answers agree, not any one of them.
