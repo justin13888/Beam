@@ -35,6 +35,10 @@ pub struct MediaSource {
     /// Present when this file holds a run of episodes (`S01E01-E03`): its
     /// duration is then the whole run's, not one episode's.
     pub episode_span: Option<EpisodeSpan>,
+    /// Present when this source is a DVD or Blu-ray folder rip's main title
+    /// (issue #234): its parts are the disc's own stream files, served as
+    /// they are (ADR-0004).
+    pub disc_structure: Option<DiscStructure>,
     /// The files this source plays, in order: one for a whole file, each
     /// part of a multi-part movie otherwise. Never empty.
     pub parts: Vec<SourcePart>,
@@ -104,6 +108,23 @@ pub struct SourcePart {
     pub stream_url: String,
     /// Download URL for this file.
     pub download_url: String,
+}
+
+/// The disc structure a source was copied from whole (issue #234).
+///
+/// Its parts are the disc's stream files: a DVD's VOBs are MPEG program
+/// streams (`mpeg`), usually MPEG-2 video with AC-3 or MPEG audio; a
+/// Blu-ray's clips are BDAV MPEG transport streams (`mpegts` with a 4-byte
+/// timestamp before each packet). Beam serves them as they are and never
+/// remuxes them (ADR-0004), so a client that cannot demux or decode them
+/// lists the source as not directly playable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscStructure {
+    /// A `VIDEO_TS/` folder: its main title set's VOBs.
+    Dvd,
+    /// A `BDMV/` folder: the clips its main playlist plays.
+    BluRay,
 }
 
 /// The episodes one file holds, first and last inclusive.

@@ -153,15 +153,17 @@ impl FileMeta {
     /// What a `stat` of a regular file returned.
     #[cfg(unix)]
     fn of_stat(stat: &rustix::fs::Stat) -> Self {
-        // `From`, not `as`: the field types differ between targets.
+        // `From`, not `as`: the field types differ between targets. The
+        // nanoseconds are signed on some (macOS) and unsigned on others
+        // (Linux), so they go to `nanos` as they are, which takes either.
         #[allow(clippy::useless_conversion)]
         let (size, ino, mtime, mtime_nsec, ctime, ctime_nsec) = (
             i64::from(stat.st_size),
             u64::from(stat.st_ino),
             i64::from(stat.st_mtime),
-            u64::from(stat.st_mtime_nsec),
+            stat.st_mtime_nsec,
             i64::from(stat.st_ctime),
-            u64::from(stat.st_ctime_nsec),
+            stat.st_ctime_nsec,
         );
         FileMeta {
             size: u64::try_from(size).unwrap_or(0),
@@ -541,7 +543,6 @@ fn open_beneath_by_walk(root: rustix::fd::OwnedFd, relative: &Path) -> io::Resul
 #[cfg(test)]
 mod tests {
     use std::io::Read;
-    use std::time::Duration;
 
     use tempfile::TempDir;
 

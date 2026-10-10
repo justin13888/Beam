@@ -77,6 +77,7 @@ internal class MediaDownloadRepository
         private val clients: BeamHttpClientFactory,
         private val cache: Cache,
         private val titles: DownloadTitleStore,
+        private val artwork: DownloadArtwork,
     ) : DownloadRepository,
         DownloadManagerHolder {
         private var delegate: BeamDownloadManager? = null
@@ -137,6 +138,7 @@ internal class MediaDownloadRepository
                         clients = clients,
                         cache = cache,
                         titles = titles,
+                        artwork = artwork,
                         server = client.serverHttpConfig(),
                     ).also { delegate = it }
             }
