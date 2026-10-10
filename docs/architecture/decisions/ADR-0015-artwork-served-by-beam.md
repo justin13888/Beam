@@ -106,7 +106,7 @@ kind (NFR-502).
 |---|---|
 | Stricter privacy requirements, with no opt-out short of disabling enrichment | Answered here. No client contacts a provider CDN, so there is nothing left to opt out of. |
 | CDN instability or a hotlinking policy change | Answered here. A cached image survives a provider reorganising or removing a path; before, the poster simply broke until the next enrichment pass. |
-| Offline art requirements | **Made possible here, not finished here.** The URL is now stable and reachable over the client's authenticated session, so Coil's disk cache can hold it -- but priming that cache at download-enqueue time is [#152](https://github.com/justin13888/beam/issues/152). |
+| Offline art requirements | **Made possible here; delivered on Android under [#152](https://github.com/justin13888/beam/issues/152), approximately.** The URL is stable and reachable over the client's authenticated session, so Coil's disk cache can hold it -- once the loader actually carries that session: it fetches through `ServerCallFactory`, which attaches the active server's cookie and trust decision from `serverHttpConfig()` to requests for that server's origin only. `BeamDownloadManager.enqueue` fetches the poster into that cache (`DownloadArtwork`), and removing the last download that uses a poster evicts it. The poster's lifetime approximates the download's rather than matching it: the cache is shared and size-capped, so enough browsing can still push a pinned poster out. The downloads screen refreshes the entry on every render, and a poster that is pushed out anyway is a placeholder offline -- re-fetched on the next online render -- never a failed download. A poster store of its own outside the cache (e.g. `filesDir/download-artwork`) would make the lifetimes match exactly; that is the open choice on #152. |
 
 **Closing [#152](https://github.com/justin13888/beam/issues/152) is a condition of this decision
 fully answering #70.** Until it is closed, Beam can say its artwork is private, cached and stable,
@@ -122,7 +122,9 @@ but not that a downloaded title renders on a plane.
 - [#81](https://github.com/justin13888/beam/issues/81) can write `img-src 'self'`, which it could not
   while any artwork came from elsewhere.
 - Android's image loader is now correct rather than aspirational, and the two native clients agree
-  about what an artwork URL is.
+  about what an artwork URL is. (Correct in intent here; in fact only once #152 routed it through
+  `ServerCallFactory` -- until then the shared client it used carried no session cookie at all, and
+  every Beam-served poster was a 401.)
 - One upstream fetch serves every client: twenty viewers opening the same grid produce one request
   per image, where twenty browsers hitting a CDN produced twenty.
 
