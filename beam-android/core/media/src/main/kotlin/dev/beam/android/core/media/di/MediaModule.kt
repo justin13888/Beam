@@ -127,8 +127,9 @@ internal object MediaModule {
     ): DownloadTitleStore = FileDownloadTitleStore(context)
 
     /**
-     * Pinned into the app's own image loader, so a poster kept for a download
-     * is the same cache entry the downloads screen renders from.
+     * Fetched through the app's own image loader, so a poster kept for a
+     * download goes out under the same session and trust decision as every
+     * other poster, then kept in a store of its own outside that loader's cache.
      */
     @Provides
     @Singleton

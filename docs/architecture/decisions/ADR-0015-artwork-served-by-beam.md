@@ -106,11 +106,11 @@ kind (NFR-502).
 |---|---|
 | Stricter privacy requirements, with no opt-out short of disabling enrichment | Answered here. No client contacts a provider CDN, so there is nothing left to opt out of. |
 | CDN instability or a hotlinking policy change | Answered here. A cached image survives a provider reorganising or removing a path; before, the poster simply broke until the next enrichment pass. |
-| Offline art requirements | **Made possible here; delivered on Android under [#152](https://github.com/justin13888/beam/issues/152), approximately.** The URL is stable and reachable over the client's authenticated session, so Coil's disk cache can hold it -- once the loader actually carries that session: it fetches through `ServerCallFactory`, which attaches the active server's cookie and trust decision from `serverHttpConfig()` to requests for that server's origin only. `BeamDownloadManager.enqueue` fetches the poster into that cache (`DownloadArtwork`), and removing the last download that uses a poster evicts it. The poster's lifetime approximates the download's rather than matching it: the cache is shared and size-capped, so enough browsing can still push a pinned poster out. The downloads screen refreshes the entry on every render, and a poster that is pushed out anyway is a placeholder offline -- re-fetched on the next online render -- never a failed download. A poster store of its own outside the cache (e.g. `filesDir/download-artwork`) would make the lifetimes match exactly; that is the open choice on #152. |
+| Offline art requirements | **Made possible here; delivered on Android under [#152](https://github.com/justin13888/beam/issues/152).** The URL is stable and reachable over the client's authenticated session -- once the loader actually carries that session: it fetches through `ServerCallFactory`, which attaches the active server's cookie and trust decision from `serverHttpConfig()` to requests for that server's origin only. `BeamDownloadManager.enqueue` fetches the poster through that loader and keeps a copy of it in `filesDir/download-artwork` (`DownloadArtwork`), outside Coil's shared, size-capped disk cache, and the downloads screen renders that copy. Removing the last download that uses a poster deletes it, so the poster's lifetime matches the download's. A poster that could not be fetched at enqueue time is rendered from its URL like any other -- a placeholder offline, never a failed download -- and is fetched again on the next enqueue of the same file. |
 
 **Closing [#152](https://github.com/justin13888/beam/issues/152) is a condition of this decision
-fully answering #70.** Until it is closed, Beam can say its artwork is private, cached and stable,
-but not that a downloaded title renders on a plane.
+fully answering #70.** With it closed, Beam can say its artwork is private, cached and stable, and
+that a downloaded title renders on a plane.
 
 ## Consequences
 
