@@ -471,9 +471,12 @@ impl MetadataEnrichmentService {
         // searched for; one pinned to an id only a match can be checked
         // against is searched, and the match must not contradict the pin. A
         // refresh of a match already made (`force_refresh` with
-        // `matched_ref`) comes first. A fetch by an id the provider has no
-        // title for is retried with backoff for a pinned title, and searched
-        // for afresh for an unpinned one (FR-304, FR-313).
+        // `matched_ref`) comes first. When the provider has no title for the
+        // match, an unpinned title is searched for afresh, and a pinned one
+        // whose match differs from its pin forgets the match and is fetched
+        // by its pin instead (issue #246). Only a fetch by the pin itself --
+        // a dead match equal to the pin, or the pin when no match is
+        // refreshed -- is retried with backoff (FR-304, FR-313).
         let (pin, pinned_ref) = self.pin_of(movie.pinned_ref.as_deref());
         let mut by_id = external_ref.clone().or_else(|| pinned_ref.clone());
         let resolved = match (external_ref, pinned_ref) {
