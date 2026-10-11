@@ -1649,13 +1649,22 @@ set -eu
 # ktlint runs over the sources rather than through Gradle: it is the same
 # binary the pre-commit hook uses, so a hook pass and a CI pass cannot
 # disagree. Generated bindings are excluded by beam-android/.ktlintignore.
-ktlint --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'
-cd beam-android && ./gradlew lintDebug
+#
+# It runs from inside beam-android/ because ktlint walks the whole tree under
+# its working directory and only then matches each file against the globs.
+# From the repository root that walk enters target/, which clippy -- running
+# alongside this in the pre-push hook -- rewrites, so ktlint failed with a
+# NoSuchFileException on a file clippy had just deleted (#248).
+cd beam-android
+ktlint --relative '**/*.kt' '!**/build/**'
+./gradlew lintDebug
 '''
 
 [tasks."android:lint:fix"]
 description = "Rewrite the Kotlin sources to satisfy ktlint"
-run = "ktlint --format --relative 'beam-android/**/*.kt' '!beam-android/**/build/**'"
+# From inside beam-android/, for the reason android:lint gives.
+dir = "beam-android"
+run = "ktlint --format --relative '**/*.kt' '!**/build/**'"
 
 # The chained Gradle tasks -- lint, test, screenshot, minify -- are ordered
 # against each other because they all drive ./gradlew against one project,
