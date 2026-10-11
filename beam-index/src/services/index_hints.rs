@@ -926,7 +926,7 @@ impl LocalIndexService {
                 let Some(record) = record_of(old) else {
                     continue;
                 };
-                if path_is_absent(old)
+                if path_is_absent(root, old)
                     || read_nfo_file(root, old).is_some_and(|read| !read.content.same_as(record))
                 {
                     vacated.push(record);
@@ -965,7 +965,7 @@ impl LocalIndexService {
                 }
                 let edited_in_the_move = before
                     .iter()
-                    .any(|old| record_of(old).is_some() && path_is_absent(old));
+                    .any(|old| record_of(old).is_some() && path_is_absent(root, old));
                 if edited_in_the_move {
                     continue;
                 }

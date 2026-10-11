@@ -15,8 +15,16 @@ use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat, UpsertSideca
 use beam_domain::utils::sidecar::{is_subtitle_folder, match_sidecar};
 
 use super::*;
+use crate::library_file::list_folder;
 
 /// A file the walk found beside the media, with what its stat said.
+///
+/// A size and an mtime are all a subtitle's row is compared by -- no inode
+/// or change time, as a video's is (issue #228). Nothing the row records is
+/// read from the file's bytes: its language, title and flags come from its
+/// name, and serving reads the file at its path. So two subtitles of one size
+/// and mtime swapped between paths leave every row true, and a missed swap
+/// costs nothing (issue #246).
 #[derive(Debug, Clone)]
 pub(super) struct WalkedSidecar {
     pub(super) path: PathBuf,
@@ -62,15 +70,17 @@ fn walk_saw(path: &Path, failed_subtrees: &[PathBuf], unscoped_failure: bool) ->
 
 impl LocalIndexService {
     /// The regular files in `dir` the path policy calls media. Listing a
-    /// folder reads nothing inside it and follows no link.
+    /// folder reads nothing inside it and follows no link beneath the root
+    /// ([`list_folder`], issue #246): a folder reached through a link lists
+    /// nothing.
     fn videos_in(&self, library: &Library, dir: &Path) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+        let Ok(entries) = list_folder(&library.root_path, dir) else {
             return Vec::new();
         };
         entries
-            .flatten()
-            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
-            .map(|entry| entry.path())
+            .into_iter()
+            .filter(|(_, kind)| *kind == EntryKind::File)
+            .map(|(path, _)| path)
             .filter(|path| {
                 self.path_policy
                     .disposition(relative_to(&library.root_path, path))
@@ -238,32 +248,29 @@ impl LocalIndexService {
 
     /// The text subtitles beside `video` -- in its folder, and in a `Subs/`
     /// or `Subtitles/` folder beside it -- that the path policy calls
-    /// sidecars: every subtitle that video could own.
+    /// sidecars: every subtitle that video could own. Both folders are listed
+    /// as [`Self::videos_in`] lists one, following no link.
     fn adjacent_subtitles(&self, library: &Library, video: &Path) -> Vec<PathBuf> {
+        let root = library.root_path.as_path();
         let Some(dir) = video.parent() else {
             return Vec::new();
         };
-        let Ok(entries) = std::fs::read_dir(dir) else {
+        let Ok(entries) = list_folder(root, dir) else {
             return Vec::new();
         };
         let mut subtitles = Vec::new();
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let path = entry.path();
-            if file_type.is_file() && is_text_subtitle(&path) {
+        for (path, kind) in entries {
+            if kind == EntryKind::File && is_text_subtitle(&path) {
                 subtitles.push(path);
-            } else if file_type.is_dir() && in_subtitle_folder(&path) {
-                let Ok(inner) = std::fs::read_dir(&path) else {
+            } else if kind == EntryKind::Folder && in_subtitle_folder(&path) {
+                let Ok(inner) = list_folder(root, &path) else {
                     continue;
                 };
                 subtitles.extend(
                     inner
-                        .flatten()
-                        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-                        .map(|e| e.path())
-                        .filter(|p| is_text_subtitle(p)),
+                        .into_iter()
+                        .filter(|(p, kind)| *kind == EntryKind::File && is_text_subtitle(p))
+                        .map(|(p, _)| p),
                 );
             }
         }
@@ -520,7 +527,7 @@ impl LocalIndexService {
             .any(|record| {
                 record.path != path
                     && content.same_as(record)
-                    && (path_is_absent(&record.path)
+                    && (path_is_absent(&library.root_path, &record.path)
                         || hints::read_nfo_file(&library.root_path, &record.path)
                             .is_some_and(|read| !read.content.same_as(record)))
             }))
