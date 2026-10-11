@@ -205,6 +205,34 @@ class DownloadArtworkTest {
         }
 
     @Test
+    fun `a poster already kept is not fetched again`() =
+        runTest {
+            enqueue("e1", POSTER)
+            // Without the kept copy, a second pin would have to go back to the wire.
+            loader.diskCache!!.clear()
+
+            enqueue("e2", POSTER)
+
+            assertEquals(listOf(POSTER), fetched)
+            assertTrue(isOnDisk(POSTER))
+        }
+
+    @Test
+    fun `a poster that cannot be stored does not fail the download`() =
+        runTest {
+            // A regular file where the store's directory should be: every write into it fails.
+            val blocked = temp.newFile("not-a-directory")
+            artwork = DownloadArtwork(context, blocked) { loader }
+            downloads = BeamDownloadManager(media3, titles, artwork)
+
+            enqueue("f1", POSTER)
+
+            assertTrue("the download was still recorded", titles.get("f1") != null)
+            assertEquals(listOf(POSTER), fetched)
+            assertFalse(isOnDisk(POSTER))
+        }
+
+    @Test
     fun `removing the download releases its poster`() =
         runTest {
             enqueue("f1", POSTER)
