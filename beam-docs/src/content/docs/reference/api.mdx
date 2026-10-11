@@ -70,16 +70,16 @@ assume continuity.
 
 ## Errors
 
-There are no machine-readable error codes, and error responses come in more than one body shape.
-Read [the error reference](/reference/errors/) before writing any client error handling.
+Every failure is an RFC 9457 problem document whose `type` identifies it. Read [the error
+reference](/reference/errors/) before writing any client error handling.
 
-## Other clients
+## Stability
 
 <Aside type="note">
-No client other than the web app exists today. The API is designed not to require server-side
-changes to support one — native mobile, TV and desktop clients are tracked under
-[#78](https://github.com/justin13888/beam/issues/78) — but nothing is built, and the API is
-pre-alpha and may change without a deprecation period.
+The API is pre-alpha and may change without a deprecation period until `/v1` is frozen. [API
+stability and versioning](/reference/api-stability/) sets out what Beam will promise from then on:
+which changes it may make within `/v1`, which ones need a `/v2`, and how a version is retired.
+Native clients are tracked under [#78](https://github.com/justin13888/beam/issues/78).
 </Aside>
 
 <LinkCard

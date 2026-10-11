@@ -137,6 +137,11 @@ export default defineConfig({
 							badge: { text: "Unstable", variant: "caution" },
 						},
 						{ slug: "reference/api" },
+						{
+							slug: "reference/api-stability",
+							label: "API stability",
+							badge: { text: "Not in force", variant: "caution" },
+						},
 					],
 				},
 				{

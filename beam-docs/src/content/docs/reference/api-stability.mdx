@@ -1,0 +1,92 @@
+---
+title: API stability and versioning
+description: What Beam promises about /v1 once it is frozen, which changes it may make without warning, and how a breaking change is introduced.
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+This page is the contract between Beam's server and the clients built on its [API](/reference/api/):
+the web app, the native apps, and anything you write yourself.
+
+<Aside type="caution" title="Not in force yet">
+`/v1` is not frozen. Its shapes are still being made consistent (issue
+[#190](https://github.com/justin13888/beam/issues/190)), and until that work closes, any of it may
+change without notice or a deprecation period. The rules below take effect when the freeze is
+recorded; until then, read them as the direction of travel.
+</Aside>
+
+## What is covered
+
+The contract is everything under `/v1`, as the OpenAPI document at `/api-doc/openapi.json`
+describes it: each operation's path, method, parameters, request and response bodies, status codes,
+and the problem `type` of each error. The `beam_session` cookie and the session-cookie
+authentication model are part of it too.
+
+Three things are **not** covered, and may change in any release:
+
+- Routes outside `/v1`: `/metrics`, `/openapi` and `/api-doc/openapi.json` themselves.
+- An error's `detail` text, and any field the document marks as human-readable. See the
+  [error reference](/reference/errors/).
+- Behaviour the document does not state: the order of a list it does not say is ordered, timing,
+  and the exact contents of opaque values such as pagination cursors.
+
+## One version: the path
+
+The API's major version is its path prefix. `/v1` changes only compatibly. A change that would
+break a correct `/v1` client is made under a new prefix, `/v2`, never by changing `/v1` in place.
+
+The API version is not the product version. Beam releases carry one product version
+([ADR-0009](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0009-release-engineering.md)),
+which moves on every release; `/v1` stays `/v1` across all of them until a `/v2` exists.
+
+## Changes Beam may make within /v1
+
+These can arrive in any release, without notice. A correct client must tolerate every one of them:
+
+- **A new operation**, a new path, or a new method on an existing path.
+- **A new optional request parameter or body field**, whose absence means what the request meant
+  before.
+- **A new response field.** Clients must ignore fields they do not recognise.
+- **A new problem `type`** for a condition that was previously answered with `about:blank` or with
+  a less specific `type`, as long as the status code stays the same. Clients must fall back on the
+  status code for a `type` they do not recognise.
+- **A looser request constraint**: a longer maximum, a wider accepted range, a parameter that was
+  required becoming optional.
+
+## Changes that require /v2
+
+Anything a correct `/v1` client could notice as breakage:
+
+- Removing or renaming an operation, a parameter, or a field, or changing its type or format.
+- Making an optional request parameter or field required, or tightening what it accepts.
+- Making a response field that was always present optional or nullable.
+- **Adding a value to an enumeration that appears in a response.** Beam's own native client core
+  decodes responses strictly and rejects a value it was not generated with, so a new value would
+  break every app released before it. (A new value in an enumeration that appears only in requests
+  is compatible.)
+- Changing a status code, or the problem `type` for a condition that already had a specific one.
+- Changing what a field means while keeping its shape: units, time zones, which way a sort runs, or
+  what a default is.
+- Changing how a request is authenticated.
+
+A security fix is the one exception. Where keeping `/v1`'s behaviour would leave users exposed,
+Beam changes it in place and says so in the release notes.
+
+## Deprecation
+
+A field or operation on its way out is marked `deprecated` in the OpenAPI document before it goes,
+and it keeps working for as long as the version that contains it is served.
+
+When `/v2` ships, the server serves `/v1` and `/v2` side by side. `/v1` keeps being served for at
+least one further release after the first one that carries `/v2`, and its removal is announced in
+the release notes of the release before the one that removes it. Native apps update on their own
+schedule, so a server upgrade must never strand a client that was current when the previous release
+shipped.
+
+## For client authors
+
+- Generate your client from the OpenAPI document rather than hand-writing it, and regenerate when
+  you move to a newer server.
+- Ignore unknown response fields, and branch on `status` when a problem's `type` is new to you.
+- Treat cursors and identifiers as opaque strings.
+- Read the [error reference](/reference/errors/) before writing error handling.
