@@ -37,7 +37,8 @@ pub struct MediaSource {
     pub episode_span: Option<EpisodeSpan>,
     /// Present when this source is a DVD or Blu-ray folder rip's main title
     /// (issue #234): its parts are the disc's own stream files, served as
-    /// they are (ADR-0004).
+    /// they are (ADR-0004). Absent for a set of discs that mixes DVD and
+    /// Blu-ray, since no one kind describes it.
     pub disc_structure: Option<DiscStructure>,
     /// The files this source plays, in order: one for a whole file, each
     /// part of a multi-part movie otherwise. Never empty.
