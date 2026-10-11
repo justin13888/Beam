@@ -339,7 +339,7 @@ async fn an_indexed_file_swapped_for_a_link_after_the_walk_is_missing_and_keeps_
 }
 
 /// A watcher event for a file whose folder has become a link: the stat the
-/// event takes follows the folder, but the file is no library file, so a new
+/// event takes refuses the folder, as the file is no library file, so a new
 /// one is not indexed and an indexed one is marked missing.
 #[cfg(unix)]
 #[tokio::test]
@@ -372,7 +372,7 @@ async fn a_watcher_event_behind_a_folder_link_indexes_nothing_and_hides_the_row(
 }
 
 /// A directory event beneath a folder that has become a link: the stat the
-/// event takes follows the link, but the directory's files are no library
+/// event takes refuses the link, as the directory's files are no library
 /// files, so the row the file's own event marked missing is not restored --
 /// and nothing of the outside file is recorded against it.
 #[cfg(unix)]
@@ -411,6 +411,40 @@ async fn a_directory_event_behind_a_folder_link_does_not_restore_the_row() {
     );
     assert_eq!(after.hash, before.hash);
     assert_eq!(after.size_bytes, before.size_bytes);
+}
+
+/// A directory event alone beneath a folder that has become a link -- no
+/// event for the file in it -- reconciles the directory as gone (issue
+/// #246): its indexed file is marked missing, and nothing of the outside
+/// folder's file of the same name is recorded.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_directory_event_alone_behind_a_folder_link_marks_its_files_missing() {
+    let h = Harness::new().await;
+    // Another video, so the root does not look unmounted once the show's
+    // folder is a link.
+    h.put_inside("Heat (1995)/Heat (1995).mkv");
+    let indexed = h.put_inside("Show/Season 01/Show - S01E01.mkv");
+    let new = h.root.join("Show/Season 01/Show - S01E02.mkv");
+    h.scan().await;
+    let before = h.row(&indexed).await.expect("the file is indexed");
+    h.put_outside("Show/Season 01/Show - S01E01.mkv");
+    h.put_outside("Show/Season 01/Show - S01E02.mkv");
+    swap_for_link(&h.root.join("Show"), &h.outside().join("Show"));
+
+    h.service
+        .reconcile_path(
+            h.library.id,
+            h.root.join("Show/Season 01"),
+            FsEventKind::Modified,
+        )
+        .await
+        .unwrap();
+
+    let after = h.row(&indexed).await.expect("the row is kept");
+    assert!(after.missing_since.is_some(), "treated as missing");
+    assert_eq!(after.hash, before.hash);
+    assert!(h.row(&new).await.is_none(), "nothing read through the link");
 }
 
 /// A file the watcher reconciles whose folder has become a link is marked

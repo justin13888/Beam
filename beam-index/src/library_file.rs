@@ -16,7 +16,11 @@
 //! scan compares with a row -- is not opened at all: [`StatCursor`] resolves
 //! its folder beneath the root with no link followed and stats it with
 //! `fstatat` and `AT_SYMLINK_NOFOLLOW`, so that reads nothing through a link
-//! either. Only a file whose bytes are read is opened.
+//! either. Only a file whose bytes are read is opened. What is at a path --
+//! a file, a folder, or neither -- is asked the same way
+//! ([`StatCursor::kind`]), and a folder's entries are listed through a handle
+//! opened beneath the root with no link followed ([`list_folder`]), so no
+//! name or kind the indexer acts on comes from beyond a link (issue #246).
 //!
 //! The root itself is opened as named: it is the administrator's choice of
 //! folder, and a root that is itself a link is followed like any path they
@@ -270,7 +274,49 @@ impl StatCursor {
     /// says nothing about the file, such as one that is gone.
     #[cfg(unix)]
     pub fn stat(&mut self, path: &Path) -> io::Result<FileMeta> {
-        use rustix::fs::{AtFlags, FileType, Mode};
+        use rustix::fs::FileType;
+        let (relative, stat) = self.lstat(path)?;
+        match FileType::from_raw_mode(stat.st_mode) {
+            FileType::RegularFile => Ok(FileMeta::of_stat(&stat)),
+            FileType::Symlink => Err(not_library_file(format!(
+                "{} is a symbolic link",
+                relative.display()
+            ))),
+            _ => Err(not_library_file(format!(
+                "{} is not a regular file",
+                relative.display()
+            ))),
+        }
+    }
+
+    /// What is at `path` beneath the root, or the root itself: a stat that
+    /// opens nothing at the path and follows no link beneath the root, as
+    /// [`Self::stat`] does, but answering for anything there, not only a
+    /// regular file. A link at the path is [`EntryKind::Other`]; one at a
+    /// folder above it fails, and [`is_refusal`] tells that apart from a
+    /// failure that says nothing about the path.
+    #[cfg(unix)]
+    pub fn kind(&mut self, path: &Path) -> io::Result<EntryKind> {
+        if relative_to(&self.root, path)?.components().next().is_none() {
+            // The root, as the administrator named it: it opens only as a
+            // folder.
+            if self.root_fd.is_none() {
+                self.root_fd = Some(open_root(&self.root)?);
+            }
+            return Ok(EntryKind::Folder);
+        }
+        let (_, stat) = self.lstat(path)?;
+        Ok(EntryKind::of(rustix::fs::FileType::from_raw_mode(
+            stat.st_mode,
+        )))
+    }
+
+    /// The stat of `path`, a path beneath the root, its folders opened with
+    /// no link followed and the path itself stat'ed without following one;
+    /// with the path relative to the root.
+    #[cfg(unix)]
+    fn lstat(&mut self, path: &Path) -> io::Result<(PathBuf, rustix::fs::Stat)> {
+        use rustix::fs::{AtFlags, Mode};
         let relative = checked_relative(relative_to(&self.root, path)?)?;
         let names: Vec<&std::ffi::OsStr> = relative.iter().collect();
         let Some((leaf, folders)) = names.split_last() else {
@@ -298,17 +344,7 @@ impl StatCursor {
         }
         let folder = self.folders.last().map_or(root_fd, |(_, fd)| fd);
         let stat = rustix::fs::statat(folder, *leaf, AtFlags::SYMLINK_NOFOLLOW)?;
-        match FileType::from_raw_mode(stat.st_mode) {
-            FileType::RegularFile => Ok(FileMeta::of_stat(&stat)),
-            FileType::Symlink => Err(not_library_file(format!(
-                "{} is a symbolic link",
-                relative.display()
-            ))),
-            _ => Err(not_library_file(format!(
-                "{} is not a regular file",
-                relative.display()
-            ))),
-        }
+        Ok((relative, stat))
     }
 
     /// Unix is the only platform Beam serves from; elsewhere the path is
@@ -325,6 +361,115 @@ impl StatCursor {
         }
         Ok(FileMeta::from(&meta))
     }
+
+    /// Elsewhere the path is stat'ed as named, without following a link at
+    /// the path itself.
+    #[cfg(not(unix))]
+    pub fn kind(&mut self, path: &Path) -> io::Result<EntryKind> {
+        let relative = relative_to(&self.root, path)?;
+        let file_type = std::fs::symlink_metadata(self.root.join(relative))?.file_type();
+        Ok(if file_type.is_file() {
+            EntryKind::File
+        } else if file_type.is_dir() {
+            EntryKind::Folder
+        } else {
+            EntryKind::Other
+        })
+    }
+}
+
+/// What a stat that follows no link says is at a path beneath a library
+/// root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A regular file.
+    File,
+    /// A folder.
+    Folder,
+    /// Anything else -- a symbolic link, a FIFO, a device, a socket -- which
+    /// is no file or folder of the library.
+    Other,
+}
+
+impl EntryKind {
+    #[cfg(unix)]
+    fn of(file_type: rustix::fs::FileType) -> Self {
+        match file_type {
+            rustix::fs::FileType::RegularFile => EntryKind::File,
+            rustix::fs::FileType::Directory => EntryKind::Folder,
+            _ => EntryKind::Other,
+        }
+    }
+}
+
+/// What the folder `dir` -- the library `root` or a folder beneath it --
+/// holds: each entry's full path and kind, in no particular order.
+///
+/// The folder is opened as [`StatCursor`] opens one, with no link followed
+/// beneath the root, so a folder that is a link, or is reached through one,
+/// fails to list -- [`is_refusal`] tells that apart -- rather than listing
+/// what the link points at. An entry's kind is the one the listing reports,
+/// or where it reports none a stat that does not follow a link at the entry,
+/// so a link listed is [`EntryKind::Other`].
+#[cfg(unix)]
+pub fn list_folder(root: &Path, dir: &Path) -> io::Result<Vec<(PathBuf, EntryKind)>> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
+    let relative = relative_to(root, dir)?;
+    let mut folder = open_root(root)?;
+    if relative.components().next().is_some() {
+        for name in checked_relative(relative)?.iter() {
+            // Read, not `O_PATH`: the last is listed.
+            folder = rustix::fs::openat(
+                &folder,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+        }
+    }
+    let mut listing = rustix::fs::Dir::new(folder)?;
+    let mut entries = Vec::new();
+    while let Some(entry) = listing.read() {
+        let entry = entry?;
+        let name = entry.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        let file_type = match entry.file_type() {
+            FileType::Unknown => FileType::from_raw_mode(
+                rustix::fs::statat(listing.fd()?, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)?
+                    .st_mode,
+            ),
+            known => known,
+        };
+        entries.push((
+            dir.join(std::ffi::OsStr::from_bytes(name)),
+            EntryKind::of(file_type),
+        ));
+    }
+    Ok(entries)
+}
+
+/// Unix is the only platform Beam serves from; elsewhere the folder is
+/// listed as named.
+#[cfg(not(unix))]
+pub fn list_folder(root: &Path, dir: &Path) -> io::Result<Vec<(PathBuf, EntryKind)>> {
+    relative_to(root, dir)?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let kind = if file_type.is_file() {
+            EntryKind::File
+        } else if file_type.is_dir() {
+            EntryKind::Folder
+        } else {
+            EntryKind::Other
+        };
+        entries.push((entry.path(), kind));
+    }
+    Ok(entries)
 }
 
 /// A file of a library, opened by [`LibraryFile::open`]: the handle, the
@@ -978,5 +1123,75 @@ mod tests {
         for (field, expected) in cases {
             assert_eq!(nanos(field), expected, "{field}");
         }
+    }
+
+    /// A root holding a file, a folder, a link to a file outside and a link
+    /// to a folder outside, which holds a file of the same name as the
+    /// inside one.
+    #[cfg(unix)]
+    fn a_root_with_links() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("library");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(root.join("Heat (1995)")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("Heat (1995)/Heat (1995).mkv"), b"inside").unwrap();
+        std::fs::write(outside.join("Heat (1995).mkv"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.join("Heat (1995).mkv"), root.join("Link.mkv")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("Linked")).unwrap();
+        (dir, root)
+    }
+
+    /// What is at a path, asked with no link followed (issue #246): a link
+    /// is neither a file nor a folder, and a path reached through one is
+    /// refused rather than answered for what the link leads to.
+    #[cfg(unix)]
+    #[test]
+    fn a_kind_is_read_with_no_link_followed() {
+        let (_dir, root) = a_root_with_links();
+        let mut cursor = StatCursor::new(&root);
+        for (rel, kind) in [
+            ("", EntryKind::Folder),
+            ("Heat (1995)", EntryKind::Folder),
+            ("Heat (1995)/Heat (1995).mkv", EntryKind::File),
+            ("Link.mkv", EntryKind::Other),
+            ("Linked", EntryKind::Other),
+        ] {
+            assert_eq!(cursor.kind(&root.join(rel)).unwrap(), kind, "{rel:?}");
+        }
+        let err = cursor
+            .kind(&root.join("Linked/Heat (1995).mkv"))
+            .unwrap_err();
+        assert!(is_refusal(&err), "{err:?}");
+        let err = cursor.kind(&root.join("Gone.mkv")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!is_refusal(&err));
+    }
+
+    /// A folder is listed with no link followed (issue #246): its links are
+    /// listed as neither files nor folders, and a folder that is a link is
+    /// not listed at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_is_listed_with_no_link_followed() {
+        let (_dir, root) = a_root_with_links();
+        let mut listed = list_folder(&root, &root).unwrap();
+        listed.sort_by(|(a, _), (b, _)| a.cmp(b));
+        assert_eq!(
+            listed,
+            vec![
+                (root.join("Heat (1995)"), EntryKind::Folder),
+                (root.join("Link.mkv"), EntryKind::Other),
+                (root.join("Linked"), EntryKind::Other),
+            ]
+        );
+        assert_eq!(
+            list_folder(&root, &root.join("Heat (1995)")).unwrap(),
+            vec![(root.join("Heat (1995)/Heat (1995).mkv"), EntryKind::File)]
+        );
+        let err = list_folder(&root, &root.join("Linked")).unwrap_err();
+        assert!(is_refusal(&err), "{err:?}");
+        let err = list_folder(&root, &root.join("Gone")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }
