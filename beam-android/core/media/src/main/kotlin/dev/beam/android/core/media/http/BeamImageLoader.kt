@@ -22,9 +22,9 @@ public object BeamImageLoader {
      *   authenticated origin as the API, so a loader on any other client sends
      *   no session and every poster is a 401 -- and fails on exactly the
      *   self-signed servers the trust prompt exists for.
-     * @param diskCacheDirectory where fetched artwork is kept. Also where a
-     *   download's poster is pinned (see `DownloadArtwork`), so it must be the
-     *   same directory across launches.
+     * @param diskCacheDirectory where fetched artwork is cached. A download's
+     *   poster passes through here on its way to the store `DownloadArtwork`
+     *   keeps, but is not kept here: this cache is size-capped and evicts.
      */
     public fun build(
         context: PlatformContext,
