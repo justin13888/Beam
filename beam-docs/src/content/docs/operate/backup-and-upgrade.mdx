@@ -58,8 +58,11 @@ recovery are just as good; what matters is that something restorable exists.
 
 A restore replaces the whole database with the dump. Restore into the **same Beam version that
 took the dump, or a newer one**: a newer Beam applies its pending migrations at startup as it would
-on any upgrade, but an older Beam refuses to start against a database that a newer version has
-migrated, because it has no record of those migrations.
+on any upgrade, but an older Beam that migrates at startup refuses to start against a database that
+a newer version has migrated, because it has no record of those migrations. With
+`BEAM_AUTO_MIGRATE=false` Beam runs no migration step at startup, so nothing makes that check: an
+older image starts against a schema it does not know. If you manage migrations yourself, never
+start an older Beam on a dump taken by a newer one.
 
 With the repository's Compose stack:
 
