@@ -164,10 +164,11 @@ hooks {
             }
             // Pure YAML/TOML parsing -- milliseconds. Narrower than ci.yml's
             // `compose` filter, which also watches dex/, for the reason the
-            // docs-build step gives: the gate reads only the compose files and
-            // mise.toml (for dev:up's OIDC scope and admin-claim wiring).
+            // docs-build step gives: the gate reads only the compose files,
+            // mise.toml (for dev:up's OIDC scope and admin-claim wiring) and
+            // .env.example (for the variables an operator is told to set).
             ["compose-invariants"] {
-                glob = List("compose*.yaml", "mise.toml")
+                glob = List("compose*.yaml", "mise.toml", ".env.example")
                 check = "mise run check:compose-invariants"
             }
             // Seconds once kubeconform's schema cache is warm. mise.toml is in

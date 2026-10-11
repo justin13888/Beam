@@ -134,6 +134,7 @@ jobs:
             compose:
               - *tooling
               - 'compose*.yaml'
+              - '.env.example'
               - 'dex/**'
             chart:
               - *tooling

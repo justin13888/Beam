@@ -1215,11 +1215,11 @@ git clone -q "$tmp/src" "$tmp/clone"
 '''
 
 [tasks."check:compose-invariants"]
-description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, forwards what dev:up sets, and mounts libraries read-only"
-# Six properties the dev stack depends on, none of which any other gate sees.
+description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, forwards what dev:up sets and .env.example names, and mounts libraries read-only"
+# Seven properties the dev stack depends on, none of which any other gate sees.
 # `dev:verify-oidc` asserts the first two, but it needs a container runtime and
 # so sits outside `ci` (NFR-201) -- which means nothing runs them automatically.
-# These six are pure configuration, hermetic, and belong here:
+# These seven are pure configuration, hermetic, and belong here:
 #
 #   1. `dex` stays behind the `dev-idp` profile, so a bare `compose up` is the
 #      production shape and starts no IdP (FR-110, NFR-406).
@@ -1250,17 +1250,25 @@ description = "Assert the compose topology keeps the dev IdP opt-in, declares it
 #      unlisted one is silently dropped -- as BEAM_OIDC_CLIENT_AUTH_METHOD
 #      would be, leaving the bundled Dex's device approvals failing (ADR-0017
 #      D151-9).
+#   7. Every `BEAM_*` variable `.env.example` names reaches compose: a
+#      service forwards it, or a compose file interpolates it (a host port,
+#      a mount path). `.env.example` is the reference the install guide sends
+#      an operator to, and a name set in `.env` that no service lists is
+#      dropped as silently as the one property 6 guards (#221). A name counts
+#      whether it is set or commented out, since an operator uncomments it.
 #
 # The files are the ones compose.yaml `include`s, read from there rather than
 # restated, so a compose file is under these checks from the moment it is
-# included; properties 4 and 6 read `mise.toml` from the same directory. The directory
-# argument points the gate at a copy of the files; that is how its negative
-# cases are exercised without editing the tracked ones.
+# included; properties 4 and 6 read `mise.toml`, and 7 reads `.env.example`,
+# from the same directory. The directory argument points the gate at a copy of
+# the files; that is how its negative cases are exercised without editing the
+# tracked ones.
 #
 # Parsed with Bun's YAML rather than grepped: mise pins bun, so CI runs the
 # exact same parser, and a textual assertion about YAML drifts the moment
-# someone reflows a block.
-usage = 'arg "[dir]" help="Directory holding compose.yaml, the files it includes, and mise.toml" default="."'
+# someone reflows a block. Property 7's interpolation test is the exception:
+# `${NAME}` is a string inside a value, so it is matched in the raw text.
+usage = 'arg "[dir]" help="Directory holding compose.yaml, the files it includes, mise.toml and .env.example" default="."'
 run = '''
 set -eu
 cd "$usage_dir"
@@ -1335,6 +1343,22 @@ if (devUp.BEAM_OIDC_ADMIN_CLAIM === "groups") {
 // Property 6.
 for (const name of Object.keys(devUp).filter((name) => name.startsWith("BEAM_")))
   check(forwarded.has(name), `a compose service forwards ${name}, which dev:up sets`);
+
+// Property 7. A name is an assignment, `BEAM_X=...`, at the start of a line,
+// optionally behind `#` and `export`. Interpolation is read off the raw text,
+// because `${NAME}` and `$NAME` can sit in any value -- a port, a volume.
+const exampleNames = new Set(
+  [...(await Bun.file(".env.example").text()).matchAll(/^[#\s]*(?:export\s+)?(BEAM_[A-Z0-9_]+)=/gm)].map(
+    (m) => m[1],
+  ),
+);
+check(exampleNames.size > 0, ".env.example names at least one BEAM_* variable");
+const composeText = (await Promise.all(files.map((f) => Bun.file(f).text()))).join("\n");
+for (const name of exampleNames)
+  check(
+    forwarded.has(name) || new RegExp(`\\$\\{?${name}\\b`).test(composeText),
+    `a compose service forwards ${name}, or a compose file interpolates it, which .env.example names`,
+  );
 
 // Property 5. A volume is a short-form string or a long-form map.
 const libraryVar = /\b(HOST_VIDEO_DIR|BEAM_VIDEO_DIR)\b/;
