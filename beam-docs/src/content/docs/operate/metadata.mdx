@@ -108,7 +108,7 @@ ids are never locked: they are the match, which you change by fixing it.
 
 Failures retry automatically with a growing delay. So does a pinned title whose id the provider
 answers "not found" for; a title no pin holds whose match the provider no longer has is searched
-for again by its name instead. You can also trigger a re-enrich for a title
+for again by its name instead, and a pinned one is fetched by its pin. You can also trigger a re-enrich for a title
 from the admin area — the right move after fixing a filename, or after adding a TMDB token to a
 library that was indexed without one. `POST /v1/admin/libraries/{id}/refresh` re-enriches one
 library, and `POST /v1/admin/media/refresh` everything; each answers with how many titles it
