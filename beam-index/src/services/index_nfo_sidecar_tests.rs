@@ -2142,6 +2142,55 @@ async fn a_settled_nfos_stamp_is_recorded_and_spares_the_next_scan_a_read() {
     );
 }
 
+/// Two NFOs of one size and one mtime swapped between their folders after
+/// their stamps were recorded -- the blind spot of issue #228, for NFOs
+/// (issue #246): each path's size and mtime still match its record, but a
+/// rename moves the change time the stamp holds, so the next scan reads both
+/// rather than skipping them as unwritten. (What it then makes of a swap is
+/// FR-219's to say; this pins only that the swap is not missed.)
+#[cfg(unix)]
+#[tokio::test]
+async fn a_same_size_same_mtime_swap_of_nfos_is_read_by_the_next_scan() {
+    let h = harness_ahead_of_its_files().await;
+    h.video("Matrix/matrix.mkv");
+    h.video("Heat/heat.mkv");
+    h.write("Matrix/movie.nfo", &tmdb_movie(603));
+    h.write("Heat/movie.nfo", &tmdb_movie(604));
+    let written = std::time::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+    h.set_mtime("Matrix/movie.nfo", written);
+    h.set_mtime("Heat/movie.nfo", written);
+    h.scan().await;
+    assert_eq!(
+        h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
+        Some("tmdb:603")
+    );
+    let recorded = h.applied("Matrix/movie.nfo").await.expect("recorded");
+    assert!(recorded.change_stamp.is_some(), "the stamp is vouched for");
+
+    let (matrix, heat) = (
+        h.root.join("Matrix/movie.nfo"),
+        h.root.join("Heat/movie.nfo"),
+    );
+    let between = h.root.join("between.nfo");
+    std::fs::rename(&matrix, &between).unwrap();
+    std::fs::rename(&heat, &matrix).unwrap();
+    std::fs::rename(&between, &heat).unwrap();
+    for path in [&matrix, &heat] {
+        let meta = std::fs::metadata(path).unwrap();
+        assert_eq!(meta.len(), recorded.size_bytes, "{}", path.display());
+        assert_eq!(meta.modified().unwrap(), written, "{}", path.display());
+    }
+    let before = nfo_reads();
+    h.scan().await;
+
+    // An unswapped rescan reads none (see
+    // `a_settled_nfos_stamp_is_recorded_and_spares_the_next_scan_a_read`).
+    assert!(
+        nfo_reads() - before >= 2,
+        "each swapped NFO is read, its stamp not vouching for it"
+    );
+}
+
 /// A walk that cannot read the folder a kept, conflicting NFO lives in says
 /// nothing about that NFO: its record is kept, so once the folder is readable
 /// again the NFO is not taken for a new one and does not replace the pin.

@@ -18,6 +18,13 @@ use super::*;
 use crate::library_file::list_folder;
 
 /// A file the walk found beside the media, with what its stat said.
+///
+/// A size and an mtime are all a subtitle's row is compared by -- no inode
+/// or change time, as a video's is (issue #228). Nothing the row records is
+/// read from the file's bytes: its language, title and flags come from its
+/// name, and serving reads the file at its path. So two subtitles of one size
+/// and mtime swapped between paths leave every row true, and a missed swap
+/// costs nothing (issue #246).
 #[derive(Debug, Clone)]
 pub(super) struct WalkedSidecar {
     pub(super) path: PathBuf,
