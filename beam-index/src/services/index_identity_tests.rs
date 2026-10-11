@@ -26,6 +26,10 @@ use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use tempfile::TempDir;
 
+/// What the service writes files through, built over the harness's in-memory
+/// file repository.
+type WrapFiles = fn(Arc<InMemoryFileRepository>) -> Arc<dyn FileRepository>;
+
 struct Harness {
     _dir: TempDir,
     root: PathBuf,
@@ -67,6 +71,21 @@ impl Harness {
     async fn with_grace_and_movies(
         grace: Duration,
         service_movies: Option<Arc<dyn MovieRepository>>,
+    ) -> Self {
+        Self::build(grace, service_movies, None).await
+    }
+
+    /// [`Self::keeping_missing_files`], with the service writing files
+    /// through `files`, built over the harness's in-memory file repository --
+    /// to make a write fail part-way through a pass.
+    async fn keeping_missing_files_with_files(files: WrapFiles) -> Self {
+        Self::build(DEFAULT_MISSING_FILE_GRACE, None, Some(files)).await
+    }
+
+    async fn build(
+        grace: Duration,
+        service_movies: Option<Arc<dyn MovieRepository>>,
+        service_files: Option<WrapFiles>,
     ) -> Self {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("library");
@@ -114,9 +133,13 @@ impl Harness {
 
         // The real clock: `delete_orphaned` compares its cutoff with the
         // `created_at` the repositories stamp from the wall clock.
+        let service_files = match service_files {
+            Some(wrap) => wrap(file_repo.clone()),
+            None => file_repo.clone() as Arc<dyn FileRepository>,
+        };
         let service = LocalIndexService::new(
             library_repo.clone(),
-            file_repo.clone(),
+            service_files,
             service_movies.unwrap_or_else(|| movie_repo.clone() as Arc<dyn MovieRepository>),
             show_repo.clone(),
             Arc::new(InMemoryMediaStreamRepository::default()),
@@ -2122,6 +2145,432 @@ async fn a_merge_carries_each_viewers_watch_state_to_the_kept_title() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+/// The in-memory file repository, refusing every write of a file's
+/// classification: the pass that tries one stops there, as a pass the process
+/// dies in does.
+#[derive(Debug)]
+struct ClassificationRefused(Arc<InMemoryFileRepository>);
+
+#[async_trait::async_trait]
+impl FileRepository for ClassificationRefused {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr> {
+        self.0.find_by_id(id).await
+    }
+    async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr> {
+        self.0.find_by_path(path).await
+    }
+    async fn find_by_hash(&self, hash: u64) -> Result<Vec<MediaFile>, DbErr> {
+        self.0.find_by_hash(hash).await
+    }
+    async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.0.find_all_by_library(library_id).await
+    }
+    async fn find_all_by_library_including_missing(
+        &self,
+        library_id: Uuid,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.0
+            .find_all_by_library_including_missing(library_id)
+            .await
+    }
+    async fn find_all_under(&self, library_id: Uuid, dir: &Path) -> Result<Vec<MediaFile>, DbErr> {
+        self.0.find_all_under(library_id, dir).await
+    }
+    async fn find_by_library_and_hash_including_missing(
+        &self,
+        library_id: Uuid,
+        hash: u64,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.0
+            .find_by_library_and_hash_including_missing(library_id, hash)
+            .await
+    }
+    async fn find_beneath_including_missing(
+        &self,
+        library_id: Uuid,
+        dir: &Path,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.0.find_beneath_including_missing(library_id, dir).await
+    }
+    async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.0.find_by_movie_entry_id(movie_entry_id).await
+    }
+    async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.0.find_by_episode_id(episode_id).await
+    }
+    async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr> {
+        self.0.create(create).await
+    }
+    async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr> {
+        self.0.update(update).await
+    }
+    async fn set_classification(
+        &self,
+        _id: Uuid,
+        _classification: FileClassification,
+    ) -> Result<MediaFile, DbErr> {
+        Err(DbErr::Custom("connection reset".to_string()))
+    }
+    async fn mark_missing(&self, ids: Vec<Uuid>, at: DateTime<Utc>) -> Result<u64, DbErr> {
+        self.0.mark_missing(ids, at).await
+    }
+    async fn relink(
+        &self,
+        relinks: Vec<FileRelink>,
+        displaced: Vec<Uuid>,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbErr> {
+        self.0.relink(relinks, displaced, at).await
+    }
+    async fn restore(&self, id: Uuid) -> Result<(), DbErr> {
+        self.0.restore(id).await
+    }
+    async fn purge_missing(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {
+        self.0.purge_missing(ids).await
+    }
+    async fn count_all(&self) -> Result<u64, DbErr> {
+        self.0.count_all().await
+    }
+}
+
+/// A viewer's report against `target`.
+fn played(
+    user_id: Uuid,
+    target: beam_domain::models::watch_state::WatchTarget,
+    position_secs: f64,
+) -> beam_domain::models::watch_state::RecordProgress {
+    beam_domain::models::watch_state::RecordProgress {
+        user_id,
+        target,
+        file_id: Uuid::new_v4(),
+        position_secs,
+        duration_secs: Some(100.0),
+        finishes_title: true,
+    }
+}
+
+/// A merge carries the retired movie's watch state before it moves the
+/// movie's first file (issue #246): a pass that stops between the two leaves
+/// the state on the title that keeps it, not on one the next scan can empty
+/// and orphan cleanup retire with the state.
+#[tokio::test]
+async fn a_movie_merge_carries_watch_state_before_it_moves_a_file() {
+    use beam_domain::models::watch_state::WatchTarget;
+    use beam_domain::repositories::WatchStateRepository;
+
+    let h = Harness::keeping_missing_files_with_files(|files| {
+        Arc::new(ClassificationRefused(files)) as Arc<dyn FileRepository>
+    })
+    .await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let older = h
+        .keyed_movie(
+            "Ocean's Eleven",
+            Some(2001),
+            "ocean s eleven|2001",
+            &["Ocean's Eleven (2001)/Ocean's Eleven (2001).mkv"],
+            base,
+        )
+        .await;
+    let newer = h
+        .keyed_movie(
+            "Oceans Eleven",
+            Some(2001),
+            "oceans eleven|2001",
+            &["Oceans.Eleven.2001.1080p.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    let viewer = Uuid::new_v4();
+    h.watch_state
+        .record_progress(played(viewer, WatchTarget::Movie { movie_id: newer }, 40.0))
+        .await
+        .unwrap();
+
+    h.service
+        .rekey_stale_titles()
+        .await
+        .expect_err("the pass stops at its first file move");
+
+    assert_eq!(
+        h.watch_state
+            .find(viewer, WatchTarget::Movie { movie_id: older })
+            .await
+            .unwrap()
+            .map(|row| row.position_secs),
+        Some(40.0),
+        "the state is already on the movie the merge keeps"
+    );
+    assert!(
+        h.watch_state
+            .find(viewer, WatchTarget::Movie { movie_id: newer })
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// As for a movie: each episode's state is carried before its files move.
+#[tokio::test]
+async fn a_show_merge_carries_watch_state_before_it_moves_a_file() {
+    use beam_domain::models::watch_state::WatchTarget;
+    use beam_domain::repositories::WatchStateRepository;
+
+    let h = Harness::keeping_missing_files_with_files(|files| {
+        Arc::new(ClassificationRefused(files)) as Arc<dyn FileRepository>
+    })
+    .await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let older = h
+        .keyed_show(
+            "Grey's Anatomy",
+            "grey s anatomy|",
+            &["Grey's Anatomy/Season 1/Greys.Anatomy.S01E01.mkv"],
+            base,
+        )
+        .await;
+    let newer = h
+        .keyed_show(
+            "Greys Anatomy",
+            "greys anatomy|",
+            &["Greys.Anatomy.S01E01.720p.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    let episode_of = |show: Uuid| {
+        let season = h
+            .show_repo
+            .seasons
+            .lock()
+            .unwrap()
+            .values()
+            .find(|s| s.show_id == show)
+            .unwrap()
+            .id;
+        let episode = h
+            .show_repo
+            .episodes
+            .lock()
+            .unwrap()
+            .values()
+            .find(|e| e.season_id == season)
+            .unwrap()
+            .id;
+        WatchTarget::Episode {
+            episode_id: episode,
+            show_id: show,
+        }
+    };
+    let viewer = Uuid::new_v4();
+    h.watch_state
+        .record_progress(played(viewer, episode_of(newer), 20.0))
+        .await
+        .unwrap();
+
+    h.service
+        .rekey_stale_titles()
+        .await
+        .expect_err("the pass stops at its first file move");
+
+    assert_eq!(
+        h.watch_state
+            .find(viewer, episode_of(older))
+            .await
+            .unwrap()
+            .map(|row| row.position_secs),
+        Some(20.0),
+        "the state is already on the kept show's episode of that number"
+    );
+    assert!(
+        h.watch_state
+            .find_for_show(viewer, newer)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Reclassifying a file older rules gave a title of its own carries that
+/// title's watch state to the one the file joins, when the move leaves it
+/// with no file (issue #246): orphan cleanup then retires it, and would take
+/// the state with it. A husk named after a season folder is such a title.
+#[tokio::test]
+async fn reclassifying_a_titles_last_file_carries_its_watch_state() {
+    use beam_domain::models::watch_state::WatchTarget;
+    use beam_domain::repositories::WatchStateRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    let husk = h
+        .keyed_show(
+            "Season 05",
+            "season 05|",
+            &["Show X/Season 05/Show.X.S05E01.mkv"],
+            chrono::Utc::now() - chrono::Duration::days(30),
+        )
+        .await;
+    let husk_episode = {
+        let season = h.show_repo.find_seasons_by_show_id(husk).await.unwrap()[0].id;
+        h.show_repo
+            .find_episodes_by_season_id(season)
+            .await
+            .unwrap()[0]
+            .id
+    };
+    let viewer = Uuid::new_v4();
+    h.watch_state
+        .record_progress(played(
+            viewer,
+            WatchTarget::Episode {
+                episode_id: husk_episode,
+                show_id: husk,
+            },
+            20.0,
+        ))
+        .await
+        .unwrap();
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let show = h.only_show();
+    assert_ne!(show.id, husk, "the husk is retired");
+    let rows = h.watch_state.find_for_show(viewer, show.id).await.unwrap();
+    let [row] = rows.as_slice() else {
+        panic!("one row on the series: {rows:?}");
+    };
+    let WatchTarget::Episode { episode_id, .. } = row.target else {
+        panic!("a show's row is an episode's");
+    };
+    let episode = h
+        .show_repo
+        .find_episode_by_id(episode_id)
+        .await
+        .unwrap()
+        .expect("an episode of the series");
+    let season = h
+        .show_repo
+        .find_season_by_id(episode.season_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            season.season_number,
+            episode.episode_number,
+            row.position_secs
+        ),
+        (5, 1, 20.0),
+        "on the episode the file now is"
+    );
+}
+
+/// A movie whose files the scan reclassifies to two other films, one after
+/// the other, carries its watch state when the second leaves it empty: the
+/// viewer's place is on one of the films, not retired with the movie.
+#[tokio::test]
+async fn reclassifying_every_file_of_a_movie_carries_its_watch_state() {
+    use beam_domain::models::watch_state::WatchTarget;
+    use beam_domain::repositories::WatchStateRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    // Its files name two films and neither is the one its key names.
+    let emptied = h
+        .keyed_movie(
+            "Dune",
+            None,
+            "dune|",
+            &["Dune.1984.mkv", "Dune.2021.mkv"],
+            chrono::Utc::now() - chrono::Duration::days(30),
+        )
+        .await;
+    let viewer = Uuid::new_v4();
+    h.watch_state
+        .record_progress(played(
+            viewer,
+            WatchTarget::Movie { movie_id: emptied },
+            40.0,
+        ))
+        .await
+        .unwrap();
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let movies = h.movies();
+    assert_eq!(movies.len(), 2, "the files are two films: {movies:?}");
+    assert!(movies.iter().all(|movie| movie.id != emptied), "retired");
+    let mut kept = Vec::new();
+    for movie in &movies {
+        if let Some(row) = h
+            .watch_state
+            .find(viewer, WatchTarget::Movie { movie_id: movie.id })
+            .await
+            .unwrap()
+        {
+            kept.push(row.position_secs);
+        }
+    }
+    assert_eq!(kept, vec![40.0], "on the film the last file joined");
+}
+
+/// A title that keeps another file after one is reclassified away is not
+/// retired, and keeps its watch state.
+#[tokio::test]
+async fn reclassifying_one_of_a_titles_files_leaves_its_watch_state() {
+    use beam_domain::models::watch_state::WatchTarget;
+    use beam_domain::repositories::WatchStateRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    // Its files name two films, so its key is kept, and the scan moves only
+    // the 2021 file to a film of its own.
+    let kept = h
+        .keyed_movie(
+            "Dune",
+            Some(1984),
+            "dune|1984",
+            &["Dune.1984.mkv", "Dune.2021.mkv"],
+            chrono::Utc::now() - chrono::Duration::days(30),
+        )
+        .await;
+    let viewer = Uuid::new_v4();
+    h.watch_state
+        .record_progress(played(viewer, WatchTarget::Movie { movie_id: kept }, 40.0))
+        .await
+        .unwrap();
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let mut movies: Vec<(Uuid, Option<u32>)> =
+        h.movies().into_iter().map(|m| (m.id, m.year)).collect();
+    movies.sort_by_key(|(_, year)| *year);
+    let [(first, Some(1984)), (second, Some(2021))] = movies.as_slice() else {
+        panic!("the files are two films: {movies:?}");
+    };
+    assert_eq!(*first, kept);
+    assert_eq!(
+        h.watch_state
+            .find(viewer, WatchTarget::Movie { movie_id: kept })
+            .await
+            .unwrap()
+            .map(|row| row.position_secs),
+        Some(40.0)
+    );
+    assert!(
+        h.watch_state
+            .find(viewer, WatchTarget::Movie { movie_id: *second })
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
