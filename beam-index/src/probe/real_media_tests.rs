@@ -514,3 +514,38 @@ fn a_handle_read_to_its_end_is_probed_from_its_start() {
     assert_video_fixture(&meta, CodecId::H264);
     assert_audio_fixture(&meta, CodecId::AAC);
 }
+
+/// A file that names another by URL -- here an HLS playlist naming a video
+/// segment outside its folder -- is probed from its own bytes only (issue
+/// #246): FFmpeg opens nothing the handle does not hold, so the segment's
+/// stream is never read into the playlist's metadata. The same segment
+/// probed directly has the stream, so its absence is the refusal.
+#[test]
+fn a_file_naming_another_by_url_is_probed_from_its_own_bytes_only() {
+    let segment = synth_fixture("mpeg2video.ts", ffmpeg::codec::Id::MPEG2VIDEO);
+    assert_video_fixture(
+        &probe(&segment).expect("probe the segment"),
+        CodecId::MPEG2VIDEO,
+    );
+    let dir = tempfile::TempDir::new().unwrap();
+    let playlist = dir.path().join("playlist.m3u8");
+    std::fs::write(
+        &playlist,
+        format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n\
+             #EXTINF:1.0,\n{}\n#EXT-X-ENDLIST\n",
+            segment.display()
+        ),
+    )
+    .unwrap();
+
+    // A playlist with no segment to read may fail to probe at all; one that
+    // probes has no stream.
+    if let Ok(meta) = probe(&playlist) {
+        assert!(
+            meta.best_video_stream.is_none() && meta.streams.is_empty(),
+            "nothing of the segment is read: {:?}",
+            meta.streams
+        );
+    }
+}
