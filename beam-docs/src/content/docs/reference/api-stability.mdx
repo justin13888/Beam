@@ -47,9 +47,6 @@ These can arrive in any release, without notice. A correct client must tolerate 
 - **A new optional request parameter or body field**, whose absence means what the request meant
   before.
 - **A new response field.** Clients must ignore fields they do not recognise.
-- **A new problem `type`** for a condition that was previously answered with `about:blank` or with
-  a less specific `type`, as long as the status code stays the same. Clients must fall back on the
-  status code for a `type` they do not recognise.
 - **A looser request constraint**: a longer maximum, a wider accepted range, a parameter that was
   required becoming optional.
 
@@ -65,6 +62,12 @@ Anything a correct `/v1` client could notice as breakage:
   break every app released before it. (A new value in an enumeration that appears only in requests
   is compatible.)
 - Changing a status code, or the problem `type` for a condition that already had a specific one.
+- **Adding a problem `type` to an operation**, even for a condition that was answered with
+  `about:blank` or a less specific `type`, with the status code unchanged. The native client core
+  decodes each operation's problem `type` against the set the contract lists for it, and reports
+  any other `type` as a malformed response that has lost its status code, so a documented 404
+  would reach an older app as a protocol error
+  ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)).
 - Changing what a field means while keeping its shape: units, time zones, which way a sort runs, or
   what a default is.
 - Changing how a request is authenticated.
