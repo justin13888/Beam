@@ -2925,6 +2925,73 @@ async fn a_kept_nfos_event_heard_before_its_moved_videos_keeps_the_pin() {
     assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
 }
 
+/// The same move with a link left at each old path, pointing at the moved
+/// file (issue #246): a link is no file of the library, so each old path is
+/// vacated as if nothing were there. The NFO's event leaves it to its video's
+/// relink rather than taking it for a new NFO, and the video's event relinks
+/// its row -- the link at the row's old path is no copy of it -- carrying the
+/// NFO's record along.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_kept_nfo_and_its_video_moved_with_links_left_behind_keep_the_pin() {
+    let h = a_kept_conflicting_nfo_in_its_own_folder().await;
+    let id = h.file("Two/Heat (1995).mkv").id;
+
+    for (from, to) in [
+        ("Two/Heat (1995).mkv", "Moved/Heat (1995).mkv"),
+        ("Two/Heat (1995).nfo", "Moved/Heat (1995).nfo"),
+    ] {
+        move_file(&h, from, to);
+        std::os::unix::fs::symlink(h.root.join(to), h.root.join(from)).unwrap();
+    }
+    h.event("Moved/Heat (1995).nfo", FsEventKind::Created).await;
+
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+    assert!(
+        h.applied("Moved/Heat (1995).nfo").await.is_none(),
+        "left for its video's relink"
+    );
+
+    h.event("Moved/Heat (1995).mkv", FsEventKind::Created).await;
+
+    assert_eq!(h.file("Moved/Heat (1995).mkv").id, id, "relinked");
+    assert!(h.applied("Moved/Heat (1995).nfo").await.is_some());
+    assert_eq!(h.movie_pins(), vec![Some("tmdb:949".to_string())]);
+}
+
+/// A kept NFO's folder moved with a link to its new place left at the old
+/// one (issue #246): every old path is now reached through a link, so each
+/// is vacated. The directory's event relinks the video and carries the NFO's
+/// record, keeping the pin -- and an NFO edited in that move is still an
+/// edited NFO, whose new id replaces the pin.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_kept_nfos_folder_moved_with_a_link_left_behind_is_judged_as_a_move() {
+    for edited in [false, true] {
+        let h = a_kept_conflicting_nfo_in_its_own_folder().await;
+        let id = h.file("Two/Heat (1995).mkv").id;
+
+        std::fs::rename(h.root.join("Two"), h.root.join("Moved")).unwrap();
+        std::os::unix::fs::symlink(h.root.join("Moved"), h.root.join("Two")).unwrap();
+        if edited {
+            h.write("Moved/Heat (1995).nfo", &tmdb_movie(2));
+        }
+        h.event("Moved", FsEventKind::Created).await;
+
+        assert_eq!(
+            h.file("Moved/Heat (1995).mkv").id,
+            id,
+            "relinked, edited: {edited}"
+        );
+        let pin = if edited { "tmdb:2" } else { "tmdb:949" };
+        assert_eq!(
+            h.movie_pins(),
+            vec![Some(pin.to_string())],
+            "edited: {edited}"
+        );
+    }
+}
+
 /// Move each `(from, to)` video on disk, and return the batch a relink of
 /// them hands [`LocalIndexService::carry_nfos_on_relink`]: each row's old
 /// path, and the row at its new one.

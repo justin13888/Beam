@@ -896,6 +896,47 @@ async fn a_disc_root_swapped_for_a_link_is_gone_and_parts_the_set() {
     );
 }
 
+/// A disc root reached through a folder that has become a link -- the disc's
+/// own folder swapped for a link to a disc elsewhere -- is gone too (issue
+/// #246): an event for a file inside it reconciles the disc as gone rather
+/// than walking it through the link, so its rows are marked missing and the
+/// discs left part.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_disc_behind_a_folder_swapped_for_a_link_is_gone_and_parts_the_set() {
+    let (h, heat) = a_whole_three_disc_set().await;
+    let elsewhere = TempDir::new().unwrap();
+    let target = elsewhere.path().join("Disc 2");
+    one_disc(&target, 2400);
+
+    let disc_folder = heat.join("Disc 2");
+    std::fs::remove_dir_all(&disc_folder).unwrap();
+    std::os::unix::fs::symlink(&target, &disc_folder).unwrap();
+    let vob = disc_folder.join("VIDEO_TS/VTS_01_1.VOB");
+    h.reconcile(&vob, FsEventKind::Modified).await;
+
+    assert_eq!(
+        h.present(),
+        [
+            ("Heat (1995)/Disc 1/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+            ("Heat (1995)/Disc 3/VIDEO_TS/VTS_01_1.VOB".to_string(), None),
+        ]
+    );
+    let disc_2 = h
+        .rows()
+        .into_iter()
+        .find(|row| row.path == vob)
+        .expect("disc 2's row is kept");
+    assert!(disc_2.missing_since.is_some(), "disc 2's row is missing");
+    assert_eq!(disc_2.size_bytes, 2100, "nothing is read through the link");
+    assert!(
+        h.rows()
+            .iter()
+            .all(|row| !row.path.starts_with(elsewhere.path())),
+        "nothing is indexed through the link"
+    );
+}
+
 /// A disc that cannot be read whole leaves its rows exactly as they were
 /// (FR-222): a VOB gone meanwhile is not marked missing and no part moves,
 /// since a title chosen from part of a disc may not be its main title.
