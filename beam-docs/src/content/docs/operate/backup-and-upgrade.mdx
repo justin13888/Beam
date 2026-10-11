@@ -1,6 +1,6 @@
 ---
 title: Backups and upgrades
-description: What to back up, what is safe to lose, and what a pre-alpha upgrade can do to your database.
+description: What to back up, how to dump and restore the database, and what a pre-alpha upgrade can do to it.
 ---
 
 import { Aside } from "@astrojs/starlight/components";
@@ -19,6 +19,86 @@ is a risk to it.
 The single thing that genuinely hurts to lose is **watch progress and history** — everything else
 in the database can be rebuilt by rescanning.
 
+`BEAM_DATA_DIR` holds the artwork cache (`artwork/`), which Beam fetches again from the metadata
+providers as it is needed, and the time the anonymous library report was last sent
+(`telemetry/library-report.json`), which only matters if you opted in to it. Losing the directory
+costs re-fetches, not data; back it up if you would rather not pay them.
+
+## Backing up the database
+
+Take a dump with `pg_dump` in its **custom format** (`-Fc`): it is compressed, and `pg_restore`
+can restore it into an empty database without editing. Use a `pg_dump` from the same PostgreSQL
+major version as the server, or a newer one — the Compose stack's own `postgres` container has
+the matching one.
+
+With the repository's Compose stack:
+
+```bash
+podman compose exec -T postgres pg_dump -U beam -Fc beam > beam-$(date +%F).dump
+```
+
+`-T` matters: without it Compose attaches a terminal, which rewrites line endings in the binary
+dump and leaves a file `pg_restore` cannot read. Use `docker compose` in place of `podman compose`
+if that is your runtime.
+
+Against any other PostgreSQL — including the one a [Kubernetes](/operate/kubernetes/) install
+points at, since the chart never runs a database itself — run the same `pg_dump` with the
+connection URL Beam uses:
+
+```bash
+pg_dump -Fc "$BEAM_DATABASE_URL" > beam-$(date +%F).dump
+```
+
+A dump can be taken while Beam is running; PostgreSQL gives it one consistent snapshot. Keep it
+somewhere other than the database's own disk, and **test a restore** before you rely on it — a
+backup you have never restored is a guess. A managed PostgreSQL's own snapshots or point-in-time
+recovery are just as good; what matters is that something restorable exists.
+
+## Restoring the database
+
+A restore replaces the whole database with the dump. Restore into the **same Beam version that
+took the dump, or a newer one**: a newer Beam applies its pending migrations at startup as it would
+on any upgrade, but an older Beam refuses to start against a database that a newer version has
+migrated, because it has no record of those migrations.
+
+With the repository's Compose stack:
+
+```bash
+# 1. Stop Beam, so nothing writes while the database is replaced.
+podman compose stop server
+
+# 2. Replace the database with an empty one.
+podman compose exec postgres dropdb -U beam beam
+podman compose exec postgres createdb -U beam -O beam beam
+
+# 3. Load the dump.
+podman compose exec -T postgres pg_restore -U beam -d beam --no-owner < beam-2026-01-31.dump
+
+# 4. Start Beam again.
+podman compose start server
+```
+
+Elsewhere, stop Beam (on Kubernetes, scale the server Deployment to zero with
+`kubectl scale deployment/<server Deployment> --replicas=0`; `kubectl get deployments` names
+it), drop and recreate the database as its
+owner, run `pg_restore --no-owner -d "$BEAM_DATABASE_URL" beam-2026-01-31.dump`, and start Beam
+again (`--replicas=1`). `--no-owner` makes the restored objects belong to the role you restore
+as, so restore as the role Beam connects with. That role needs the same rights Beam itself needs:
+to create objects in the database, including the `pg_trgm` extension.
+
+<Aside type="caution" title="A restore rewinds accounts too">
+The database holds sign-in sessions and disabled accounts as well as the catalogue, so they return
+to the moment of the dump:
+
+- **Sessions signed out since the dump are valid again** until they expire, and sessions started
+  since are gone. To sign everyone out after a restore, run `DELETE FROM sessions;` against the
+  database before starting Beam; everyone signs in again through your identity provider.
+- **An account disabled since the dump is enabled again.** Disable it again under **Users** on
+  the admin dashboard.
+- Watch progress, libraries and match fixes made since the dump are lost. Re-add libraries and
+  rescan as needed; the files themselves are untouched.
+</Aside>
+
 ## Upgrades
 
 Beam applies schema migrations automatically at startup unless you set `BEAM_AUTO_MIGRATE=false`
@@ -29,10 +109,10 @@ Beam is pre-alpha and has no released versions. Migrations at this stage are per
 destructive — an upgrade may discard indexed data, and in the worst case require you to start the
 catalogue again.
 
-**Take a database dump before every upgrade:**
+**Take a database dump before every upgrade**, as [above](#backing-up-the-database):
 
 ```bash
-podman compose exec postgres pg_dump -U beam beam > beam-backup.sql
+podman compose exec -T postgres pg_dump -U beam -Fc beam > beam-before-upgrade.dump
 ```
 
 Do not upgrade a Beam instance you depend on without one.
@@ -53,4 +133,5 @@ database dump as the thing that protects the parts that are not.
 ## Rolling back
 
 There is no supported downgrade path. Migrations are not reversible, so rolling back means
-restoring the dump you took before upgrading — which is the other reason to take one.
+[restoring](#restoring-the-database) the dump you took before upgrading into the version you are
+rolling back to — which is the other reason to take one.
