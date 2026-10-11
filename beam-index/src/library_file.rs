@@ -410,7 +410,9 @@ impl EntryKind {
 /// fails to list -- [`is_refusal`] tells that apart -- rather than listing
 /// what the link points at. An entry's kind is the one the listing reports,
 /// or where it reports none a stat that does not follow a link at the entry,
-/// so a link listed is [`EntryKind::Other`].
+/// so a link listed is [`EntryKind::Other`]. An entry that cannot be read or
+/// stat'ed is left out rather than failing the folder, so one entry that
+/// vanishes mid-listing costs only itself.
 #[cfg(unix)]
 pub fn list_folder(root: &Path, dir: &Path) -> io::Result<Vec<(PathBuf, EntryKind)>> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -431,16 +433,28 @@ pub fn list_folder(root: &Path, dir: &Path) -> io::Result<Vec<(PathBuf, EntryKin
     let mut listing = rustix::fs::Dir::new(folder)?;
     let mut entries = Vec::new();
     while let Some(entry) = listing.read() {
-        let entry = entry?;
+        // A failed read ends the listing (the `Dir` reads nothing after an
+        // error); what was listed before it is kept, as `read_dir` was.
+        let Ok(entry) = entry else {
+            continue;
+        };
         let name = entry.file_name().to_bytes();
         if name == b"." || name == b".." {
             continue;
         }
         let file_type = match entry.file_type() {
-            FileType::Unknown => FileType::from_raw_mode(
-                rustix::fs::statat(listing.fd()?, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)?
-                    .st_mode,
-            ),
+            // An entry that vanished, or fails to stat, between the listing
+            // and its stat is skipped: the rest of the folder still lists.
+            FileType::Unknown => {
+                let Ok(fd) = listing.fd() else {
+                    continue;
+                };
+                let Ok(stat) = rustix::fs::statat(fd, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+                else {
+                    continue;
+                };
+                FileType::from_raw_mode(stat.st_mode)
+            }
             known => known,
         };
         entries.push((
@@ -457,9 +471,10 @@ pub fn list_folder(root: &Path, dir: &Path) -> io::Result<Vec<(PathBuf, EntryKin
 pub fn list_folder(root: &Path, dir: &Path) -> io::Result<Vec<(PathBuf, EntryKind)>> {
     relative_to(root, dir)?;
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let kind = if file_type.is_file() {
             EntryKind::File
         } else if file_type.is_dir() {
