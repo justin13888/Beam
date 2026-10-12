@@ -475,8 +475,9 @@ impl MetadataEnrichmentService {
         // match, an unpinned title is searched for afresh, and a pinned one
         // whose match differs from its pin forgets the match and is fetched
         // by its pin instead (issue #246). Only a fetch by the pin itself --
-        // a dead match equal to the pin, or the pin when no match is
-        // refreshed -- is retried with backoff (FR-304, FR-313).
+        // a dead match equal to the pin, the pin fetched in place of a dead
+        // match, or the pin when no match is refreshed -- is retried with
+        // backoff (FR-304, FR-313).
         let (pin, pinned_ref) = self.pin_of(movie.pinned_ref.as_deref());
         let mut by_id = external_ref.clone().or_else(|| pinned_ref.clone());
         let resolved = match (external_ref, pinned_ref) {
