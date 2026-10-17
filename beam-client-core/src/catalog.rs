@@ -522,6 +522,18 @@ fn narrow_u32(value: Option<i64>) -> Option<u32> {
     value.and_then(|raw| u32::try_from(raw).ok())
 }
 
+/// The server's 0-10 TMDB rating as the percentage the UniFFI record has
+/// always carried, rounded to the nearest point: 7.25 is 73.
+///
+/// A rating off the 0-10 scale, which the server's schema bounds, is dropped
+/// rather than clamped into one that looks real.
+fn rating_percent(tmdb: Option<f64>) -> Option<u32> {
+    tmdb.filter(|rating| (0.0..=10.0).contains(rating))
+        // In 0..=100 after the check above, so the cast neither wraps nor
+        // truncates anything but the fraction `round` already removed.
+        .map(|rating| (rating * 10.0).round() as u32)
+}
+
 /// Resolve an optional server-relative URL against the server that served it.
 ///
 /// A URL that cannot be resolved is dropped rather than failing the whole
@@ -572,8 +584,8 @@ impl MediaSummary {
             poster_url: absolute(record, movie.poster_url.clone()),
             backdrop_url: absolute(record, movie.backdrop_url.clone()),
             genres: movie.genres.clone(),
-            runtime_minutes: narrow_u32(movie.runtime),
-            tmdb_rating: narrow_u32(movie.ratings.as_ref().and_then(|ratings| ratings.tmdb)),
+            runtime_minutes: narrow_u32(movie.runtime_mins),
+            tmdb_rating: rating_percent(movie.ratings.as_ref().and_then(|ratings| ratings.tmdb)),
             file_id: movie.file_id.map(|id| id.to_string()),
             season_count: 0,
             episode_count: 0,
@@ -597,7 +609,7 @@ impl MediaSummary {
         let runtime = show
             .seasons
             .iter()
-            .find_map(|season| season.episode_runtime);
+            .find_map(|season| season.episode_runtime_mins);
 
         Self {
             id: show.id.to_string(),
@@ -613,7 +625,7 @@ impl MediaSummary {
             backdrop_url: absolute(record, show.backdrop_url.clone()),
             genres: show.genres.clone(),
             runtime_minutes: narrow_u32(runtime),
-            tmdb_rating: narrow_u32(rating),
+            tmdb_rating: rating_percent(rating),
             file_id: None,
             season_count: narrow_u32(Some(show.season_count)).unwrap_or(0),
             episode_count: narrow_u32(Some(show.episode_count)).unwrap_or(0),
@@ -629,8 +641,8 @@ impl EpisodeSummary {
             title: episode.title.clone(),
             description: episode.description.clone(),
             thumbnail_url: absolute(record, episode.thumbnail_url.clone()),
-            air_date: episode.air_date.clone(),
-            duration_secs: episode.duration,
+            air_date: episode.air_date.as_ref().map(|date| date.0.to_string()),
+            duration_secs: episode.duration_secs,
             file_id: episode.file_id.map(|id| id.to_string()),
         }
     }
@@ -641,7 +653,7 @@ impl SeasonSummary {
         Self {
             season_number: narrow_u32(Some(season.season_number)).unwrap_or(0),
             poster_url: absolute(record, season.poster_url.clone()),
-            episode_runtime_minutes: narrow_u32(season.episode_runtime),
+            episode_runtime_minutes: narrow_u32(season.episode_runtime_mins),
             genres: season.genres.clone(),
             episodes: season
                 .episodes
@@ -695,18 +707,20 @@ impl LibrarySummary {
     pub fn from_generated(library: wire::Library) -> Self {
         let wire::Library {
             description,
+            file_count,
             id,
             last_scan_file_count,
             last_scan_finished_at,
             last_scan_started_at,
             name,
-            size,
         } = library;
         Self {
-            id,
+            id: id.to_string(),
             name,
             description,
-            size: u32::try_from(size).unwrap_or(0),
+            // The record keeps its `size` name and `u32` width (issue #190
+            // left the UniFFI surface alone); a count past it saturates.
+            size: u32::try_from(file_count).unwrap_or(u32::MAX),
             last_scan_file_count: last_scan_file_count.and_then(|count| u32::try_from(count).ok()),
             last_scan_started_at_unix: last_scan_started_at.map(|at| at.0.unix_timestamp()),
             last_scan_finished_at_unix: last_scan_finished_at.map(|at| at.0.unix_timestamp()),
@@ -733,8 +747,8 @@ impl LibraryFileSummary {
             updated_at: _,
         } = file;
         Self {
-            id,
-            library_id,
+            id: id.to_string(),
+            library_id: library_id.to_string(),
             path,
             size_bytes: u64::try_from(size_bytes).unwrap_or(0),
             container_format,
@@ -764,14 +778,14 @@ impl DeviceSession {
             device_hash,
             id,
             ip,
-            last_active,
+            last_active_at,
         } = session;
         Self {
-            id,
+            id: id.to_string(),
             device_hash,
             ip,
-            created_at_unix: created_at,
-            last_active_unix: last_active,
+            created_at_unix: created_at.0.unix_timestamp(),
+            last_active_unix: last_active_at.0.unix_timestamp(),
         }
     }
 }
@@ -874,14 +888,25 @@ impl LogLevel {
 
 /// The admin log category as the text the UniFFI record carries: the server's
 /// own spelling, so a native screen shows what the web admin shows.
+///
+/// Read from the generated enum's own serialisation rather than restated
+/// here, so a category the server adds or respells reaches the record as the
+/// server spells it, with no table in this crate to fall out of step.
 fn log_category_name(category: wire::AdminLogCategory) -> String {
-    match category {
-        wire::AdminLogCategory::LibraryScan => "library_scan",
-        wire::AdminLogCategory::System => "system",
-        wire::AdminLogCategory::Auth => "auth",
-        wire::AdminLogCategory::Enrichment => "enrichment",
+    match serde_json::to_value(category) {
+        Ok(serde_json::Value::String(name)) => name,
+        // A unit variant serialises as its name; anything else would be a
+        // generator change, reported as what it serialised to rather than
+        // hidden behind a guess.
+        other => format!("{other:?}"),
     }
-    .to_owned()
+}
+
+/// An instant as the RFC 3339 text the UniFFI record's `created_at` has
+/// always carried.
+fn created_at_rfc3339(at: &time::OffsetDateTime) -> String {
+    at.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| at.to_string())
 }
 
 impl AdminStatus {
@@ -920,7 +945,7 @@ impl AdminStatus {
                 .map(|scan| RecentScan {
                     level: LogLevel::from_wire(scan.level),
                     message: scan.message,
-                    timestamp_unix: scan.timestamp.0.unix_timestamp(),
+                    timestamp_unix: scan.created_at.0.unix_timestamp(),
                 })
                 .collect(),
         }
@@ -941,7 +966,7 @@ impl AdminUser {
             is_admin,
         } = user;
         Self {
-            id,
+            id: id.to_string(),
             display_name,
             email,
             avatar_url: absolute(record, avatar_url),
@@ -965,7 +990,7 @@ impl AdminLogEntry {
             message,
         } = entry;
         Self {
-            id,
+            id: id.to_string(),
             level: LogLevel::from_wire(level),
             category: log_category_name(category),
             message,
@@ -973,7 +998,7 @@ impl AdminLogEntry {
             // carried across the boundary as text and rendered verbatim
             // rather than being given a shape the server never promised.
             details: details.map(|value| value.to_string()),
-            created_at,
+            created_at: created_at_rfc3339(&created_at.0),
         }
     }
 }
@@ -993,10 +1018,10 @@ impl AdminEvent {
             library_name,
             message,
             scan: _,
-            timestamp,
+            occurred_at,
         } = event;
         Self {
-            id,
+            id: id.to_string(),
             level: LogLevel::from_wire(level),
             category: match category {
                 // A scan's structured progress reads, in the feed, as the
@@ -1011,9 +1036,9 @@ impl AdminEvent {
                 }
             },
             message,
-            library_id,
+            library_id: library_id.map(|id| id.to_string()),
             library_name,
-            timestamp_unix: timestamp.0.unix_timestamp(),
+            timestamp_unix: occurred_at.0.unix_timestamp(),
         }
     }
 }
@@ -1100,7 +1125,9 @@ pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParam
         year_from: query.year_from.map(i64::from),
         year_to: query.year_to.map(i64::from),
         query: query.query.clone(),
-        min_rating: query.min_rating.map(i64::from),
+        // The record keeps its percentage (issue #190 left the UniFFI surface
+        // alone); the wire takes the rating on its own 0-10 scale.
+        min_rating: query.min_rating.map(|percent| f64::from(percent) / 10.0),
         origin: None,
         referer: None,
     })
@@ -1135,13 +1162,13 @@ mod tests {
         "title":{"original":"Le Samourai","localized":"The Samurai"},
         "genres":["Crime","Drama"],
         "year":1967,
-        "runtime":105,
-        "duration":6300.0,
+        "runtime_mins":105,
+        "duration_secs":6300.0,
         "description":"A contract killer.",
         "poster_url":"/artwork/m1/poster.jpg",
         "backdrop_url":"/artwork/m1/backdrop.jpg",
         "file_id":"f1f1f1f1-0000-4000-8000-000000000001",
-        "ratings":{"tmdb":81},
+        "ratings":{"tmdb":8.1},
         "user_state":{"played":false,"position_secs":0.0,"play_count":0}
     }}"#;
 
@@ -1151,7 +1178,7 @@ mod tests {
         "description":"Undercover.",
         "year":2015,
         "genres":["Drama","Thriller"],
-        "ratings":{"tmdb":88},
+        "ratings":{"tmdb":8.8},
         "season_count":2,
         "episode_count":3,
         "seasons":[
@@ -1159,10 +1186,10 @@ mod tests {
                 {"id":"e0000001-0000-4000-8000-000000000001","episode_number":1,"title":"Pilot","source_count":1,"user_state":{"played":false,"position_secs":0.0,"play_count":0},"file_id":"f1f1f1f1-0000-4000-8000-000000000001"},
                 {"id":"e0000002-0000-4000-8000-000000000002","episode_number":2,"title":"Second","source_count":0,"user_state":{"played":false,"position_secs":0.0,"play_count":0}}
             ]},
-            {"id":"5e500002-0000-4000-8000-000000000002","season_number":2,"dates":{},"genres":[],"episode_runtime":52,
+            {"id":"5e500002-0000-4000-8000-000000000002","season_number":2,"dates":{},"genres":[],"episode_runtime_mins":52,
              "poster_url":"/artwork/s1/2.jpg","episodes":[
                 {"id":"e0000003-0000-4000-8000-000000000003","episode_number":1,"title":"Return","source_count":1,"user_state":{"played":false,"position_secs":0.0,"play_count":0},"file_id":"f3f3f3f3-0000-4000-8000-000000000003",
-                 "thumbnail_url":"/artwork/e3.jpg","duration":3120.0,"air_date":"2016-01-01"}
+                 "thumbnail_url":"/artwork/e3.jpg","duration_secs":3120.0,"air_date":"2016-01-01"}
             ]}
         ]
     }}"#;
@@ -1173,7 +1200,7 @@ mod tests {
         "id":"22222222-2222-4222-8222-222222222222",
         "title":{"original":"Le Bureau"},
         "genres":["Drama"],
-        "ratings":{"tmdb":91},
+        "ratings":{"tmdb":9.1},
         "season_count":5,
         "episode_count":50,
         "seasons":[]
@@ -1415,7 +1442,7 @@ mod tests {
 
     #[test]
     fn a_library_reports_a_running_scan_as_started_but_unfinished() {
-        let json = r#"{"id":"l1","name":"Films","size":42,
+        let json = r#"{"id":"00000000-0000-0000-0000-0000000000a1","name":"Films","file_count":42,
                        "last_scan_started_at":"2026-01-01T00:00:00Z"}"#;
         let library: wire::Library = serde_json::from_str(json).expect("a valid library");
         let summary = LibrarySummary::from_generated(library);
@@ -1428,17 +1455,60 @@ mod tests {
     fn an_admin_log_entry_carries_untyped_details_as_text() {
         // `details` has no schema in the contract, so it is rendered verbatim
         // rather than given a shape the server never promised.
-        let json = r#"{"id":"1","level":"warning","category":"library_scan",
-                       "message":"skipped","created_at":"2026-01-01",
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000001","level":"warning",
+                       "category":"library_scan","message":"skipped",
+                       "created_at":"2026-01-01T12:30:00Z",
                        "details":{"path":"/media/x.mkv"}}"#;
         let entry: wire::AdminLogEntry = serde_json::from_str(json).expect("a valid log entry");
         let mapped = AdminLogEntry::from_generated(entry);
+        assert_eq!(mapped.id, "00000000-0000-0000-0000-000000000001");
         assert_eq!(mapped.level, LogLevel::Warning);
         assert_eq!(mapped.category, "library_scan");
+        assert_eq!(mapped.created_at, "2026-01-01T12:30:00Z");
         assert_eq!(
             mapped.details.as_deref(),
             Some(r#"{"path":"/media/x.mkv"}"#)
         );
+    }
+
+    /// Every category the contract declares reaches the record spelled as the
+    /// server spells it. The spellings are read from the document the client
+    /// is generated from, so neither side is restated here.
+    #[test]
+    fn every_admin_log_category_keeps_the_servers_spelling() {
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../api/openapi.json")).expect("the document");
+        let spellings = document
+            .pointer("/components/schemas/AdminLogCategory/enum")
+            .and_then(serde_json::Value::as_array)
+            .expect("the contract declares the categories");
+        assert!(!spellings.is_empty());
+        for spelling in spellings {
+            let category: wire::AdminLogCategory =
+                serde_json::from_value(spelling.clone()).expect("a declared category");
+            assert_eq!(
+                serde_json::Value::String(log_category_name(category)),
+                *spelling
+            );
+        }
+    }
+
+    /// The UniFFI record keeps its percentage; the wire's 0-10 rating is
+    /// scaled and rounded to it, and a value off the scale is dropped.
+    #[test]
+    fn a_tmdb_rating_becomes_the_records_rounded_percentage() {
+        for (wire_rating, percent) in [
+            (Some(8.4), Some(84)),
+            (Some(7.25), Some(73)),
+            (Some(0.0), Some(0)),
+            (Some(10.0), Some(100)),
+            (Some(10.5), None),
+            (Some(-0.1), None),
+            (Some(f64::NAN), None),
+            (None, None),
+        ] {
+            assert_eq!(rating_percent(wire_rating), percent, "{wire_rating:?}");
+        }
     }
 
     #[test]
@@ -1481,7 +1551,11 @@ mod tests {
         assert_eq!(params.year, Some(1999));
         assert_eq!(params.year_from, Some(1990));
         assert_eq!(params.year_to, Some(2000));
-        assert_eq!(params.min_rating, Some(70));
+        assert_eq!(
+            params.min_rating,
+            Some(7.0),
+            "the percentage on the wire's 0-10 scale"
+        );
         assert_eq!(params.last, None, "forward paging only");
         assert_eq!(params.before, None);
     }

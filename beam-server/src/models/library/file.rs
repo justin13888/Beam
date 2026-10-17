@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use kynos::Schema;
 use serde::Serialize;
 use tracing::warn;
+use uuid::Uuid;
 
 /// File indexing status
 #[derive(Clone, Copy, Debug, Serialize, Schema, Eq, PartialEq)]
@@ -42,13 +43,13 @@ pub enum FileContentType {
 /// A media file within a library
 #[derive(Clone, Debug, Serialize, Schema)]
 pub struct LibraryFile {
-    pub id: String,
-    pub library_id: String,
+    pub id: Uuid,
+    pub library_id: Uuid,
     /// Path of the file relative to its library's root, '/'-separated. Never
     /// absolute (NFR-108).
     pub path: String,
     /// File size in bytes
-    pub size_bytes: i64,
+    pub size_bytes: u64,
     /// Content hash (XXH3) as a decimal string. Identifies the file's content
     /// for caching and duplicate detection.
     pub hash: String,
@@ -143,10 +144,10 @@ impl LibraryFile {
         };
 
         LibraryFile {
-            id: id.to_string(),
-            library_id: library_id.to_string(),
+            id,
+            library_id,
             path: root_relative_path(library_root, &path),
-            size_bytes: size_bytes as i64,
+            size_bytes,
             hash: hash.to_string(),
             mime_type,
             duration_secs: duration.map(|d| d.as_secs_f64()),

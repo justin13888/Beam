@@ -65,12 +65,12 @@ pub struct EnrichmentEvent {
 
 #[derive(Clone, Debug)]
 pub struct AdminEvent {
-    pub id: String,
+    pub id: Uuid,
     pub timestamp: DateTime<Utc>,
     pub level: EventLevel,
     pub category: EventCategory,
     pub message: String,
-    pub library_id: Option<String>,
+    pub library_id: Option<Uuid>,
     pub library_name: Option<String>,
     /// The scan job an [`EventCategory::ScanProgress`] event reports on.
     pub scan: Option<ScanEvent>,
@@ -83,11 +83,11 @@ impl AdminEvent {
         level: EventLevel,
         category: EventCategory,
         message: impl Into<String>,
-        library_id: Option<String>,
+        library_id: Option<Uuid>,
         library_name: Option<String>,
     ) -> Self {
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: Uuid::new_v4(),
             timestamp: Utc::now(),
             level,
             category,
@@ -102,7 +102,7 @@ impl AdminEvent {
     pub fn info(
         category: EventCategory,
         message: impl Into<String>,
-        library_id: Option<String>,
+        library_id: Option<Uuid>,
         library_name: Option<String>,
     ) -> Self {
         Self::new(
@@ -117,7 +117,7 @@ impl AdminEvent {
     pub fn warning(
         category: EventCategory,
         message: impl Into<String>,
-        library_id: Option<String>,
+        library_id: Option<Uuid>,
         library_name: Option<String>,
     ) -> Self {
         Self::new(
@@ -132,7 +132,7 @@ impl AdminEvent {
     pub fn error(
         category: EventCategory,
         message: impl Into<String>,
-        library_id: Option<String>,
+        library_id: Option<Uuid>,
         library_name: Option<String>,
     ) -> Self {
         Self::new(
@@ -286,13 +286,13 @@ mod tests {
         svc.publish(AdminEvent::info(
             EventCategory::LibraryScan,
             "Scan started",
-            Some("lib-1".to_string()),
+            Some(Uuid::from_u128(1)),
             Some("Movies".to_string()),
         ));
         svc.publish(AdminEvent::warning(
             EventCategory::LibraryScan,
             "File skipped",
-            Some("lib-1".to_string()),
+            Some(Uuid::from_u128(1)),
             Some("Movies".to_string()),
         ));
         svc.publish(AdminEvent::error(
@@ -386,11 +386,11 @@ mod tests {
         svc.publish(AdminEvent::info(
             EventCategory::LibraryScan,
             "Test event",
-            Some("lib-1".to_string()),
+            Some(Uuid::from_u128(1)),
             None,
         ));
         let events = svc.published_events();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].library_id, Some("lib-1".to_string()));
+        assert_eq!(events[0].library_id, Some(Uuid::from_u128(1)));
     }
 }

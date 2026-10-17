@@ -68,19 +68,19 @@ impl crate::services::library::LibraryService for StubLibraryService {
     }
     async fn get_library_by_id(
         &self,
-        _library_id: String,
+        _library_id: uuid::Uuid,
     ) -> Result<Option<crate::models::Library>, LibraryError> {
         unimplemented!("not called in routing tests")
     }
     async fn get_library_files(
         &self,
-        _library_id: String,
+        _library_id: uuid::Uuid,
     ) -> Result<Vec<crate::models::LibraryFile>, LibraryError> {
         unimplemented!("not called in routing tests")
     }
     async fn get_file_by_id(
         &self,
-        _file_id: String,
+        _file_id: uuid::Uuid,
     ) -> Result<Option<crate::services::library::LocatedFile>, LibraryError> {
         unimplemented!("not called in routing tests")
     }
@@ -103,7 +103,7 @@ impl crate::services::library::LibraryService for StubLibraryService {
     ) -> Result<Option<crate::models::ScanJob>, LibraryError> {
         unimplemented!("not called in routing tests")
     }
-    async fn delete_library(&self, _library_id: String) -> Result<bool, LibraryError> {
+    async fn delete_library(&self, _library_id: uuid::Uuid) -> Result<bool, LibraryError> {
         unimplemented!("not called in routing tests")
     }
 }
@@ -135,7 +135,7 @@ impl MetadataService for StubMetadataService {
     }
     async fn get_media_sources(
         &self,
-        _media_id: &str,
+        _media_id: uuid::Uuid,
     ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
         unimplemented!("not called in routing tests")
     }

@@ -375,7 +375,7 @@ mod session_store {
         let store = PgSessionStore::with_clock(db.clone(), clock());
         let id = Uuid::from_u128(6);
         let user = Uuid::from_u128(7);
-        let _ = store.delete_by_id(&id.to_string(), &user.to_string()).await;
+        let _ = store.delete_by_id(id, &user.to_string()).await;
         drop(store);
 
         let sql = statements(db);
@@ -789,10 +789,7 @@ mod expiry_rules {
             let store = PgSessionStore::with_clock(db.clone(), clock());
             assert_eq!(
                 store
-                    .delete_by_id(
-                        &Uuid::from_u128(1).to_string(),
-                        &Uuid::from_u128(2).to_string()
-                    )
+                    .delete_by_id(Uuid::from_u128(1), &Uuid::from_u128(2).to_string())
                     .await
                     .unwrap(),
                 expected,

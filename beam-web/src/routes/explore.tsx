@@ -229,7 +229,8 @@ export function ExplorePage({
 						genre,
 						year_from: yearFrom,
 						year_to: yearTo,
-						min_rating: minRating !== undefined ? minRating * 10 : undefined,
+						// The server takes the rating on the 0-10 scale the picker shows.
+						min_rating: minRating,
 					},
 				},
 				credentials: "include",

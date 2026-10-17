@@ -36,7 +36,8 @@ use beam_auth::utils::oidc::{DevicePoll, OidcClient, OidcError};
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
-use beam_auth::utils::session_store::{SessionError, SessionStore};
+use beam_auth::utils::session_store::{SessionData, SessionStore};
+use chrono::{DateTime, Utc};
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
 use kynos::response::headers::WithHeaders;
@@ -63,7 +64,7 @@ pub(crate) const DEVICE_LOGIN_MAX_SECS: u64 = 1800;
 
 #[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct CurrentUser {
-    pub id: String,
+    pub id: Uuid,
     pub email: Option<String>,
     pub is_admin: bool,
     pub display_name: String,
@@ -76,11 +77,42 @@ pub struct CurrentUser {
 /// at rest and cannot be recovered.
 #[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct SessionSummary {
-    pub id: String,
+    pub id: Uuid,
     pub device_hash: String,
     pub ip: String,
-    pub created_at: i64,
-    pub last_active: i64,
+    /// When the session was signed in.
+    pub created_at: DateTime<Utc>,
+    /// When the session was last used, to the hour: activity slides it
+    /// forward at most once an hour.
+    pub last_active_at: DateTime<Utc>,
+}
+
+impl SessionSummary {
+    /// The wire view of one stored session.
+    ///
+    /// The store keeps whole Unix seconds, which a `DateTime` holds for any
+    /// time a session can have; one it cannot is a corrupt row, reported as
+    /// such rather than rendered as some other instant.
+    fn from_store(id: Uuid, data: SessionData) -> Result<Self, String> {
+        let SessionData {
+            user_id: _,
+            device_hash,
+            ip,
+            created_at,
+            last_active,
+        } = data;
+        let instant = |secs: i64| {
+            DateTime::from_timestamp(secs, 0)
+                .ok_or_else(|| format!("session {id} has an unrepresentable timestamp {secs}"))
+        };
+        Ok(Self {
+            id,
+            device_hash,
+            ip,
+            created_at: instant(created_at)?,
+            last_active_at: instant(last_active)?,
+        })
+    }
 }
 
 /// Where the browser is sent back to after a successful login.
@@ -182,7 +214,7 @@ pub enum DeviceLoginPollReply {
 #[derive(Debug, Schema, PathParams)]
 pub struct SessionPath {
     /// Session id, from `GET /sessions`.
-    pub id: String,
+    pub id: uuid::Uuid,
 }
 
 /// The cookies these endpoints read for themselves.
@@ -472,31 +504,10 @@ pub enum CurrentUserError {
 /// Keeps its own 401 because the status carries meaning here that
 /// `SessionAuth`'s does not: a session id that does not exist and one that
 /// belongs to somebody else answer identically and deliberately, so a caller
-/// cannot enumerate other people's sessions.
+/// cannot enumerate other people's sessions. A malformed id is the `Path`
+/// extractor's 400.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
 pub enum SessionRevokeError {
-    /// The `{id}` in the path is not a UUID.
-    ///
-    /// Its position titles nothing. Kynos titles a status from the first
-    /// declaration it meets, and the `Path` extractor's 400 and `SessionAuth`'s
-    /// 401 are both met before this enum, so the document reads "Bad Request"
-    /// and "Unauthorized" for those statuses whatever order the variants take;
-    /// order decides a title only for a status no extractor or authenticator
-    /// declares.
-    ///
-    /// The operation already advertised a 400 it had no way to reach: every
-    /// store error, the id parse included, was flattened into `Internal`, so a
-    /// client's typo came back as "Beam broke" (issue #123). Its own code
-    /// rather than the 401, because a malformed id and a session that is not
-    /// there are different things for a caller to do something about.
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-session-id",
-        title = "Invalid session id"
-    )]
-    InvalidSessionId(String),
-
     #[error("{0}")]
     #[problem(
         status = 401,
@@ -597,7 +608,7 @@ impl ClientHeaders {
 /// The wire shape of a user, shared by `GET /v1/me` and a device login.
 fn me_from(user: User) -> CurrentUser {
     CurrentUser {
-        id: user.id.to_string(),
+        id: user.id,
         email: user.email,
         is_admin: user.is_admin,
         display_name: user.display_name,
@@ -1062,18 +1073,12 @@ pub async fn oidc_list_sessions(
         .await
         .map_err(|e| InternalError::Internal(e.to_string()))?;
 
-    Ok(Json(
-        sessions
-            .into_iter()
-            .map(|(id, data)| SessionSummary {
-                id,
-                device_hash: data.device_hash,
-                ip: data.ip,
-                created_at: data.created_at,
-                last_active: data.last_active,
-            })
-            .collect(),
-    ))
+    let summaries = sessions
+        .into_iter()
+        .map(|(id, data)| SessionSummary::from_store(id, data))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(InternalError::Internal)?;
+    Ok(Json(summaries))
 }
 
 /// Revokes a specific session by its listing id, scoped to the current user
@@ -1087,18 +1092,9 @@ pub async fn oidc_delete_session(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<SessionRevoked, SessionRevokeError> {
     let deleted = session_store
-        .delete_by_id(&path.id, &auth.0.user_id)
+        .delete_by_id(path.id, &auth.0.user_id)
         .await
-        .map_err(|e| match e {
-            // The store parses the path id before it queries, so this is the
-            // caller's typo rather than a fault. The user id cannot reach here
-            // malformed -- it comes from an authenticated session.
-            SessionError::InvalidId(_) => SessionRevokeError::InvalidSessionId(format!(
-                "{} is not a valid session id",
-                path.id
-            )),
-            other => SessionRevokeError::Internal(other.to_string()),
-        })?;
+        .map_err(|e| SessionRevokeError::Internal(e.to_string()))?;
 
     if !deleted {
         return Err(SessionRevokeError::SessionNotFound(

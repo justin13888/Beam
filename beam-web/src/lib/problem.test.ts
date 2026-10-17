@@ -36,15 +36,15 @@ describe("apiError", () => {
 	it("shows the server's explanation for a client error", () => {
 		const error = apiError(
 			{
-				type: `${BASE}#invalid-library-id`,
+				type: `${BASE}#library-path-not-found`,
 				status: 400,
-				detail: "library id 7 is not a valid identifier",
+				detail: "the library path does not exist",
 			},
 			"Failed to load libraries",
 		);
 
-		expect(error.message).toBe("library id 7 is not a valid identifier");
-		expect(error.code).toBe(`${BASE}#invalid-library-id`);
+		expect(error.message).toBe("the library path does not exist");
+		expect(error.code).toBe(`${BASE}#library-path-not-found`);
 		expect(error.status).toBe(400);
 	});
 

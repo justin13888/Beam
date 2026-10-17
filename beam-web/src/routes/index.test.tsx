@@ -12,8 +12,8 @@ describe("/ (dashboard)", () => {
 		server.use(
 			http.get(`${BASE_URL}/v1/libraries`, () =>
 				HttpResponse.json([
-					factory.library({ id: "lib-1", name: "Movies", size: 40 }),
-					factory.library({ id: "lib-2", name: "Shows", size: 2 }),
+					factory.library({ id: "lib-1", name: "Movies", file_count: 40 }),
+					factory.library({ id: "lib-2", name: "Shows", file_count: 2 }),
 				]),
 			),
 		);
@@ -28,7 +28,7 @@ describe("/ (dashboard)", () => {
 		server.use(
 			http.get(`${BASE_URL}/v1/libraries`, () =>
 				HttpResponse.json([
-					factory.library({ id: "lib-1", name: "Movies", size: 3 }),
+					factory.library({ id: "lib-1", name: "Movies", file_count: 3 }),
 				]),
 			),
 		);

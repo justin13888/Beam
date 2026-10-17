@@ -124,8 +124,8 @@ describe("/explore", () => {
 		expect(query.get("genre")).toBe("Action");
 		expect(query.get("year_from")).toBe("1990");
 		expect(query.get("year_to")).toBe("2001");
-		// minRating is user-facing 0-10; the API takes 0-100.
-		expect(query.get("min_rating")).toBe("80");
+		// minRating is 0-10, the scale the API takes it on.
+		expect(query.get("min_rating")).toBe("8");
 		// An unset cursor must be absent, not the string "undefined".
 		expect(query.has("after")).toBe(false);
 	});

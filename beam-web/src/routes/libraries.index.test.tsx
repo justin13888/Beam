@@ -9,7 +9,11 @@ import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
-const testLibrary = factory.library({ id: "lib-1", name: "Movies", size: 3 });
+const testLibrary = factory.library({
+	id: "lib-1",
+	name: "Movies",
+	file_count: 3,
+});
 
 function serveLibraries(...extra: Parameters<typeof server.use>) {
 	server.use(
@@ -133,7 +137,7 @@ describe("/libraries", () => {
 		// Asserted on the create mutation, not on the list. `GET /v1/libraries`
 		// reads a collection and parses no id, so this branch removed its 400
 		// and 404 -- it declares 200/401/403/500 and has no coded client error
-		// at all. The fixture this replaces served it a 400 `#invalid-library-id`,
+		// at all. The fixture this replaces served it a 400 about an invalid id,
 		// a response that operation cannot produce, so it proved nothing about
 		// what a viewer would ever see. `POST /v1/admin/libraries` does declare
 		// a 400, and it is the one a person actually hits: a root path that is

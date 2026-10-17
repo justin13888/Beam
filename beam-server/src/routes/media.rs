@@ -54,7 +54,8 @@ pub struct BrowseQuery {
     /// Filter by genre, by name or slug: `Science Fiction` and
     /// `science-fiction` name the same genre.
     pub genre: Option<String>,
-    /// Filter by year (exact match).
+    /// Filter by year (exact match). A year beyond 2147483647 is refused as
+    /// `#invalid-filter`, as are the range bounds below.
     pub year: Option<u32>,
     /// Filter by year range (start).
     pub year_from: Option<u32>,
@@ -63,16 +64,23 @@ pub struct BrowseQuery {
     /// Search the titles: those resembling this text or containing it,
     /// ignoring case. Results keep the requested sort.
     pub query: Option<String>,
-    /// Filter by minimum rating (0-100).
-    #[schema(maximum = 100)]
-    pub min_rating: Option<u32>,
+    /// Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;
+    /// an unrated title counts as 0. Outside 0-10 is `#invalid-filter`.
+    //
+    // The bounds do not reach the document yet: the Kynos gap noted on
+    // `first` above (#223).
+    #[schema(minimum = 0, maximum = 10)]
+    pub min_rating: Option<f64>,
 }
 
 /// What `/v1/media/{id}` and `/v1/media/{id}/sources` capture.
+///
+/// A `Uuid`, so a malformed id is the `Path` extractor's 400 and never reaches
+/// the handler, as on every other route naming a title.
 #[derive(Debug, Schema, PathParams)]
 pub struct MediaPath {
     /// Media id (movie or show UUID).
-    pub id: String,
+    pub id: Uuid,
 }
 
 /// What `/v1/episodes/{id}` and `/v1/seasons/{id}` capture.
@@ -152,9 +160,9 @@ pub async fn browse_media(
         Err(MetadataError::InvalidSearchQuery(detail)) => {
             Err(MediaBrowseError::InvalidSearchQuery(detail))
         }
+        Err(MetadataError::InvalidFilter(detail)) => Err(MediaBrowseError::InvalidFilter(detail)),
         Err(
             err @ (MetadataError::InternalError(_)
-            | MetadataError::InvalidId
             | MetadataError::MediaNotFound
             | MetadataError::Unsupported(_)),
         ) => Err(MediaBrowseError::Internal(err.to_string())),
@@ -169,15 +177,7 @@ pub async fn get_media_detail(
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaMetadata>, MediaLookupError> {
-    // Parsed here, so a malformed id is the 400 `/sources` and the refresh
-    // route answer for the same path parameter, not a lookup miss.
-    let Ok(id) = Uuid::parse_str(&path.id) else {
-        return Err(MediaLookupError::InvalidMediaId(format!(
-            "{} is not a valid media id",
-            path.id
-        )));
-    };
-
+    let id = path.id;
     let user_id = parse_user_id(&auth.0.user_id)?;
 
     // A failed lookup is a 500: answering 404 would tell the client the
@@ -214,12 +214,8 @@ pub async fn get_media_sources(
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaSourceConnection>, MediaSourcesError> {
-    match state.services.metadata.get_media_sources(&path.id).await {
+    match state.services.metadata.get_media_sources(path.id).await {
         Ok(sources) => Ok(Json(MediaSourceConnection::complete(sources))),
-        Err(MetadataError::InvalidId) => Err(MediaSourcesError::InvalidMediaId(format!(
-            "media id {} is not a valid identifier",
-            path.id
-        ))),
         Err(MetadataError::MediaNotFound) => Err(MediaSourcesError::MediaNotFound(format!(
             "media {} not found",
             path.id
@@ -227,13 +223,14 @@ pub async fn get_media_sources(
         Err(MetadataError::Unsupported(msg)) => {
             Err(MediaSourcesError::SourcesNotAvailableForShow(msg))
         }
-        // Sources are neither paged nor searched: a cursor, page or search
-        // error cannot arise here.
+        // Sources are neither paged, searched nor filtered: a cursor, page,
+        // search or filter error cannot arise here.
         Err(
             MetadataError::InternalError(msg)
             | MetadataError::InvalidCursor(msg)
             | MetadataError::InvalidPagination(msg)
-            | MetadataError::InvalidSearchQuery(msg),
+            | MetadataError::InvalidSearchQuery(msg)
+            | MetadataError::InvalidFilter(msg),
         ) => Err(MediaSourcesError::Internal(msg)),
     }
 }
