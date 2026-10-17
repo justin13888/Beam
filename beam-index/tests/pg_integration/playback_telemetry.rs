@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-// `start_key`, `switch_key` and `PlaybackTelemetryEvent` are brought into
+// The keys, their builders and `PlaybackTelemetryEvent` are brought into
 // scope by the contract macro below.
 use beam_domain::repositories::PlaybackTelemetryRepository;
 use beam_index::repositories::SqlPlaybackTelemetryRepository;
@@ -71,6 +71,84 @@ async fn concurrent_reports_of_one_key_all_count() {
     let summary = repo.summarize(day, day).await.unwrap();
     assert_eq!(summary.starts.len(), 1);
     assert_eq!(summary.starts[0].count, u64::from(WRITERS));
+}
+
+/// Why `record_batch` writes a batch as its tally: two batches naming the
+/// same keys in opposite orders must both commit. Each upsert locks its rows
+/// in the order its VALUES list them, so were the rows written in the order
+/// the client sent them, one writer would hold the first key and wait on the
+/// last while the other held the last and waited on the first -- a deadlock
+/// Postgres breaks by failing one of them. The tally sorts every list by key
+/// and always writes starts, then rebuffers, then switches, so every writer
+/// takes its locks in the same order. Half the writers send the keys
+/// ascending and half descending, over several rounds so the transactions
+/// really interleave; every one must succeed and every event must count.
+#[tokio::test]
+async fn concurrent_batches_naming_keys_in_opposite_orders_all_commit() {
+    const WRITERS: u32 = 8;
+    const ROUNDS: u32 = 4;
+    let schema = ScopedSchema::create_migrated("playback_telemetry_reversed")
+        .await
+        .expect("create a migrated schema");
+    let repo = SqlPlaybackTelemetryRepository::new(
+        schema.pool(WRITERS).await.expect("open a pool of eight"),
+    );
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+
+    let heights = [
+        HeightClass::Sd,
+        HeightClass::Hd,
+        HeightClass::Fhd,
+        HeightClass::Uhd,
+        HeightClass::Unknown,
+    ];
+    let mut ascending = Vec::new();
+    for height_class in heights {
+        ascending.push(PlaybackTelemetryEvent::Start(StartKey {
+            height_class,
+            ..start_key()
+        }));
+        ascending.push(PlaybackTelemetryEvent::Rebuffer {
+            key: RebufferKey {
+                height_class,
+                ..rebuffer_key()
+            },
+            duration_ms: 500,
+        });
+    }
+    for trigger in [SwitchTrigger::Manual, SwitchTrigger::Auto] {
+        for to_height_class in heights {
+            ascending.push(PlaybackTelemetryEvent::Switch(SwitchKey {
+                trigger,
+                to_height_class,
+                ..switch_key()
+            }));
+        }
+    }
+    let descending: Vec<_> = ascending.iter().rev().cloned().collect();
+
+    for _ in 0..ROUNDS {
+        let writes = (0..WRITERS).map(|writer| {
+            let batch = if writer % 2 == 0 {
+                &ascending
+            } else {
+                &descending
+            };
+            repo.record_batch(day, batch)
+        });
+        for result in futures::future::join_all(writes).await {
+            result.expect("no batch deadlocks against one naming its keys in reverse");
+        }
+    }
+
+    let writes = u64::from(WRITERS * ROUNDS);
+    let summary = repo.summarize(day, day).await.unwrap();
+    assert_eq!(summary.starts.len(), heights.len());
+    assert!(summary.starts.iter().all(|row| row.count == writes));
+    assert_eq!(summary.rebuffers.len(), heights.len());
+    assert!(summary.rebuffers.iter().all(|row| row.events == writes));
+    assert_eq!(summary.switches.len(), 2 * heights.len());
+    assert!(summary.switches.iter().all(|row| row.count == writes));
 }
 
 /// The table refuses a row no outcome describes -- a successful start with a

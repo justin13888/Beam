@@ -108,7 +108,7 @@ ids are never locked: they are the match, which you change by fixing it.
 
 Failures retry automatically with a growing delay. So does a pinned title whose id the provider
 answers "not found" for; a title no pin holds whose match the provider no longer has is searched
-for again by its name instead. You can also trigger a re-enrich for a title
+for again by its name instead, and a pinned one is fetched by its pin. You can also trigger a re-enrich for a title
 from the admin area — the right move after fixing a filename, or after adding a TMDB token to a
 library that was indexed without one. `POST /v1/admin/libraries/{id}/refresh` re-enriches one
 library, and `POST /v1/admin/media/refresh` everything; each answers with how many titles it
@@ -152,12 +152,12 @@ Two things follow that are worth knowing:
 - **Artwork now uses your server's bandwidth.** If viewers watch from outside your network, the
   posters they see travel from your uplink rather than from a CDN. Posters are small and clients
   cache them hard, so this is usually unnoticeable — but it is not zero on a metered connection.
-- **Downloaded titles usually keep their poster offline on Android.** The app fetches a title's
-  poster, over your signed-in session, when you download it, and releases it when you delete the
-  last download that uses it, so the downloads screen shows it with no connection. The poster
-  shares space with the app's image cache rather than living beside the download, so after a great
-  deal of browsing it can still be pushed out; it then shows a placeholder until the next time the
-  downloads screen is opened online. The download itself is never affected.
+- **Downloaded titles keep their poster offline on Android.** The app fetches a title's poster, over
+  your signed-in session, when you download it, keeps it beside the download rather than in the
+  app's image cache, and deletes it when you delete the last download that uses it, so the
+  downloads screen shows it with no connection. A poster that could not be fetched when you
+  downloaded the title (the server was unreachable, say) shows a placeholder offline; the download
+  itself is never affected.
 
 <LinkCard
 	title="Why enrichment works this way"

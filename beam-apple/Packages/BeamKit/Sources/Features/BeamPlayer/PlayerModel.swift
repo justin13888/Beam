@@ -29,7 +29,9 @@ public final class PlayerModel {
     @ObservationIgnored private let engine: any PlaybackEngine
     @ObservationIgnored private let playback: any PlaybackRepository
     @ObservationIgnored private let catalog: any CatalogRepository
-    @ObservationIgnored private let reporter: ProgressReporter
+    /// Module-qualified: from the macOS 27 SDK on, Foundation also exports a
+    /// `ProgressReporter`, and the bare name is ambiguous.
+    @ObservationIgnored private let reporter: BeamPlayback.ProgressReporter
     @ObservationIgnored private let nowPlaying: NowPlayingCenter
     @ObservationIgnored private let autoplayNextEpisode: Bool
 
@@ -55,7 +57,7 @@ public final class PlayerModel {
         self.engineKind = engineKind
         self.playback = playback
         self.catalog = catalog
-        self.reporter = ProgressReporter(playback: playback)
+        self.reporter = BeamPlayback.ProgressReporter(playback: playback)
         self.nowPlaying = nowPlaying
         self.autoplayNextEpisode = autoplayNextEpisode
     }

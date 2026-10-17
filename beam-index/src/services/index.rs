@@ -13,7 +13,9 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::disc::{self, DiscRead};
-use crate::library_file::{FileMeta, LibraryFile, StatCursor, is_refusal, stat_regular_file};
+use crate::library_file::{
+    EntryKind, FileMeta, LibraryFile, StatCursor, is_refusal, stat_regular_file,
+};
 use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
 use crate::services::admin_log::AdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FilesystemProbe, StatfsFilesystemProbe};
@@ -573,15 +575,19 @@ fn plan_missing<'a>(
     plan
 }
 
-/// Whether nothing is at `path` any more: a stat that does not follow a
-/// link says "no such file". Any other failure -- a permission error, a
-/// transient I/O error on a network mount -- says nothing about the file, so
-/// it is not absent.
-fn path_is_absent(path: &Path) -> bool {
-    matches!(
-        std::fs::symlink_metadata(path),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound
-    )
+/// Whether no file or folder of the library rooted at `root` is at `path`
+/// any more: a stat that follows no link beneath the root
+/// ([`StatCursor::kind`], issue #246) says "no such file", finds something
+/// that is neither -- a link, a FIFO -- or is refused because a folder above
+/// the path is a link now ([`is_refusal`]). Any other failure -- a
+/// permission error, a transient I/O error on a network mount -- says
+/// nothing about the file, so it is not absent.
+fn path_is_absent(root: &Path, path: &Path) -> bool {
+    match StatCursor::new(root).kind(path) {
+        Ok(EntryKind::File | EntryKind::Folder) => false,
+        Ok(EntryKind::Other) => true,
+        Err(err) => err.kind() == std::io::ErrorKind::NotFound || is_refusal(&err),
+    }
 }
 
 /// A walked file's size, modification time, identity and content hash, read
@@ -1908,7 +1914,8 @@ impl LocalIndexService {
     /// file a viewer's watch state last played -- its hash and its probe
     /// results; nothing is re-probed. A title the move leaves with no file (a
     /// show a legacy build named after a `Season 01` folder) is retired by
-    /// the scan's orphan cleanup.
+    /// the scan's orphan cleanup, its viewers' watch state carried first to
+    /// the title the file joins.
     ///
     /// Only a row that was probed is reclassified: one whose probe failed has
     /// no runtime and was never classified.
@@ -1929,6 +1936,11 @@ impl LocalIndexService {
             (Some(_), FileStatus::Unknown) => FileStatus::Known,
             (Some(_), status) => status,
         };
+        // A title the move empties goes with orphan cleanup, and its viewers'
+        // state with it unless carried first (issue #246).
+        if let (Some(from), Some(to)) = (&existing.content, &content) {
+            self.carry_from_emptied_title(existing.id, from, to).await?;
+        }
         self.file_repo
             .set_classification(
                 existing.id,
@@ -2024,9 +2036,14 @@ impl LocalIndexService {
                 inodes,
                 hash,
             };
-            if let Some(row) =
-                choose_relink_candidate(path, size, hash, &candidates, path_is_absent, &last_played)
-            {
+            if let Some(row) = choose_relink_candidate(
+                path,
+                size,
+                hash,
+                &candidates,
+                |old| path_is_absent(root, old),
+                &last_played,
+            ) {
                 self.relink_files(&[(row.clone(), path.to_path_buf(), found)], &[], library)
                     .await?;
                 return Ok(FileOutcome::Relinked);
@@ -3461,6 +3478,17 @@ impl LocalIndexService {
                 // Its files stay where they are; the holder's move below.
                 self.read_held_parts(&rows, &key).await?;
             }
+            // The retired movie's viewers keep their place on the survivor;
+            // left behind, it would go when the retired movie does. Carried
+            // before any file moves, so a pass that stops part-way leaves the
+            // state on the title that keeps it -- never on one the move has
+            // emptied for orphan cleanup to retire (issue #246).
+            self.progress_repo
+                .carry(
+                    WatchTarget::Movie { movie_id: loser },
+                    WatchTarget::Movie { movie_id: survivor },
+                )
+                .await?;
             for entry in self.movie_repo.find_entries_by_movie_id(loser).await? {
                 let MovieEntry {
                     id: entry_id,
@@ -3494,14 +3522,6 @@ impl LocalIndexService {
                 }
                 entry_files.entry(target.id).or_default().extend(moved);
             }
-            // The retired movie's viewers keep their place on the survivor;
-            // left behind, it would go when the retired movie does.
-            self.progress_repo
-                .carry(
-                    WatchTarget::Movie { movie_id: loser },
-                    WatchTarget::Movie { movie_id: survivor },
-                )
-                .await?;
             let (kept, retired) = if survivor == movie.id {
                 (&movie, &holder)
             } else {
@@ -3650,6 +3670,20 @@ impl LocalIndexService {
                             air_date,
                         })
                         .await?;
+                    // Carried before the episode's files move, as for a
+                    // movie merge.
+                    self.progress_repo
+                        .carry(
+                            WatchTarget::Episode {
+                                episode_id,
+                                show_id: loser,
+                            },
+                            WatchTarget::Episode {
+                                episode_id: target.id,
+                                show_id: survivor,
+                            },
+                        )
+                        .await?;
                     let moved = episode_files.remove(&episode_id).unwrap_or_default();
                     for (file, _) in &moved {
                         let last_episode_number = match file.content {
@@ -3672,18 +3706,6 @@ impl LocalIndexService {
                         .await?;
                     }
                     episode_files.entry(target.id).or_default().extend(moved);
-                    self.progress_repo
-                        .carry(
-                            WatchTarget::Episode {
-                                episode_id,
-                                show_id: loser,
-                            },
-                            WatchTarget::Episode {
-                                episode_id: target.id,
-                                show_id: survivor,
-                            },
-                        )
-                        .await?;
                 }
             }
             let (kept, retired) = if survivor == show.id {
@@ -3911,6 +3933,100 @@ impl LocalIndexService {
         Ok(())
     }
 
+    /// The title watch state is kept against for a file of `content`: its
+    /// movie, or its episode and that episode's show. `None` when the entry
+    /// or episode is gone.
+    async fn watch_target_of(
+        &self,
+        content: &MediaFileContent,
+    ) -> Result<Option<WatchTarget>, DbErr> {
+        match *content {
+            MediaFileContent::Movie { movie_entry_id, .. } => Ok(self
+                .movie_repo
+                .find_entry_by_id(movie_entry_id)
+                .await?
+                .map(|entry| WatchTarget::Movie {
+                    movie_id: entry.movie_id,
+                })),
+            MediaFileContent::Episode { episode_id, .. } => {
+                let Some(episode) = self.show_repo.find_episode_by_id(episode_id).await? else {
+                    return Ok(None);
+                };
+                Ok(self
+                    .show_repo
+                    .find_season_by_id(episode.season_id)
+                    .await?
+                    .map(|season| WatchTarget::Episode {
+                        episode_id,
+                        show_id: season.show_id,
+                    }))
+            }
+        }
+    }
+
+    /// Before the file `file_id` moves from `from` to `to`, carry the watch
+    /// state of the title it leaves onto the one it joins -- when that move
+    /// leaves the title with no other visible file, so that orphan cleanup
+    /// would otherwise retire it with its viewers' state (issue #246). A
+    /// title another file still holds keeps its state; so does one moving to
+    /// a title of the other kind, which no watch state can follow.
+    async fn carry_from_emptied_title(
+        &self,
+        file_id: Uuid,
+        from: &MediaFileContent,
+        to: &MediaFileContent,
+    ) -> Result<(), DbErr> {
+        let (Some(from), Some(to)) = (
+            self.watch_target_of(from).await?,
+            self.watch_target_of(to).await?,
+        ) else {
+            return Ok(());
+        };
+        let keeps_a_file = match (from, to) {
+            (WatchTarget::Movie { movie_id }, WatchTarget::Movie { movie_id: to_movie }) => {
+                if movie_id == to_movie {
+                    return Ok(());
+                }
+                let mut keeps = false;
+                for entry in self.movie_repo.find_entries_by_movie_id(movie_id).await? {
+                    if self
+                        .file_repo
+                        .find_by_movie_entry_id(entry.id)
+                        .await?
+                        .iter()
+                        .any(|file| file.id != file_id)
+                    {
+                        keeps = true;
+                        break;
+                    }
+                }
+                keeps
+            }
+            (
+                WatchTarget::Episode { episode_id, .. },
+                WatchTarget::Episode {
+                    episode_id: to_episode,
+                    ..
+                },
+            ) => {
+                if episode_id == to_episode {
+                    return Ok(());
+                }
+                self.file_repo
+                    .find_by_episode_id(episode_id)
+                    .await?
+                    .iter()
+                    .any(|file| file.id != file_id)
+            }
+            (WatchTarget::Movie { .. }, WatchTarget::Episode { .. })
+            | (WatchTarget::Episode { .. }, WatchTarget::Movie { .. }) => return Ok(()),
+        };
+        if keeps_a_file {
+            return Ok(());
+        }
+        self.progress_repo.carry(from, to).await
+    }
+
     /// Point `file` at `content`, keeping its status and classifier version.
     async fn move_file(&self, file: &MediaFile, content: MediaFileContent) -> Result<(), DbErr> {
         self.file_repo
@@ -4127,12 +4243,15 @@ impl LocalIndexService {
         // other failure (EACCES from an unsearchable parent, a transient EIO
         // or ESTALE on a network mount) says nothing about the file, so the
         // event is dropped rather than read as a deletion; the next scan
-        // shields the same path (issue #179). The stat does not follow a
-        // symlink: a link is not a library file (issue #186), so a path that
-        // is now one reconciles exactly like a path that is gone.
-        let meta = match std::fs::symlink_metadata(&path) {
-            Ok(meta) => Some(meta),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        // shields the same path (issue #179). The stat follows no link
+        // beneath the root ([`StatCursor::kind`], issues #238 and #246): a
+        // link is not a library file (issue #186), so a path that is now one
+        // -- or is reached through a folder that is now one, which the stat
+        // refuses -- reconciles exactly like a path that is gone.
+        let kind = match StatCursor::new(&library.root_path).kind(&path) {
+            Ok(EntryKind::Other) => None,
+            Ok(kind) => Some(kind),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound || is_refusal(&err) => None,
             Err(err) => {
                 warn!(
                     path = %path.display(),
@@ -4142,14 +4261,6 @@ impl LocalIndexService {
                 return Ok(ReconcileOutcome::Done);
             }
         };
-        // Nor is a file reached through a link: the stat above follows a
-        // folder above the path that has become one, but the stat every
-        // record of a library file comes from refuses it (issue #238), so
-        // such a path reconciles as gone too.
-        let meta = meta.filter(|meta| {
-            !(meta.is_file()
-                && stat_regular_file(&library.root_path, &path).is_err_and(|err| is_refusal(&err)))
-        });
 
         // Anything at or inside a disc structure is its disc's (issue #234):
         // which of its stream files the disc's main title plays depends on
@@ -4161,17 +4272,17 @@ impl LocalIndexService {
             .disc_root(relative_to(&library.root_path, &path))
         {
             let disc_root = library.root_path.join(disc_root);
-            return match std::fs::symlink_metadata(&disc_root) {
-                Ok(meta) if meta.is_dir() => {
+            return match StatCursor::new(&library.root_path).kind(&disc_root) {
+                Ok(EntryKind::Folder) => {
                     let inodes = self.inodes_of(&library);
                     self.reconcile_directory(&disc_root, &library, inodes).await
                 }
-                Ok(_) => {
+                Ok(EntryKind::File | EntryKind::Other) => {
                     self.reconcile_gone(&disc_root, &library).await?;
                     self.rederive_disc_set_of(&library, &disc_root).await?;
                     Ok(ReconcileOutcome::Done)
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound || is_refusal(&err) => {
                     self.reconcile_gone(&disc_root, &library).await?;
                     self.rederive_disc_set_of(&library, &disc_root).await?;
                     Ok(ReconcileOutcome::Done)
@@ -4195,7 +4306,7 @@ impl LocalIndexService {
             .disposition(relative_to(&library.root_path, &path))
             == PathDisposition::Sidecar
         {
-            let is_file = meta.as_ref().is_some_and(std::fs::Metadata::is_file);
+            let is_file = kind == Some(EntryKind::File);
             if hints::is_nfo(&path) {
                 self.reconcile_nfo_event(&library, &path, is_file, &[])
                     .await?;
@@ -4205,17 +4316,17 @@ impl LocalIndexService {
             }
         }
 
-        let outcome = match meta {
-            Some(meta) if meta.is_file() => {
+        let outcome = match kind {
+            Some(EntryKind::File) => {
                 let inodes = self.inodes_of(&library);
                 self.reconcile_file(&path, &library, reclassify, inodes)
                     .await?
             }
-            Some(meta) if meta.is_dir() => {
+            Some(EntryKind::Folder) => {
                 let inodes = self.inodes_of(&library);
                 return self.reconcile_directory(&path, &library, inodes).await;
             }
-            _ => {
+            Some(EntryKind::Other) | None => {
                 self.reconcile_gone(&path, &library).await?;
                 // A disc folder of a set gone takes its disc out of the set
                 // (issue #234).
@@ -4396,7 +4507,7 @@ impl LocalIndexService {
             .into_iter()
             .filter(|row| {
                 row.missing_since.is_none()
-                    && (path_is_absent(&row.path)
+                    && (path_is_absent(&library.root_path, &row.path)
                         || stat_regular_file(&library.root_path, &row.path)
                             .is_err_and(|err| is_refusal(&err)))
             })

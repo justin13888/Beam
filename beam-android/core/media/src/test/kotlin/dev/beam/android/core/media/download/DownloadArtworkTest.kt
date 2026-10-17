@@ -5,21 +5,26 @@ package dev.beam.android.core.media.download
 
 import android.content.Context
 import android.util.Base64
+import androidx.core.net.toUri
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadManager
+import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.test.core.app.ApplicationProvider
 import coil3.ImageLoader
 import coil3.decode.DataSource
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
+import coil3.request.ImageResult
 import coil3.request.SuccessResult
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.BeamImageLoader
 import dev.beam.android.core.media.http.ServerCallFactory
+import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.testing.FakePlaybackRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -106,6 +111,7 @@ class DownloadArtworkTest {
     private lateinit var cache: SimpleCache
     private lateinit var media3: DownloadManager
     private lateinit var titles: DownloadTitleStore
+    private lateinit var artwork: DownloadArtwork
     private lateinit var downloads: BeamDownloadManager
     private val playback = FakePlaybackRepository()
 
@@ -133,7 +139,8 @@ class DownloadArtworkTest {
         // Only the artwork is under test; the media bytes are not fetched.
         media3.pauseDownloads()
         titles = FileDownloadTitleStore(context)
-        downloads = BeamDownloadManager(media3, titles, DownloadArtwork(context) { loader })
+        artwork = DownloadArtwork(context, temp.newFolder("download-artwork")) { loader }
+        downloads = BeamDownloadManager(media3, titles, artwork)
     }
 
     @After
@@ -151,20 +158,35 @@ class DownloadArtworkTest {
             enqueue("f1", POSTER)
 
             online = false
-            // What Artwork asks for: the URL as the model, default keys. The
-            // memory cache is bypassed because a fresh process has none.
-            val result =
-                loader.execute(
-                    ImageRequest
-                        .Builder(context)
-                        .data(POSTER)
-                        .memoryCachePolicy(CachePolicy.DISABLED)
-                        .build(),
-                )
+            val result = renderRecordOf("f1")
 
             assertTrue("rendered offline, got $result", result is SuccessResult)
             assertEquals(DataSource.DISK, (result as SuccessResult).dataSource)
             assertEquals(listOf(POSTER), fetched)
+        }
+
+    @Test
+    fun `a kept poster outlives the image cache dropping it`() =
+        runTest {
+            enqueue("f1", POSTER)
+
+            online = false
+            // What enough browsing does to an LRU cache, all at once.
+            loader.diskCache!!.clear()
+            val result = renderRecordOf("f1")
+
+            assertTrue("rendered offline from the kept copy, got $result", result is SuccessResult)
+            assertEquals(listOf(POSTER), fetched)
+        }
+
+    @Test
+    fun `a download whose poster could not be kept still names the poster's URL`() =
+        runTest {
+            online = false
+            enqueue("f1", POSTER)
+
+            // Online, the screen still fetches it like any other poster.
+            assertEquals(POSTER, recordOf("f1").posterUrl)
         }
 
     @Test
@@ -180,6 +202,34 @@ class DownloadArtworkTest {
             enqueue("f1", POSTER)
 
             assertTrue(isOnDisk(POSTER))
+        }
+
+    @Test
+    fun `a poster already kept is not fetched again`() =
+        runTest {
+            enqueue("e1", POSTER)
+            // Without the kept copy, a second pin would have to go back to the wire.
+            loader.diskCache!!.clear()
+
+            enqueue("e2", POSTER)
+
+            assertEquals(listOf(POSTER), fetched)
+            assertTrue(isOnDisk(POSTER))
+        }
+
+    @Test
+    fun `a poster that cannot be stored does not fail the download`() =
+        runTest {
+            // A regular file where the store's directory should be: every write into it fails.
+            val blocked = temp.newFile("not-a-directory")
+            artwork = DownloadArtwork(context, blocked) { loader }
+            downloads = BeamDownloadManager(media3, titles, artwork)
+
+            enqueue("f1", POSTER)
+
+            assertTrue("the download was still recorded", titles.get("f1") != null)
+            assertEquals(listOf(POSTER), fetched)
+            assertFalse(isOnDisk(POSTER))
         }
 
     @Test
@@ -279,7 +329,34 @@ class DownloadArtworkTest {
         repository = playback,
     )
 
-    private fun isOnDisk(url: String): Boolean = loader.diskCache!!.openSnapshot(url)?.use { true } ?: false
+    /** The record the downloads screen would be handed for [fileId]. */
+    private fun recordOf(fileId: String): DownloadRecord =
+        Download(
+            DownloadRequest.Builder(fileId, "https://beam.test/v1/files/$fileId".toUri()).build(),
+            Download.STATE_COMPLETED,
+            0L,
+            0L,
+            0L,
+            Download.STOP_REASON_NONE,
+            Download.FAILURE_REASON_NONE,
+        ).toRecord(titles, artwork)
+
+    /**
+     * Render [fileId]'s poster the way `Artwork` does: the record's poster as
+     * the model, default keys. The memory cache is bypassed because a fresh
+     * process has none.
+     */
+    private suspend fun renderRecordOf(fileId: String): ImageResult =
+        loader.execute(
+            ImageRequest
+                .Builder(context)
+                .data(recordOf(fileId).posterUrl)
+                .memoryCachePolicy(CachePolicy.DISABLED)
+                .build(),
+        )
+
+    /** Whether the downloads screen would render [url] from a kept copy. */
+    private fun isOnDisk(url: String): Boolean = artwork.displayUrl(url) != url
 
     private companion object {
         const val POSTER = "https://beam.test/v1/artwork/media/m1/poster"

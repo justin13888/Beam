@@ -213,16 +213,26 @@ mod discovered {
 
     impl OidcHttpClient {
         pub(crate) fn new() -> Result<Self, reqwest::Error> {
-            Self::with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+            Self::from_builder(
+                reqwest::ClientBuilder::new(),
+                CONNECT_TIMEOUT,
+                REQUEST_TIMEOUT,
+            )
         }
 
-        /// [`Self::new`] with explicit bounds, so a test can prove the bound
-        /// is enforced without waiting out the production one.
-        fn with_timeouts(connect: Duration, request: Duration) -> Result<Self, reqwest::Error> {
+        /// [`Self::new`] over a caller's builder and with explicit bounds, so
+        /// a test can prove the bound is enforced without waiting out the
+        /// production one, and can talk to a loopback listener without
+        /// routing through whatever proxy the environment names.
+        fn from_builder(
+            builder: reqwest::ClientBuilder,
+            connect: Duration,
+            request: Duration,
+        ) -> Result<Self, reqwest::Error> {
             // Redirects are never followed: an IdP endpoint that answers with
             // a redirect is surfaced as that response, not chased to wherever
             // it points (the SSRF guidance of the OIDC/OAuth 2.0 specs).
-            let client = reqwest::ClientBuilder::new()
+            let client = builder
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(connect)
                 .timeout(request)
@@ -694,12 +704,22 @@ mod discovered {
 
     #[cfg(test)]
     mod http_client_tests {
-        use super::{OidcHttpClient, into_http_response};
+        use super::{CONNECT_TIMEOUT, OidcHttpClient, REQUEST_TIMEOUT, into_http_response};
         use openidconnect::http::{self, Method, StatusCode, Version, header::LOCATION};
         use openidconnect::{AsyncHttpClient, HttpClientError};
         use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::{TcpListener, TcpStream};
+
+        /// The production client with the given bounds, minus the
+        /// environment's proxy. Every test here talks to a loopback socket,
+        /// and an `HTTP_PROXY` would route the request to the proxy instead,
+        /// whose own answer -- a 502, or a connection it does make -- is not
+        /// what the test is about.
+        fn loopback_client(connect: Duration, request: Duration) -> OidcHttpClient {
+            OidcHttpClient::from_builder(reqwest::ClientBuilder::new().no_proxy(), connect, request)
+                .unwrap()
+        }
 
         /// Reads one HTTP/1.1 request (head plus a `Content-Length` body)
         /// off `stream` and returns it raw.
@@ -758,7 +778,7 @@ mod discovered {
                 .body(body.clone())
                 .unwrap();
 
-            let client = OidcHttpClient::new().unwrap();
+            let client = loopback_client(CONNECT_TIMEOUT, REQUEST_TIMEOUT);
             let response = client.call(request).await.unwrap();
 
             assert_eq!(response.status(), StatusCode::FOUND);
@@ -793,18 +813,23 @@ mod discovered {
 
         #[tokio::test]
         async fn an_unreachable_idp_is_a_transport_error() {
-            // Bind then drop, so the port is known to have no listener.
-            let addr = TcpListener::bind("127.0.0.1:0")
-                .await
-                .unwrap()
-                .local_addr()
-                .unwrap();
+            // A socket bound but never listening: a connection to its port is
+            // refused, and because the socket is held until the end of the
+            // test no other test running in parallel can be handed the same
+            // port and answer in its place -- as one could if the port were
+            // bound and released.
+            let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+            reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = reserved.local_addr().unwrap();
             let request = http::Request::builder()
                 .uri(format!("http://{addr}/.well-known/openid-configuration"))
                 .body(Vec::new())
                 .unwrap();
 
-            let result = OidcHttpClient::new().unwrap().call(request).await;
+            let result = loopback_client(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+                .call(request)
+                .await;
+            drop(reserved);
 
             match result {
                 Err(HttpClientError::Reqwest(error)) => assert!(error.is_connect(), "{error}"),
@@ -825,11 +850,7 @@ mod discovered {
                 let _ = stream.read_to_end(&mut sink).await;
             });
             let request = http::Request::builder().uri(url).body(Vec::new()).unwrap();
-            let client = OidcHttpClient::with_timeouts(
-                Duration::from_millis(200),
-                Duration::from_millis(200),
-            )
-            .unwrap();
+            let client = loopback_client(Duration::from_millis(200), Duration::from_millis(200));
 
             // The outer bound only turns a missing timeout into a failure
             // instead of a hung test run.

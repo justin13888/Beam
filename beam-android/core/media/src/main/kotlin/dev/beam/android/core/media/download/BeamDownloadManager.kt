@@ -56,7 +56,7 @@ public class BeamDownloadManager internal constructor(
     public val downloads: Flow<List<DownloadRecord>> =
         callbackFlow {
             fun publish() {
-                trySend(manager.currentDownloads.map { it.toRecord(titles) })
+                trySend(manager.currentDownloads.map { it.toRecord(titles, artwork) })
             }
 
             val listener =
@@ -240,7 +240,10 @@ public class BeamDownloadManager internal constructor(
     }
 }
 
-private fun Download.toRecord(titles: DownloadTitleStore): DownloadRecord {
+internal fun Download.toRecord(
+    titles: DownloadTitleStore,
+    artwork: DownloadArtwork,
+): DownloadRecord {
     val title = titles.get(request.id)
     return DownloadRecord(
         fileId = request.id,
@@ -249,7 +252,9 @@ private fun Download.toRecord(titles: DownloadTitleStore): DownloadRecord {
         serverId = title?.serverId.orEmpty(),
         title = title?.title ?: request.id,
         subtitle = title?.subtitle,
-        posterUrl = title?.posterUrl,
+        // The copy kept at enqueue time where there is one, so the poster
+        // renders with no network.
+        posterUrl = title?.posterUrl?.let(artwork::displayUrl),
         state =
             when (state) {
                 Download.STATE_QUEUED -> DownloadState.Queued

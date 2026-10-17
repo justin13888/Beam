@@ -458,7 +458,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   backoff (FR-304), naming the id, for a title a pin holds -- an NFO's or an administrator's --
   and leave it unmatched rather than failed once the retries are spent; a title with no pin a
   configured provider resolves, whose stored match the provider no longer has, MUST be searched
-  for again by its name instead.
+  for again by its name instead, and a title whose pin a configured provider resolves, whose
+  stored match the provider no longer has, MUST be fetched by its pin instead
+  ([#246](https://github.com/justin13888/beam/issues/246)).
 
 ## FR-4xx — Browse, Search & Detail
 

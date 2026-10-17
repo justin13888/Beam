@@ -428,13 +428,13 @@ impl MetadataEnrichmentService {
     }
 
     /// Clear `row`'s match, `gone`, which the provider no longer has, so no
-    /// later pass asks for it again: whatever the search that follows
-    /// finds, or fails to, the row no longer names it.
+    /// later pass asks for it again: whatever the search or the fetch by the
+    /// pin that follows finds, or fails to, the row no longer names it.
     async fn forget_match(&self, row: &EnrichmentState, gone: &ExternalMediaRef) {
         info!(
             target = ?row.target,
             matched = %gone,
-            "the provider no longer has a title's match; searching for it again"
+            "the provider no longer has a title's match; forgetting it"
         );
         if let Err(err) = self.state_repo.request_refresh(row.target, true).await {
             warn!(error = %err, "could not clear a match the provider no longer has");
@@ -471,9 +471,13 @@ impl MetadataEnrichmentService {
         // searched for; one pinned to an id only a match can be checked
         // against is searched, and the match must not contradict the pin. A
         // refresh of a match already made (`force_refresh` with
-        // `matched_ref`) comes first. A fetch by an id the provider has no
-        // title for is retried with backoff for a pinned title, and searched
-        // for afresh for an unpinned one (FR-304, FR-313).
+        // `matched_ref`) comes first. When the provider has no title for the
+        // match, an unpinned title is searched for afresh, and a pinned one
+        // whose match differs from its pin forgets the match and is fetched
+        // by its pin instead (issue #246). Only a fetch by the pin itself --
+        // a dead match equal to the pin, the pin fetched in place of a dead
+        // match, or the pin when no match is refreshed -- is retried with
+        // backoff (FR-304, FR-313).
         let (pin, pinned_ref) = self.pin_of(movie.pinned_ref.as_deref());
         let mut by_id = external_ref.clone().or_else(|| pinned_ref.clone());
         let resolved = match (external_ref, pinned_ref) {
@@ -490,6 +494,21 @@ impl MetadataEnrichmentService {
                             Ok(fetched) => fetched,
                             Err(outcome) => return outcome,
                         }
+                    }
+                    // The match of a pinned title, gone from the provider: it
+                    // is fetched by its pin instead -- one a provider
+                    // configured since the match was made resolves (issue
+                    // #246) -- rather than asked for by the dead id forever.
+                    Err(EnrichmentError::NotFound)
+                        if pinned_ref.as_ref().is_some_and(|pin| *pin != ref_id) =>
+                    {
+                        self.forget_match(row, &ref_id).await;
+                        let pinned_ref = pinned_ref.unwrap_or(ref_id);
+                        by_id = Some(pinned_ref.clone());
+                        self.provider
+                            .movie_enrichment(&pinned_ref)
+                            .await
+                            .map(|e| (pinned_ref, e, 1.0))
                     }
                     fetched => fetched.map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0))),
                 }
@@ -573,6 +592,19 @@ impl MetadataEnrichmentService {
                             Ok(fetched) => fetched,
                             Err(outcome) => return outcome,
                         }
+                    }
+                    // As for a movie: a pinned show's lost match falls back
+                    // to the pin.
+                    Err(EnrichmentError::NotFound)
+                        if pinned_ref.as_ref().is_some_and(|pin| *pin != ref_id) =>
+                    {
+                        self.forget_match(row, &ref_id).await;
+                        let pinned_ref = pinned_ref.unwrap_or(ref_id);
+                        by_id = Some(pinned_ref.clone());
+                        self.provider
+                            .show_enrichment(&pinned_ref)
+                            .await
+                            .map(|e| (pinned_ref, e, 1.0))
                     }
                     fetched => fetched.map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0))),
                 }
@@ -1179,11 +1211,12 @@ mod tests {
         }
     }
 
-    /// A refresh of a pinned title's match fetches by that match, and a
-    /// match the provider no longer has is what the retry names -- not the
-    /// pin, which was never asked for.
+    /// A refresh of a pinned title's match fetches by that match; a match
+    /// the provider no longer has falls back to the pin (issue #246) -- one
+    /// a provider configured since resolves -- and the dead match is
+    /// forgotten.
     #[tokio::test]
-    async fn a_pinned_titles_lost_match_is_retried_by_that_match() {
+    async fn a_pinned_titles_lost_match_falls_back_to_the_pin() {
         let provider =
             InMemoryEnrichmentProvider::new(&["tmdb"]).with_movie_enrichment(MovieEnrichment {
                 tmdb_id: Some(603),
@@ -1202,11 +1235,83 @@ mod tests {
 
         let report = service.sweep_once().await;
 
+        assert_eq!(report.enriched, 1, "{report:?}");
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+        assert_eq!(row.matched_ref.as_deref(), Some("tmdb:603"));
+        assert_eq!(
+            movie_repo.find_by_id(id).await.unwrap().unwrap().title,
+            "The Matrix"
+        );
+    }
+
+    /// As for a movie, a pinned show's lost match falls back to its pin.
+    #[tokio::test]
+    async fn a_pinned_shows_lost_match_falls_back_to_the_pin() {
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"]).with_show_enrichment(
+            ExternalMediaRef::new("tmdb", "1399"),
+            ShowEnrichment {
+                tmdb_id: Some(1399),
+                title: "Game of Thrones".to_string(),
+                ..Default::default()
+            },
+        );
+        let (service, _movies, show_repo, state_repo, _genres, _clock) = harness(provider);
+        let show = show_repo
+            .find_or_create_by_identity(CreateShow::new("got".to_string(), None))
+            .await
+            .unwrap();
+        assert!(
+            show_repo
+                .set_pinned_ref(
+                    show.id,
+                    &ProviderPin::Tmdb(1399),
+                    beam_domain::models::PinSource::Nfo
+                )
+                .await
+                .unwrap()
+        );
+        let target = EnrichmentTargetId::Show(show.id);
+        state_repo.ensure_pending(target).await.unwrap();
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
+        state_repo
+            .mark_enriched(row, "tmdb:999", 1.0, chrono::Utc::now())
+            .await
+            .unwrap();
+        state_repo.request_refresh(target, false).await.unwrap();
+
+        let report = service.sweep_once().await;
+
+        assert_eq!(report.enriched, 1, "{report:?}");
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+        assert_eq!(row.matched_ref.as_deref(), Some("tmdb:1399"));
+        assert_eq!(
+            show_repo.find_by_id(show.id).await.unwrap().unwrap().title,
+            "Game of Thrones"
+        );
+    }
+
+    /// A pinned title whose match and pin the provider both no longer has is
+    /// retried by the pin, which the retry names.
+    #[tokio::test]
+    async fn a_pinned_titles_lost_match_and_pin_are_retried_by_the_pin() {
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"]);
+        let (service, movie_repo, _shows, state_repo, _genres, _clock) = harness(provider);
+        let id = pinned_movie(&movie_repo, &state_repo, "matrix", ProviderPin::Tmdb(603)).await;
+        let target = EnrichmentTargetId::Movie(id);
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
+        state_repo
+            .mark_enriched(row, "tmdb:999", 1.0, chrono::Utc::now())
+            .await
+            .unwrap();
+        state_repo.request_refresh(target, false).await.unwrap();
+
+        let report = service.sweep_once().await;
+
         assert_eq!(report.retrying, 1, "{report:?}");
         let row = state_repo.find_by_target(target).await.unwrap().unwrap();
         assert_eq!(
             row.last_error.as_deref(),
-            Some("the provider has no title tmdb:999")
+            Some("the provider has no title tmdb:603")
         );
         assert_eq!(
             movie_repo.find_by_id(id).await.unwrap().unwrap().title,

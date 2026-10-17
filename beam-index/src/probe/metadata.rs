@@ -432,7 +432,14 @@ impl VideoFileMetadata {
             MetadataError::UnknownError(format!("Failed to rewind {}: {e}", file_path.display()))
         })?;
         let io = ffmpeg::format::context::StreamIo::from_read_seek(handle)?;
-        let context = ffmpeg::format::input_from_stream(io, file_path.to_str(), None)?;
+        // The handle is all FFmpeg may read (issue #246). A container that
+        // names other files -- an HLS or DASH playlist, a concat list, a MOV
+        // data reference -- would have FFmpeg open each by URL, through no
+        // check of where it leads; an empty protocol whitelist refuses every
+        // such open, so only the handle's own bytes are probed.
+        let mut options = ffmpeg::Dictionary::new();
+        options.set("protocol_whitelist", "");
+        let context = ffmpeg::format::input_from_stream(io, file_path.to_str(), Some(options))?;
 
         // Collect file-level metadata
         let metadata: HashMap<String, String> = context

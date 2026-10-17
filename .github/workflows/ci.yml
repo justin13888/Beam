@@ -134,6 +134,7 @@ jobs:
             compose:
               - *tooling
               - 'compose*.yaml'
+              - '.env.example'
               - 'dex/**'
             chart:
               - *tooling
@@ -657,11 +658,18 @@ jobs:
   # recorded against one renderer, and a runner image that silently moved to a
   # newer Xcode would fail them for a reason that has nothing to do with the
   # change under test.
+  #
+  # Each job has a timeout. A hung `simctl` or `xcodebuild` otherwise holds a
+  # scarce macOS runner for the six-hour default before the run fails. Each
+  # bound is over three times what a passing run takes: under two minutes for
+  # lint, and up to about seventeen for the three that cross-compile the core
+  # and install the simulator runtime.
   apple-lint:
     name: Apple lint
     needs: [changes]
     if: needs.changes.outputs.apple == 'true'
     runs-on: macos-26
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: maxim-lobanov/setup-xcode@v1
@@ -675,6 +683,7 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.apple == 'true'
     runs-on: macos-26
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: maxim-lobanov/setup-xcode@v1
@@ -695,6 +704,7 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.apple == 'true'
     runs-on: macos-26
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: maxim-lobanov/setup-xcode@v1
@@ -728,6 +738,7 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.apple == 'true'
     runs-on: macos-26
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: maxim-lobanov/setup-xcode@v1
