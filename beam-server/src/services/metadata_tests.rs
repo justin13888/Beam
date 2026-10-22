@@ -884,7 +884,7 @@ mod tests {
             Arc::default(),
         );
         let mut sources: Vec<(Uuid, Option<DiscStructure>, Vec<Uuid>)> = service
-            .get_media_sources(&movie_id.to_string())
+            .get_media_sources(movie_id)
             .await
             .unwrap()
             .into_iter()
@@ -949,10 +949,7 @@ mod tests {
             Arc::new(InMemorySidecarSubtitleRepository::default()),
             Arc::default(),
         );
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
         let mut found: Vec<(Option<DiscStructure>, Vec<Uuid>)> = sources
             .iter()
             .map(|s| {
@@ -1018,10 +1015,7 @@ mod tests {
             Arc::new(InMemorySidecarSubtitleRepository::default()),
             Arc::default(),
         );
-        let sources = service
-            .get_media_sources(&movie_id.to_string())
-            .await
-            .unwrap();
+        let sources = service.get_media_sources(movie_id).await.unwrap();
         let found: Vec<_> = sources
             .iter()
             .map(|s| {
