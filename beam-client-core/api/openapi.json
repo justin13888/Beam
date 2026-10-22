@@ -14159,7 +14159,7 @@
                 "type": "null"
               }
             ],
-            "description": "Present when this source is a DVD or Blu-ray folder rip's main title\n(issue #234): its parts are the disc's own stream files, served as\nthey are (ADR-0004)."
+            "description": "Present when this source is a DVD or Blu-ray folder rip's main title\n(issue #234): its parts are the disc's own stream files, served as\nthey are (ADR-0004). Absent for a set of discs that mixes DVD and\nBlu-ray, since no one kind describes it."
           },
           "parts": {
             "items": {
