@@ -40,6 +40,22 @@ ENV C_APP_TITLE=${C_APP_TITLE}
 ENV C_STREAM_SERVER_URL=${C_STREAM_SERVER_URL}
 RUN bun run build
 
+# Derive the API origin the bundle was just built against, for the
+# Content-Security-Policy below. C_STREAM_SERVER_URL is baked into the bundle
+# here, so the policy is derived from the same build argument rather than from
+# a runtime variable that could disagree with what the bundle requests. The
+# origin is normalised by the URL parser (scheme and host lowercased, a default
+# port dropped) and must be plain http(s) so it is a valid CSP source
+# expression and safe to substitute into the Caddyfile.
+RUN bun -e ' \
+    const url = new URL(process.env.C_STREAM_SERVER_URL); \
+    const origin = url.origin; \
+    if (!/^https?:\/\/[a-z0-9.\-]+(:[0-9]+)?$|^https?:\/\/\[[0-9a-f:.]+\](:[0-9]+)?$/.test(origin)) { \
+        throw new Error(`C_STREAM_SERVER_URL must be an http(s) URL, got origin ${origin}`); \
+    } \
+    console.log(origin); \
+    ' > /app/api-origin
+
 # ----------------------------------------------------
 # Serve statically-built web app with HTTP (caching handled externally)
 # ----------------------------------------------------
@@ -66,6 +82,15 @@ COPY <<EOF /etc/caddy/Caddyfile
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
+        # Defense in depth against XSS. @API_ORIGIN@ is replaced at build
+        # time with the origin of C_STREAM_SERVER_URL (see below).
+        # - script-src 'self': the Vite build emits no inline script.
+        # - style-src 'unsafe-inline': React, Radix and the player set
+        #   inline style attributes.
+        # - connect-src: the API, including the admin EventSource.
+        # - img-src: artwork is served by the API (/v1/artwork/...).
+        # - media-src: direct-play <video> streams from the API.
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' @API_ORIGIN@; media-src 'self' @API_ORIGIN@; connect-src 'self' @API_ORIGIN@; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
     }
 
     # Cache static assets
@@ -75,5 +100,15 @@ COPY <<EOF /etc/caddy/Caddyfile
     header @static Cache-Control "public, max-age=31536000, immutable"
 }
 EOF
+
+# Substitute the API origin into the CSP, then refuse to build an image whose
+# Caddyfile still holds the placeholder or does not parse.
+COPY --from=builder /app/api-origin /tmp/api-origin
+RUN origin="$(cat /tmp/api-origin)" \
+    && test -n "$origin" \
+    && sed -i "s|@API_ORIGIN@|$origin|g" /etc/caddy/Caddyfile \
+    && ! grep -q '@API_ORIGIN@' /etc/caddy/Caddyfile \
+    && caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+    && rm /tmp/api-origin
 
 EXPOSE 80

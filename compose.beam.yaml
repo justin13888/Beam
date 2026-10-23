@@ -140,11 +140,15 @@ services:
       context: .
       dockerfile: beam-web/Containerfile
       args:
-        # Pass build-time environment variables for Vite
+        # Pass build-time environment variables for Vite. C_STREAM_SERVER_URL
+        # is baked into the bundle, and the image's Content-Security-Policy
+        # admits that URL's origin for API calls, artwork and playback -- so
+        # changing it means rebuilding the image (`compose build web`).
         C_APP_TITLE: ${C_APP_TITLE:-Beam}
         C_STREAM_SERVER_URL: ${C_STREAM_SERVER_URL:-http://localhost:8000}
     environment:
-      # Runtime environment variables (if needed by nginx or the container)
+      # Informational only: Caddy reads neither, and setting them here changes
+      # neither the bundle nor the Content-Security-Policy (see the build args).
       C_APP_TITLE: ${C_APP_TITLE:-Beam}
       C_STREAM_SERVER_URL: ${C_STREAM_SERVER_URL:-http://localhost:8000}
     ports:
