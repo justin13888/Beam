@@ -13,6 +13,8 @@
 			"beam-web/index.html",
 			"beam-web/vite.config.ts",
 			"beam-web/vitest.config.ts",
+			"beam-web/playwright.config.ts",
+			"beam-web/e2e/**/*.ts",
 			"beam-web/codegen.ts",
 			"beam-docs/src/**/*.ts",
 			"beam-docs/src/**/*.tsx",

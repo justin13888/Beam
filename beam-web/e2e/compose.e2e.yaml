@@ -1,0 +1,55 @@
+# Compose override for the browser end-to-end suite (#74). Layered over the
+# root compose.yaml by `mise run ts:e2e`, which is the only supported entry
+# point: it builds the image named below, runs the stack under its own project
+# name so its volumes never mix with `dev:up`'s, and tears it down afterwards.
+#
+# Deliberately not `include`d by compose.yaml. Nothing here belongs in an
+# operator's stack, and `check:compose-invariants` reads exactly the files
+# compose.yaml includes.
+services:
+  server:
+    # Built by `ts:e2e` before the stack starts, so the fixture seeder below
+    # can run the very same image. With the image present, compose uses it
+    # rather than building the service again.
+    image: ${BEAM_E2E_SERVER_IMAGE:?set by mise run ts:e2e}
+
+  # Writes the suite's one fixture into the library volume, then exits. It is
+  # run with `compose run` before the server starts, never by `up`, which is
+  # what the profile guarantees.
+  #
+  # The server's own image is reused because it already carries the FFmpeg
+  # CLI with libx264 (beam-server/Containerfile), so the fixture needs no host
+  # FFmpeg and no third image. Writing into the named volume rather than
+  # bind-mounting a host directory keeps the run identical on Docker and on
+  # rootless podman under SELinux, where an unlabelled bind mount is
+  # unreadable from the container.
+  #
+  # The server still mounts this volume read-only (compose.beam.yaml, FR-202):
+  # the seeder is test infrastructure standing in for the operator who put the
+  # files there, not Beam writing under a library root.
+  e2e-fixtures:
+    image: ${BEAM_E2E_SERVER_IMAGE:?set by mise run ts:e2e}
+    profiles: [e2e]
+    user: "0:0"
+    network_mode: none
+    volumes:
+      - server_videos:/fixtures
+    entrypoint: ["sh", "-euc"]
+    # Ten seconds of H.264/AAC in an MP4 with the index up front: the format a
+    # browser direct-plays (ADR-0004), small enough to generate in a second.
+    # The title and year are what beam-web/e2e/core-loop.e2e.ts searches for.
+    command:
+      - |
+        dir="/fixtures/Beam E2E Fixture (2026)"
+        mkdir -p "$$dir"
+        ffmpeg -nostdin -hide_banner -loglevel error -y \
+          -f lavfi -i testsrc2=size=640x360:rate=24:duration=10 \
+          -f lavfi -i sine=frequency=440:sample_rate=48000:duration=10 \
+          -c:v libx264 -pix_fmt yuv420p -profile:v main \
+          -c:a aac -b:a 96k \
+          -movflags +faststart -shortest \
+          "$$dir/Beam E2E Fixture (2026).mp4"
+        chmod -R a+rX /fixtures
+
+volumes:
+  server_videos:
