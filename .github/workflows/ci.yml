@@ -535,6 +535,10 @@ jobs:
       needs.changes.outputs.ts == 'true' ||
       needs.changes.outputs.compose == 'true'
     runs-on: ubuntu-latest
+    # A cold cache compiles FFmpeg and the release server; a warm one takes a
+    # fraction of that. The bound is a backstop for a run that hangs, which
+    # would otherwise hold the runner for GitHub's six-hour default.
+    timeout-minutes: 60
     env:
       # The runner has podman as well as docker, and scripts/compose.sh would
       # pick podman. The image is built with docker buildx below, so compose
