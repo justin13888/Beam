@@ -90,14 +90,18 @@ export const handlers = [
 
 	// ── libraries ────────────────────────────────────────────────────────
 	http.get(`${BASE_URL}/v1/libraries`, () =>
-		HttpResponse.json<Schemas["beam_server.models.library.Library"][]>([]),
+		HttpResponse.json(
+			factory.connection<Schemas["beam_server.models.library.Library"]>([]),
+		),
 	),
 	http.get(`${BASE_URL}/v1/libraries/:id`, () =>
 		problem(404, "No library has that id", "#library-not-found"),
 	),
 	http.get(`${BASE_URL}/v1/libraries/:id/files`, () =>
-		HttpResponse.json<Schemas["beam_server.models.library.file.LibraryFile"][]>(
-			[],
+		HttpResponse.json(
+			factory.connection<
+				Schemas["beam_server.models.library.file.LibraryFile"]
+			>([]),
 		),
 	),
 

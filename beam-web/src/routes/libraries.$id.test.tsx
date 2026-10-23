@@ -7,6 +7,7 @@ import * as factory from "@/test/factories";
 import { BASE_URL } from "@/test/handlers";
 import { renderRoute } from "@/test/harness";
 import { problem } from "@/test/problem";
+import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
 type LibraryFile =
@@ -66,7 +67,7 @@ function serveLibrary({ filesStatus = 200 }: { filesStatus?: number } = {}) {
 		),
 		http.get(`${BASE_URL}/v1/libraries/:id/files`, () =>
 			filesStatus === 200
-				? HttpResponse.json(files)
+				? HttpResponse.json(factory.connection(files))
 				: problem(filesStatus, "boom", "#internal"),
 		),
 	);
@@ -102,6 +103,36 @@ describe("/libraries/$id", () => {
 		).toBeInTheDocument();
 		// Footer row count.
 		expect(screen.getByText(/Showing 3 of 3 files/)).toBeInTheDocument();
+	});
+
+	it("walks every page of the file connection", async () => {
+		const requests = recordRequests();
+		const [first, second, third] = files;
+		server.use(
+			http.get(`${BASE_URL}/v1/libraries/:id`, () =>
+				HttpResponse.json(testLibrary),
+			),
+			http.get(`${BASE_URL}/v1/libraries/:id/files`, ({ request }) =>
+				new URL(request.url).searchParams.get("after") === "page-2"
+					? HttpResponse.json(factory.connection([third]))
+					: HttpResponse.json(
+							factory.connection([first, second], {
+								has_next_page: true,
+								end_cursor: "page-2",
+							}),
+						),
+			),
+		);
+		renderPage();
+
+		// All three rows, though no single response carried them all.
+		expect(await screen.findByText("Gamma.avi")).toBeInTheDocument();
+		expect(screen.getByText("Alpha.mkv")).toBeInTheDocument();
+		expect(screen.getByText(/Showing 3 of 3 files/)).toBeInTheDocument();
+
+		const sent = requests.matching("GET", "/v1/libraries/lib-1/files");
+		expect(sent.map((r) => r.query.get("after"))).toEqual([null, "page-2"]);
+		expect(sent.every((r) => r.query.get("first") === "500")).toBe(true);
 	});
 
 	it("narrows the table with the client-side search filter", async () => {
