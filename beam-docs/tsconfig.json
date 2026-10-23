@@ -1,3 +1,10 @@
+// Type-checked by TypeScript 6, not 7. `astro check` (@astrojs/check 0.9.x,
+// peer `typescript ^5 || ^6`) drives the type check through the JS compiler
+// API, which TypeScript 7's native compiler does not ship. Against 7.0.2 it
+// stops with "The TypeScript module loaded (found 7.0.2) does not expose the
+// programmatic API that `astro check` relies on". Upstream tracks it in
+// withastro/roadmap#1321. Move `typescript` in package.json to ^7 once a
+// release of @astrojs/check supports it.
 {
   "extends": "astro/tsconfigs/strict",
   "include": [
