@@ -1320,6 +1320,68 @@ mod tests {
         );
     }
 
+    /// A pinned title whose match is its pin, and which the provider no
+    /// longer has, is retried by that id and keeps the match: the dead match
+    /// is the pin, so it is not forgotten (issue #259) -- for a movie and for
+    /// a show alike.
+    #[tokio::test]
+    async fn a_pinned_titles_lost_match_equal_to_its_pin_is_retried_and_kept() {
+        use beam_domain::models::PinSource;
+
+        for kind in [TitleKind::Movie, TitleKind::Show] {
+            let provider = InMemoryEnrichmentProvider::new(&["tmdb"]);
+            let (service, movie_repo, show_repo, state_repo, _genres, _clock) = harness(provider);
+            let pin = ProviderPin::Tmdb(603);
+            let target = match kind {
+                TitleKind::Movie => {
+                    let id = pinned_movie(&movie_repo, &state_repo, "matrix", pin).await;
+                    EnrichmentTargetId::Movie(id)
+                }
+                TitleKind::Show => {
+                    let show = show_repo
+                        .find_or_create_by_identity(CreateShow::new("got".to_string(), None))
+                        .await
+                        .unwrap();
+                    assert!(
+                        show_repo
+                            .set_pinned_ref(show.id, &pin, PinSource::Nfo)
+                            .await
+                            .unwrap()
+                    );
+                    let target = EnrichmentTargetId::Show(show.id);
+                    state_repo.ensure_pending(target).await.unwrap();
+                    target
+                }
+            };
+            let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
+            state_repo
+                .mark_enriched(row, "tmdb:603", 1.0, chrono::Utc::now())
+                .await
+                .unwrap();
+            state_repo.request_refresh(target, false).await.unwrap();
+
+            let report = service.sweep_once().await;
+
+            assert_eq!(
+                (report.retrying, report.unmatched),
+                (1, 0),
+                "{kind:?}: {report:?}"
+            );
+            let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+            assert_eq!(row.status, EnrichmentStatus::Pending, "{kind:?}");
+            assert_eq!(
+                row.last_error.as_deref(),
+                Some("the provider has no title tmdb:603"),
+                "{kind:?}"
+            );
+            assert_eq!(
+                row.matched_ref.as_deref(),
+                Some("tmdb:603"),
+                "{kind:?}: the match equal to the pin is kept"
+            );
+        }
+    }
+
     /// An unpinned title whose match the provider no longer has is searched
     /// for by its name in the same pass, as a title never matched is, rather
     /// than retried by the dead id -- and the dead id is gone from its row

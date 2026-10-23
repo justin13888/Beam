@@ -36,6 +36,7 @@ if (!("IntersectionObserver" in globalThis)) {
 	class NoopIntersectionObserver implements IntersectionObserver {
 		readonly root = null;
 		readonly rootMargin = "";
+		readonly scrollMargin = "";
 		readonly thresholds: readonly number[] = [];
 		disconnect() {}
 		observe() {}

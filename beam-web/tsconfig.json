@@ -1,3 +1,17 @@
+// Type-checked by TypeScript 7, the native compiler: `tsc` comes from the
+// `typescript-7` alias in package.json. The package named `typescript` is
+// `@typescript/typescript6` on purpose, and stays until openapi-typescript runs
+// on 7. TypeScript 7 does not ship the JS compiler API (its main export is only
+// the version string), and openapi-typescript 7.13.0 builds `api.gen.ts` through
+// `ts.factory` from whatever `typescript` resolves to -- against 7 it fails
+// with `Cannot read properties of undefined (reading 'createKeywordTypeNode')`.
+// `@typescript/typescript6` re-exports the TypeScript 6 API and ships only a
+// `tsc6` bin, so it does not collide with 7's `tsc`. bun has no nested
+// overrides, so the API cannot be scoped to openapi-typescript alone. When it
+// supports 7, set `typescript` to `typescript@^7` and drop the alias.
+//
+// `baseUrl` is gone: TypeScript 7 removed it, and `paths` resolve relative to
+// this file.
 {
   "include": ["**/*.ts", "**/*.tsx"],
   "compilerOptions": {
@@ -20,7 +34,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
     }
