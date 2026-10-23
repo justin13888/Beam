@@ -185,6 +185,12 @@ surviving mutant is a prompt to harden the code, not a broken build. See the har
 Commits must be [Conventional Commits](https://www.conventionalcommits.org/); `convco` enforces this
 in the `commit-msg` hook, and release-please derives the version and `CHANGELOG.md` from them.
 
+Push by remote name (`git push origin <branch>`), never to a URL. For a push to a URL, `hk` cannot
+find the remote's `master` to diff against, so the pre-push hook hands every tracked file to every
+step and a one-line change runs the full Rust, Android and Apple builds. Where SSH is unavailable,
+set `git config remote.origin.pushurl https://github.com/justin13888/Beam.git` and keep pushing to
+`origin`. The `default_branch` comment in `hk.pkl` and ADR-0009 have the detail (#282).
+
 The Rust tasks statically vendor an LGPL-only FFmpeg by default (via `ffmpeg-sys-next`'s `build`
 feature), so they compile on hosts without system FFmpeg development libraries -- no `.pc` files for
 `libavutil` etc., which is common outside CI/containers. This requires a `nasm` assembler on `PATH`.

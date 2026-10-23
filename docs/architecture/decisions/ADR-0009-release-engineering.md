@@ -107,3 +107,17 @@ in the vendored FFmpeg build failed on a fresh worktree's first push. `check:hoo
 `mise run ci`, drives the hook under that environment to keep it so.) Existing clones must delete the
 stale lefthook shims in `.git/hooks/`: `hk` installs via git's `hook.*` config on git 2.54+ rather
 than by writing hook files, so the old shims would otherwise keep running alongside it.
+
+`pre-push` gates each step on a glob over the files being pushed, so what it costs depends on how
+`hk` builds that file set. (Amended — issue #282.) For a branch the remote does not have yet, `hk`
+1.57.0 diffs against `default_branch`, and against the empty tree when that ref does not resolve --
+which hands every tracked file to every step, and turns a one-line change into a full Rust, Android
+and Apple build. Two things led there, and only one is fixable in `hk.pkl`:
+
+- `default_branch` was the local `master`, which nothing fetches, so a long-lived clone or a linked
+  worktree diffed against a stale base and picked up everything merged since. It is now
+  `origin/master`, the base `commits:check` already measures from.
+- A push to a URL (`git push https://github.com/justin13888/Beam.git HEAD:refs/heads/x`) makes git
+  pass the URL where the remote name goes, and `hk` then looks for `refs/remotes/<the URL>/master`,
+  which never exists. No `hk` setting changes that. **Push by remote name**; where SSH is
+  unavailable, set `remote.origin.pushurl` to the HTTPS URL and keep pushing to `origin`.
