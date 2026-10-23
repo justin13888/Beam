@@ -2,7 +2,7 @@ package dev.beam.android.core.ffi.repository
 
 import kotlinx.coroutines.flow.Flow
 import uniffi.beam_client_core.AdminEvent
-import uniffi.beam_client_core.AdminLogEntry
+import uniffi.beam_client_core.AdminLogPage
 import uniffi.beam_client_core.AdminStatus
 import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BrowseQuery
@@ -200,10 +200,10 @@ public interface AdminRepository {
     /** The server's own health report. */
     public suspend fun health(): ServerHealth
 
-    /** One page of user accounts. */
+    /** One page of user accounts: [first] of them, after the page whose `endCursor` is [after]. */
     public suspend fun users(
-        limit: UInt?,
-        offset: UInt?,
+        first: UInt?,
+        after: String?,
     ): AdminUserPage
 
     /** Block or unblock an account. */
@@ -212,14 +212,14 @@ public interface AdminRepository {
         disabled: Boolean,
     )
 
-    /** One page of the operational log. */
+    /**
+     * One page of the operational log, newest first: [first] lines, after the page whose
+     * `endCursor` is [after]. Its `total` is how many lines the server holds.
+     */
     public suspend fun logs(
-        limit: UInt?,
-        offset: UInt?,
-    ): List<AdminLogEntry>
-
-    /** How many log lines the server holds. */
-    public suspend fun logCount(): ULong
+        first: UInt?,
+        after: String?,
+    ): AdminLogPage
 
     /** Recent server events, newest first. */
     public suspend fun events(limit: UInt?): List<AdminEvent>

@@ -850,9 +850,15 @@ mod tests {
             .send()
             .await;
         assert_eq!(response.status(), StatusCode::OK);
-        response
-            .json::<Vec<Value>>()
-            .into_iter()
+        let body = response.json::<Value>();
+        assert_eq!(
+            body["page_info"]["has_next_page"], false,
+            "the whole list is one page"
+        );
+        body["items"]
+            .as_array()
+            .expect("a connection's items")
+            .iter()
             .map(|session| session["id"].as_str().expect("a session id").to_string())
             .collect()
     }
@@ -883,24 +889,33 @@ mod tests {
         );
     }
 
+    /// An id naming no session is `404 #session-not-found`, and the caller
+    /// stays signed in: it is the id that failed, not their credential.
     #[tokio::test]
-    async fn delete_unknown_session_id_returns_401() {
+    async fn delete_unknown_session_id_returns_404() {
         let harness = make_harness(FakeOidcClient::with_identity(identity(
             "sessions2@example.com",
             true,
         )));
         let session_cookie = login_and_get_session_cookie(&harness, "sessions2@example.com").await;
 
-        let response = harness
+        harness
             .client
             .delete("/v1/sessions/00000000-0000-0000-0000-000000000000")
             .cookie(SESSION_COOKIE, &session_cookie)
             .send()
-            .await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            .await
+            .assert_status(StatusCode::NOT_FOUND)
+            .assert_problem_type(
+                "https://beam.justinchung.net/reference/errors/#session-not-found",
+            );
+        assert_eq!(
+            get_me(&harness, &session_cookie).await.status(),
+            StatusCode::OK
+        );
     }
 
-    /// A well-formed id nobody owns is a 401; a malformed one is a 400.
+    /// A well-formed id nobody owns is a 404; a malformed one is a 400.
     ///
     /// It used to be a 500, because the handler flattened every
     /// `SessionError` into `Internal`. The path id is typed `Uuid` now, so the
@@ -952,7 +967,8 @@ mod tests {
             .send()
             .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let sessions = response.json::<Vec<Value>>();
+        let body = response.json::<Value>();
+        let sessions = body["items"].as_array().expect("a connection's items");
         assert_eq!(sessions.len(), 1);
         let instant = |field: &str| {
             sessions[0][field]
@@ -1097,7 +1113,7 @@ mod tests {
             .await;
         assert_eq!(
             response.status(),
-            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
             "another user's session id must not be revocable, and must not be \
              distinguishable from one that does not exist"
         );

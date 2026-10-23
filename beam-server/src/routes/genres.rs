@@ -5,15 +5,22 @@
 use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::models::PageInfo;
 use crate::routes::api_error::{InternalError, SessionAuth};
 use crate::routes::tags::Media;
 use crate::state::AppState;
 
 /// The distinct genre names present in the library, sorted alphabetically.
+///
+/// A connection, as every `/v1` list is, though a catalog's genres are few
+/// enough that it is never paged: `items` is the whole list, both of
+/// `page_info`'s `has_*_page` flags are `false`, and it carries no cursors.
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct GenreList {
+pub struct GenreConnection {
     /// Genre display names, sorted alphabetically (case-insensitive).
-    pub genres: Vec<String>,
+    pub items: Vec<String>,
+    /// Always a single, complete page.
+    pub page_info: PageInfo,
 }
 
 /// List the distinct genres in the library, sorted for stable presentation.
@@ -25,7 +32,7 @@ pub struct GenreList {
 pub async fn list_genres(
     _auth: SessionAuth,
     Inject(state): Inject<AppState>,
-) -> Result<Json<GenreList>, InternalError> {
+) -> Result<Json<GenreConnection>, InternalError> {
     let mut genres: Vec<String> = state
         .services
         .genre_repo
@@ -37,7 +44,10 @@ pub async fn list_genres(
         .collect();
     genres.sort_by_key(|name| name.to_lowercase());
 
-    Ok(Json(GenreList { genres }))
+    Ok(Json(GenreConnection {
+        items: genres,
+        page_info: PageInfo::complete(),
+    }))
 }
 
 #[cfg(test)]

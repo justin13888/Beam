@@ -168,11 +168,11 @@ pub(crate) fn parse_user_id(user_id: &str) -> Result<Uuid, InternalError> {
 }
 
 /// `first`, defaulted and held to `1..=max`.
-fn page_size(first: Option<u32>, default: u32, max: u32) -> Result<NonZeroU32, String> {
+pub(crate) fn page_size(first: Option<u32>, default: u32, max: u32) -> Result<NonZeroU32, String> {
     let size = first.unwrap_or(default);
     NonZeroU32::new(size)
         .filter(|size| size.get() <= max)
-        .ok_or_else(|| format!("a page holds 1 to {max} titles, not {size}"))
+        .ok_or_else(|| format!("a page holds 1 to {max} items, not {size}"))
 }
 
 /// Record how far through a file the caller has watched.

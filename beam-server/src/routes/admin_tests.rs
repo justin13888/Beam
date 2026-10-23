@@ -13,6 +13,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::{
     models::{CreateUser, User},
@@ -38,13 +40,13 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 use crate::models::{
-    AdminLogEntry, AdminStatus, AdminUserList, CreateLibraryRequest, Library, ScanJob, ScanState,
-    ScanTrigger, UpdateAdminUserRequest,
+    AdminLogConnection, AdminStatus, AdminUserConnection, CreateLibraryRequest, Library,
+    LibraryConnection, ScanJob, ScanState, ScanTrigger, UpdateAdminUserRequest,
 };
 use crate::routes::admin::{
-    create_library, delete_library, get_admin_events, get_admin_log_count, get_admin_logs,
-    get_admin_status, get_library, get_library_files, get_library_scan, list_admin_users,
-    list_libraries, refresh_media_metadata, scan_library, stream_admin_events, update_admin_user,
+    create_library, delete_library, get_admin_events, get_admin_logs, get_admin_status,
+    get_library, get_library_files, get_library_scan, list_admin_users, list_libraries,
+    refresh_media_metadata, scan_library, stream_admin_events, update_admin_user,
 };
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::hash::HashService;
@@ -485,7 +487,6 @@ fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
                 ])
                 .mount(kynos::routes![
                     get_admin_logs,
-                    get_admin_log_count,
                     get_admin_events,
                     stream_admin_events,
                     list_admin_users,
@@ -525,7 +526,12 @@ async fn an_authenticated_caller_sees_an_empty_library_list() {
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.json::<Vec<Library>>().is_empty());
+    let listed: LibraryConnection = response.json();
+    assert!(listed.items.is_empty());
+    assert!(
+        !listed.page_info.has_next_page && !listed.page_info.has_previous_page,
+        "the whole list is one page"
+    );
 }
 
 /// The stored scan count is a signed column; a negative one is reported as
@@ -552,7 +558,8 @@ async fn a_negative_stored_scan_count_is_listed_as_unknown() {
             .cookie("beam_session", &token)
             .send()
             .await
-            .json::<Vec<Value>>();
+            .json::<Value>();
+        let listed = listed["items"].as_array().expect("a connection's items");
         assert_eq!(listed.len(), 1);
         listed[0]["last_scan_file_count"].clone()
     };
@@ -648,9 +655,9 @@ async fn a_regular_user_listing_library_files_never_sees_a_filesystem_path() {
         !body.to_string().contains("/videos"),
         "the library root must not appear anywhere in the listing: {body}"
     );
-    let mut paths: Vec<&str> = body
+    let mut paths: Vec<&str> = body["items"]
         .as_array()
-        .expect("the listing is an array")
+        .expect("the listing is a connection")
         .iter()
         .map(|file| file["path"].as_str().expect("every file has a path"))
         .collect();
@@ -658,7 +665,197 @@ async fn a_regular_user_listing_library_files_never_sees_a_filesystem_path() {
     assert_eq!(paths, ["A (2016)/A.mkv", "b.mp4"]);
 }
 
+/// Seed a present file at `path` under `library_id`.
+async fn seed_file(fixture: &TestFixture, library_id: uuid::Uuid, path: &str) {
+    fixture
+        .file_repo
+        .create(CreateMediaFile {
+            library_id,
+            path: PathBuf::from(path),
+            hash: 1,
+            size_bytes: 10,
+            mtime: None,
+            identity: None,
+            mime_type: None,
+            duration: None,
+            container_format: None,
+            content: None,
+            status: FileStatus::Unknown,
+            classifier_version: 0,
+            container_tags: None,
+        })
+        .await
+        .unwrap();
+}
+
+/// A library's files page by path: `first` bounds a page, its `end_cursor`
+/// starts the next, the walk visits every file once in path order, and the
+/// cursor carries the root-relative path only (NFR-108).
+#[tokio::test]
+async fn a_library_s_files_page_by_path() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let library: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+    for name in ["c.mkv", "a.mkv", "b.mkv"] {
+        seed_file(&fixture, library.id, &format!("/videos/movies/{name}")).await;
+    }
+
+    let mut walked = Vec::new();
+    let mut after: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let uri = match &after {
+            Some(cursor) => format!("/v1/libraries/{}/files?first=2&after={cursor}", library.id),
+            None => format!("/v1/libraries/{}/files?first=2", library.id),
+        };
+        let page: Value = client
+            .get(&uri)
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::OK)
+            .json();
+        pages += 1;
+        assert_eq!(page["page_info"]["has_previous_page"], after.is_some());
+        let items = page["items"].as_array().expect("a connection's items");
+        assert!(items.len() <= 2, "a page holds at most `first`");
+        walked.extend(
+            items
+                .iter()
+                .map(|file| file["path"].as_str().unwrap().to_owned()),
+        );
+        let end = page["page_info"]["end_cursor"].as_str().map(str::to_owned);
+        if let Some(cursor) = &end {
+            let decoded = URL_SAFE_NO_PAD.decode(cursor).expect("base64url");
+            let decoded = String::from_utf8(decoded).expect("JSON text");
+            assert!(!decoded.contains("/videos"), "no absolute path: {decoded}");
+        }
+        if page["page_info"]["has_next_page"] != true {
+            break;
+        }
+        after = end;
+    }
+    assert_eq!(pages, 2);
+    assert_eq!(walked, ["a.mkv", "b.mkv", "c.mkv"]);
+}
+
+/// A file-list cursor from another library is `400 #invalid-cursor`, not a
+/// position in this one; and a page size past 500 is refused at the edge.
+#[tokio::test]
+async fn a_library_s_file_list_refuses_another_library_s_cursor() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let library: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+    let foreign = crate::services::library_files_cursor::encode(
+        uuid::Uuid::new_v4(),
+        "a.mkv",
+        uuid::Uuid::nil(),
+    );
+
+    client
+        .get(&format!(
+            "/v1/libraries/{}/files?after={foreign}",
+            library.id
+        ))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
+    client
+        .get(&format!("/v1/libraries/{}/files?first=501", library.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("about:blank");
+    client
+        .get(&format!("/v1/libraries/{}/files", uuid::Uuid::new_v4()))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#library-not-found");
+}
+
 // ─── Library mutations: admin-gated ─────────────────────────────────────────
+
+/// A blank name, a name over 200 characters and a blank root path are each
+/// `422 #validation-failed`, naming the field by pointer, and nothing is
+/// stored.
+#[tokio::test]
+async fn creating_a_library_with_a_bad_name_or_root_is_422_and_changes_nothing() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    for (case, name, root_path, pointers) in [
+        ("blank name", "  ", "movies", vec!["/name"]),
+        ("long name", &*"n".repeat(201), "movies", vec!["/name"]),
+        ("blank root", "Movies", "", vec!["/root_path"]),
+        ("both", "", " ", vec!["/name", "/root_path"]),
+    ] {
+        let problem: Value = client
+            .post("/v1/admin/libraries")
+            .cookie("beam_session", &token)
+            .json(&CreateLibraryRequest {
+                name: name.to_string(),
+                root_path: root_path.to_string(),
+            })
+            .send()
+            .await
+            .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#validation-failed")
+            .json();
+        let named: Vec<&str> = problem["errors"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{case}: an errors list: {problem}"))
+            .iter()
+            .map(|error| error["pointer"].as_str().unwrap())
+            .collect();
+        assert_eq!(named, pointers, "{case}");
+    }
+
+    // 200 characters -- multi-byte ones, counted as characters -- is allowed.
+    client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "é".repeat(200),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .assert_status(StatusCode::OK);
+    let listed = client
+        .get("/v1/libraries")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json::<LibraryConnection>()
+        .items;
+    assert_eq!(listed.len(), 1, "only the valid library was stored");
+}
 
 #[tokio::test]
 async fn creating_a_library_as_a_regular_user_is_403() {
@@ -708,7 +905,8 @@ async fn an_admin_creates_a_library_and_it_is_then_listed() {
         .cookie("beam_session", &token)
         .send()
         .await
-        .json::<Vec<Library>>();
+        .json::<LibraryConnection>()
+        .items;
 
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, created.id);
@@ -1197,25 +1395,104 @@ async fn an_admin_reads_the_seeded_log_entries() {
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let logs: Vec<AdminLogEntry> = response.json();
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].message, "server started");
+    let logs: AdminLogConnection = response.json();
+    assert_eq!(logs.items.len(), 1);
+    assert_eq!(logs.items[0].message, "server started");
+    assert_eq!(logs.total, 1, "the count rides on the page");
 }
 
+/// The log pages newest first by `first`/`after`: each page's `end_cursor`
+/// starts the next, the pages cover every entry once, `total` is the whole
+/// count on each, and the flags say where each page sits.
 #[tokio::test]
-async fn the_admin_log_count_without_a_session_is_401() {
+async fn the_admin_log_pages_by_cursor() {
+    let fixture = make_test_state();
+    for message in ["first", "second", "third"] {
+        fixture
+            .state
+            .services
+            .admin_log
+            .log(
+                beam_domain::models::AdminLogLevel::Info,
+                beam_domain::models::AdminLogCategory::System,
+                message.to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    let page1: AdminLogConnection = client
+        .get("/v1/admin/logs?first=2")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json();
+    assert_eq!(page1.items.len(), 2);
+    assert_eq!(page1.total, 3);
+    assert!(page1.page_info.has_next_page);
+    assert!(!page1.page_info.has_previous_page);
+
+    let after = page1
+        .page_info
+        .end_cursor
+        .clone()
+        .expect("a full page ends somewhere");
+    let page2: AdminLogConnection = client
+        .get(&format!("/v1/admin/logs?first=2&after={after}"))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json();
+    assert_eq!(page2.items.len(), 1);
+    assert_eq!(page2.total, 3);
+    assert!(!page2.page_info.has_next_page);
+    assert!(page2.page_info.has_previous_page);
+
+    let messages: Vec<&str> = page1
+        .items
+        .iter()
+        .chain(&page2.items)
+        .map(|entry| entry.message.as_str())
+        .collect();
+    let mut sorted = messages.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        ["first", "second", "third"],
+        "every entry once: {messages:?}"
+    );
+}
+
+/// A cursor the log did not issue -- the user list's, or none at all -- is
+/// `400 #invalid-cursor`, never read as a position.
+#[tokio::test]
+async fn the_admin_log_refuses_a_cursor_it_did_not_issue() {
     let fixture = make_test_state();
     let client = build_client(&fixture);
-
-    assert_eq!(
-        client.get("/v1/admin/logs/count").send().await.status(),
-        StatusCode::UNAUTHORIZED
+    let token = seed_user_session(&fixture, true).await;
+    let users = crate::services::offset_cursor::encode(
+        crate::services::offset_cursor::OffsetList::AdminUsers,
+        0,
     );
+
+    for after in [users.as_str(), "not-a-cursor"] {
+        client
+            .get(&format!("/v1/admin/logs?after={after}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
+    }
 }
 
 // ─── Admin events: snapshot and live stream ─────────────────────────────────
 
-/// The snapshot endpoint returns the *newest* events, bounded by `limit`.
+/// The snapshot endpoint returns the *newest* events, bounded by `first`,
+/// and says older ones were left out.
 #[tokio::test]
 async fn the_admin_event_snapshot_returns_the_newest_events_within_the_limit() {
     let fixture = make_test_state();
@@ -1232,14 +1509,21 @@ async fn the_admin_event_snapshot_returns_the_newest_events_within_the_limit() {
     let token = seed_user_session(&fixture, true).await;
 
     let response = client
-        .get("/v1/admin/events?limit=2")
+        .get("/v1/admin/events?first=2")
         .cookie("beam_session", &token)
         .send()
         .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let events: Vec<Value> = response.json();
-    let messages: Vec<&str> = events
+    let body: Value = response.json();
+    assert_eq!(
+        body["page_info"]["has_next_page"], true,
+        "an older event exists"
+    );
+    assert_eq!(body["page_info"]["has_previous_page"], false);
+    let messages: Vec<&str> = body["items"]
+        .as_array()
+        .expect("a connection's items")
         .iter()
         .map(|event| event["message"].as_str().expect("a message string"))
         .collect();
@@ -1584,33 +1868,44 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
     seed_plain_user(&fixture, "s3", "Bob").await;
     seed_plain_user(&fixture, "s4", "Carol").await;
 
-    // Default limit returns everyone, all enabled, exactly one admin.
+    // The default page holds everyone, all enabled, exactly one admin.
     let response = client
         .get("/v1/admin/users")
         .cookie("beam_session", &token)
         .send()
         .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let body: AdminUserList = response.json();
+    let body: AdminUserConnection = response.json();
     assert_eq!(body.total, 4);
     assert_eq!(body.items.len(), 4);
+    assert!(!body.page_info.has_next_page);
     assert!(body.items.iter().all(|u| !u.disabled));
     assert_eq!(body.items.iter().filter(|u| u.is_admin).count(), 1);
 
-    // Two pages of two cover all four users exactly once, and `total` stays the
-    // full count on every page.
-    let page1: AdminUserList = client
-        .get("/v1/admin/users?limit=2&offset=0")
+    // Two pages of two, the second after the first's `end_cursor`, cover all
+    // four users exactly once, and `total` stays the full count on every
+    // page.
+    let page1: AdminUserConnection = client
+        .get("/v1/admin/users?first=2")
         .cookie("beam_session", &token)
         .send()
         .await
         .json();
-    let page2: AdminUserList = client
-        .get("/v1/admin/users?limit=2&offset=2")
+    assert!(page1.page_info.has_next_page);
+    assert!(!page1.page_info.has_previous_page);
+    let after = page1
+        .page_info
+        .end_cursor
+        .clone()
+        .expect("a full page ends somewhere");
+    let page2: AdminUserConnection = client
+        .get(&format!("/v1/admin/users?first=2&after={after}"))
         .cookie("beam_session", &token)
         .send()
         .await
         .json();
+    assert!(!page2.page_info.has_next_page);
+    assert!(page2.page_info.has_previous_page);
     assert_eq!(page1.items.len(), 2);
     assert_eq!(page2.items.len(), 2);
     assert_eq!(page1.total, 4);
@@ -1625,15 +1920,28 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
     ids.dedup();
     assert_eq!(ids.len(), 4, "pages must cover every user exactly once");
 
-    // A limit below its published minimum of 1 is refused by Kynos's
+    // A page size below its published minimum of 1 is refused by Kynos's
     // `QueryParams` check rather than served.
     client
-        .get("/v1/admin/users?limit=0")
+        .get("/v1/admin/users?first=0")
         .cookie("beam_session", &token)
         .send()
         .await
         .assert_status(StatusCode::BAD_REQUEST)
         .assert_problem_type("about:blank");
+
+    // The log's cursor is not this list's.
+    let logs = crate::services::offset_cursor::encode(
+        crate::services::offset_cursor::OffsetList::AdminLogs,
+        0,
+    );
+    client
+        .get(&format!("/v1/admin/users?after={logs}"))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
 }
 
 #[tokio::test]
@@ -1961,7 +2269,8 @@ async fn registering_a_root_that_overlaps_an_existing_library_is_409_and_changes
         .cookie("beam_session", &token)
         .send()
         .await
-        .json::<Vec<Library>>();
+        .json::<LibraryConnection>()
+        .items;
     assert_eq!(listed.len(), 1, "the rejected library was not stored");
 }
 
@@ -2001,7 +2310,8 @@ async fn registering_a_root_that_holds_the_data_directory_is_400_and_changes_not
         .cookie("beam_session", &token)
         .send()
         .await
-        .json::<Vec<Library>>();
+        .json::<LibraryConnection>()
+        .items;
     assert!(listed.is_empty(), "the rejected library was not stored");
 }
 

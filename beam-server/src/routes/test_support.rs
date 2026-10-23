@@ -75,7 +75,9 @@ impl crate::services::library::LibraryService for StubLibraryService {
     async fn get_library_files(
         &self,
         _library_id: uuid::Uuid,
-    ) -> Result<Vec<crate::models::LibraryFile>, LibraryError> {
+        _after: Option<(String, uuid::Uuid)>,
+        _first: std::num::NonZeroU32,
+    ) -> Result<crate::services::library::LibraryFilePage, LibraryError> {
         unimplemented!("not called in routing tests")
     }
     async fn get_file_by_id(

@@ -29,7 +29,23 @@
 //! * **R6** a number measuring a duration, runtime, size, position or length
 //!   says its unit: its name ends in `_secs`, `_mins`, `_ms`, `_days`,
 //!   `_bytes` or `_count`. `duration` and `runtime` in one schema meaning
-//!   seconds and minutes is the ambiguity this closes.
+//!   seconds and minutes is the ambiguity this closes;
+//! * **R3** no response body is a bare JSON array. Every list is a
+//!   `*Connection` object -- `items` and `page_info`, and `total` where the
+//!   list counts itself -- so it can page, or say it does not, without a
+//!   breaking change;
+//! * **R8** `info.version` is the release -- `CARGO_PKG_VERSION` -- in the
+//!   document served and in both committed copies, which the release workflow
+//!   regenerates on the release pull request. `/v1` is the contract's
+//!   version; this number only names the build (ADR-0021);
+//! * **R10** a `409` or `422` names its problem `type` from Beam's
+//!   taxonomy, never leaving it open or `about:blank`: a conflict and an
+//!   unprocessable request are the caller's to act on. The one exception is
+//!   Kynos's own `422` for a request body that does not decode, which is
+//!   `about:blank` on any operation that takes a body.
+//!
+//! Headers are not asserted: they are transport, described by Kynos rather
+//! than by Beam's types (#200 tracks the two Kynos gaps there).
 //!
 //! R4-R6 read the payload vocabulary: every property of a component schema,
 //! however deeply nested, and every path and query parameter. Headers are
@@ -403,6 +419,162 @@ mod tests {
             .collect()
     }
 
+    /// Follow `schema`'s `$ref`s to the schema they name.
+    fn resolved<'a>(document: &'a Value, mut schema: &'a Value) -> &'a Value {
+        for _ in 0..16 {
+            match schema
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|target| target.strip_prefix('#'))
+                .and_then(|pointer| document.pointer(pointer))
+            {
+                Some(target) => schema = target,
+                None => break,
+            }
+        }
+        schema
+    }
+
+    /// One response of one operation: `(pointer, status, response,
+    /// operation)`.
+    fn responses(document: &Value) -> Vec<(String, String, &Value, &Value)> {
+        let mut found = Vec::new();
+        for (path, item) in document
+            .get("paths")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            for (method, operation) in item.as_object().into_iter().flatten() {
+                for (status, response) in operation
+                    .get("responses")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                {
+                    found.push((
+                        format!("/paths/{}/{method}/responses/{status}", token(path)),
+                        status.clone(),
+                        response,
+                        operation,
+                    ));
+                }
+            }
+        }
+        found
+    }
+
+    /// R3: every response body that is a bare JSON array. A list is a
+    /// `*Connection` object, so it can grow `page_info` and `total` without a
+    /// breaking change.
+    fn r3_violations(document: &Value) -> Vec<String> {
+        let mut violations = Vec::new();
+        for (pointer, _, response, _) in responses(document) {
+            for (media_type, content) in response
+                .get("content")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+            {
+                let Some(schema) = content.get("schema") else {
+                    continue;
+                };
+                if has_type(resolved(document, schema), "array") {
+                    violations.push(format!("{pointer}/content/{}", token(media_type)));
+                }
+            }
+        }
+        violations
+    }
+
+    /// The problem `type`s one branch of a problem response can carry: the
+    /// `const` it narrows `type` to, or `None` for a branch that leaves it
+    /// open.
+    fn problem_branch_types(document: &Value, schema: &Value) -> Vec<Option<String>> {
+        let schema = resolved(document, schema);
+        if let Some(branches) = schema.get("oneOf").and_then(Value::as_array) {
+            return branches
+                .iter()
+                .flat_map(|branch| problem_branch_types(document, branch))
+                .collect();
+        }
+        let narrowed = |node: &Value| {
+            node.pointer("/properties/type/const")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let named = narrowed(schema).or_else(|| {
+            schema
+                .get("allOf")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find_map(|part| narrowed(resolved(document, part)))
+        });
+        vec![named]
+    }
+
+    /// R10: every `409` or `422` whose problem `type` is not a named Beam
+    /// code -- left open, or `about:blank`. A conflict and an unprocessable
+    /// request are the caller's to act on, so each says which. The one
+    /// `about:blank` allowed is Kynos's own rejection of a body that does not
+    /// decode, a `422` on an operation that takes one.
+    fn r10_violations(document: &Value) -> Vec<String> {
+        use crate::routes::api_error::ERROR_BASE;
+
+        let mut violations = Vec::new();
+        for (pointer, status, response, operation) in responses(document) {
+            if status != "409" && status != "422" {
+                continue;
+            }
+            let takes_a_body = operation.get("requestBody").is_some();
+            let Some(schema) = response.pointer("/content/application~1problem+json/schema") else {
+                violations.push(format!("{pointer}: not a problem document"));
+                continue;
+            };
+            for named in problem_branch_types(document, schema) {
+                match named.as_deref() {
+                    Some(uri) if uri.starts_with(ERROR_BASE) => {}
+                    Some("about:blank") if status == "422" && takes_a_body => {}
+                    Some(other) => violations.push(format!("{pointer}: {other}")),
+                    None => violations.push(format!("{pointer}: an open problem type")),
+                }
+            }
+        }
+        violations
+    }
+
+    /// The committed copies of the document every client is generated from,
+    /// by path. The release workflow regenerates both on the release pull
+    /// request, after release-please bumps `Cargo.toml`.
+    const COMMITTED_DOCUMENTS: [(&str, &str); 2] = [
+        (
+            "beam-web/openapi.json",
+            include_str!("../../../beam-web/openapi.json"),
+        ),
+        (
+            "beam-client-core/api/openapi.json",
+            include_str!("../../../beam-client-core/api/openapi.json"),
+        ),
+    ];
+
+    /// R8: each document, by name, whose `info.version` is not the release's,
+    /// `CARGO_PKG_VERSION`.
+    fn r8_violations<'a>(documents: impl IntoIterator<Item = (&'a str, Value)>) -> Vec<String> {
+        documents
+            .into_iter()
+            .filter_map(|(name, document)| {
+                let version = document.pointer("/info/version").and_then(Value::as_str);
+                (version != Some(env!("CARGO_PKG_VERSION"))).then(|| {
+                    format!(
+                        "{name}: info.version is {version:?}, not {:?}",
+                        env!("CARGO_PKG_VERSION")
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// The pointers of every named value -- what the vacuity guards below
     /// check a known conforming value is among.
     fn named_pointers(document: &Value) -> Vec<String> {
@@ -520,6 +692,177 @@ mod tests {
             UNIT_SUFFIXES.join(", "),
             violations.join("\n")
         );
+    }
+
+    #[test]
+    fn r3_no_response_is_a_bare_array() {
+        let document = exported_document();
+        let read: Vec<String> = responses(&document)
+            .into_iter()
+            .map(|(pointer, ..)| pointer)
+            .collect();
+        assert!(
+            read.iter()
+                .any(|pointer| pointer == "/paths/~1v1~1libraries/get/responses/200"),
+            "the walk did not reach listLibraries' 200, so it is not reading the document"
+        );
+        let violations = r3_violations(&document);
+        assert!(
+            violations.is_empty(),
+            "a list is a *Connection object, never a bare array:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn r8_the_document_names_the_release() {
+        let committed = COMMITTED_DOCUMENTS.map(|(name, text)| {
+            (
+                name,
+                serde_json::from_str::<Value>(text).expect("a committed document is JSON"),
+            )
+        });
+        let violations = r8_violations(
+            [("the exported document", exported_document())]
+                .into_iter()
+                .chain(committed),
+        );
+        assert!(
+            violations.is_empty(),
+            "info.version is the release, in the document served and in both committed copies \
+             (the release workflow regenerates them on the release pull request):\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn r10_conflicts_and_unprocessable_requests_are_named() {
+        let document = exported_document();
+        assert!(
+            responses(&document)
+                .iter()
+                .any(|(_, status, ..)| status == "422"),
+            "the walk found no 422, so it is not reading the document"
+        );
+        let violations = r10_violations(&document);
+        assert!(
+            violations.is_empty(),
+            "a 409 or 422 names its Beam problem type (Kynos's body rejection aside):\n{}",
+            violations.join("\n")
+        );
+    }
+
+    /// R3, R8 and R10, each shown to fire on the violation it exists for and
+    /// to stay quiet on the shape it allows.
+    #[test]
+    fn r3_r8_and_r10_catch_the_violations_they_name() {
+        let named = |code: &str| {
+            json!({ "allOf": [
+                { "$ref": "#/components/schemas/Problem" },
+                { "properties": { "type": {
+                    "const": format!("https://beam.justinchung.net/reference/errors/#{code}")
+                }}},
+            ]})
+        };
+        let blank = json!({ "allOf": [
+            { "$ref": "#/components/schemas/Problem" },
+            { "properties": { "type": { "const": "about:blank" } } },
+        ]});
+        let problem = |schema: Value| json!({ "content": { "application/problem+json": { "schema": schema } } });
+        let violating = json!({
+            "info": { "version": "1.0.0" },
+            "components": { "schemas": {
+                "Problem": { "type": "object" },
+                "Libraries": { "type": "array", "items": { "type": "object" } },
+            }},
+            "paths": {
+                "/v1/libraries": { "get": { "responses": {
+                    "200": { "content": { "application/json": {
+                        "schema": { "$ref": "#/components/schemas/Libraries" }
+                    }}},
+                }}},
+                "/v1/sessions": { "get": { "responses": {
+                    "200": { "content": { "application/json": {
+                        "schema": { "type": "array", "items": { "type": "object" } }
+                    }}},
+                    "409": problem(json!({ "$ref": "#/components/schemas/Problem" })),
+                }}},
+                "/v1/admin/libraries": { "post": {
+                    "requestBody": { "content": {} },
+                    "responses": {
+                        "409": problem(json!({ "oneOf": [blank.clone(), named("library-path-overlaps-library")] })),
+                    },
+                }},
+                "/v1/admin/scan": { "post": { "responses": {
+                    "422": problem(blank.clone()),
+                }}},
+            }
+        });
+        let mut r3 = r3_violations(&violating);
+        r3.sort();
+        assert_eq!(
+            r3,
+            vec![
+                "/paths/~1v1~1libraries/get/responses/200/content/application~1json".to_owned(),
+                "/paths/~1v1~1sessions/get/responses/200/content/application~1json".to_owned(),
+            ],
+            "an inline array and a $ref to one are both caught"
+        );
+        let mut r10 = r10_violations(&violating);
+        r10.sort();
+        assert_eq!(
+            r10,
+            vec![
+                "/paths/~1v1~1admin~1libraries/post/responses/409: about:blank".to_owned(),
+                "/paths/~1v1~1admin~1scan/post/responses/422: about:blank".to_owned(),
+                "/paths/~1v1~1sessions/get/responses/409: an open problem type".to_owned(),
+            ],
+            "about:blank on a 409, about:blank on a 422 with no body to reject, and an open \
+             type are each caught"
+        );
+        assert_eq!(
+            r8_violations([
+                ("a hard-coded version", violating.clone()),
+                ("no version", json!({ "info": {} })),
+            ]),
+            vec![
+                format!(
+                    "a hard-coded version: info.version is Some(\"1.0.0\"), not {:?}",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                format!(
+                    "no version: info.version is None, not {:?}",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            ]
+        );
+
+        let conforming = json!({
+            "info": { "version": env!("CARGO_PKG_VERSION") },
+            "components": { "schemas": {
+                "Problem": { "type": "object" },
+                "LibraryConnection": { "type": "object", "properties": {
+                    "items": { "type": "array", "items": { "type": "object" } },
+                }},
+            }},
+            "paths": {
+                "/v1/libraries": { "get": { "responses": {
+                    "200": { "content": { "application/json": {
+                        "schema": { "$ref": "#/components/schemas/LibraryConnection" }
+                    }}},
+                }}},
+                "/v1/admin/libraries": { "post": {
+                    "requestBody": { "content": {} },
+                    "responses": {
+                        "409": problem(named("library-path-overlaps-library")),
+                        "422": problem(json!({ "oneOf": [blank, named("validation-failed")] })),
+                    },
+                }},
+            }
+        });
+        assert!(r3_violations(&conforming).is_empty());
+        assert!(r10_violations(&conforming).is_empty());
+        assert!(r8_violations([("conforming", conforming)]).is_empty());
     }
 
     /// Each rule, shown to fire on the violation it exists for and to stay

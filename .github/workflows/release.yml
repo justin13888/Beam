@@ -51,11 +51,21 @@ jobs:
   # Cargo.lock, and release-please's `simple` strategy has no Cargo updater.
   # Refresh the lockfile on the release branch so `cargo metadata --locked`
   # (the rust-lockfile job in ci.yml) passes on the release pull request.
+  #
+  # It bumps the OpenAPI document's `info.version` too, which is
+  # CARGO_PKG_VERSION (#190), so both committed copies are regenerated here
+  # for `codegen:openapi:check`. Regenerated rather than bumped by a
+  # release-please `json` extra-file: that updater re-serializes the whole
+  # file with JSON.stringify, which moves every numeric response key ("200")
+  # ahead of the others and writes `100.0` as `100`, so the document it leaves
+  # is not the one the generator writes.
   lockfile-sync:
-    name: Sync Cargo.lock on the release pull request
+    name: Sync Cargo.lock and the OpenAPI document on the release pull request
     needs: [release-please]
     if: needs.release-please.outputs.prs_created == 'true'
     runs-on: ubuntu-latest
+    env:
+      BEAM_CARGO_FEATURES: ""
     steps:
       - uses: actions/checkout@v7
         with:
@@ -70,16 +80,23 @@ jobs:
       - name: Refresh workspace entries in Cargo.lock
         run: cargo update --workspace --offline
 
-      - name: Commit and push if the lockfile changed
+      - uses: ./.github/actions/install-rust-build-deps
+      - uses: ./.github/actions/setup-ffmpeg
+
+      - name: Regenerate the OpenAPI document under the bumped version
+        run: mise run codegen:openapi
+
+      - name: Commit and push what changed
         run: |
-          if git diff --quiet -- Cargo.lock; then
-            echo "Cargo.lock already matches the bumped manifests"
+          synced="Cargo.lock beam-web/openapi.json beam-client-core/api/openapi.json"
+          if git diff --quiet -- $synced; then
+            echo "Cargo.lock and the OpenAPI document already match the bumped manifests"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock
-          git commit -m "chore: sync Cargo.lock for the release"
+          git add $synced
+          git commit -m "chore: sync Cargo.lock and the OpenAPI document for the release"
           git push
 
   # Generated once and shared: beam-web's image and the release assets both need

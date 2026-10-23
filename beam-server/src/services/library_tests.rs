@@ -700,7 +700,7 @@ mod tests {
     // ── get_library_files ─────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_get_library_files_existing_library_with_files_returns_all_files() {
+    async fn test_get_library_files_pages_a_library_s_files_by_path_then_id() {
         let video_dir = PathBuf::from("/media/videos");
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
@@ -732,16 +732,48 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.get_library_files(lib_id).await;
-
-        assert!(result.is_ok());
-        let files = result.unwrap();
-        assert_eq!(files.len(), 3);
-        assert!(files.iter().all(|f| f.library_id == lib_id));
+        let two = std::num::NonZeroU32::new(2).unwrap();
+        let first = service
+            .get_library_files(lib_id, None, two)
+            .await
+            .expect("the first page");
+        assert_eq!(first.items.len(), 2);
+        assert!(first.has_next_page, "a third file follows");
         // Stored at `/media/videos/test.mp4` under a `/media/videos` root: the
         // listing carries the root-relative path, never the absolute one
         // (NFR-108).
-        assert!(files.iter().all(|f| f.path == "test.mp4"));
+        assert!(first.items.iter().all(|f| f.path == "test.mp4"));
+
+        // The page after the last file seeks from the relative path the page
+        // reported, rebuilt beneath the root; the three share a path, so the
+        // id decides.
+        let last = first.items.last().unwrap();
+        let rest = service
+            .get_library_files(lib_id, Some((last.path.clone(), last.id)), two)
+            .await
+            .expect("the second page");
+        assert_eq!(rest.items.len(), 1);
+        assert!(!rest.has_next_page);
+
+        let mut seen: Vec<Uuid> = first
+            .items
+            .iter()
+            .chain(&rest.items)
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            seen.windows(2).all(|pair| pair[0] < pair[1]),
+            "by id: {seen:?}"
+        );
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "every file once");
+        assert!(
+            first
+                .items
+                .iter()
+                .chain(&rest.items)
+                .all(|f| f.library_id == lib_id)
+        );
     }
 
     #[tokio::test]
@@ -758,7 +790,9 @@ mod tests {
             Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         );
 
-        let result = service.get_library_files(Uuid::new_v4()).await;
+        let result = service
+            .get_library_files(Uuid::new_v4(), None, std::num::NonZeroU32::MIN)
+            .await;
 
         assert!(matches!(result, Err(LibraryError::LibraryNotFound)));
     }

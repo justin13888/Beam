@@ -124,7 +124,6 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
         ])
         .mount(kynos::routes![
             admin::get_admin_logs,
-            admin::get_admin_log_count,
             admin::get_admin_events,
             admin::stream_admin_events,
             admin::list_admin_users,
@@ -199,7 +198,12 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
 /// forge, and a cross-origin reader of `/openapi` has nothing to steal.
 pub fn create_router() -> Router<AppState, Propagate, (), ServedScopes> {
     Router::new()
-        .info(Info::new("Beam Server API", "1.0.0"))
+        // The release's own version: release-please bumps it in `Cargo.toml`,
+        // and the release workflow regenerates both committed copies of the
+        // document on the release pull request, so the document a release
+        // ships names the release. `/v1` is the path, not this number: a
+        // breaking change goes to `/v2` (ADR-0021).
+        .info(Info::new("Beam Server API", env!("CARGO_PKG_VERSION")))
         .nest(
             "/v1",
             rest_routes()
