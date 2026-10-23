@@ -7,19 +7,24 @@
 //! plays the same file untouched. The rule lives here, once, rather than
 //! three times across Android, Apple, and GTK.
 //!
-//! Quality switching is a discrete user action, never an automatic ladder --
-//! there is no ABR to fall back on, so a wrong automatic choice is a failed
-//! playback rather than a rebuffer.
+//! Quality switching is a discrete action, never an automatic ladder -- there
+//! is no ABR to fall back on, so a wrong automatic choice is a failed playback
+//! rather than a rebuffer. The one automatic switch is the visible downgrade
+//! [`rebuffer`] and [`select_downgrade`] decide between them: a smaller
+//! existing file, after sustained rebuffering, and only when the viewer did
+//! not pick the source themselves.
 //!
 //! [ADR-0004]: ../../../docs/architecture/decisions/ADR-0004-never-transcode.md
 
 pub mod codec;
+pub mod rebuffer;
 pub mod select;
 
 pub use codec::{AudioCodec, VideoCodec};
+pub use rebuffer::RebufferDetector;
 pub use select::{
     MediaSourceView, Playability, QualityPolicy, RejectedSource, RejectionReason, SourceSelection,
-    select_source,
+    select_downgrade, select_source,
 };
 
 /// One decoder the device reports through `MediaCodecList`.

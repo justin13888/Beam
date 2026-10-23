@@ -395,6 +395,61 @@ pub fn select_source(
     Ok(finish(chosen, verdict, profile, reason, rejected))
 }
 
+/// Choose a smaller file to fall back to after sustained rebuffering.
+///
+/// The candidates are every source that demands less of the connection than
+/// the one playing: by bit rate where both sides declare one, and by size
+/// otherwise. They are then ranked by [`select_source`] with
+/// [`QualityPolicy::MatchScreen`], so the result runs through
+/// [`playability`] like any other choice -- a smaller file this device cannot
+/// decode is never a fallback -- and is the *best* of the smaller files that
+/// fits the screen rather than the smallest outright. A step down costs the
+/// viewer as little picture as it can; if the connection still cannot keep
+/// up, the next sustained rebuffer steps down again.
+///
+/// The selection's `rejected` list covers only the smaller candidates, and its
+/// `reason` says why playback switched, phrased for the viewer.
+///
+/// Returns `None` when `current_file_id` is not among `sources`, or when no
+/// smaller source plays here: the honest outcome then is to keep stalling on
+/// the file that does play, not to switch to one that does not.
+#[must_use]
+pub fn select_downgrade(
+    sources: &[MediaSourceView],
+    current_file_id: &str,
+    profile: &DeviceProfile,
+) -> Option<SourceSelection> {
+    let current = sources
+        .iter()
+        .find(|source| source.file_id == current_file_id)?;
+    let cheaper: Vec<MediaSourceView> = sources
+        .iter()
+        .filter(|candidate| demands_less_than(candidate, current))
+        .cloned()
+        .collect();
+
+    let mut selection = select_source(&cheaper, profile, &QualityPolicy::MatchScreen).ok()?;
+    selection.reason = match selection.source.height {
+        Some(height) if height > 0 => {
+            format!("Switched to {height}p because playback kept stalling")
+        }
+        _ => "Switched to a smaller version because playback kept stalling".to_owned(),
+    };
+    Some(selection)
+}
+
+/// Whether `candidate` needs less bandwidth than `current`.
+///
+/// Bit rate is the measure that matters, and it is compared only when both
+/// files declare one; a file missing it is judged by size instead, which is
+/// the same measure for two versions of one title of about the same length.
+fn demands_less_than(candidate: &MediaSourceView, current: &MediaSourceView) -> bool {
+    match (candidate.bit_rate, current.bit_rate) {
+        (Some(candidate_rate), Some(current_rate)) => candidate_rate < current_rate,
+        _ => candidate.size_bytes < current.size_bytes,
+    }
+}
+
 /// Ordering key for "quality": pixels, then bit rate, then size.
 ///
 /// Returned as a tuple of floats so the comparison is total over the `f64`
@@ -785,6 +840,164 @@ mod tests {
         let rejections =
             select_source(&[], &profile, &QualityPolicy::Highest).expect_err("nothing to play");
         assert!(rejections.is_empty());
+    }
+
+    fn hd_h264_small() -> MediaSourceView {
+        MediaSourceBuilder::new("hd-small")
+            .video("h264", 1920, 1080)
+            .bitrate(4_000_000)
+            .size(2_000_000_000)
+            .build()
+    }
+
+    fn hd_av1() -> MediaSourceView {
+        MediaSourceBuilder::new("hd-av1")
+            .video("av1", 1920, 1080)
+            .bitrate(3_000_000)
+            .size(1_500_000_000)
+            .build()
+    }
+
+    #[test]
+    fn a_downgrade_steps_to_the_best_smaller_source_not_the_smallest() {
+        // From 4K, the 1080p file is the step that costs the least picture;
+        // jumping straight to 480p would punish a connection that only
+        // narrowly failed to carry the remux.
+        let sources = [uhd_hevc(), hd_h264(), sd_h264()];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        let chosen = select_downgrade(&sources, "uhd", &profile).expect("a smaller source");
+        assert_eq!(chosen.source.file_id, "hd");
+        assert_eq!(
+            chosen.reason,
+            "Switched to 1080p because playback kept stalling"
+        );
+    }
+
+    #[test]
+    fn a_second_downgrade_steps_down_again() {
+        let sources = [uhd_hevc(), hd_h264(), sd_h264()];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        let chosen = select_downgrade(&sources, "hd", &profile).expect("a smaller source");
+        assert_eq!(chosen.source.file_id, "sd");
+    }
+
+    #[test]
+    fn the_smallest_source_has_nowhere_to_go() {
+        let sources = [uhd_hevc(), hd_h264(), sd_h264()];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        assert_eq!(select_downgrade(&sources, "sd", &profile), None);
+    }
+
+    #[test]
+    fn a_smaller_source_this_device_cannot_decode_is_never_a_fallback() {
+        // The AV1 file is the smaller one, but this phone has no AV1 decoder:
+        // switching to it would turn a stall into a failure.
+        let sources = [hd_h264(), hd_av1()];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        assert_eq!(select_downgrade(&sources, "hd", &profile), None);
+    }
+
+    #[test]
+    fn a_downgrade_skips_an_undecodable_rung_for_a_decodable_one() {
+        let sources = [hd_h264(), hd_av1(), sd_h264()];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        let chosen = select_downgrade(&sources, "hd", &profile).expect("the SD file plays");
+        assert_eq!(chosen.source.file_id, "sd");
+        assert!(
+            chosen.rejected.iter().any(
+                |r| r.file_id == "hd-av1" && r.reason == RejectionReason::VideoCodecUnsupported
+            ),
+            "the skipped file is reported with its reason: {:?}",
+            chosen.rejected
+        );
+    }
+
+    #[test]
+    fn bit_rate_decides_which_is_smaller_when_both_declare_one() {
+        // The extended cut is the bigger file but the lighter stream; size
+        // alone would call it "larger" and miss the fallback.
+        let long_but_light = MediaSourceBuilder::new("extended")
+            .video("h264", 1280, 720)
+            .bitrate(2_000_000)
+            .size(9_000_000_000)
+            .build();
+        let sources = [hd_h264(), long_but_light];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        let chosen = select_downgrade(&sources, "hd", &profile).expect("a lighter stream");
+        assert_eq!(chosen.source.file_id, "extended");
+    }
+
+    #[test]
+    fn size_decides_when_a_bit_rate_is_missing() {
+        let mut unprobed = MediaSourceBuilder::new("unprobed")
+            .video("h264", 1280, 720)
+            .size(1_000_000_000)
+            .build();
+        unprobed.bit_rate = None;
+        let sources = [hd_h264(), unprobed];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        let chosen = select_downgrade(&sources, "hd", &profile).expect("a smaller file");
+        assert_eq!(chosen.source.file_id, "unprobed");
+    }
+
+    #[test]
+    fn an_equally_heavy_source_is_not_a_downgrade() {
+        let twin = MediaSourceBuilder::new("twin")
+            .video("h264", 1280, 720)
+            .bitrate(8_000_000)
+            .size(1_000_000_000)
+            .build();
+        let sources = [hd_h264(), twin];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        assert_eq!(select_downgrade(&sources, "hd", &profile), None);
+    }
+
+    #[test]
+    fn a_file_that_is_not_among_the_sources_has_no_downgrade() {
+        // A later part of a multi-part movie, say, which is not itself a
+        // source: nothing here says what it is smaller than.
+        let sources = [uhd_hevc(), hd_h264()];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        assert_eq!(select_downgrade(&sources, "elsewhere", &profile), None);
+    }
+
+    #[test]
+    fn a_downgrade_without_a_known_height_still_says_why() {
+        let unknown = MediaSourceBuilder::new("unknown")
+            .video("h264", 0, 0)
+            .bitrate(1_000_000)
+            .size(500_000_000)
+            .build();
+        let sources = [hd_h264(), unknown];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        let chosen = select_downgrade(&sources, "hd", &profile).expect("a smaller file");
+        assert_eq!(
+            chosen.reason,
+            "Switched to a smaller version because playback kept stalling"
+        );
+    }
+
+    #[test]
+    fn a_downgrade_prefers_a_hardware_decode_among_the_smaller_files() {
+        let sources = [uhd_hevc(), hd_h264_small(), hd_av1()];
+        let profile = DeviceProfileBuilder::phone_h264_hevc()
+            .software_video("video/av01", 1920, 1080)
+            .allow_software()
+            .build();
+
+        let chosen = select_downgrade(&sources, "uhd", &profile).expect("a smaller file");
+        assert_eq!(chosen.source.file_id, "hd-small");
+        assert_eq!(chosen.playability, Playability::Hardware);
     }
 
     #[test]

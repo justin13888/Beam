@@ -64,7 +64,8 @@ pub mod upnext;
 
 pub use capability::{
     AudioCodec, DecoderCapability, DeviceProfile, MediaSourceView, Playability, QualityPolicy,
-    RejectedSource, RejectionReason, SourceSelection, VideoCodec, select_source,
+    RebufferDetector, RejectedSource, RejectionReason, SourceSelection, VideoCodec,
+    select_downgrade, select_source,
 };
 pub use catalog::{
     AdminEvent, AdminLogEntry, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
@@ -74,7 +75,7 @@ pub use catalog::{
 };
 pub use clock::{Clock, SystemClock};
 pub use error::{BeamError, StorageError};
-pub use ffi::{PlaybackHttpConfig, ServerHttpConfig};
+pub use ffi::{PlaybackHttpConfig, RebufferMonitor, ServerHttpConfig};
 pub use paging::{CursorPager, PageAdvance};
 pub use ports::kv::KeyValueStore;
 pub use progress::{ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress};
