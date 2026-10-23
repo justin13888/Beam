@@ -32,6 +32,7 @@ jobs:
       ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
       ffmpeg_image: ${{ steps.filter.outputs.ffmpeg_image }}
       compose: ${{ steps.filter.outputs.compose }}
+      e2e: ${{ steps.filter.outputs.e2e }}
       chart: ${{ steps.filter.outputs.chart }}
       hooks: ${{ steps.filter.outputs.hooks }}
       android: ${{ steps.filter.outputs.android }}
@@ -136,6 +137,15 @@ jobs:
               - 'compose*.yaml'
               - '.env.example'
               - 'dex/**'
+            # What web-e2e reads beyond the three filters above: its compose
+            # override and seeder (beam-web/e2e/compose.e2e.yaml is not a
+            # root compose*.yaml), and the Containerfile `ts:e2e` builds the
+            # server image from. Without this a change to either alone would
+            # skip the job, and ci-ok would count the skip as a pass.
+            e2e:
+              - *tooling
+              - 'beam-web/e2e/**'
+              - 'beam-server/Containerfile'
             chart:
               - *tooling
               - 'charts/**'
@@ -521,6 +531,63 @@ jobs:
       # beam-docs is built by the docs-build job, under its own path filter.
       - run: mise run ts:build:web
 
+  # The browser end-to-end suite (#74): a real Chromium through OIDC login via
+  # Dex, a library scan, browse and search, and direct play, against the
+  # composed Postgres, Dex and beam-server stack. Like rust-test-pg it is the
+  # infrastructure tier NFR-201 keeps out of `mise run ci`, so it has a job of
+  # its own. It reads the server, the SPA, the compose topology and its own
+  # e2e harness, so any of those four filters runs it.
+  web-e2e:
+    name: Web end-to-end (Playwright)
+    needs: [changes]
+    if: >-
+      needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.ts == 'true' ||
+      needs.changes.outputs.compose == 'true' ||
+      needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    # A cold cache compiles FFmpeg and the release server; a warm one takes a
+    # fraction of that. The bound is a backstop for a run that hangs, which
+    # would otherwise hold the runner for GitHub's six-hour default.
+    timeout-minutes: 60
+    env:
+      # The runner has podman as well as docker, and scripts/compose.sh would
+      # pick podman. The image is built with docker buildx below, so compose
+      # has to be the one that reads docker's image store.
+      BEAM_COMPOSE: docker compose
+      BEAM_CONTAINER_CACHE_DIR: /tmp/beam-e2e-server-cache
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/bun-install
+      # The default `docker` driver cannot export a cache; the container driver
+      # this installs can, and `ts:e2e` loads the image back into docker.
+      - uses: docker/setup-buildx-action@v4
+
+      # Keyed on what decides the expensive layers -- the FFmpeg stage and the
+      # cargo-chef dependency cook -- with a prefix restore-key, so a change to
+      # Rust sources alone replays both and recompiles only the workspace.
+      - name: Cache the server image layers
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.BEAM_CONTAINER_CACHE_DIR }}
+          key: e2e-server-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('beam-server/Containerfile', 'Cargo.lock') }}
+          restore-keys: |
+            e2e-server-${{ runner.os }}-${{ runner.arch }}-
+
+      - run: mise run ts:e2e
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-e2e-report
+          path: |
+            beam-web/e2e/.report
+            beam-web/e2e/.results
+          if-no-files-found: ignore
+          retention-days: 7
+
   docs-build:
     name: Docs site build
     needs: [changes]
@@ -781,6 +848,7 @@ jobs:
       - ts-typecheck
       - ts-test
       - ts-build
+      - web-e2e
       - docs-build
       - android-lint
       - android-test

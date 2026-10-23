@@ -71,8 +71,9 @@ requirements (referenced below as FR-xxx).
   admin actions) MUST have at least one subcutaneous end-to-end test that instantiates the
   application router with in-memory implementations and drives it through the active framework's
   in-process test client, asserting on both the HTTP response and the resulting state mutation.
-  Automated browser e2e tests are deferred — tracked in
-  [#74](https://github.com/justin13888/beam/issues/74).
+  The browser end-to-end tier (`mise run ts:e2e`, see [testing.md](../testing.md)) drives the
+  same core loop through a real browser against the composed stack; it complements these tests
+  and does not replace them.
 - **NFR-205**: Edge cases that would otherwise require manual verification (missing file, corrupted
   or unreadable media entry, database-call failure, expired session, unauthorized admin action) MUST
   be codified as unit tests by configuring the relevant injected trait to return the corresponding

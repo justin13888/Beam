@@ -440,6 +440,124 @@ description = "Run the beam-web test suite"
 depends = ["deps:js"]
 run = "bun run --filter beam-web test"
 
+[tasks."ts:e2e"]
+description = "Run the beam-web Playwright suite against the composed stack (needs a container runtime)"
+# The browser end-to-end suite (#74): OIDC login through Dex, adding and
+# scanning a library, browse and search, and direct play of a generated
+# fixture, driven by a real Chromium against Postgres, Dex and beam-server.
+#
+# Deliberately outside `ci`, like `dev:verify-oidc` and `rust:test:pg`: it
+# needs a container runtime, and NFR-201 says the default run must not. CI runs
+# it in its own `web-e2e` job.
+#
+# The stack runs as its own compose project, `beam-e2e`, so its database, Dex
+# state and library volume never mix with `dev:up`'s; it is torn down, volumes
+# and all, before and after every run, so each run starts from nothing. The
+# root `.env` is not read (`--env-file /dev/null`): a developer's
+# HOST_VIDEO_DIR there would swap the fixture volume for their own library.
+#
+# Two ports are fixed because the stack cannot work on any others: Dex's
+# static client registers only http://localhost:8000/v1/auth/callback, and
+# beam-web/playwright.config.ts serves the SPA on :8080, which BEAM_WEB_URL --
+# the post-login redirect and the CSRF allowed-origin set -- has to name.
+#
+# The OIDC wiring is read out of `dev:up`'s env table rather than restated, so
+# the suite signs in through exactly the configuration `dev:up` ships and
+# `check:compose-invariants` guards.
+#
+# The SPA is served by Playwright (`vite build` and `vite preview`), not by the
+# `web` image: that image runs `codegen:openapi` and `tsc`, neither of which can
+# pass until beam-web is regenerated against the OpenAPI 3.2 contract (#146).
+#
+# BEAM_CONTAINER_CACHE_DIR turns on a buildx local layer cache for the server
+# image, as it does for `check:ffmpeg-build`; it needs docker with a
+# container-driver builder, which is what CI provides. BEAM_CONTAINER overrides
+# the engine, which otherwise follows the compose provider scripts/compose.sh
+# picks, so the image is built where compose will look for it.
+depends = ["deps:js"]
+run = '''
+set -eu
+. scripts/compose.sh
+
+image=localhost/beam-e2e-server:latest
+export BEAM_E2E_SERVER_IMAGE="$image"
+
+# One NAME=VALUE per line, each exported as a single word: no value is ever
+# evaluated by the shell, so nothing in it needs quoting.
+dev_up_env=$(bun -e '
+const env = Bun.TOML.parse(await Bun.file("mise.toml").text()).tasks["dev:up"].env;
+for (const [name, value] of Object.entries(env)) console.log(`${name}=${value}`);
+')
+while IFS= read -r assignment; do
+    export "$assignment"
+done <<EOF
+$dev_up_env
+EOF
+export BEAM_SERVER_HOST_PORT=8000
+export BEAM_WEB_URL=http://localhost:8080
+# Hash the fixture the moment it is seen: the default settle window would
+# leave a file written seconds before the scan unindexed.
+export BEAM_SCAN_SETTLE_SECS=0
+# The fixture is not anime; nothing in the suite needs a metadata provider.
+export BEAM_ANILIST_ENABLED=false
+unset HOST_VIDEO_DIR HOST_DATA_DIR
+
+e2e() {
+    compose -p beam-e2e --env-file /dev/null \
+        -f compose.yaml -f beam-web/e2e/compose.e2e.yaml \
+        --profile dev-idp --profile e2e "$@"
+}
+
+case "$compose_cmd" in
+    podman*) engine=podman ;;
+    *) engine=docker ;;
+esac
+engine=${BEAM_CONTAINER:-$engine}
+if [ -n "${BEAM_CONTAINER_CACHE_DIR:-}" ]; then
+    # Export to a fresh directory and swap it in after the build. buildx's
+    # local exporter never prunes blobs, so exporting into the directory the
+    # cache was restored from would carry every earlier layer forward and grow
+    # the saved cache on each Cargo.lock or Containerfile change.
+    cache_next="$BEAM_CONTAINER_CACHE_DIR.next"
+    mkdir -p "$BEAM_CONTAINER_CACHE_DIR"
+    rm -rf "$cache_next"
+    set -- buildx build --load \
+        --cache-from "type=local,src=$BEAM_CONTAINER_CACHE_DIR" \
+        --cache-to "type=local,dest=$cache_next,mode=max"
+else
+    cache_next=
+    set -- build
+fi
+echo "ts:e2e: $engine $* --file beam-server/Containerfile --tag $image ."
+"$engine" "$@" --file beam-server/Containerfile --tag "$image" .
+if [ -n "$cache_next" ]; then
+    rm -rf "$BEAM_CONTAINER_CACHE_DIR"
+    mv "$cache_next" "$BEAM_CONTAINER_CACHE_DIR"
+fi
+
+(cd beam-web && bun x playwright install chromium)
+
+teardown() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "ts:e2e: failed; the server and IdP logs follow" >&2
+        e2e logs --no-color server dex 2>&1 | tail -n 300 >&2 || true
+    fi
+    e2e down -v --remove-orphans > /dev/null 2>&1 || true
+    exit "$status"
+}
+e2e down -v --remove-orphans > /dev/null 2>&1 || true
+trap teardown EXIT INT TERM
+
+e2e run --rm e2e-fixtures
+# Dex first, and healthy, before the server, for the reason dev:up gives:
+# beam-server resolves OIDC discovery once at startup.
+e2e up -d --wait postgres dex
+e2e up -d --wait server
+
+bun run --filter beam-web e2e
+'''
+
 [tasks."ts:coverage"]
 description = "Run JS/TS tests with coverage thresholds"
 depends = ["deps:js"]
