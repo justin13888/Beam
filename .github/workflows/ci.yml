@@ -32,6 +32,7 @@ jobs:
       ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
       ffmpeg_image: ${{ steps.filter.outputs.ffmpeg_image }}
       compose: ${{ steps.filter.outputs.compose }}
+      e2e: ${{ steps.filter.outputs.e2e }}
       chart: ${{ steps.filter.outputs.chart }}
       hooks: ${{ steps.filter.outputs.hooks }}
       android: ${{ steps.filter.outputs.android }}
@@ -136,6 +137,15 @@ jobs:
               - 'compose*.yaml'
               - '.env.example'
               - 'dex/**'
+            # What web-e2e reads beyond the three filters above: its compose
+            # override and seeder (beam-web/e2e/compose.e2e.yaml is not a
+            # root compose*.yaml), and the Containerfile `ts:e2e` builds the
+            # server image from. Without this a change to either alone would
+            # skip the job, and ci-ok would count the skip as a pass.
+            e2e:
+              - *tooling
+              - 'beam-web/e2e/**'
+              - 'beam-server/Containerfile'
             chart:
               - *tooling
               - 'charts/**'
@@ -525,15 +535,16 @@ jobs:
   # Dex, a library scan, browse and search, and direct play, against the
   # composed Postgres, Dex and beam-server stack. Like rust-test-pg it is the
   # infrastructure tier NFR-201 keeps out of `mise run ci`, so it has a job of
-  # its own. It reads the server, the SPA and the compose topology, so any of
-  # the three filters runs it.
+  # its own. It reads the server, the SPA, the compose topology and its own
+  # e2e harness, so any of those four filters runs it.
   web-e2e:
     name: Web end-to-end (Playwright)
     needs: [changes]
     if: >-
       needs.changes.outputs.rust == 'true' ||
       needs.changes.outputs.ts == 'true' ||
-      needs.changes.outputs.compose == 'true'
+      needs.changes.outputs.compose == 'true' ||
+      needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     # A cold cache compiles FFmpeg and the release server; a warm one takes a
     # fraction of that. The bound is a backstop for a run that hangs, which
