@@ -10,7 +10,30 @@ amends "package://github.com/jdx/hk/releases/download/v1.57.0/hk@1.57.0#/Config.
 
 min_hk_version = "1.57.0"
 
-default_branch = "master"
+// The base a pre-push of a new branch is diffed against, so each glob-gated
+// step below sees only the branch's own changes (#282). hk 1.57.0 builds the
+// pre-push file set as follows: a branch the remote already has is diffed
+// against the remote's old sha; a new one against the checked-out branch's
+// `refs/remotes/<remote>/<name>` if it exists, else against this value (rebound onto `<remote>` when that is not
+// `origin`); and a ref that does not resolve is diffed against the empty tree,
+// which hands every tracked file to every step.
+//
+// Remote-qualified on purpose. A bare "master" is the *local* branch, which
+// nothing fetches -- `git fetch origin master` moves origin/master and leaves
+// master where it was -- so in a long-lived clone or a linked worktree it
+// trails upstream, and everything merged since it last moved lands in the file
+// set. `commits:check` in mise.toml measures from origin/master for the same
+// reason.
+//
+// No setting here covers a push to a URL (`git push https://... HEAD:refs/heads/x`).
+// Git then passes the URL where the remote name goes, hk looks for
+// `refs/remotes/<the URL>/master`, finds nothing, and falls back to the empty
+// tree: a one-file change runs the Rust, Android and Apple steps over the
+// whole repository. Push by remote name instead; where SSH is unavailable,
+// point the remote at HTTPS (`git config remote.origin.pushurl
+// https://github.com/justin13888/Beam.git`) and keep pushing to `origin`.
+// That is an hk limitation, not reported upstream from here; ADR-0009 records it.
+default_branch = "origin/master"
 
 // Every step runs in hk's default shell, `sh -o errexit -c`, with GIT_DIR and
 // GIT_WORK_TREE removed from its environment (#204). Each hook's `steps` sets
