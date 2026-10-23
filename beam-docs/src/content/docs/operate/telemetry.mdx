@@ -137,7 +137,14 @@ still a statement about what that viewer watched in aggregate -- which is why it
 
 ### Reading the counts
 
-An admin reads the counts, summed over a range of days (the last 30 by default, at most 366):
+The Android app reports today; the Apple apps and the web player do not report yet. A client sends
+what it saw in batches of at most 50 events -- on pause, on stop, and whenever 50 are waiting -- and
+stops for the rest of the session the first time the server answers that collection is off.
+
+The **Playback** tab of the web admin dashboard and the **Playback** section of the Android app's
+admin screen show the counts for a range of days you pick: the failure rate by video codec, by audio
+codec and by client, a histogram of stalls by length, and the source switches. Underneath, an admin
+reads the counts summed over a range of days (the last 30 by default, at most 366):
 
 ```bash
 curl -b "beam_session=…" "http://localhost:8000/v1/admin/telemetry/playback?from=2026-09-01&to=2026-09-27"
