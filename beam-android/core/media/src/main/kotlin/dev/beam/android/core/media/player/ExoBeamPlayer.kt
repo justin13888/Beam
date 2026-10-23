@@ -340,6 +340,20 @@ internal class ExoBeamPlayer(
         mutableState.update { it.copy(isPlaying = isPlaying) }
     }
 
+    override fun onPlayWhenReadyChanged(
+        playWhenReady: Boolean,
+        reason: Int,
+    ) {
+        // The media session (notification, headset, audio focus) flips
+        // playWhenReady on the player directly, bypassing pause() and
+        // resume(), so the stall follows the flag here rather than there.
+        if (!playWhenReady) {
+            endStall()
+        } else if (exoPlayer.playbackState == Player.STATE_BUFFERING) {
+            startStall()
+        }
+    }
+
     override fun onPlaybackStateChanged(playbackState: Int) {
         mutableState.update {
             it.copy(
