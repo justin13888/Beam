@@ -17,9 +17,13 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.Playability
+import uniffi.beam_client_core.SourceSelection
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlayerTest {
@@ -38,6 +42,7 @@ class PlayerTest {
                 nextEpisode = Fixtures.episode(id = "episode-2", fileId = "file-2")
             },
         preferences: FakePreferencesRepository = FakePreferencesRepository(),
+        playback: FakePlaybackRepository = FakePlaybackRepository(),
     ) = PlayerViewModel(
         player = player,
         // Throws rather than returning a stub: the view model must not build a
@@ -48,7 +53,7 @@ class PlayerTest {
                 override fun exoPlayer(): androidx.media3.exoplayer.ExoPlayer =
                     error("the player screen must not construct a decoder to hold state")
             },
-        playback = FakePlaybackRepository(),
+        playback = playback,
         catalog = catalog,
         preferences = preferences,
         savedStateHandle =
@@ -238,6 +243,204 @@ class PlayerTest {
             assertFalse(player.released)
         }
 
+    @Test
+    fun `sustained rebuffering switches to the smaller file the core chose and says so`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val playback = FakePlaybackRepository().apply { downgrade = smallerSource() }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("file-sd"), player.switched)
+            assertEquals(
+                SourceDowngrade(message = DOWNGRADE_REASON, fromFileId = "file-1"),
+                model.state.value.downgrade,
+            )
+            assertEquals(
+                "an episode's sources are asked for by the episode, never by its show",
+                listOf("episode-1" to "file-1"),
+                playback.downgradeRequests,
+            )
+        }
+
+    @Test
+    fun `a movie's fallback is asked for by the movie`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val playback = FakePlaybackRepository().apply { downgrade = smallerSource() }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request().copy(episodeId = null))
+            testScheduler.advanceUntilIdle()
+
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("media-1" to "file-1"), playback.downgradeRequests)
+        }
+
+    @Test
+    fun `a source the viewer picked is never overridden`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val playback = FakePlaybackRepository().apply { downgrade = smallerSource() }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            model.switchSource(Fixtures.source(fileId = "file-remux"))
+            testScheduler.advanceUntilIdle()
+
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("file-remux"), player.switched)
+            assertTrue(playback.downgradeRequests.isEmpty())
+            assertNull(model.state.value.downgrade)
+        }
+
+    @Test
+    fun `with nothing smaller to play the current file keeps playing`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val playback = FakePlaybackRepository().apply { downgrade = null }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            assertTrue(player.switched.isEmpty())
+            assertNull(model.state.value.downgrade)
+        }
+
+    @Test
+    fun `a failure asking the core keeps the current file playing`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val playback =
+                FakePlaybackRepository().apply {
+                    downgrade = smallerSource()
+                    failWith = BeamException.NotFound("gone", "about:blank")
+                }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            assertTrue(player.switched.isEmpty())
+            assertNull(model.state.value.downgrade)
+        }
+
+    @Test
+    fun `one verdict on a file asks the core once`() =
+        runTest {
+            // The verdict stays set while the file plays, and every position
+            // tick republishes the state; asking on each would hammer the
+            // server with a sources request twice a second.
+            val player = FakeBeamPlayer()
+            val playback = FakePlaybackRepository().apply { downgrade = null }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+            player.seekTo(60_000L)
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(1, playback.downgradeRequests.size)
+        }
+
+    @Test
+    fun `undoing a downgrade returns to the original file and pins it`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val playback = FakePlaybackRepository().apply { downgrade = smallerSource() }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            model.undoDowngrade()
+            testScheduler.advanceUntilIdle()
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("file-sd", "file-1"), player.switched)
+            assertTrue(model.state.value.isSourcePinned)
+            assertNull(model.state.value.downgrade)
+            assertEquals(
+                "going back is a choice, so the original file is not downgraded again",
+                1,
+                playback.downgradeRequests.size,
+            )
+        }
+
+    @Test
+    fun `dismissing the notice keeps the smaller file`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val playback = FakePlaybackRepository().apply { downgrade = smallerSource() }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            model.dismissDowngrade()
+            testScheduler.advanceUntilIdle()
+
+            assertNull(model.state.value.downgrade)
+            assertEquals(listOf("file-sd"), player.switched)
+            assertFalse(model.state.value.isSourcePinned)
+        }
+
+    @Test
+    fun `the next episode is not held to the last episode's pick`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val model =
+                viewModel(
+                    player = player,
+                    preferences = FakePreferencesRepository(UserPreferences(autoPlayNext = true)),
+                )
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            model.switchSource(Fixtures.source(fileId = "file-remux"))
+            testScheduler.advanceUntilIdle()
+
+            player.finish()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals("file-2", player.played.last().fileId)
+            assertFalse(model.state.value.isSourcePinned)
+        }
+
+    private fun smallerSource() =
+        SourceSelection(
+            source = Fixtures.source(fileId = "file-sd", width = 854u, height = 480u),
+            playability = Playability.Hardware,
+            audioTrackIndex = null,
+            reason = DOWNGRADE_REASON,
+            rejected = emptyList(),
+        )
+
     private fun request() =
         PlaybackRequest(
             mediaId = "media-1",
@@ -245,4 +448,8 @@ class PlayerTest {
             fileId = "file-1",
             title = "Arrival",
         )
+
+    private companion object {
+        const val DOWNGRADE_REASON = "Switched to 480p because playback kept stalling"
+    }
 }

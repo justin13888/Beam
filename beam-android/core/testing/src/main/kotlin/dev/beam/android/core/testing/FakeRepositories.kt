@@ -205,6 +205,21 @@ public class FakePlaybackRepository : PlaybackRepository {
         return selection ?: throw BeamException.NotFound("This title has no playable files", "about:blank")
     }
 
+    /** The fallback returned by [downgradeSource]; null means nothing smaller plays. */
+    public var downgrade: SourceSelection? = null
+
+    /** Every `(titleId, currentFileId)` [downgradeSource] was asked for, in order. */
+    public val downgradeRequests: MutableList<Pair<String, String>> = mutableListOf()
+
+    override suspend fun downgradeSource(
+        titleId: String,
+        currentFileId: String,
+    ): SourceSelection? {
+        downgradeRequests += titleId to currentFileId
+        failWith?.let { throw it }
+        return downgrade
+    }
+
     override suspend fun playbackConfig(fileId: String): PlaybackHttpConfig {
         failWith?.let { throw it }
         return PlaybackHttpConfig(

@@ -35,6 +35,28 @@ public data class PlayerScreenState(
     val areControlsVisible: Boolean = true,
     /** Whether the viewer wants the next episode to start on its own. */
     val autoPlayNext: Boolean = true,
+    /** The automatic switch to a smaller file that just happened, while it is on screen. */
+    val downgrade: SourceDowngrade? = null,
+    /**
+     * Whether the viewer chose the file themselves, which turns the automatic
+     * downgrade off: a viewer who picked the remux on purpose is not
+     * overridden, however much it stalls.
+     */
+    val isSourcePinned: Boolean = false,
+)
+
+/**
+ * A switch to a smaller file after sustained rebuffering.
+ *
+ * Always shown. Beam does not do adaptive bitrate (ADR-0014), and a silent
+ * switch would be pretending to: the viewer is told what happened and can
+ * take it back.
+ */
+public data class SourceDowngrade(
+    /** What to tell the viewer, phrased by the core. */
+    val message: String,
+    /** The file playback left, so undoing the switch can return to it. */
+    val fromFileId: String,
 )
 
 /**
@@ -65,6 +87,9 @@ public class PlayerViewModel
         private val mutableState = MutableStateFlow(PlayerScreenState())
         public val state: StateFlow<PlayerScreenState> = mutableState.asStateFlow()
 
+        /** The file a downgrade was last attempted from, so one verdict asks once. */
+        private var downgradeAttemptedFrom: String? = null
+
         /**
          * The instance the video surface renders from.
          *
@@ -85,6 +110,7 @@ public class PlayerViewModel
                 player.state.collect { playbackState ->
                     mutableState.update { it.copy(playback = playbackState) }
                     if (playbackState.hasEnded) onEnded()
+                    if (playbackState.isRebufferingSustained) onSustainedRebuffering(playbackState)
                 }
             }
             viewModelScope.launch {
@@ -129,9 +155,30 @@ public class PlayerViewModel
         /** Choose a subtitle track, or turn subtitles off. */
         public fun selectSubtitleTrack(id: String?): Unit = player.selectSubtitleTrack(id)
 
-        /** Switch to a different file, holding position. */
+        /**
+         * Switch to a different file, holding position.
+         *
+         * The viewer's own choice, so it pins the source: no automatic
+         * downgrade overrides it afterwards.
+         */
         public fun switchSource(source: MediaSourceView) {
+            mutableState.update { it.copy(isSourcePinned = true, downgrade = null) }
             viewModelScope.launch { player.switchSource(source.fileId) }
+        }
+
+        /**
+         * Take back an automatic downgrade: return to the file it left, and
+         * pin it, since going back is the viewer saying they want that file.
+         */
+        public fun undoDowngrade() {
+            val downgrade = mutableState.value.downgrade ?: return
+            mutableState.update { it.copy(isSourcePinned = true, downgrade = null) }
+            viewModelScope.launch { player.switchSource(downgrade.fromFileId) }
+        }
+
+        /** Hide the downgrade notice, keeping the smaller file. */
+        public fun dismissDowngrade() {
+            mutableState.update { it.copy(downgrade = null) }
         }
 
         /** Show or hide the transport controls. */
@@ -148,7 +195,9 @@ public class PlayerViewModel
         public fun playNext() {
             val next = mutableState.value.upNext ?: return
             val nextFile = next.fileId ?: return
-            mutableState.update { it.copy(isOfferingNext = false) }
+            // A different title: a pin on this episode's file says nothing about
+            // which file of the next one the viewer wants.
+            mutableState.update { it.copy(isOfferingNext = false, isSourcePinned = false, downgrade = null) }
             viewModelScope.launch {
                 player.play(
                     PlaybackRequest(
@@ -177,6 +226,34 @@ public class PlayerViewModel
                 playNext()
             } else {
                 mutableState.update { it.copy(isOfferingNext = true) }
+            }
+        }
+
+        private fun onSustainedRebuffering(playbackState: PlaybackUiState) {
+            val request = playbackState.request ?: return
+            if (mutableState.value.isSourcePinned) return
+            if (downgradeAttemptedFrom == request.fileId) return
+            downgradeAttemptedFrom = request.fileId
+            // Sources belong to a movie or an episode; a show has none of its
+            // own, so an episode is asked about by its own id.
+            val titleId = request.episodeId ?: request.mediaId.takeIf { it.isNotEmpty() } ?: return
+            viewModelScope.launch {
+                val selection =
+                    runCatching { playback.downgradeSource(titleId, request.fileId) }.getOrNull()
+                        ?: return@launch
+                // The viewer may have picked a file, or moved on, while the
+                // core was asked: either way this answer is about a file that
+                // is no longer the question.
+                if (mutableState.value.isSourcePinned) return@launch
+                if (player.state.value.request
+                        ?.fileId != request.fileId
+                ) {
+                    return@launch
+                }
+                mutableState.update {
+                    it.copy(downgrade = SourceDowngrade(message = selection.reason, fromFileId = request.fileId))
+                }
+                player.switchSource(selection.source.fileId)
             }
         }
 

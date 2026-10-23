@@ -153,6 +153,11 @@ internal class BeamPlaybackRepository
             policy: QualityPolicy,
         ): SourceSelection = client.selectPlaybackSource(mediaId, policy)
 
+        override suspend fun downgradeSource(
+            titleId: String,
+            currentFileId: String,
+        ): SourceSelection? = client.selectDowngradeSource(titleId, currentFileId)
+
         override suspend fun playbackConfig(fileId: String): PlaybackHttpConfig = client.playbackConfig(fileId)
 
         override suspend fun continueWatching(limit: UInt?): List<ContinueWatchingEntry> =

@@ -59,6 +59,15 @@ public fun PlayerRoute(
         }
     }
 
+    // The downgrade notice stays long enough to read and to reach "Undo", then
+    // gets out of the picture; the smaller file keeps playing either way.
+    LaunchedEffect(state.downgrade) {
+        if (state.downgrade != null) {
+            delay(DOWNGRADE_NOTICE_TIMEOUT_MS)
+            viewModel.dismissDowngrade()
+        }
+    }
+
     Box(
         modifier =
             modifier
@@ -85,8 +94,11 @@ public fun PlayerRoute(
             },
             onPlayNext = viewModel::playNext,
             onDismissNext = viewModel::dismissUpNext,
+            onUndoDowngrade = viewModel::undoDowngrade,
         )
     }
 }
 
 private const val CONTROLS_TIMEOUT_MS = 3_500L
+
+private const val DOWNGRADE_NOTICE_TIMEOUT_MS = 8_000L

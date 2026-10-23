@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.RebufferMonitor
 
 /**
  * [BeamPlayer] over Media3's [ExoPlayer].
@@ -56,6 +57,23 @@ internal class ExoBeamPlayer(
     private var positionTicker: Job? = null
     private var currentFileId: String? = null
 
+    /**
+     * Whether rebuffering on this file is sustained. The rule is the core's;
+     * this side only reports the stalls, timed on the player's own monotonic
+     * clock, so a test player built with a fake clock drives it too.
+     */
+    private val rebuffers = RebufferMonitor()
+
+    /**
+     * True from a prepare or a seek until playback is next ready. Buffering
+     * then is the player filling an empty buffer on purpose, not the
+     * connection falling behind, and is never reported as a stall.
+     */
+    private var isFillingOnPurpose = false
+
+    /** Whether a reported stall is still open. */
+    private var isStalled = false
+
     init {
         exoPlayer.addListener(this)
     }
@@ -74,11 +92,15 @@ internal class ExoBeamPlayer(
 
     override fun pause() {
         exoPlayer.playWhenReady = false
+        // A paused viewer is not waiting on the network.
+        endStall()
         reporter.stop()
         forceReport()
     }
 
     override fun seekTo(positionMs: Long) {
+        endStall()
+        isFillingOnPurpose = true
         exoPlayer.seekTo(positionMs.coerceAtLeast(0L))
         refreshPosition()
         // Forced rather than left to the interval: a seek is the clearest
@@ -155,6 +177,7 @@ internal class ExoBeamPlayer(
         positionTicker = null
         exoPlayer.removeListener(this)
         exoPlayer.release()
+        rebuffers.close()
     }
 
     private suspend fun prepare(
@@ -197,6 +220,11 @@ internal class ExoBeamPlayer(
                 .DefaultMediaSourceFactory(factory)
                 .createMediaSource(item)
 
+        // A different file: whatever the last one's stalls said about it, they
+        // say nothing about this one.
+        rebuffers.reset()
+        isStalled = false
+        isFillingOnPurpose = true
         exoPlayer.setMediaSource(source)
         exoPlayer.prepare()
         if (startAtSecs > 0.0) {
@@ -247,6 +275,13 @@ internal class ExoBeamPlayer(
             scope.launch {
                 while (isActive) {
                     refreshPosition()
+                    // Belt and braces for a seek the player satisfied without
+                    // ever leaving READY: the flag must not outlive the fill it
+                    // was set for, or every later stall would go unreported.
+                    if (exoPlayer.playbackState == Player.STATE_READY) isFillingOnPurpose = false
+                    // A stall that never ends produces no further player
+                    // events, and it is the one that most needs to trip.
+                    if (isStalled) publishRebuffering(rebuffers.poll(nowMs()))
                     delay(POSITION_POLL_MS)
                 }
             }
@@ -273,6 +308,26 @@ internal class ExoBeamPlayer(
         )
     }
 
+    private fun nowMs(): ULong = exoPlayer.clock.elapsedRealtime().toULong()
+
+    private fun startStall() {
+        if (isStalled || isFillingOnPurpose || !exoPlayer.playWhenReady) return
+        isStalled = true
+        publishRebuffering(rebuffers.stallStarted(nowMs()))
+    }
+
+    private fun endStall() {
+        if (!isStalled) return
+        isStalled = false
+        publishRebuffering(rebuffers.stallEnded(nowMs()))
+    }
+
+    private fun publishRebuffering(sustained: Boolean) {
+        if (sustained && !mutableState.value.isRebufferingSustained) {
+            mutableState.update { it.copy(isRebufferingSustained = true) }
+        }
+    }
+
     private fun forceReport() {
         val fileId = currentFileId ?: return
         val sample = sample() ?: return
@@ -291,6 +346,20 @@ internal class ExoBeamPlayer(
                 isBuffering = playbackState == Player.STATE_BUFFERING,
                 hasEnded = playbackState == Player.STATE_ENDED,
             )
+        }
+        when (playbackState) {
+            Player.STATE_BUFFERING -> {
+                startStall()
+            }
+
+            Player.STATE_READY -> {
+                isFillingOnPurpose = false
+                endStall()
+            }
+
+            else -> {
+                endStall()
+            }
         }
         if (playbackState == Player.STATE_READY) {
             refreshPosition()

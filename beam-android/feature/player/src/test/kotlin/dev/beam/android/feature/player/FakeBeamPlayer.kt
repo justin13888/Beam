@@ -67,6 +67,13 @@ internal class FakeBeamPlayer : BeamPlayer {
 
     override suspend fun switchSource(fileId: String) {
         switched += fileId
+        // As the real player does: a different file starts with a clean
+        // rebuffering verdict.
+        mutableState.value =
+            mutableState.value.copy(
+                request = mutableState.value.request?.copy(fileId = fileId),
+                isRebufferingSustained = false,
+            )
     }
 
     override fun stop() {
@@ -75,6 +82,11 @@ internal class FakeBeamPlayer : BeamPlayer {
 
     override fun release() {
         released = true
+    }
+
+    /** Drive the player to the core's verdict that the current file keeps stalling. */
+    fun rebufferPersistently() {
+        mutableState.value = mutableState.value.copy(isRebufferingSustained = true, isBuffering = true)
     }
 
     /** Drive the player to the end of the current item. */
