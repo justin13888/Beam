@@ -96,7 +96,6 @@ another source ([#142](https://github.com/justin13888/beam/issues/142)).
   [#67](https://github.com/justin13888/beam/issues/67) and Apple iOS/macOS
   [#66](https://github.com/justin13888/beam/issues/66) have shipped; both remaining clients inherit
   `beam-client-core`, and both need a native token mint before they can sign in at all.
-- Automated browser e2e tests (Playwright) — [#74](https://github.com/justin13888/beam/issues/74).
 
 ## Non-goals
 

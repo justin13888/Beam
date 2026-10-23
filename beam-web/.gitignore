@@ -20,3 +20,8 @@ coverage/
 # invisible in review. It is committed, and `mise run codegen:openapi:check`
 # fails when the regenerated spec differs, so drift shows up as a diff.
 src/api.gen.ts
+
+# Playwright output (playwright.config.ts): traces, screenshots and the report
+# from `mise run ts:e2e`.
+e2e/.results/
+e2e/.report/
