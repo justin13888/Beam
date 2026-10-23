@@ -8,7 +8,9 @@
 
 use crate::api::Client as GeneratedClient;
 use crate::api::{MiddlewareBackend, ReqwestBackend};
-use crate::capability::{DeviceProfile, MediaSourceView, QualityPolicy, SourceSelection};
+use crate::capability::{
+    DeviceProfile, MediaSourceView, QualityPolicy, RebufferDetector, SourceSelection,
+};
 use crate::catalog::{
     AdminEvent, AdminLogEntry, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
     ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
@@ -28,7 +30,7 @@ use crate::transport::{ABOUT_BLANK, FailureKind, SessionMiddleware, TransportFai
 use crate::upnext::{UpNextSeason, next_playable_episode};
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Storage key holding the list of known server ids.
 const SERVER_INDEX_KEY: &str = "servers/index";
@@ -231,6 +233,54 @@ impl std::fmt::Debug for ServerContext {
             .field("record", &self.record)
             .field("state", &self.state)
             .finish_non_exhaustive()
+    }
+}
+
+/// The sustained-rebuffer detector, as the platform player holds it.
+///
+/// One per player. Every timestamp is the platform's monotonic clock in
+/// milliseconds (Android's `elapsedRealtime`), never wall-clock time, which
+/// can jump. Each call returns whether rebuffering on the current file is
+/// sustained; the rule itself is [`RebufferDetector`]'s.
+#[derive(Debug, Default, uniffi::Object)]
+pub struct RebufferMonitor {
+    detector: Mutex<RebufferDetector>,
+}
+
+#[uniffi::export]
+impl RebufferMonitor {
+    /// A monitor that has seen nothing.
+    #[uniffi::constructor]
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Playback stalled mid-stream. Never called for the buffering that
+    /// starts a file or follows a seek.
+    pub fn stall_started(&self, now_ms: u64) -> bool {
+        self.detector
+            .lock()
+            .expect("detector lock")
+            .stall_started(now_ms)
+    }
+
+    /// Playback resumed after a stall.
+    pub fn stall_ended(&self, now_ms: u64) -> bool {
+        self.detector
+            .lock()
+            .expect("detector lock")
+            .stall_ended(now_ms)
+    }
+
+    /// Re-judge without a new event, so a stall that never ends still trips.
+    pub fn poll(&self, now_ms: u64) -> bool {
+        self.detector.lock().expect("detector lock").poll(now_ms)
+    }
+
+    /// Forget everything, because a different file is now playing.
+    pub fn reset(&self) {
+        self.detector.lock().expect("detector lock").reset();
     }
 }
 
@@ -659,16 +709,7 @@ impl BeamClient {
         policy: QualityPolicy,
     ) -> Result<SourceSelection, BeamError> {
         let sources = self.media_sources(media_id).await?;
-        let profile = self
-            .device_profile
-            .read()
-            .expect("profile lock")
-            .clone()
-            .ok_or_else(|| BeamError::BadRequest {
-                detail: "the device profile has not been set".to_owned(),
-                // Refused here, so there is no server type to carry.
-                code: ABOUT_BLANK.to_owned(),
-            })?;
+        let profile = self.require_device_profile()?;
 
         crate::capability::select_source(&sources, &profile, &policy).map_err(|rejections| {
             let detail = rejections.first().map_or_else(
@@ -680,6 +721,31 @@ impl BeamClient {
                 code: ABOUT_BLANK.to_owned(),
             }
         })
+    }
+
+    /// A smaller file of the same title to fall back to, after the platform's
+    /// [`RebufferMonitor`] judged rebuffering on `current_file_id` sustained.
+    ///
+    /// `None` means there is nothing smaller this device can play, which is
+    /// an answer rather than a failure: playback continues on the current
+    /// file. See [`crate::capability::select_downgrade`] for how it chooses.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and server failures, and refuses with
+    /// [`BeamError::BadRequest`] before the device profile has been set.
+    pub async fn select_downgrade_source(
+        &self,
+        media_id: String,
+        current_file_id: String,
+    ) -> Result<Option<SourceSelection>, BeamError> {
+        let sources = self.media_sources(media_id).await?;
+        let profile = self.require_device_profile()?;
+        Ok(crate::capability::select_downgrade(
+            &sources,
+            &current_file_id,
+            &profile,
+        ))
     }
 
     /// Accept a server certificate the verifier turned away.
@@ -1904,6 +1970,18 @@ impl BeamClient {
             .ok_or(BeamError::NoActiveServer)
     }
 
+    fn require_device_profile(&self) -> Result<DeviceProfile, BeamError> {
+        self.device_profile
+            .read()
+            .expect("profile lock")
+            .clone()
+            .ok_or_else(|| BeamError::BadRequest {
+                detail: "the device profile has not been set".to_owned(),
+                // Refused here, so there is no server type to carry.
+                code: ABOUT_BLANK.to_owned(),
+            })
+    }
+
     fn summary(&self, server_id: &str) -> Result<ServerSummary, BeamError> {
         self.list_servers()?
             .into_iter()
@@ -2753,6 +2831,126 @@ mod tests {
         assert_eq!(other.file_id, "f2f2f2f2-0000-4000-8000-000000000002");
         assert_eq!(other.video_codec, None, "no video track, no picture");
         assert_eq!((other.width, other.height), (None, None));
+    }
+
+    /// Two H.264 versions of one title: a 1080p file at 8 Mbps and a 720p
+    /// file at 3 Mbps.
+    const TWO_H264_SOURCES: &str = r#"{"items":[
+        {"file_id":"a1a1a1a1-0000-4000-8000-000000000001","is_primary":true,
+         "edition":null,"episode_span":null,"parts":[],
+         "size_bytes":4000000000,"mime_type":"video/mp4","container_format":"mp4",
+         "duration_secs":6300.0,
+         "video_tracks":[{"index":0,"codec":"h264","width":1920,"height":1080,
+                          "frame_rate":null,"bit_rate":8000000,"hdr_format":null}],
+         "audio_tracks":[{"index":1,"codec":"aac","language":"eng","title":null,
+                          "channels":2,"channel_layout":null,"sample_rate":null,
+                          "bit_rate":null,"is_default":true,"is_forced":false}],
+         "subtitle_tracks":[],
+         "stream_url":"/v1/files/a1a1a1a1-0000-4000-8000-000000000001/stream",
+         "download_url":"/v1/files/a1a1a1a1-0000-4000-8000-000000000001/download"},
+        {"file_id":"b2b2b2b2-0000-4000-8000-000000000002","is_primary":false,
+         "edition":null,"episode_span":null,"parts":[],
+         "size_bytes":1500000000,"mime_type":"video/mp4","container_format":"mp4",
+         "duration_secs":6300.0,
+         "video_tracks":[{"index":0,"codec":"h264","width":1280,"height":720,
+                          "frame_rate":null,"bit_rate":3000000,"hdr_format":null}],
+         "audio_tracks":[{"index":1,"codec":"aac","language":"eng","title":null,
+                          "channels":2,"channel_layout":null,"sample_rate":null,
+                          "bit_rate":null,"is_default":true,"is_forced":false}],
+         "subtitle_tracks":[],
+         "stream_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/stream",
+         "download_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/download"}
+    ],
+    "page_info":{"has_next_page":false,"has_previous_page":false,
+                 "start_cursor":null,"end_cursor":null}}"#;
+
+    async fn client_answering_sources(body: &'static str) -> Arc<BeamClient> {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering(200, "application/json", body));
+        client
+            .use_transport(&id, backend as Arc<dyn crate::api::HttpBackend>)
+            .expect("the server is registered");
+        client
+    }
+
+    #[tokio::test]
+    async fn a_downgrade_falls_back_from_the_server_sources_to_the_lighter_file() {
+        let client = client_answering_sources(TWO_H264_SOURCES).await;
+        client.set_device_profile(
+            crate::capability::builders::DeviceProfileBuilder::phone_h264_hevc().build(),
+        );
+
+        let downgrade = client
+            .select_downgrade_source(
+                MEDIA_ID.to_owned(),
+                "a1a1a1a1-0000-4000-8000-000000000001".to_owned(),
+            )
+            .await
+            .expect("the sources decode")
+            .expect("the 720p file is lighter and plays");
+
+        assert_eq!(
+            downgrade.source.file_id,
+            "b2b2b2b2-0000-4000-8000-000000000002"
+        );
+        assert_eq!(
+            downgrade.reason,
+            "Switched to 720p because playback kept stalling"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_lightest_file_has_no_downgrade_and_that_is_not_an_error() {
+        let client = client_answering_sources(TWO_H264_SOURCES).await;
+        client.set_device_profile(
+            crate::capability::builders::DeviceProfileBuilder::phone_h264_hevc().build(),
+        );
+
+        let downgrade = client
+            .select_downgrade_source(
+                MEDIA_ID.to_owned(),
+                "b2b2b2b2-0000-4000-8000-000000000002".to_owned(),
+            )
+            .await
+            .expect("nothing lighter is an answer, not a failure");
+
+        assert_eq!(downgrade, None);
+    }
+
+    #[tokio::test]
+    async fn a_downgrade_is_refused_before_the_device_profile_is_known() {
+        // Without the profile there is no way to know which smaller file
+        // plays, and guessing is how a stall becomes a decoder failure.
+        let client = client_answering_sources(TWO_H264_SOURCES).await;
+
+        let refused = client
+            .select_downgrade_source(
+                MEDIA_ID.to_owned(),
+                "a1a1a1a1-0000-4000-8000-000000000001".to_owned(),
+            )
+            .await;
+
+        assert!(
+            matches!(refused, Err(BeamError::BadRequest { .. })),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn the_rebuffer_monitor_carries_the_detectors_verdict_across_calls() {
+        // The platform holds one monitor per player and calls it from the
+        // player's event callbacks; the verdict must accumulate across those
+        // calls, and `reset` must clear it for the next file.
+        let monitor = RebufferMonitor::new();
+        assert!(!monitor.stall_started(0));
+        assert!(!monitor.stall_ended(1_000));
+        assert!(!monitor.stall_started(10_000));
+        assert!(!monitor.stall_ended(11_000));
+        assert!(monitor.stall_started(20_000), "the third stall in a minute");
+        assert!(monitor.poll(20_500));
+
+        monitor.reset();
+        assert!(!monitor.poll(21_000));
     }
 
     /// A cookie found in secret storage at startup is registered with the

@@ -143,6 +143,16 @@ public interface PlaybackRepository {
         policy: QualityPolicy,
     ): SourceSelection
 
+    /**
+     * A smaller file of [titleId] (a movie or an episode) to fall back to after
+     * sustained rebuffering on [currentFileId], or null when nothing smaller
+     * plays on this device.
+     */
+    public suspend fun downgradeSource(
+        titleId: String,
+        currentFileId: String,
+    ): SourceSelection?
+
     /** URL, headers and pins for the platform player to fetch bytes itself. */
     public suspend fun playbackConfig(fileId: String): PlaybackHttpConfig
 

@@ -10,6 +10,13 @@ public data class PlaybackUiState(
     val isPlaying: Boolean = false,
     /** Whether playback is stalled waiting for data. */
     val isBuffering: Boolean = false,
+    /**
+     * Whether the current file keeps stalling mid-playback, as the core's
+     * rebuffer detector judges it: three stalls within a minute, or fifteen
+     * seconds stalled within one. A single stall never sets it. Cleared when a
+     * different file starts.
+     */
+    val isRebufferingSustained: Boolean = false,
     /** Whether the current item has finished. */
     val hasEnded: Boolean = false,
     /** Current position in milliseconds. */

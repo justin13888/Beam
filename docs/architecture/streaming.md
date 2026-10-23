@@ -78,6 +78,33 @@ attaches to the existing row as another source rather than failing the scan -- c
 decision. The existing episode is never written on that path: its title and runtime stay those the
 first file (or enrichment) set.
 
+The Android app is the client that switches on observed network conditions
+([#141](https://github.com/justin13888/beam/issues/141)); `beam-web` does not, and its source
+selection is [#138](https://github.com/justin13888/beam/issues/138)'s. `beam-client-core`
+decides both halves so another native client inherits the same rule:
+
+- **When.** `RebufferDetector` (`capability/rebuffer.rs`) judges rebuffering *sustained* at three
+  mid-playback stalls starting within a minute, or fifteen seconds stalled within one, whether in
+  one stall or several. A single short stall is noise and never trips it. The player reports only
+  stalls while the viewer is playing: the buffering that starts a file, follows a seek, or follows a
+  switch is the player filling an empty buffer on purpose and is not counted. The verdict holds
+  until a different file starts.
+- **To what.** `select_downgrade` (`capability/select.rs`) takes every source lighter than the one
+  playing -- by video bit rate where both declare one, by size otherwise -- and ranks them with
+  `QualityPolicy::MatchScreen` through `select_source`, so the fallback goes through
+  `playability()` like any other choice: a smaller file the device cannot decode is never a
+  fallback, and with nothing smaller that plays, playback stays on the current file. It is the
+  best lighter file rather than the smallest, so a step costs as little picture as it can; if the
+  connection still cannot keep up, the next verdict steps down again.
+- **How.** The player resumes the new file at the current position and shows the viewer what
+  happened ("Switched to 720p because playback kept stalling") with an Undo. The switch is visible
+  by design: a silent one would be pretending to be ABR. Undo returns to the original file and
+  pins it, and a source the viewer switches to in the player is pinned too: a pinned source is
+  never downgraded. The next episode starts unpinned. A file picked on the detail screen before
+  playback is not yet carried into the player as a pin
+  ([#291](https://github.com/justin13888/beam/issues/291)), so until then it is downgraded like a
+  default, and its Undo pins it.
+
 "Observed network conditions" in (c) are now something a server can count. With playback telemetry
 enabled (FR-511, [ADR-0019](decisions/ADR-0019-telemetry-posture.md)), clients report mid-stream
 rebuffers with their duration and every source switch, manual or automatic, to

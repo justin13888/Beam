@@ -7,6 +7,7 @@ import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.repository.SessionRepository
 import dev.beam.android.core.model.UserPreferences
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import uniffi.beam_client_core.AdminEvent
@@ -203,6 +204,25 @@ public class FakePlaybackRepository : PlaybackRepository {
         selectionPolicy = policy
         failWith?.let { throw it }
         return selection ?: throw BeamException.NotFound("This title has no playable files", "about:blank")
+    }
+
+    /** The fallback returned by [downgradeSource]; null means nothing smaller plays. */
+    public var downgrade: SourceSelection? = null
+
+    /** Every `(titleId, currentFileId)` [downgradeSource] was asked for, in order. */
+    public val downgradeRequests: MutableList<Pair<String, String>> = mutableListOf()
+
+    /** When set, [downgradeSource] holds its answer until this completes. */
+    public var downgradeHold: CompletableDeferred<Unit>? = null
+
+    override suspend fun downgradeSource(
+        titleId: String,
+        currentFileId: String,
+    ): SourceSelection? {
+        downgradeRequests += titleId to currentFileId
+        downgradeHold?.await()
+        failWith?.let { throw it }
+        return downgrade
     }
 
     override suspend fun playbackConfig(fileId: String): PlaybackHttpConfig {

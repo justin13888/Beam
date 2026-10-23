@@ -44,11 +44,12 @@ public interface BeamPlayer {
     /**
      * Switch to a different file of the same title, holding position.
      *
-     * A discrete action, never automatic: Beam does not transcode and does not
-     * do adaptive bitrate ([ADR-0004]), so changing quality means changing
-     * which file is being read. Position is preserved because the alternative
-     * -- restarting the title because the viewer wanted a smaller file -- is
-     * indefensible.
+     * A discrete action, never a silent one: Beam does not transcode and does
+     * not do adaptive bitrate ([ADR-0004]), so changing quality means changing
+     * which file is being read. The viewer asks for it, or the player screen
+     * does on their behalf after [PlaybackUiState.isRebufferingSustained], and
+     * says so. Position is preserved because the alternative -- restarting the
+     * title because the viewer wanted a smaller file -- is indefensible.
      */
     public suspend fun switchSource(fileId: String)
 

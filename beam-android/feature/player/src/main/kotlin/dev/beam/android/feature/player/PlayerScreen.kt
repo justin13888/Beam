@@ -55,6 +55,7 @@ internal fun PlayerControls(
     onClose: () -> Unit,
     onPlayNext: () -> Unit,
     onDismissNext: () -> Unit,
+    onUndoDowngrade: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val playback = state.playback
@@ -136,6 +137,31 @@ internal fun PlayerControls(
                         .safeDrawingPadding()
                         .padding(horizontal = BeamSpacing.Medium),
             )
+        }
+
+        // Shown whether or not the controls are: an automatic switch the viewer
+        // never sees would be pretending to be adaptive bitrate.
+        state.downgrade?.let { downgrade ->
+            Row(
+                modifier =
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .safeDrawingPadding()
+                        .padding(BeamSpacing.Medium)
+                        .background(
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                            MaterialTheme.shapes.large,
+                        ).padding(horizontal = BeamSpacing.Medium, vertical = BeamSpacing.Small),
+                horizontalArrangement = Arrangement.spacedBy(BeamSpacing.Small),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = downgrade.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                TextButton(onClick = onUndoDowngrade) { Text("Undo") }
+            }
         }
 
         if (state.isOfferingNext) {
