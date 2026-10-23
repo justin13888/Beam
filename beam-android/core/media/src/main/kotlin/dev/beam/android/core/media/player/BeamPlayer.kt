@@ -2,6 +2,7 @@ package dev.beam.android.core.media.player
 
 import dev.beam.android.core.model.PlaybackRequest
 import kotlinx.coroutines.flow.StateFlow
+import uniffi.beam_client_core.SwitchTrigger
 
 /**
  * The player, as every screen above it sees one.
@@ -50,8 +51,15 @@ public interface BeamPlayer {
      * does on their behalf after [PlaybackUiState.isRebufferingSustained], and
      * says so. Position is preserved because the alternative -- restarting the
      * title because the viewer wanted a smaller file -- is indefensible.
+     *
+     * [trigger] is who chose the file -- [SwitchTrigger.MANUAL] for the viewer,
+     * [SwitchTrigger.AUTO] for a downgrade the screen made for them -- which is
+     * what the switch is counted under in playback telemetry.
      */
-    public suspend fun switchSource(fileId: String)
+    public suspend fun switchSource(
+        fileId: String,
+        trigger: SwitchTrigger,
+    )
 
     /** Stop, report the final position, and release the decoder. */
     public fun stop()

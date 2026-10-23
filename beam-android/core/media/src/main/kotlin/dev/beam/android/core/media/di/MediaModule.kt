@@ -20,6 +20,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import dev.beam.android.core.ffi.repository.PlaybackRepository
+import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.media.download.BeamDownloadManager
 import dev.beam.android.core.media.download.DownloadArtwork
 import dev.beam.android.core.media.download.DownloadManagerHolder
@@ -110,9 +111,10 @@ internal object MediaModule {
         @ApplicationContext context: Context,
         player: ExoPlayer,
         repository: PlaybackRepository,
+        telemetry: TelemetryRepository,
         clients: BeamHttpClientFactory,
         scope: CoroutineScope,
-    ): BeamPlayer = ExoBeamPlayer(context, player, repository, clients, scope)
+    ): BeamPlayer = ExoBeamPlayer(context, player, repository, telemetry, clients, scope)
 
     @Provides
     @Singleton
