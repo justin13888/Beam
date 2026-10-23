@@ -299,6 +299,12 @@ loop, serially, against the composed Postgres, Dex and beam-server stack:
 4. **Direct play** -- the player fetches the original file from the stream endpoint and the
    `<video>` element's clock advances, which only a decoded stream does.
 
+Steps 3 and 4 are written but held as `test.fixme` until
+[#297](https://github.com/justin13888/beam/issues/297). The SPA they drive breaks at runtime against
+the current `/v1` contract: Explore and the media page still read the pre-#190 response shapes. That
+is the stale-client debt [#146](https://github.com/justin13888/beam/issues/146) tracks. Steps 1
+and 2 run today.
+
 The fixture is generated per run, not committed: ten seconds of H.264/AAC in an MP4, written into
 the library volume by a one-shot service in `beam-web/e2e/compose.e2e.yaml` that runs the server's
 own image, since that image already carries the FFmpeg CLI. The server still mounts the library
