@@ -124,8 +124,9 @@ pub enum MediaBrowseError {
     )]
     InvalidCursor(String),
 
-    /// The page parameters mix directions, or ask for a page size outside
-    /// 1-100.
+    /// The page parameters mix directions: `first` or `after` with `last` or
+    /// `before`. A page size outside 1-100 never reaches this: the query's
+    /// schema bounds are refused first, as a `400` with `about:blank`.
     #[error("{0}")]
     #[problem(
         status = 400,
@@ -229,7 +230,9 @@ pub enum EnrichmentListError {
     )]
     InvalidCursor(String),
 
-    /// `first` is outside 1-100.
+    /// `first` is outside 1-100. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
     #[error("{0}")]
     #[problem(
         status = 400,
@@ -680,7 +683,9 @@ pub enum MediaRefLookupError {
 /// `GET /v1/continue-watching`.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum ContinueWatchingError {
-    /// `first` is outside 1-50.
+    /// `first` is outside 1-50. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
     #[error("{0}")]
     #[problem(
         status = 400,
@@ -708,7 +713,9 @@ pub enum HistoryError {
         title = "Invalid cursor"
     )]
     InvalidCursor(String),
-    /// `first` is outside 1-100.
+    /// `first` is outside 1-100. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
     #[error("{0}")]
     #[problem(
         status = 400,

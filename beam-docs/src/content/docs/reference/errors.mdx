@@ -81,11 +81,11 @@ starts where that title was.
 
 ### invalid-pagination
 
-**400.** From `GET /v1/media`, `GET /v1/history`, `GET /v1/continue-watching` and
-`GET /v1/admin/enrichment`. The page parameters ask for something the server does not answer: a
-forward parameter (`first`, `after`) combined with a backward one (`last`, `before`). A `first`
-or `last` outside 1 to 100 (1 to 50 for continue-watching) is refused before this check, as a
-`400` with `"type": "about:blank"` naming the parameter (see [below](#responses-with-no-code)).
+**400.** From `GET /v1/media`. The page parameters ask for something the server does not answer: a
+forward parameter (`first`, `after`) combined with a backward one (`last`, `before`). The other
+lists page forwards only, so they cannot mix directions. A `first` or `last` outside 1 to 100 (1
+to 50 for `GET /v1/continue-watching`) is refused on every list before this check, as a `400` with
+`"type": "about:blank"` naming the parameter (see [below](#responses-with-no-code)).
 
 **What to do.** Page forwards with `first` and `after`, or backwards with `last` and `before`, at
 most 100 items at a time.
