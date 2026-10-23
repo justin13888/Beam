@@ -25,6 +25,7 @@ import org.junit.Test
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.Playability
 import uniffi.beam_client_core.SourceSelection
+import uniffi.beam_client_core.SwitchTrigger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlayerTest {
@@ -226,6 +227,11 @@ class PlayerTest {
             testScheduler.advanceUntilIdle()
 
             assertEquals(listOf("file-hd"), player.switched)
+            assertEquals(
+                "the viewer chose it, so it is counted as a manual switch",
+                listOf(SwitchTrigger.MANUAL),
+                player.switchTriggers,
+            )
         }
 
     @Test
@@ -258,6 +264,11 @@ class PlayerTest {
             testScheduler.advanceUntilIdle()
 
             assertEquals(listOf("file-sd"), player.switched)
+            assertEquals(
+                "the screen chose it for the viewer, so it is counted as automatic",
+                listOf(SwitchTrigger.AUTO),
+                player.switchTriggers,
+            )
             assertEquals(
                 SourceDowngrade(message = DOWNGRADE_REASON, fromFileId = "file-1"),
                 model.state.value.downgrade,
@@ -477,6 +488,7 @@ class PlayerTest {
             testScheduler.advanceUntilIdle()
 
             assertEquals(listOf("file-sd", "file-1"), player.switched)
+            assertEquals(listOf(SwitchTrigger.AUTO, SwitchTrigger.MANUAL), player.switchTriggers)
             assertTrue(model.state.value.isSourcePinned)
             assertNull(model.state.value.downgrade)
             assertEquals(

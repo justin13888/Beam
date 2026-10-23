@@ -112,9 +112,11 @@ rebuffers with their duration and every source switch, manual or automatic, to
 resolution class and bitrate class, and an admin reads them at `GET /v1/admin/telemetry/playback`.
 Start failures are counted the same way, by reason. That is the evidence
 [ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md) asks for before constrained-bandwidth
-or compatibility behaviour is judged insufficient. The client emitters are tracked in
-[#222](https://github.com/justin13888/beam/issues/222), separately from the server half that landed
-with [#143](https://github.com/justin13888/beam/issues/143).
+or compatibility behaviour is judged insufficient. The server half landed with
+[#143](https://github.com/justin13888/beam/issues/143); the emitter is `beam-client-core`'s
+`telemetry` module ([#222](https://github.com/justin13888/beam/issues/222)), which batches at most 50
+events to a request, stops for the session on `409`, and drops a batch the server refuses. The
+Android player reports through it today; the Apple players and the web player do not yet.
 
 Both endpoints authenticate via the session cookie like every other request; no tokens in URLs (see
 `security.md`).

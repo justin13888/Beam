@@ -19,6 +19,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
+import java.time.LocalDate
+import java.time.temporal.ChronoUnit
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AdminTest {
@@ -193,4 +195,83 @@ class AdminTest {
                     ?.message,
             )
         }
+
+    /** The number of days `from` to `to` covers, both included. */
+    private fun daysCovered(range: Pair<String?, String?>): Long =
+        ChronoUnit.DAYS.between(LocalDate.parse(range.first), LocalDate.parse(range.second)) + 1
+
+    @Test
+    fun `playback telemetry loads with the dashboard for the last thirty days`() =
+        runTest {
+            val admin = FakeAdminRepository()
+            val viewModel = AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value.valueOrNull!!
+            assertEquals(TelemetryRange.LAST_30_DAYS, state.telemetryRange)
+            assertEquals(admin.telemetry.byVideoCodec, state.telemetry?.byVideoCodec)
+            assertEquals(30L, daysCovered(admin.telemetryRanges.single()))
+        }
+
+    @Test
+    fun `picking a range asks the server for exactly those days`() =
+        runTest {
+            val admin = FakeAdminRepository()
+            val viewModel = AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+
+            viewModel.setTelemetryRange(TelemetryRange.LAST_7_DAYS)
+            testScheduler.advanceUntilIdle()
+
+            val asked = admin.telemetryRanges.last()
+            assertEquals(7L, daysCovered(asked))
+            val state = viewModel.state.value.valueOrNull!!
+            assertEquals(TelemetryRange.LAST_7_DAYS, state.telemetryRange)
+            assertEquals(asked.first, state.telemetry?.from)
+        }
+
+    @Test
+    fun `a range survives a reload of the dashboard`() =
+        runTest {
+            val admin = FakeAdminRepository()
+            val viewModel = AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+            viewModel.setTelemetryRange(TelemetryRange.LAST_90_DAYS)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.refresh()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(90L, daysCovered(admin.telemetryRanges.last()))
+        }
+
+    @Test
+    fun `telemetry that cannot be read leaves the rest of the dashboard standing`() =
+        runTest {
+            val admin =
+                FakeAdminRepository().apply {
+                    telemetryFailWith = BeamException.Network("offline", true)
+                }
+            val viewModel = AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value.valueOrNull
+            assertNotNull("the dashboard still loads", state)
+            assertNull(state!!.telemetry)
+            assertNotNull(state.telemetryError)
+            assertTrue(state.libraries.isNotEmpty())
+        }
+
+    @Test
+    fun `a range is the days ending today, today included`() {
+        val today = LocalDate.of(2026, 10, 23)
+        assertEquals("2026-10-17" to "2026-10-23", TelemetryRange.LAST_7_DAYS.bounds(today))
+        assertEquals("2026-10-23", TelemetryRange.LAST_365_DAYS.bounds(today).second)
+    }
+
+    @Test
+    fun `a failure rate with nothing attempted is zero, not a division by zero`() {
+        assertEquals("0%", percent(failureRate(started = 0uL, failed = 0uL)))
+        assertEquals("25%", percent(failureRate(started = 3uL, failed = 1uL)))
+    }
 }

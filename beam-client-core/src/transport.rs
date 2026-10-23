@@ -174,6 +174,13 @@ pub struct ProblemDetail {
     pub type_uri: String,
     /// The occurrence-specific explanation, for a person.
     pub detail: Option<String>,
+    /// The JSON pointer of each `errors` entry, in order: where in the request
+    /// body a `validation-failed` refusal found each problem. Empty for a
+    /// document without them.
+    ///
+    /// Kept for a log line, never for a decision: it is what lets a refused
+    /// batch be diagnosed after it has been dropped.
+    pub pointers: Vec<String>,
 }
 
 impl ProblemDetail {
@@ -188,12 +195,28 @@ impl ProblemDetail {
             #[serde(rename = "type")]
             type_uri: String,
             detail: Option<String>,
+            // Read loosely: a malformed `errors` extension must not cost the
+            // `type` and `detail` that decide what the caller does.
+            #[serde(default)]
+            errors: Option<serde_json::Value>,
         }
 
         let wire: Wire = serde_json::from_slice(body).ok()?;
+        let pointers = wire
+            .errors
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .map(|errors| {
+                errors
+                    .iter()
+                    .filter_map(|error| error.get("pointer")?.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         Some(Self {
             type_uri: wire.type_uri,
             detail: wire.detail,
+            pointers,
         })
     }
 }
@@ -435,6 +458,8 @@ mod canned {
         pub(crate) method: reqwest::Method,
         pub(crate) url: reqwest::Url,
         pub(crate) headers: reqwest::header::HeaderMap,
+        /// The body, where it was a buffered one; empty otherwise.
+        pub(crate) body: Vec<u8>,
     }
 
     impl CannedBackend {
@@ -472,6 +497,11 @@ mod canned {
                     method: request.method().clone(),
                     url: request.url().clone(),
                     headers: request.headers().clone(),
+                    body: request
+                        .body()
+                        .and_then(reqwest::Body::as_bytes)
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_default(),
                 });
             let (status, content_type, body) = {
                 let mut answers = self.answers.lock().expect("canned answers");
@@ -805,7 +835,32 @@ mod tests {
         ProblemDetail {
             type_uri: type_uri.to_owned(),
             detail: detail.map(str::to_owned),
+            pointers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_validation_failure_yields_the_pointer_of_each_error() {
+        let document = ProblemDetail::parse(
+            br#"{"type":"https://beam.justinchung.net/reference/errors/#validation-failed",
+                 "status":422,"errors":[
+                   {"pointer":"/rebuffers/0/duration_ms","detail":"at most 600000"},
+                   {"detail":"an entry without a pointer is skipped"},
+                   {"pointer":"","detail":"at most 50 events in total, got 51"}]}"#,
+        )
+        .expect("a problem document parses");
+
+        assert_eq!(document.pointers, ["/rebuffers/0/duration_ms", ""]);
+    }
+
+    #[test]
+    fn a_malformed_errors_extension_does_not_cost_the_type() {
+        let document =
+            ProblemDetail::parse(br#"{"type":"about:blank","status":422,"errors":"not a list"}"#)
+                .expect("the type and detail still parse");
+
+        assert_eq!(document.type_uri, ABOUT_BLANK);
+        assert!(document.pointers.is_empty());
     }
 
     #[test]
