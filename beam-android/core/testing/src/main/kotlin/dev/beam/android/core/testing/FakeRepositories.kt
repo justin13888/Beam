@@ -7,6 +7,7 @@ import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.repository.SessionRepository
 import dev.beam.android.core.model.UserPreferences
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import uniffi.beam_client_core.AdminEvent
@@ -211,11 +212,15 @@ public class FakePlaybackRepository : PlaybackRepository {
     /** Every `(titleId, currentFileId)` [downgradeSource] was asked for, in order. */
     public val downgradeRequests: MutableList<Pair<String, String>> = mutableListOf()
 
+    /** When set, [downgradeSource] holds its answer until this completes. */
+    public var downgradeHold: CompletableDeferred<Unit>? = null
+
     override suspend fun downgradeSource(
         titleId: String,
         currentFileId: String,
     ): SourceSelection? {
         downgradeRequests += titleId to currentFileId
+        downgradeHold?.await()
         failWith?.let { throw it }
         return downgrade
     }

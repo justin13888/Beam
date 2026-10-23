@@ -8,6 +8,7 @@ import dev.beam.android.core.testing.FakeCatalogRepository
 import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.FakePreferencesRepository
 import dev.beam.android.core.testing.Fixtures
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -301,6 +302,65 @@ class PlayerTest {
 
             assertEquals(listOf("file-remux"), player.switched)
             assertTrue(playback.downgradeRequests.isEmpty())
+            assertNull(model.state.value.downgrade)
+        }
+
+    @Test
+    fun `a pick made while the core is asked wins over its answer`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val hold = CompletableDeferred<Unit>()
+            val playback =
+                FakePlaybackRepository().apply {
+                    downgrade = smallerSource()
+                    downgradeHold = hold
+                }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            // The viewer pins the very file that is playing, so only the pin,
+            // not a change of file, can be what drops the answer.
+            model.switchSource(Fixtures.source(fileId = "file-1"))
+            testScheduler.advanceUntilIdle()
+            hold.complete(Unit)
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("episode-1" to "file-1"), playback.downgradeRequests)
+            assertEquals(listOf("file-1"), player.switched)
+            assertNull(model.state.value.downgrade)
+        }
+
+    @Test
+    fun `an answer about a file that is no longer playing is dropped`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val hold = CompletableDeferred<Unit>()
+            val playback =
+                FakePlaybackRepository().apply {
+                    downgrade = smallerSource()
+                    downgradeHold = hold
+                }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            // Something else (the media session's queue, say) moved playback
+            // on without the viewer pinning anything.
+            player.play(request().copy(fileId = "file-9"))
+            testScheduler.advanceUntilIdle()
+            hold.complete(Unit)
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("episode-1" to "file-1"), playback.downgradeRequests)
+            assertFalse(model.state.value.isSourcePinned)
+            assertTrue(player.switched.isEmpty())
             assertNull(model.state.value.downgrade)
         }
 
