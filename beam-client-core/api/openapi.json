@@ -2,7 +2,7 @@
   "openapi": "3.2.0",
   "info": {
     "title": "Beam Server API",
-    "version": "1.0.0"
+    "version": "0.1.0"
   },
   "paths": {
     "/v1/health": {
@@ -174,7 +174,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenreList"
+                  "$ref": "#/components/schemas/GenreConnection"
                 }
               }
             }
@@ -5882,10 +5882,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Library"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/LibraryConnection"
                 }
               }
             }
@@ -6083,7 +6080,8 @@
         "tags": [
           "admin"
         ],
-        "summary": "The files indexed under one library.",
+        "summary": "The files indexed under one library, a page at a time, by path.",
+        "description": "Pass `page_info.end_cursor` as `after` for the next page; a cursor\nanother library's list issued is refused.",
         "operationId": "getLibraryFiles",
         "parameters": [
           {
@@ -6094,6 +6092,33 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "first",
+            "in": "query",
+            "description": "This many files (1-500, default 100).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 500.0,
+              "minimum": 1.0,
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page on from.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           {
@@ -6153,21 +6178,57 @@
             }
           },
           "400": {
-            "description": "Bad Request",
+            "description": "Bad Request; Invalid cursor; Invalid pagination",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "allOf": [
+                  "oneOf": [
                     {
-                      "$ref": "#/components/schemas/Problem"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
                     },
                     {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "about:blank"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
+                            }
+                          }
                         }
-                      }
+                      ],
+                      "title": "Invalid cursor"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid pagination"
                     }
                   ]
                 }
@@ -6179,10 +6240,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/LibraryFile"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/LibraryFileConnection"
                 }
               }
             }
@@ -6495,21 +6553,40 @@
             }
           },
           "422": {
-            "description": "Unprocessable Entity",
+            "description": "Unprocessable Entity; Validation failed",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "allOf": [
+                  "oneOf": [
                     {
-                      "$ref": "#/components/schemas/Problem"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
                     },
                     {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "about:blank"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#validation-failed"
+                            }
+                          }
                         }
-                      }
+                      ]
                     }
                   ]
                 }
@@ -7535,37 +7612,35 @@
         "tags": [
           "admin"
         ],
-        "summary": "A page of the operational log.",
+        "summary": "A page of the operational log, newest first.",
+        "description": "Pass `page_info.end_cursor` as `after` for the next page. `total` counts\nevery entry; an entry written while paging shifts the pages after it by\none, since the log is read by position.",
         "operationId": "getAdminLogs",
         "parameters": [
           {
-            "name": "limit",
+            "name": "first",
             "in": "query",
-            "description": "Max entries to return (default 50).",
+            "description": "This many entries (1-200, default 50).",
             "required": false,
             "schema": {
               "type": [
                 "integer",
                 "null"
               ],
-              "maximum": 4294967295.0,
-              "minimum": 0.0,
+              "maximum": 200.0,
+              "minimum": 1.0,
               "format": "uint32"
             }
           },
           {
-            "name": "offset",
+            "name": "after",
             "in": "query",
-            "description": "Number of entries to skip.",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page on from.",
             "required": false,
             "schema": {
               "type": [
-                "integer",
+                "string",
                 "null"
-              ],
-              "maximum": 4294967295.0,
-              "minimum": 0.0,
-              "format": "uint32"
+              ]
             }
           },
           {
@@ -7688,128 +7763,7 @@
             }
           },
           "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/Problem"
-                    },
-                    {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "about:blank"
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AdminLogEntry"
-                  },
-                  "type": "array"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/Problem"
-                    },
-                    {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "https://beam.justinchung.net/reference/errors/#internal"
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "BeamSession": [
-              "admin"
-            ]
-          }
-        ]
-      }
-    },
-    "/v1/admin/logs/count": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "How many operational log entries exist.",
-        "operationId": "getAdminLogCount",
-        "parameters": [
-          {
-            "name": "Origin",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "Referer",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/Problem"
-                    },
-                    {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "about:blank"
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "description": "Bad Request; Invalid cursor; Invalid pagination",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -7838,11 +7792,12 @@
                           "properties": {
                             "type": {
                               "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
                             }
                           }
                         }
-                      ]
+                      ],
+                      "title": "Invalid cursor"
                     },
                     {
                       "allOf": [
@@ -7853,28 +7808,12 @@
                           "properties": {
                             "type": {
                               "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
                             }
                           }
                         }
                       ],
-                      "title": "Cross-origin request rejected"
-                    },
-                    {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
-                            }
-                          }
-                        }
-                      ],
-                      "title": "Malformed Origin/Referer header"
+                      "title": "Invalid pagination"
                     }
                   ]
                 }
@@ -7886,7 +7825,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminLogCount"
+                  "$ref": "#/components/schemas/AdminLogConnection"
                 }
               }
             }
@@ -7928,13 +7867,14 @@
         "tags": [
           "admin"
         ],
-        "summary": "The most recent admin events, as a snapshot.",
+        "summary": "The most recent admin events, oldest first, as a snapshot.",
+        "description": "At most `first` of them; `page_info.has_next_page` says whether older\nevents were left out.",
         "operationId": "getAdminEvents",
         "parameters": [
           {
-            "name": "limit",
+            "name": "first",
             "in": "query",
-            "description": "Max events to return (default 100, max 1000).",
+            "description": "At most this many of the most recent events (1-1000, default 100).",
             "required": false,
             "schema": {
               "type": [
@@ -7942,7 +7882,7 @@
                 "null"
               ],
               "maximum": 1000.0,
-              "minimum": 0.0,
+              "minimum": 1.0,
               "format": "uint32"
             }
           },
@@ -8092,10 +8032,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AdminEvent"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/AdminEventConnection"
                 }
               }
             }
@@ -8303,9 +8240,9 @@
         "operationId": "listAdminUsers",
         "parameters": [
           {
-            "name": "limit",
+            "name": "first",
             "in": "query",
-            "description": "Max users to return (1-100, default 50).",
+            "description": "This many users (1-100, default 50).",
             "required": false,
             "schema": {
               "type": [
@@ -8314,21 +8251,19 @@
               ],
               "maximum": 100.0,
               "minimum": 1.0,
-              "format": "uint64"
+              "format": "uint32"
             }
           },
           {
-            "name": "offset",
+            "name": "after",
             "in": "query",
-            "description": "Number of users to skip.",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page on from.",
             "required": false,
             "schema": {
               "type": [
-                "integer",
+                "string",
                 "null"
-              ],
-              "minimum": 0.0,
-              "format": "uint64"
+              ]
             }
           },
           {
@@ -8451,21 +8386,57 @@
             }
           },
           "400": {
-            "description": "Bad Request",
+            "description": "Bad Request; Invalid cursor; Invalid pagination",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "allOf": [
+                  "oneOf": [
                     {
-                      "$ref": "#/components/schemas/Problem"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
                     },
                     {
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "const": "about:blank"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
+                            }
+                          }
                         }
-                      }
+                      ],
+                      "title": "Invalid cursor"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid pagination"
                     }
                   ]
                 }
@@ -8477,7 +8448,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AdminUserList"
+                  "$ref": "#/components/schemas/AdminUserConnection"
                 }
               }
             }
@@ -11996,10 +11967,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/SessionSummary"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/SessionConnection"
                 }
               }
             }
@@ -12039,7 +12007,7 @@
         "tags": [
           "auth"
         ],
-        "summary": "Revokes a specific session by its listing id, scoped to the current user (returns 401 for a session that doesn't exist or belongs to someone else, never distinguishing the two).",
+        "summary": "Revokes a specific session by its listing id, scoped to the current user (returns 404 for a session that doesn't exist or belongs to someone else, never distinguishing the two).",
         "operationId": "deleteSession",
         "parameters": [
           {
@@ -12105,40 +12073,21 @@
         ],
         "responses": {
           "401": {
-            "description": "Unauthorized; Session not found",
+            "description": "Unauthorized",
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "oneOf": [
+                  "allOf": [
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "about:blank"
-                            }
-                          }
-                        }
-                      ]
+                      "$ref": "#/components/schemas/Problem"
                     },
                     {
-                      "allOf": [
-                        {
-                          "$ref": "#/components/schemas/Problem"
-                        },
-                        {
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "const": "https://beam.justinchung.net/reference/errors/#session-not-found"
-                            }
-                          }
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
                         }
-                      ]
+                      }
                     }
                   ]
                 }
@@ -12184,6 +12133,28 @@
                 "required": true,
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#session-not-found"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -13688,21 +13659,58 @@
         "title": "Problem Details",
         "description": "An RFC 9457 problem detail."
       },
-      "GenreList": {
+      "PageInfo": {
         "properties": {
-          "genres": {
+          "has_next_page": {
+            "type": "boolean",
+            "description": "Whether a page follows this one."
+          },
+          "has_previous_page": {
+            "type": "boolean",
+            "description": "Whether a page precedes this one."
+          },
+          "start_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor of the first item; absent on an empty page."
+          },
+          "end_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor of the last item; absent on an empty page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_next_page",
+          "has_previous_page"
+        ],
+        "description": "Where a page sits in the whole listing."
+      },
+      "GenreConnection": {
+        "properties": {
+          "items": {
             "items": {
               "type": "string"
             },
             "type": "array",
             "description": "Genre display names, sorted alphabetically (case-insensitive)."
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Always a single, complete page."
           }
         },
         "type": "object",
         "required": [
-          "genres"
+          "items",
+          "page_info"
         ],
-        "description": "The distinct genre names present in the library, sorted alphabetically."
+        "description": "The distinct genre names present in the library, sorted alphabetically.\n\nA connection, as every `/v1` list is, though a catalog's genres are few\nenough that it is never paged: `items` is the whole list, both of\n`page_info`'s `has_*_page` flags are `false`, and it carries no cursors."
       },
       "ArtworkKind": {
         "type": "string",
@@ -14767,38 +14775,6 @@
         ],
         "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.\n\nThe one track model Beam has (issue #189): every video, audio and\nsubtitle track here is tied to this file, addressed by its stream index,\nand names its codec as FFmpeg does (`h264`, `eac3`, `subrip`).\n\nA movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`) is one\nsource whose `parts` play in sequence (issue #233): a client is expected\nto play each part's `stream_url` in turn -- a concatenated playlist -- and\nBeam never joins them (ADR-0004). A whole file is a source of one part. The fields\nthat name one file -- `file_id`, the tracks, `stream_url`,\n`download_url`, `mime_type` and `container_format` -- are the first\npart's; `size_bytes` and `duration_secs` are the whole source's."
       },
-      "PageInfo": {
-        "properties": {
-          "has_next_page": {
-            "type": "boolean",
-            "description": "Whether a page follows this one."
-          },
-          "has_previous_page": {
-            "type": "boolean",
-            "description": "Whether a page precedes this one."
-          },
-          "start_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Cursor of the first item; absent on an empty page."
-          },
-          "end_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Cursor of the last item; absent on an empty page."
-          }
-        },
-        "type": "object",
-        "required": [
-          "has_next_page",
-          "has_previous_page"
-        ],
-        "description": "Where a page sits in the whole listing."
-      },
       "MediaSourceConnection": {
         "properties": {
           "items": {
@@ -15479,6 +15455,27 @@
           "file_count"
         ]
       },
+      "LibraryConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Library"
+            },
+            "type": "array",
+            "description": "Every library, in the order the server keeps them."
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Always a single, complete page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "description": "Every library on the server: what `GET /v1/libraries` returns.\n\nA connection, as every `/v1` list is, though a server has few enough\nlibraries that it is never paged: `items` is the whole list, both of\n`page_info`'s `has_*_page` flags are `false`, and it carries no cursors."
+      },
       "FileIndexStatus": {
         "type": "string",
         "enum": [
@@ -15575,6 +15572,27 @@
           "updated_at"
         ],
         "description": "A media file within a library"
+      },
+      "LibraryFileConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryFile"
+            },
+            "type": "array",
+            "description": "The files on this page."
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the whole listing."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "description": "One page of a library's files, by path: what\n`GET /v1/libraries/{id}/files` returns.\n\nOrdered by the file's stored path, then id. Pass `page_info.end_cursor` as\n`after` for the next page. The library's `file_count` says how many files\nthere are in all."
       },
       "CreateLibraryRequest": {
         "properties": {
@@ -15813,18 +15831,31 @@
           "created_at"
         ]
       },
-      "AdminLogCount": {
+      "AdminLogConnection": {
         "properties": {
-          "count": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminLogEntry"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo"
+          },
+          "total": {
             "type": "integer",
             "minimum": 0.0,
-            "format": "uint64"
+            "format": "uint64",
+            "description": "Every entry in the log, across all pages."
           }
         },
         "type": "object",
         "required": [
-          "count"
-        ]
+          "items",
+          "page_info",
+          "total"
+        ],
+        "description": "One page of the operational log, newest first: what\n`GET /v1/admin/logs` returns.\n\nPass `page_info.end_cursor` as `after` for the next page. `total` counts\nevery entry the log holds."
       },
       "AdminEventCategory": {
         "type": "string",
@@ -15982,6 +16013,26 @@
           "message"
         ]
       },
+      "AdminEventConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminEvent"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "No cursors; `has_next_page` says whether older events exist."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "description": "The most recent admin events, oldest first: what `GET /v1/admin/events`\nreturns.\n\nA snapshot of the events the server keeps in memory, not a paged list: it\ncarries no cursors and `has_previous_page` is always `false`.\n`has_next_page` is `true` when older events were left out to keep to\n`first`."
+      },
       "AdminUser": {
         "properties": {
           "id": {
@@ -16025,13 +16076,16 @@
         ],
         "description": "One user row in the admin users tab. `is_admin` is informational and\nread-only here: admin is derived from the IdP-asserted claim on every\nlogin, so there is deliberately no endpoint to change it."
       },
-      "AdminUserList": {
+      "AdminUserConnection": {
         "properties": {
           "items": {
             "items": {
               "$ref": "#/components/schemas/AdminUser"
             },
             "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo"
           },
           "total": {
             "type": "integer",
@@ -16043,8 +16097,10 @@
         "type": "object",
         "required": [
           "items",
+          "page_info",
           "total"
-        ]
+        ],
+        "description": "One page of user accounts, oldest first: what `GET /v1/admin/users`\nreturns.\n\nPass `page_info.end_cursor` as `after` for the next page."
       },
       "UpdateAdminUserRequest": {
         "properties": {
@@ -17204,6 +17260,26 @@
           "last_active_at"
         ],
         "description": "One of the current user's active sessions, as returned by `GET\n/sessions`. `id` is an opaque row identifier for revocation via `DELETE\n/sessions/{id}` -- never the session credential itself, which is hashed\nat rest and cannot be recovered."
+      },
+      "SessionConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSummary"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Always a single, complete page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "description": "Every active session of the current user: what `GET /v1/sessions`\nreturns.\n\nA connection, as every `/v1` list is, though a user has few enough\nsessions that it is never paged: `items` is the whole list, both of\n`page_info`'s `has_*_page` flags are `false`, and it carries no cursors."
       },
       "DeviceLoginStart": {
         "properties": {

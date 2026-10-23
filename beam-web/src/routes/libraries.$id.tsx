@@ -23,7 +23,7 @@ import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/hooks/auth";
-import { apiClient } from "@/lib/apiClient";
+import { apiClient, asConnection } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 
@@ -194,13 +194,26 @@ export function LibraryDetailPage({ libraryId: id }: { libraryId: string }) {
 		refetch: refetchFiles,
 	} = useQuery({
 		queryKey: ["library", id, "files"],
+		// The page filters, sorts and totals the whole library client-side, so
+		// it walks every page of the connection (`first` at its 500 maximum).
 		queryFn: async () => {
-			const { data, error } = await apiClient.GET("/v1/libraries/{id}/files", {
-				params: { path: { id } },
-				credentials: "include",
-			});
-			if (error) throw apiError(error, "Failed to load library files");
-			return data;
+			const all: LibraryFile[] = [];
+			let after: string | undefined;
+			for (;;) {
+				const { data, error } = await apiClient.GET(
+					"/v1/libraries/{id}/files",
+					{
+						params: { path: { id }, query: { first: 500, after } },
+						credentials: "include",
+					},
+				);
+				if (error) throw apiError(error, "Failed to load library files");
+				const page = asConnection(data);
+				all.push(...page.items);
+				const next = page.page_info.end_cursor;
+				if (!page.page_info.has_next_page || !next) return all;
+				after = next;
+			}
 		},
 		enabled: isAuthenticated,
 	});

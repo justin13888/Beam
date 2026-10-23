@@ -77,6 +77,20 @@ pub struct PageInfo {
     pub end_cursor: Option<String>,
 }
 
+impl PageInfo {
+    /// The page of a list that is never paged: it is the whole list, so no
+    /// page precedes or follows it and it carries no cursors.
+    #[must_use]
+    pub fn complete() -> Self {
+        Self {
+            has_next_page: false,
+            has_previous_page: false,
+            start_cursor: None,
+            end_cursor: None,
+        }
+    }
+}
+
 // ── Query-parameter parsing ──────────────────────────────────────────────────
 //
 // Kynos reads a query parameter through `FromStr` rather than serde: a query

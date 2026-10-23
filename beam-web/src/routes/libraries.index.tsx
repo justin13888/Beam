@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/auth";
-import { apiClient } from "@/lib/apiClient";
+import { apiClient, asConnection } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 
@@ -99,7 +99,7 @@ export function LibrariesPage() {
 				credentials: "include",
 			});
 			if (error) throw apiError(error, "Failed to load libraries");
-			return data;
+			return asConnection(data).items;
 		},
 		enabled: isAuthenticated,
 	});

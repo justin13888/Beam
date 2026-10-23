@@ -519,10 +519,15 @@ public final class FakeAdminRepository: AdminRepository, @unchecked Sendable {
         }
     }
 
-    public func users(limit: UInt32?, offset: UInt32?) async throws -> AdminUserPage {
+    public func users(first: UInt32?, after: String?) async throws -> AdminUserPage {
         try state.withLock { state in
             try state.check()
-            return AdminUserPage(items: state.users, total: UInt64(state.users.count))
+            return AdminUserPage(
+                items: state.users,
+                total: UInt64(state.users.count),
+                endCursor: nil,
+                hasNextPage: false
+            )
         }
     }
 
@@ -544,15 +549,15 @@ public final class FakeAdminRepository: AdminRepository, @unchecked Sendable {
         }
     }
 
-    public func logs(limit: UInt32?, offset: UInt32?) async throws -> [AdminLogEntry] {
+    public func logs(first: UInt32?, after: String?) async throws -> AdminLogPage {
         try state.withLock {
-            try $0.check(); return $0.logs
-        }
-    }
-
-    public func logCount() async throws -> UInt64 {
-        try state.withLock {
-            try $0.check(); return UInt64($0.logs.count)
+            try $0.check()
+            return AdminLogPage(
+                items: $0.logs,
+                total: UInt64($0.logs.count),
+                endCursor: nil,
+                hasNextPage: false
+            )
         }
     }
 

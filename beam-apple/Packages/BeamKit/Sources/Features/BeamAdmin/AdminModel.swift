@@ -58,8 +58,8 @@ public final class AdminModel {
         }
 
         libraries = (try? await catalog.libraries()) ?? []
-        users = (try? await admin.users(limit: 100, offset: 0))?.items ?? []
-        logs = (try? await admin.logs(limit: Self.logLimit, offset: 0)) ?? []
+        users = (try? await admin.users(first: 100, after: nil))?.items ?? []
+        logs = (try? await admin.logs(first: Self.logLimit, after: nil))?.items ?? []
     }
 
     /// Start a scan of one library. The server answers once it has accepted
@@ -103,7 +103,7 @@ public final class AdminModel {
     public func setDisabled(_ disabled: Bool, userId: String) async {
         do {
             try await admin.setUserDisabled(userId: userId, disabled: disabled)
-            users = (try? await admin.users(limit: 100, offset: 0))?.items ?? users
+            users = (try? await admin.users(first: 100, after: nil))?.items ?? users
         } catch {
             actionMessage = BeamFailure.from(error).message
         }

@@ -40,3 +40,28 @@ export const apiClient = createClient<paths>({
 	// driven by fakes at the network boundary instead.
 	fetch: (request) => globalThis.fetch(request),
 });
+
+/** A `/v1` connection's paging state (`PageInfo` in the OpenAPI document). */
+export interface PageInfo {
+	has_next_page: boolean;
+	has_previous_page: boolean;
+	start_cursor?: string | null;
+	end_cursor?: string | null;
+}
+
+/** The one `/v1` list envelope (ADR-0021): `{ items, page_info }`. */
+export interface Connection<T> {
+	items: T[];
+	page_info: PageInfo;
+}
+
+/**
+ * Reads a list response as the connection the server sends.
+ *
+ * TODO(#146): the stale `api.gen.ts` still types every list as a bare array.
+ * The parameter takes that stale type on purpose, so regenerating it turns each
+ * call site into a type error that says this shim can go.
+ */
+export function asConnection<T>(data: T[]): Connection<T> {
+	return data as unknown as Connection<T>;
+}

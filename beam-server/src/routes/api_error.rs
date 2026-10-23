@@ -479,6 +479,21 @@ pub enum LibraryCreateError {
     )]
     PathOverlapsLibrary(String),
 
+    /// The name is blank or longer than 200 characters, or the root path is
+    /// blank: one entry per broken rule, each naming its field.
+    #[error("the request body breaks {} rule(s)", errors.len())]
+    #[problem(
+        status = 422,
+        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
+        title = "Validation failed"
+    )]
+    ValidationFailed {
+        // kynos gap: as for `PlaybackTelemetryError::ValidationFailed`;
+        // getkono/kynos#991.
+        #[problem(extension)]
+        errors: Vec<crate::models::FieldError>,
+    },
+
     #[error("{0}")]
     #[problem(
         status = 500,
@@ -723,6 +738,75 @@ pub enum HistoryError {
         title = "Invalid pagination"
     )]
     InvalidPagination(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/admin/users` and `GET /v1/admin/logs`: the lists paged by an
+/// offset inside an opaque cursor (issue #190).
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum AdminListError {
+    /// `after` is not a cursor this list issued -- another list's included.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        title = "Invalid cursor"
+    )]
+    InvalidCursor(String),
+    /// `first` is outside the list's bounds. Kynos refuses that from the
+    /// query's schema bounds first, as a `400` with `about:blank`, so this is
+    /// the handler's second guard and no request answers it.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/libraries/{id}/files` (issue #190). A malformed id is the `Path`
+/// extractor's 400.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum LibraryFilesError {
+    /// `after` is not a cursor this library's file list issued.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        title = "Invalid cursor"
+    )]
+    InvalidCursor(String),
+    /// `first` is outside 1-500. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
+        title = "Library not found"
+    )]
+    LibraryNotFound(String),
     #[error("{0}")]
     #[problem(
         status = 500,

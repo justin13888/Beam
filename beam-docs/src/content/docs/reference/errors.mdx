@@ -69,10 +69,12 @@ detail (`GET /v1/media/{id}`, `GET /v1/seasons/{id}`), and marking one watched i
 
 ### invalid-cursor
 
-**400.** From `GET /v1/media`, `GET /v1/history` and `GET /v1/admin/enrichment`. The `after` or
-`before` cursor is not one this server issued for that list: it was altered, it came from an older server whose cursors
-this one cannot read, or -- on `/v1/media` -- it was issued under a different `sort_by` or
-`sort_order`.
+**400.** From `GET /v1/media`, `GET /v1/history`, `GET /v1/libraries/{id}/files`,
+`GET /v1/admin/enrichment`, `GET /v1/admin/users` and `GET /v1/admin/logs`. The `after` or
+`before` cursor is not one this server issued for that list: it was altered, it came from an older
+server whose cursors this one cannot read, it came from another list -- another library's files, or
+the user list's cursor handed to the log -- or, on `/v1/media`, it was issued under a different
+`sort_by` or `sort_order`.
 
 **What to do.** Start again from the first page without a cursor. A cursor names a place in *one*
 ordering, so a client that changes the sort must drop the cursor it holds. A cursor does not go
@@ -83,8 +85,10 @@ starts where that title was.
 
 **400.** From `GET /v1/media`. The page parameters ask for something the server does not answer: a
 forward parameter (`first`, `after`) combined with a backward one (`last`, `before`). The other
-lists page forwards only, so they cannot mix directions. A `first` or `last` outside 1 to 100 (1
-to 50 for `GET /v1/continue-watching`) is refused on every list before this check, as a `400` with
+lists page forwards only, so they cannot mix directions. A `first` or `last` outside its list's
+bounds -- 1 to 100 on most, 1 to 50 for `GET /v1/continue-watching`, 1 to 500 for
+`GET /v1/libraries/{id}/files`, 1 to 200 for `GET /v1/admin/logs`, 1 to 1000 for
+`GET /v1/admin/events` -- is refused on every list before this check, as a `400` with
 `"type": "about:blank"` naming the parameter (see [below](#responses-with-no-code)).
 
 **What to do.** Page forwards with `first` and `after`, or backwards with `last` and `before`, at
@@ -390,7 +394,8 @@ problem.
 
 ### session-not-found
 
-**401.** From `DELETE /v1/sessions/{id}`. No such session.
+**404.** From `DELETE /v1/sessions/{id}`. No such session. The caller's own session is unaffected:
+it is the id that named nothing, not the credential that failed.
 
 **What to do.** Nothing. A session id that does not exist and one belonging to somebody else answer
 identically and deliberately, so that this endpoint cannot be used to enumerate other people's
@@ -470,7 +475,9 @@ for the body as a whole) and a `detail`:
 }
 ```
 
-Four operations answer it. `POST /v1/telemetry/playback`: a batch carries 1 to 50 events in total,
+Five operations answer it. `POST /v1/admin/libraries`: a library's `name` is not blank and at most
+200 characters (`/name`), and its `root_path` is not blank (`/root_path`); blank is empty or only
+whitespace. `POST /v1/telemetry/playback`: a batch carries 1 to 50 events in total,
 and a source switch is between two different files. Its schema's own bounds -- at most 50 in any
 one list, a rebuffer lasting 1 ms to 10 minutes -- are checked first and refused as a 422 with
 `"type": "about:blank"`, carrying the same `errors`. `POST /v1/admin/media/{id}/match`: `external_ref` is a `"provider:id"` some

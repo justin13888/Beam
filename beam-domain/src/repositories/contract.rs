@@ -1048,6 +1048,101 @@ macro_rules! file_repository_contract {
             ids
         }
 
+        /// A library's files page by path, then id: each page holds at most
+        /// `limit` present files of that library, the next starts strictly
+        /// after the position it is given, and walking the pages visits every
+        /// present file once, in order -- a missing file and another
+        /// library's never.
+        #[tokio::test]
+        async fn a_library_s_files_page_by_path_without_gaps_or_repeats() {
+            use ::std::num::NonZeroU32;
+            use $crate::models::file::LibraryFilePosition;
+
+            let fixture = $setup().await;
+            let library = fixture.new_library().await;
+            let other_library = fixture.new_library().await;
+            let root = PathBuf::from(format!("/videos/{library}"));
+            let mut created = Vec::new();
+            // Inserted out of order; lower-case ASCII names, so the database
+            // collation and a byte comparison agree on the order.
+            for (name, in_library) in [
+                ("d/e.mkv", library),
+                ("a.mkv", library),
+                ("c.mkv", library),
+                ("b/z.mkv", library),
+                ("b/a.mkv", library),
+                ("gone.mkv", library),
+                ("aa.mkv", other_library),
+            ] {
+                let movie_entry_id = fixture.new_movie_entry(in_library).await;
+                let unique = Uuid::new_v4();
+                let file = fixture
+                    .repo()
+                    .create(CreateMediaFile {
+                        library_id: in_library,
+                        path: root.join(name),
+                        hash: (unique.as_u128() as u64) >> 1,
+                        size_bytes: 1024,
+                        mtime: None,
+                        identity: None,
+                        mime_type: None,
+                        duration: None,
+                        container_format: None,
+                        content: Some(MediaFileContent::movie(movie_entry_id)),
+                        status: FileStatus::Known,
+                        classifier_version: 0,
+                        container_tags: None,
+                    })
+                    .await
+                    .expect("create a file");
+                created.push((name, file));
+            }
+            let gone = created
+                .iter()
+                .find(|(name, _)| *name == "gone.mkv")
+                .map(|(_, file)| file.id)
+                .unwrap();
+            fixture.repo().mark_missing(vec![gone], at(0)).await.unwrap();
+
+            let two = NonZeroU32::new(2).unwrap();
+            let mut walked = Vec::new();
+            let mut after: Option<LibraryFilePosition> = None;
+            loop {
+                let page = fixture
+                    .repo()
+                    .find_page_by_library(library, after.clone(), two)
+                    .await
+                    .expect("read a page");
+                assert!(page.len() <= 2, "a page holds at most the limit");
+                let Some(last) = page.last() else { break };
+                after = Some(LibraryFilePosition {
+                    path: last.path.clone(),
+                    id: last.id,
+                });
+                walked.extend(page.iter().map(|f| f.path.clone()));
+                assert!(walked.len() <= 5, "the walk ends: {walked:?}");
+            }
+            let expected: Vec<PathBuf> = ["a.mkv", "b/a.mkv", "b/z.mkv", "c.mkv", "d/e.mkv"]
+                .into_iter()
+                .map(|name| root.join(name))
+                .collect();
+            assert_eq!(
+                walked, expected,
+                "every present file of the library, once, by path"
+            );
+
+            let other = fixture
+                .repo()
+                .find_page_by_library(other_library, None, NonZeroU32::new(10).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                other.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+                vec![root.join("aa.mkv")],
+                "another library's file is its own"
+            );
+        }
+
         /// The files beneath a directory are those whose path starts with it a
         /// whole component at a time, at any depth -- the directory name is a
         /// literal, never a pattern -- and present, in that library.

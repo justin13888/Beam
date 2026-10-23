@@ -82,12 +82,7 @@ impl MediaSourceConnection {
     pub fn complete(sources: Vec<MediaSource>) -> Self {
         Self {
             items: sources,
-            page_info: PageInfo {
-                has_next_page: false,
-                has_previous_page: false,
-                start_cursor: None,
-                end_cursor: None,
-            },
+            page_info: PageInfo::complete(),
         }
     }
 }

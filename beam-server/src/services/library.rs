@@ -1,12 +1,24 @@
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use beam_domain::models::file::LibraryFilePosition;
 use sea_orm::DbErr;
 use thiserror::Error;
 use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::models::{Library, LibraryFile, ScanJob};
+
+/// One page of a library's files, as
+/// [`LibraryService::get_library_files`] reads it.
+#[derive(Debug, Clone)]
+pub struct LibraryFilePage {
+    /// The files on the page, by stored path then id.
+    pub items: Vec<LibraryFile>,
+    /// Whether another page follows.
+    pub has_next_page: bool,
+}
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_index::runtime::LibraryWatchHook;
 use beam_index::services::index::{IndexError, IndexService};
@@ -334,8 +346,15 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// Get a single library by ID
     async fn get_library_by_id(&self, library_id: Uuid) -> Result<Option<Library>, LibraryError>;
 
-    /// Get all files within a library
-    async fn get_library_files(&self, library_id: Uuid) -> Result<Vec<LibraryFile>, LibraryError>;
+    /// One page of a library's files, by stored path then id: at most
+    /// `first`, after the file at `after` -- its path relative to the root,
+    /// as [`LibraryFile::path`] reports it, and its id -- or from the first.
+    async fn get_library_files(
+        &self,
+        library_id: Uuid,
+        after: Option<(String, Uuid)>,
+        first: NonZeroU32,
+    ) -> Result<LibraryFilePage, LibraryError>;
 
     /// Get a single file by its ID: `Ok(None)` when no file has it.
     async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<LocatedFile>, LibraryError>;
@@ -434,20 +453,43 @@ impl LibraryService for LocalLibraryService {
         }
     }
 
-    async fn get_library_files(&self, lib_uuid: Uuid) -> Result<Vec<LibraryFile>, LibraryError> {
+    async fn get_library_files(
+        &self,
+        lib_uuid: Uuid,
+        after: Option<(String, Uuid)>,
+        first: NonZeroU32,
+    ) -> Result<LibraryFilePage, LibraryError> {
         let library = self
             .library_repo
             .find_by_id(lib_uuid)
             .await?
             .ok_or(LibraryError::LibraryNotFound)?;
 
+        // A cursor carries the path relative to the root, as the page
+        // reported it, so the absolute path never leaves the server
+        // (NFR-108); it is rebuilt here to seek on.
+        let after = after.map(|(relative, id)| LibraryFilePosition {
+            path: library.root_path.join(relative),
+            id,
+        });
+        // One row more than the page holds says whether another follows.
+        let probe = first.saturating_add(1);
+        let mut files = self
+            .file_repo
+            .find_page_by_library(lib_uuid, after, probe)
+            .await?;
+        let has_next_page = files.len() > first.get() as usize;
+        files.truncate(first.get() as usize);
+
         // Reported relative to the library's root, never as the absolute path
         // the file is stored under (NFR-108).
-        let files = self.file_repo.find_all_by_library(lib_uuid).await?;
-        Ok(files
-            .into_iter()
-            .map(|file| LibraryFile::from_domain(file, &library.root_path))
-            .collect())
+        Ok(LibraryFilePage {
+            items: files
+                .into_iter()
+                .map(|file| LibraryFile::from_domain(file, &library.root_path))
+                .collect(),
+            has_next_page,
+        })
     }
 
     async fn get_file_by_id(&self, file_uuid: Uuid) -> Result<Option<LocatedFile>, LibraryError> {

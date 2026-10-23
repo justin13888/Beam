@@ -58,6 +58,16 @@ impl FileIdentity {
     }
 }
 
+/// Where a page of a library's files starts: after the file stored at `path`
+/// with id `id` (issue #190). The list runs by stored path, then id, both
+/// ascending; one row per path (issue #181) makes the id a tie-break that
+/// never decides, kept so the order is total by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryFilePosition {
+    pub path: PathBuf,
+    pub id: Uuid,
+}
+
 /// Represents a media file in the library
 #[derive(Debug, Clone)]
 pub struct MediaFile {

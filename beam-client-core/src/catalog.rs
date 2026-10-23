@@ -450,13 +450,30 @@ pub struct AdminUser {
     pub created_at_unix: i64,
 }
 
-/// One page of the admin user list.
+/// One page of the admin user list, oldest account first.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct AdminUserPage {
     /// The accounts on this page.
     pub items: Vec<AdminUser>,
     /// Total accounts across every page.
     pub total: u64,
+    /// Pass as `after` for the next page; `None` on an empty page.
+    pub end_cursor: Option<String>,
+    /// Whether a page follows this one.
+    pub has_next_page: bool,
+}
+
+/// One page of the operational log, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AdminLogPage {
+    /// The log lines on this page.
+    pub items: Vec<AdminLogEntry>,
+    /// Total log lines across every page.
+    pub total: u64,
+    /// Pass as `after` for the next page; `None` on an empty page.
+    pub end_cursor: Option<String>,
+    /// Whether a page follows this one.
+    pub has_next_page: bool,
 }
 
 /// One operational log line.

@@ -2168,6 +2168,14 @@ impl FileRepository for ClassificationRefused {
     async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
         self.0.find_all_by_library(library_id).await
     }
+    async fn find_page_by_library(
+        &self,
+        library_id: Uuid,
+        after: Option<beam_domain::models::file::LibraryFilePosition>,
+        limit: std::num::NonZeroU32,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.0.find_page_by_library(library_id, after, limit).await
+    }
     async fn find_all_by_library_including_missing(
         &self,
         library_id: Uuid,

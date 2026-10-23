@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -6,7 +7,8 @@ use sea_orm::DbErr;
 use uuid::Uuid;
 
 use crate::models::file::{
-    CreateMediaFile, FileClassification, FileRelink, MediaFile, UpdateMediaFile, displaced_path,
+    CreateMediaFile, FileClassification, FileRelink, LibraryFilePosition, MediaFile,
+    UpdateMediaFile, displaced_path,
 };
 
 /// Persistence for indexed media files.
@@ -36,6 +38,17 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     async fn find_by_hash(&self, hash: u64) -> Result<Vec<MediaFile>, DbErr>;
     /// Visible read: every present file in the library.
     async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr>;
+    /// Visible read: one page of the library's present files, ordered by
+    /// stored path, then id -- at most `limit` of them, strictly after
+    /// `after` in that order, or from the first when `None` (issue #190).
+    /// Paths compare as the database compares text; a path that is valid
+    /// UTF-8 is all the indexer stores.
+    async fn find_page_by_library(
+        &self,
+        library_id: Uuid,
+        after: Option<LibraryFilePosition>,
+        limit: NonZeroU32,
+    ) -> Result<Vec<MediaFile>, DbErr>;
     /// Reconcile read: every file in the library, missing ones included. The
     /// scan compares the walk against this.
     async fn find_all_by_library_including_missing(
@@ -202,6 +215,34 @@ pub mod in_memory {
                 .filter(|f| f.missing_since.is_none() && f.library_id == library_id)
                 .cloned()
                 .collect())
+        }
+
+        async fn find_page_by_library(
+            &self,
+            library_id: Uuid,
+            after: Option<LibraryFilePosition>,
+            limit: NonZeroU32,
+        ) -> Result<Vec<MediaFile>, DbErr> {
+            // By the path's text, as Postgres compares the column -- not by
+            // `PathBuf`'s component order, which puts `/a/b` before `/a-b`.
+            let key = |path: &Path, id: Uuid| (path.to_string_lossy().into_owned(), id);
+            let after = after.map(|position| key(&position.path, position.id));
+            let mut page: Vec<MediaFile> = self
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|f| f.missing_since.is_none() && f.library_id == library_id)
+                .filter(|f| {
+                    after
+                        .as_ref()
+                        .is_none_or(|after| key(&f.path, f.id) > *after)
+                })
+                .cloned()
+                .collect();
+            page.sort_by_key(|f| key(&f.path, f.id));
+            page.truncate(limit.get() as usize);
+            Ok(page)
         }
 
         async fn find_all_by_library_including_missing(

@@ -20,18 +20,22 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::models::{
-    AdminEvent, AdminLogCount, AdminLogEntry, AdminStatus, AdminStatusCounts, AdminUser,
-    AdminUserList, CreateLibraryRequest, EnrichmentQueueCounts, Library, LibraryFile,
-    LibraryTelemetryPreview, PlaybackTelemetryReport, RecentScan, ScanJob, UpdateAdminUserRequest,
-    WatcherStatus,
+    AdminEvent, AdminEventConnection, AdminLogConnection, AdminLogEntry, AdminStatus,
+    AdminStatusCounts, AdminUser, AdminUserConnection, CreateLibraryRequest, EnrichmentQueueCounts,
+    FieldError, Library, LibraryConnection, LibraryFile, LibraryFileConnection,
+    LibraryTelemetryPreview, PageInfo, PlaybackTelemetryReport, RecentScan, ScanJob,
+    UpdateAdminUserRequest, WatcherStatus,
 };
 use crate::routes::api_error::{
-    AdminAuth, AdminUserError, InternalError, LibraryCreateError, LibraryRefError,
-    LibraryScanError, LibraryScanReadError, MediaRefreshError, PlaybackTelemetryReportError,
-    SessionAuth,
+    AdminAuth, AdminListError, AdminUserError, InternalError, LibraryCreateError,
+    LibraryFilesError, LibraryRefError, LibraryScanError, LibraryScanReadError, MediaRefreshError,
+    PlaybackTelemetryReportError, SessionAuth,
 };
+use crate::routes::playback::page_size;
 use crate::routes::tags::Admin;
 use crate::services::library::LibraryError;
+use crate::services::library_files_cursor;
+use crate::services::offset_cursor::{self, OffsetList};
 use crate::services::playback_telemetry::ReportError;
 use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
@@ -72,6 +76,22 @@ impl From<LibraryError> for LibraryRefError {
             LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
             // Unreachable: a path is only validated when a library is
             // registered or rescanned, never when one is resolved by id.
+            LibraryError::PathNotFound(_)
+            | LibraryError::PathOutsideRoot(_)
+            | LibraryError::PathOverlapsLibrary
+            | LibraryError::PathOverlapsDataDir
+            | LibraryError::ScanInProgress
+            | LibraryError::Db(_) => Self::Internal(err.to_string()),
+        }
+    }
+}
+
+impl From<LibraryError> for LibraryFilesError {
+    fn from(err: LibraryError) -> Self {
+        match err {
+            LibraryError::LibraryNotFound => Self::LibraryNotFound(err.to_string()),
+            // Unreachable: reading a page of files validates no path and
+            // starts no scan.
             LibraryError::PathNotFound(_)
             | LibraryError::PathOutsideRoot(_)
             | LibraryError::PathOverlapsLibrary
@@ -156,31 +176,56 @@ pub struct UserPath {
     pub id: uuid::Uuid,
 }
 
+/// The largest admin log page, and the one a request naming none gets.
+const LOGS_MAX: u32 = 200;
+const LOGS_DEFAULT: u32 = 50;
+/// The largest admin event snapshot, and the one a request naming none gets.
+const EVENTS_MAX: u32 = 1000;
+const EVENTS_DEFAULT: u32 = 100;
+/// The largest admin user page, and the one a request naming none gets.
+const USERS_MAX: u32 = 100;
+const USERS_DEFAULT: u32 = 50;
+/// The largest page of a library's files, and the one a request naming none
+/// gets.
+const FILES_MAX: u32 = 500;
+const FILES_DEFAULT: u32 = 100;
+
 /// How the admin log list is paged.
 #[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
 pub struct LogsQuery {
-    /// Max entries to return (default 50).
-    pub limit: Option<u32>,
-    /// Number of entries to skip.
-    pub offset: Option<u32>,
+    /// This many entries (1-200, default 50).
+    #[schema(minimum = 1, maximum = 200)]
+    pub first: Option<u32>,
+    /// An opaque cursor -- a page's `end_cursor` -- to page on from.
+    pub after: Option<String>,
 }
 
 /// How the admin event snapshot is bounded.
 #[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
 pub struct EventsQuery {
-    /// Max events to return (default 100, max 1000).
-    #[schema(maximum = 1000)]
-    pub limit: Option<u32>,
+    /// At most this many of the most recent events (1-1000, default 100).
+    #[schema(minimum = 1, maximum = 1000)]
+    pub first: Option<u32>,
 }
 
 /// How the admin user list is paged.
 #[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
 pub struct UsersQuery {
-    /// Max users to return (1-100, default 50).
+    /// This many users (1-100, default 50).
     #[schema(minimum = 1, maximum = 100)]
-    pub limit: Option<u64>,
-    /// Number of users to skip.
-    pub offset: Option<u64>,
+    pub first: Option<u32>,
+    /// An opaque cursor -- a page's `end_cursor` -- to page on from.
+    pub after: Option<String>,
+}
+
+/// How a library's files are paged.
+#[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
+pub struct FilesQuery {
+    /// This many files (1-500, default 100).
+    #[schema(minimum = 1, maximum = 500)]
+    pub first: Option<u32>,
+    /// An opaque cursor -- a page's `end_cursor` -- to page on from.
+    pub after: Option<String>,
 }
 
 // ── Library reads (any authenticated user) ─────────────────────────────────
@@ -198,14 +243,17 @@ pub struct UsersQuery {
 pub async fn list_libraries(
     auth: SessionAuth,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<Library>>, InternalError> {
+) -> Result<Json<LibraryConnection>, InternalError> {
     let libraries = state
         .services
         .library
         .get_libraries(auth.0.user_id.clone())
         .await
         .map_err(|e| InternalError::Internal(e.to_string()))?;
-    Ok(Json(libraries))
+    Ok(Json(LibraryConnection {
+        items: libraries,
+        page_info: PageInfo::complete(),
+    }))
 }
 
 /// One library by id.
@@ -224,7 +272,10 @@ pub async fn get_library(
     }
 }
 
-/// The files indexed under one library.
+/// The files indexed under one library, a page at a time, by path.
+///
+/// Pass `page_info.end_cursor` as `after` for the next page; a cursor
+/// another library's list issued is refused.
 #[kynos::get(
     "/libraries/{id}/files",
     tag = Admin,
@@ -233,10 +284,34 @@ pub async fn get_library(
 pub async fn get_library_files(
     _auth: SessionAuth,
     Path(path): Path<LibraryPath>,
+    Query(query): Query<FilesQuery>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<LibraryFile>>, LibraryRefError> {
-    let files = state.services.library.get_library_files(path.id).await?;
-    Ok(Json(files))
+) -> Result<Json<LibraryFileConnection>, LibraryFilesError> {
+    let FilesQuery { first, after } = query;
+    let first =
+        page_size(first, FILES_DEFAULT, FILES_MAX).map_err(LibraryFilesError::InvalidPagination)?;
+    let after = after
+        .as_deref()
+        .map(|cursor| library_files_cursor::decode(path.id, cursor))
+        .transpose()
+        .map_err(|err| LibraryFilesError::InvalidCursor(err.to_string()))?;
+    let has_previous_page = after.is_some();
+
+    let page = state
+        .services
+        .library
+        .get_library_files(path.id, after, first)
+        .await?;
+    let cursor = |file: &LibraryFile| library_files_cursor::encode(path.id, &file.path, file.id);
+    Ok(Json(LibraryFileConnection {
+        page_info: PageInfo {
+            has_next_page: page.has_next_page,
+            has_previous_page,
+            start_cursor: page.items.first().map(cursor),
+            end_cursor: page.items.last().map(cursor),
+        },
+        items: page.items,
+    }))
 }
 
 // ── Library mutations (admin only) ──────────────────────────────────────────
@@ -248,12 +323,46 @@ pub async fn create_library(
     Inject(state): Inject<AppState>,
     Json(body): Json<CreateLibraryRequest>,
 ) -> Result<Json<Library>, LibraryCreateError> {
+    let errors = create_library_errors(&body);
+    if !errors.is_empty() {
+        return Err(LibraryCreateError::ValidationFailed { errors });
+    }
+    let CreateLibraryRequest { name, root_path } = body;
     let library = state
         .services
         .library
-        .create_library(body.name, body.root_path)
+        .create_library(name, root_path)
         .await?;
     Ok(Json(library))
+}
+
+/// The longest library name, in characters.
+const LIBRARY_NAME_MAX_CHARS: usize = 200;
+
+/// Every rule `body` breaks, by field: a blank name, a name over
+/// [`LIBRARY_NAME_MAX_CHARS`], a blank root path. Blank is empty or only
+/// whitespace.
+fn create_library_errors(body: &CreateLibraryRequest) -> Vec<FieldError> {
+    let CreateLibraryRequest { name, root_path } = body;
+    let mut errors = Vec::new();
+    if name.trim().is_empty() {
+        errors.push(FieldError {
+            pointer: "/name".to_owned(),
+            detail: "a library needs a name".to_owned(),
+        });
+    } else if name.chars().count() > LIBRARY_NAME_MAX_CHARS {
+        errors.push(FieldError {
+            pointer: "/name".to_owned(),
+            detail: format!("a library name is at most {LIBRARY_NAME_MAX_CHARS} characters"),
+        });
+    }
+    if root_path.trim().is_empty() {
+        errors.push(FieldError {
+            pointer: "/root_path".to_owned(),
+            detail: "a library needs a root path".to_owned(),
+        });
+    }
+    errors
 }
 
 /// Start a rescan of a library root. Answers at once with the scan job,
@@ -347,53 +456,72 @@ pub async fn delete_library(
 
 // ── Admin logs (admin only) ─────────────────────────────────────────────────
 
-/// A page of the operational log.
+/// A page of the operational log, newest first.
+///
+/// Pass `page_info.end_cursor` as `after` for the next page. `total` counts
+/// every entry; an entry written while paging shifts the pages after it by
+/// one, since the log is read by position.
 #[kynos::get("/admin/logs", tag = Admin, operation_id = "getAdminLogs")]
 pub async fn get_admin_logs(
     _auth: AdminAuth,
     Query(query): Query<LogsQuery>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<Vec<AdminLogEntry>>, InternalError> {
-    let logs = state
-        .services
-        .admin_log
-        .get_logs(query.limit.unwrap_or(50), query.offset.unwrap_or(0))
-        .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?;
-    Ok(Json(logs.into_iter().map(AdminLogEntry::from).collect()))
-}
+) -> Result<Json<AdminLogConnection>, AdminListError> {
+    let internal =
+        |e: crate::services::admin_log::AdminLogError| AdminListError::Internal(e.to_string());
+    let LogsQuery { first, after } = query;
+    let first =
+        page_size(first, LOGS_DEFAULT, LOGS_MAX).map_err(AdminListError::InvalidPagination)?;
+    let offset = offset_cursor::start_after(OffsetList::AdminLogs, after.as_deref())
+        .map_err(|err| AdminListError::InvalidCursor(err.to_string()))?;
+    // The log service pages by a `u32` offset; one past it has no rows.
+    let logs = match u32::try_from(offset) {
+        Ok(offset) => state
+            .services
+            .admin_log
+            .get_logs(first.get(), offset)
+            .await
+            .map_err(internal)?,
+        Err(_) => Vec::new(),
+    };
+    let total = state.services.admin_log.count().await.map_err(internal)?;
 
-/// How many operational log entries exist.
-#[kynos::get(
-    "/admin/logs/count",
-    tag = Admin,
-    operation_id = "getAdminLogCount"
-)]
-pub async fn get_admin_log_count(
-    _auth: AdminAuth,
-    Inject(state): Inject<AppState>,
-) -> Result<Json<AdminLogCount>, InternalError> {
-    let count = state
-        .services
-        .admin_log
-        .count()
-        .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?;
-    Ok(Json(AdminLogCount { count }))
+    Ok(Json(AdminLogConnection {
+        page_info: offset_cursor::page_info(OffsetList::AdminLogs, offset, logs.len(), total),
+        items: logs.into_iter().map(AdminLogEntry::from).collect(),
+        total,
+    }))
 }
 
 // ── Admin events: snapshot + SSE live stream (admin only) ───────────────────
 
-/// The most recent admin events, as a snapshot.
+/// The most recent admin events, oldest first, as a snapshot.
+///
+/// At most `first` of them; `page_info.has_next_page` says whether older
+/// events were left out.
 #[kynos::get("/admin/events", tag = Admin, operation_id = "getAdminEvents")]
 pub async fn get_admin_events(
     _auth: AdminAuth,
     Query(query): Query<EventsQuery>,
     Inject(state): Inject<AppState>,
-) -> Json<Vec<AdminEvent>> {
-    let limit = (query.limit.unwrap_or(100) as usize).min(1000);
-    let events = state.services.notification.recent_events(limit);
-    Json(events.into_iter().map(AdminEvent::from).collect())
+) -> Json<AdminEventConnection> {
+    let EventsQuery { first } = query;
+    // Kynos holds `first` to its schema's 1-1000 before the handler runs.
+    let first = first.unwrap_or(EVENTS_DEFAULT).clamp(1, EVENTS_MAX) as usize;
+    // One more than the snapshot shows says whether older events exist.
+    let mut events = state.services.notification.recent_events(first + 1);
+    let has_next_page = events.len() > first;
+    if has_next_page {
+        // Oldest first: the one left out is the oldest.
+        events.remove(0);
+    }
+    Json(AdminEventConnection {
+        items: events.into_iter().map(AdminEvent::from).collect(),
+        page_info: PageInfo {
+            has_next_page,
+            ..PageInfo::complete()
+        },
+    })
 }
 
 /// Headers an SSE response needs to survive an intermediary.
@@ -484,21 +612,25 @@ pub async fn list_admin_users(
     _auth: AdminAuth,
     Query(query): Query<UsersQuery>,
     Inject(state): Inject<AppState>,
-) -> Result<Json<AdminUserList>, InternalError> {
-    let internal = |e: sea_orm::DbErr| InternalError::Internal(e.to_string());
+) -> Result<Json<AdminUserConnection>, AdminListError> {
+    let internal = |e: sea_orm::DbErr| AdminListError::Internal(e.to_string());
 
-    let limit = query.limit.unwrap_or(50).clamp(1, 100);
-    let offset = query.offset.unwrap_or(0);
+    let UsersQuery { first, after } = query;
+    let first =
+        page_size(first, USERS_DEFAULT, USERS_MAX).map_err(AdminListError::InvalidPagination)?;
+    let offset = offset_cursor::start_after(OffsetList::AdminUsers, after.as_deref())
+        .map_err(|err| AdminListError::InvalidCursor(err.to_string()))?;
 
     let items = state
         .services
         .user_repo
-        .list_page(limit, offset)
+        .list_page(u64::from(first.get()), offset)
         .await
         .map_err(internal)?;
     let total = state.services.user_repo.count().await.map_err(internal)?;
 
-    Ok(Json(AdminUserList {
+    Ok(Json(AdminUserConnection {
+        page_info: offset_cursor::page_info(OffsetList::AdminUsers, offset, items.len(), total),
         items: items.into_iter().map(AdminUser::from).collect(),
         total,
     }))

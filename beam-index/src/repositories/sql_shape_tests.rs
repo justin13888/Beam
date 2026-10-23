@@ -542,6 +542,46 @@ mod file {
         );
     }
 
+    /// A page of a library's files is a visible read scoped to the library
+    /// that seeks past its cursor on `(file_path, id)`, ascending, and
+    /// limits itself (issue #190).
+    #[tokio::test]
+    async fn a_page_of_a_library_s_files_seeks_by_path_then_id() {
+        use beam_domain::models::file::LibraryFilePosition;
+
+        let library = Uuid::from_u128(17);
+        let after = Uuid::from_u128(18);
+        let db = connection(empty_mock());
+        let repo = SqlFileRepository::new(db.clone());
+        let _ = repo
+            .find_page_by_library(
+                library,
+                Some(LibraryFilePosition {
+                    path: std::path::PathBuf::from("/lib/b.mkv"),
+                    id: after,
+                }),
+                std::num::NonZeroU32::new(101).unwrap(),
+            )
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        let page = &sql[0];
+        assert_filters(page, "files", "library_id", "=");
+        assert_bound(page, &library.to_string());
+        assert_filters(page, "files", "missing_since", "IS NULL");
+        assert_filters(page, "files", "file_path", ">");
+        assert_filters(page, "files", "file_path", "=");
+        assert_filters(page, "files", "id", ">");
+        assert_bound(page, "/lib/b.mkv");
+        assert_bound(page, &after.to_string());
+        assert_contains(
+            page,
+            r#"ORDER BY "files"."file_path" ASC, "files"."id" ASC"#,
+        );
+        assert_bound(page, "101");
+    }
+
     /// The rows beneath a directory are found by one prefix match scoped to
     /// the library, with the directory's own wildcards escaped, and missing
     /// rows are not filtered out.
