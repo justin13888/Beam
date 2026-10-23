@@ -143,9 +143,6 @@ pub struct TitlePath {
 #[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
 pub struct ContinueWatchingQuery {
     /// At most this many titles (1-50, default 20).
-    //
-    // Bounds not documented while kynos drops `#[schema]` on an `Option`
-    // query field; tracked with #223, as for `BrowseQuery::first`.
     #[schema(minimum = 1, maximum = 50)]
     pub first: Option<u32>,
 }

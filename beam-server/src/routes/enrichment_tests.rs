@@ -262,10 +262,15 @@ async fn the_list_pages_unmatched_titles_newest_first_with_their_errors() {
 #[tokio::test]
 async fn the_list_refuses_a_page_it_cannot_serve() {
     let f = fixture(InMemoryEnrichmentProvider::new(&["tmdb"])).await;
-    for (query, code) in [
-        ("first=0", "invalid-pagination"),
-        ("first=101", "invalid-pagination"),
-        ("after=not-a-cursor", "invalid-cursor"),
+    // A page size outside its published 1-100 is refused by Kynos's
+    // `QueryParams` check, before the handler's own.
+    for (query, problem_type) in [
+        ("first=0", "about:blank"),
+        ("first=101", "about:blank"),
+        (
+            "after=not-a-cursor",
+            "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        ),
     ] {
         f.client
             .get(&format!("/v1/admin/enrichment?{query}"))
@@ -273,9 +278,7 @@ async fn the_list_refuses_a_page_it_cannot_serve() {
             .send()
             .await
             .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type(&format!(
-                "https://beam.justinchung.net/reference/errors/#{code}"
-            ));
+            .assert_problem_type(problem_type);
     }
     assert_eq!(
         f.client

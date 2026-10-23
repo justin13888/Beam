@@ -172,6 +172,9 @@ mod cors {
     /// hand-written list this replaces named GET, POST, PUT, DELETE and
     /// OPTIONS -- but not PATCH, which `/v1/admin/users/{id}` has used since
     /// issue #85, so a browser preflighting that request was told no.
+    ///
+    /// HEAD is in the set because the path's GET answers it (RFC 9110
+    /// section 9.3.2), which Kynos advertises from 0.4.0 on.
     #[tokio::test]
     async fn the_advertised_methods_are_the_ones_the_path_actually_declares() {
         let response = preflight("PATCH").await;
@@ -185,7 +188,7 @@ mod cors {
 
         assert_eq!(
             advertised,
-            BTreeSet::from(["GET", "PATCH", "DELETE"]),
+            BTreeSet::from(["GET", "HEAD", "PATCH", "DELETE"]),
             "the advertised set must be exactly what this path declares"
         );
     }

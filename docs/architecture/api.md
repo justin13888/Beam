@@ -136,7 +136,8 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   ([#187](https://github.com/justin13888/beam/issues/187)):
   - A request pages **forwards** with `first` (default 20) and optionally `after`, or
     **backwards** with `last` (default 20) and optionally `before`; a page holds 1 to 100 items.
-    Mixing the two directions, or a size outside 1-100, is `400 #invalid-pagination`. A backward
+    Mixing the two directions is `400 #invalid-pagination`; a size outside 1-100 is refused
+    before the handler by Kynos's query check, as `400 about:blank` naming the parameter. A backward
     page is still returned in display order.
   - Forwards, `has_next_page` says whether another page follows and `has_previous_page` whether
     `after` was given; backwards, the mirror. Pass `end_cursor` as `after` for the next page and
@@ -155,9 +156,10 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   - Filters apply to movies and shows alike, `min_rating` included; `genre` matches by name or
     slug. `min_rating` is on the 0-10 scale `ratings.tmdb` is reported on, compared in the single
     precision a rating is stored in, an unrated title counting as 0. A numeric filter out of its
-    range -- a year above 2147483647 (the `year` columns are signed), a `min_rating` outside 0-10,
-    `NaN` included -- is `400 #invalid-filter`, never narrowed into a bound that matches
-    everything. Only titles with a present file are listed.
+    range -- a year above 2147483647 (the `year` columns are signed), a `min_rating` of `NaN` --
+    is `400 #invalid-filter`, never narrowed into a bound that matches everything; a `min_rating`
+    outside 0-10 is refused before the handler as `400 about:blank`. Only titles with a present
+    file are listed.
   - One page is one catalogue statement plus a fixed number of reads by id to hydrate the page
     (titles, genres, season and episode counts), whatever the library's size (NFR-301). The
     statement is a `UNION ALL` over `movies` and `shows` in which each branch filters, seeks,

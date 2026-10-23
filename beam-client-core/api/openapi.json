@@ -265,6 +265,22 @@
             }
           },
           {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
@@ -435,12 +451,41 @@
               }
             }
           },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
           "416": {
-            "description": "Range not satisfiable",
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -573,6 +618,22 @@
             }
           },
           {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
@@ -743,12 +804,41 @@
               }
             }
           },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
           "416": {
-            "description": "Range not satisfiable",
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -1498,8 +1588,8 @@
                 "integer",
                 "null"
               ],
-              "maximum": 4294967295.0,
-              "minimum": 0.0,
+              "maximum": 100.0,
+              "minimum": 1.0,
               "format": "uint32"
             }
           },
@@ -1525,8 +1615,8 @@
                 "integer",
                 "null"
               ],
-              "maximum": 4294967295.0,
-              "minimum": 0.0,
+              "maximum": 100.0,
+              "minimum": 1.0,
               "format": "uint32"
             }
           },
@@ -1662,13 +1752,15 @@
           {
             "name": "min_rating",
             "in": "query",
-            "description": "Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;\nan unrated title counts as 0. Outside 0-10 is `#invalid-filter`.",
+            "description": "Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;\nan unrated title counts as 0. `NaN` is `#invalid-filter`.",
             "required": false,
             "schema": {
               "type": [
                 "number",
                 "null"
               ],
+              "maximum": 10.0,
+              "minimum": 0.0,
               "format": "double"
             }
           },
@@ -2013,6 +2105,28 @@
           },
           "400": {
             "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2823,8 +2937,8 @@
                 "integer",
                 "null"
               ],
-              "maximum": 4294967295.0,
-              "minimum": 0.0,
+              "maximum": 50.0,
+              "minimum": 1.0,
               "format": "uint32"
             }
           },
@@ -3135,8 +3249,8 @@
                 "integer",
                 "null"
               ],
-              "maximum": 4294967295.0,
-              "minimum": 0.0,
+              "maximum": 100.0,
+              "minimum": 1.0,
               "format": "uint32"
             }
           },
@@ -3403,6 +3517,28 @@
               }
             }
           },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "415": {
             "description": "Unsupported Media Type",
             "content": {
@@ -3558,6 +3694,22 @@
             }
           },
           {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
@@ -3740,12 +3892,41 @@
               }
             }
           },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
           "416": {
-            "description": "Range not satisfiable",
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -3858,6 +4039,22 @@
             }
           },
           {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
@@ -4040,12 +4237,41 @@
               }
             }
           },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
           "416": {
-            "description": "Range not satisfiable",
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -4160,6 +4386,22 @@
             }
           },
           {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
@@ -4342,12 +4584,41 @@
               }
             }
           },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
           "416": {
-            "description": "Range not satisfiable",
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -4460,6 +4731,22 @@
             }
           },
           {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
@@ -4642,12 +4929,41 @@
               }
             }
           },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
           "416": {
-            "description": "Range not satisfiable",
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -4772,6 +5088,22 @@
             }
           },
           {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
@@ -4960,12 +5292,41 @@
               }
             }
           },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
           "416": {
-            "description": "Range not satisfiable",
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -5122,6 +5483,22 @@
             }
           },
           {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
@@ -5292,12 +5669,41 @@
               }
             }
           },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
           "416": {
-            "description": "Range not satisfiable",
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Problem"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -6038,6 +6444,28 @@
                         }
                       ],
                       "title": "Library path overlaps the data directory"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
                     }
                   ]
                 }
@@ -7513,7 +7941,7 @@
                 "integer",
                 "null"
               ],
-              "maximum": 4294967295.0,
+              "maximum": 1000.0,
               "minimum": 0.0,
               "format": "uint32"
             }
@@ -7877,14 +8305,15 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "Max users to return (default 50, clamped to 1..=100).",
+            "description": "Max users to return (1-100, default 50).",
             "required": false,
             "schema": {
               "type": [
                 "integer",
                 "null"
               ],
-              "minimum": 0.0,
+              "maximum": 100.0,
+              "minimum": 1.0,
               "format": "uint64"
             }
           },
@@ -8268,6 +8697,28 @@
                           }
                         }
                       ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
                     }
                   ]
                 }
@@ -9000,8 +9451,8 @@
                 "integer",
                 "null"
               ],
-              "maximum": 4294967295.0,
-              "minimum": 0.0,
+              "maximum": 100.0,
+              "minimum": 1.0,
               "format": "uint32"
             }
           },
@@ -9923,6 +10374,28 @@
               }
             }
           },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
           "415": {
             "description": "Unsupported Media Type",
             "content": {
@@ -10457,6 +10930,28 @@
           },
           "400": {
             "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11179,6 +11674,8 @@
             "in": "cookie",
             "description": "The CSRF state cookie set when the login round-trip began.",
             "required": false,
+            "style": "cookie",
+            "explode": true,
             "schema": {
               "type": [
                 "string",
@@ -11191,6 +11688,8 @@
             "in": "cookie",
             "description": "The session credential, when the caller holds one.",
             "required": false,
+            "style": "cookie",
+            "explode": true,
             "schema": {
               "type": [
                 "string",
@@ -11558,6 +12057,8 @@
             "in": "cookie",
             "description": "The CSRF state cookie set when the login round-trip began.",
             "required": false,
+            "style": "cookie",
+            "explode": true,
             "schema": {
               "type": [
                 "string",
@@ -11570,6 +12071,8 @@
             "in": "cookie",
             "description": "The session credential, when the caller holds one.",
             "required": false,
+            "style": "cookie",
+            "explode": true,
             "schema": {
               "type": [
                 "string",
@@ -11994,6 +12497,8 @@
             "in": "cookie",
             "description": "The CSRF state cookie set when the login round-trip began.",
             "required": false,
+            "style": "cookie",
+            "explode": true,
             "schema": {
               "type": [
                 "string",
@@ -12006,6 +12511,8 @@
             "in": "cookie",
             "description": "The session credential, when the caller holds one.",
             "required": false,
+            "style": "cookie",
+            "explode": true,
             "schema": {
               "type": [
                 "string",
@@ -12640,6 +13147,28 @@
                         }
                       ],
                       "title": "Login failed"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
                     }
                   ]
                 }

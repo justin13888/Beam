@@ -81,10 +81,11 @@ starts where that title was.
 
 ### invalid-pagination
 
-**400.** From `GET /v1/media`, `GET /v1/history`, `GET /v1/continue-watching` and
-`GET /v1/admin/enrichment`. The page parameters ask for something the server does not answer:
-`first` or `last` outside 1 to 100 (1 to 50 for continue-watching), or a forward parameter
-(`first`, `after`) combined with a backward one (`last`, `before`).
+**400.** From `GET /v1/media`. The page parameters ask for something the server does not answer: a
+forward parameter (`first`, `after`) combined with a backward one (`last`, `before`). The other
+lists page forwards only, so they cannot mix directions. A `first` or `last` outside 1 to 100 (1
+to 50 for `GET /v1/continue-watching`) is refused on every list before this check, as a `400` with
+`"type": "about:blank"` naming the parameter (see [below](#responses-with-no-code)).
 
 **What to do.** Page forwards with `first` and `after`, or backwards with `last` and `before`, at
 most 100 items at a time.
@@ -99,9 +100,10 @@ can contain one, so the search is refused rather than run.
 ### invalid-filter
 
 **400.** From `GET /v1/media`. A numeric filter is outside the range it can take: `year`,
-`year_from` or `year_to` above 2147483647, or `min_rating` outside 0-10 (TMDB's scale, the one
-`ratings.tmdb` is reported on) -- `NaN` and infinities included. The filter is refused rather than
-narrowed, so an out-of-range bound can never quietly match everything or nothing.
+`year_from` or `year_to` above 2147483647, or a `min_rating` of `NaN`. The filter is refused
+rather than narrowed, so an out-of-range bound can never quietly match everything or nothing. A
+`min_rating` outside 0-10 (TMDB's scale, the one `ratings.tmdb` is reported on), infinities
+included, is refused before this check, as a `400` with `"type": "about:blank"`.
 
 **What to do.** Fix the caller: send a year a title can have, and a rating between 0 and 10.
 
@@ -464,13 +466,14 @@ for the body as a whole) and a `detail`:
   "status": 422,
   "title": "Validation failed",
   "detail": "the request body breaks 1 rule(s)",
-  "errors": [{ "pointer": "/rebuffers/0/duration_ms", "detail": "must be from 1 to 600000, got 0" }]
+  "errors": [{ "pointer": "", "detail": "at most 50 events in total, got 51" }]
 }
 ```
 
-Four operations answer it. `POST /v1/telemetry/playback`: a batch carries 1 to 50 events in total
-and at most 50 in any one list, a rebuffer lasts 1 ms to 10 minutes, and a source switch is between
-two different files. `POST /v1/admin/media/{id}/match`: `external_ref` is a `"provider:id"` some
+Four operations answer it. `POST /v1/telemetry/playback`: a batch carries 1 to 50 events in total,
+and a source switch is between two different files. Its schema's own bounds -- at most 50 in any
+one list, a rebuffer lasting 1 ms to 10 minutes -- are checked first and refused as a 422 with
+`"type": "about:blank"`, carrying the same `errors`. `POST /v1/admin/media/{id}/match`: `external_ref` is a `"provider:id"` some
 provider issues (`/external_ref`). `PUT /v1/admin/media/{id}/enrichment/locks`: a show has no
 `release_date` or `runtime` to lock (`/locked_fields/<index>`). `PUT /v1/files/{file_id}/progress`:
 `position_secs` is at least 0 and no further past the end than 2 seconds or 1% of the duration,
@@ -514,11 +517,13 @@ status code is the whole story, and for each of these there is no finer distinct
 
 | Status | When | What to do |
 |---|---|---|
-| `400` | A path or query parameter, header, cookie or body could not be parsed -- including an id in the path that is not a UUID, on every route that takes one | Fix the request |
+| `400` | A path or query parameter, header, cookie or body could not be parsed -- including an id in the path that is not a UUID, on every route that takes one -- or a query parameter is outside the bounds the API reference publishes for it (a page size, `min_rating`); `errors` names what broke | Fix the request |
 | `401` | No session cookie, or one the server does not recognise | Sign in |
 | `404` | The URL matches no route at all | Check the path |
 | `405` | A real path, wrong method | Check the method |
-| `415` / `422` | Unsupported request media type, or a body that does not satisfy the schema | Fix the request |
+| `412` | A conditional delivery request (`If-Match`, `If-Unmodified-Since`) names a copy the file no longer matches | Fetch it again without the condition |
+| `413` | A request body larger than 2 MiB | Send a smaller body |
+| `415` / `422` | Unsupported request media type, or a body that does not satisfy the schema; a `422` carries `errors`, one JSON Pointer per member that broke a bound | Fix the request |
 | `416` | The requested byte range cannot be satisfied | See below |
 
 ### 416 Range Not Satisfiable

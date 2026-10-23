@@ -28,12 +28,9 @@ pub struct BrowseQuery {
     /// Page forwards: this many items (1-100, default 20), after `after` or
     /// from the start. Not combined with `last` or `before`.
     //
-    // Kynos 0.3.0 neither documents nor enforces `#[schema]` bounds on an
-    // `Option` field of a `QueryParams` struct (`HistoryQuery::limit` shows
-    // the same) -- tracked with #223, the local issue for this class of
-    // Kynos constraint gap; upstream issue pending. The service enforces 1-100
-    // either way -- `#invalid-pagination` -- and the prose states it; the
-    // bounds below reach the document once Kynos honours them.
+    // Kynos documents these bounds and refuses a value outside them with its
+    // own 400 before the handler runs; the service's 1-100 check stays as the
+    // second.
     #[schema(minimum = 1, maximum = 100)]
     pub first: Option<u32>,
     /// An opaque cursor -- a page's `end_cursor` -- to page forwards from.
@@ -65,10 +62,7 @@ pub struct BrowseQuery {
     /// ignoring case. Results keep the requested sort.
     pub query: Option<String>,
     /// Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;
-    /// an unrated title counts as 0. Outside 0-10 is `#invalid-filter`.
-    //
-    // The bounds do not reach the document yet: the Kynos gap noted on
-    // `first` above (#223).
+    /// an unrated title counts as 0. `NaN` is `#invalid-filter`.
     #[schema(minimum = 0, maximum = 10)]
     pub min_rating: Option<f64>,
 }

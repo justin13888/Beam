@@ -2,12 +2,12 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use eyre::{Result, eyre};
-use kynos::http::forwarded::TrustedProxies;
 use kynos::server::{Server, error::ServerError, shutdown::Shutdown};
 use tracing::info;
 
 use beam_server::config::ServerConfig;
 use beam_server::routes::create_router;
+use beam_server::routes::rate_limit::trusted_proxies;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -181,12 +181,9 @@ async fn main() -> Result<()> {
         // Without it `ByClientAddress` reads the socket peer, and every client
         // behind a proxy shares one bucket: a per-IP limit that is silently a
         // global one. With more hops trusted than really exist, a client picks
-        // its own bucket by writing its own `Forwarded`.
-        .trusted_proxies(if config.rate_limit_trust_forwarded_for {
-            TrustedProxies::hops(1)
-        } else {
-            TrustedProxies::none()
-        })
+        // its own bucket by writing its own `X-Forwarded-For`. The mapping from
+        // configuration lives beside the limiter so a test can drive it.
+        .trusted_proxies(trusted_proxies(&config))
         .build(state)
         .map_err(|e| eyre!("The router does not describe itself: {e}"))?;
 

@@ -20,7 +20,7 @@ use beam_auth::utils::session_store::get_and_touch;
 use kynos::error::rejection::AuthRejection;
 use kynos::prelude::*;
 use kynos::security::{
-    Authenticates, Authenticator,
+    Authenticates, Authenticator, Scope,
     auth::{Auth, Scoped, Scopes},
 };
 
@@ -124,8 +124,9 @@ pub enum MediaBrowseError {
     )]
     InvalidCursor(String),
 
-    /// The page parameters mix directions, or ask for a page size outside
-    /// 1-100.
+    /// The page parameters mix directions: `first` or `after` with `last` or
+    /// `before`. A page size outside 1-100 never reaches this: the query's
+    /// schema bounds are refused first, as a `400` with `about:blank`.
     #[error("{0}")]
     #[problem(
         status = 400,
@@ -229,7 +230,9 @@ pub enum EnrichmentListError {
     )]
     InvalidCursor(String),
 
-    /// `first` is outside 1-100.
+    /// `first` is outside 1-100. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
     #[error("{0}")]
     #[problem(
         status = 400,
@@ -346,7 +349,7 @@ pub enum FixMatchError {
     )]
     ValidationFailed {
         // kynos gap: the `errors` extension is not described (see
-        // `PlaybackTelemetryError::ValidationFailed`); tracked in #223.
+        // `PlaybackTelemetryError::ValidationFailed`); getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -380,7 +383,7 @@ pub enum FieldLocksError {
         title = "Validation failed"
     )]
     ValidationFailed {
-        // kynos gap: as for `FixMatchError::ValidationFailed`; tracked in #223.
+        // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -613,7 +616,7 @@ pub enum ProgressError {
     )]
     ValidationFailed {
         // kynos gap: as for `PlaybackTelemetryError::ValidationFailed`;
-        // tracked in #223.
+        // getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -680,7 +683,9 @@ pub enum MediaRefLookupError {
 /// `GET /v1/continue-watching`.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum ContinueWatchingError {
-    /// `first` is outside 1-50.
+    /// `first` is outside 1-50. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
     #[error("{0}")]
     #[problem(
         status = 400,
@@ -708,7 +713,9 @@ pub enum HistoryError {
         title = "Invalid cursor"
     )]
     InvalidCursor(String),
-    /// `first` is outside 1-100.
+    /// `first` is outside 1-100. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
     #[error("{0}")]
     #[problem(
         status = 400,
@@ -754,8 +761,8 @@ pub enum PlaybackTelemetryError {
         // kynos gap: the derived responses describe a problem's `type` and
         // `title` only, never its `#[problem(extension)]` members, so the
         // OpenAPI document's 422 omits `errors` and `FieldError` and a
-        // generated client cannot type them. Tracked in #223, pending the
-        // upstream getkono/kynos issue; the document is not patched locally.
+        // generated client cannot type them. getkono/kynos#991; the document
+        // is not patched locally.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -1038,19 +1045,36 @@ pub struct AuthenticatedUser {
     api_key(in = "cookie", name = "beam_session"),
     name = "BeamSession",
     credential = AuthenticatedUser,
+    scope = BeamScope,
     description = "Opaque session cookie issued by the OIDC login flow (ADR-0003). \
                    Hashed at rest; never recoverable from the API."
 )]
 pub struct SessionCookie;
 
-/// The scope an admin-gated operation requires.
+/// Every scope a [`SessionCookie`] operation can demand.
 ///
 /// Beam has exactly one privilege level above "signed in", so this is one
 /// scope rather than a scope language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BeamScope {
+    /// The caller's user row has `is_admin` set.
+    Admin,
+}
+
+impl Scope for BeamScope {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+        }
+    }
+}
+
+/// The scope set an admin-gated operation requires.
 pub struct Admin;
 
 impl Scopes for Admin {
-    const SCOPES: &'static [&'static str] = &["admin"];
+    type Scope = BeamScope;
+    const REQUIRED: &'static [BeamScope] = &[BeamScope::Admin];
     const FORBIDDEN_TYPE: Option<&'static str> = Some(ADMIN_REQUIRED);
 }
 
@@ -1130,10 +1154,10 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
     async fn authorize(
         &self,
         credential: &AuthenticatedUser,
-        scopes: &'static [&'static str],
+        scopes: &[BeamScope],
         context: &AppState,
     ) -> Result<(), AuthRejection> {
-        if !scopes.contains(&"admin") {
+        if !scopes.contains(&BeamScope::Admin) {
             return Ok(());
         }
 

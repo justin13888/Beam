@@ -11,7 +11,8 @@
 //!
 //! The client is set with `TestRequest::peer`, not with `X-Forwarded-For`:
 //! Kynos resolves the client through the router's trusted-proxy policy, and
-//! this router trusts nobody.
+//! unless a test turns on `rate_limit_trust_forwarded_for` this router trusts
+//! nobody.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +23,7 @@ use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::{TestClient, TestResponse};
 
-use super::{BeamRateLimit, Class};
+use super::{BeamRateLimit, Class, trusted_proxies};
 use crate::config::ServerConfig;
 use crate::routes::test_support::make_app_state_with_clock;
 use crate::state::AppState;
@@ -49,10 +50,15 @@ struct Harness {
 /// One limiter of `class`, over a configuration the caller writes.
 fn harness(class: Class, adjust: impl FnOnce(&mut ServerConfig)) -> Harness {
     let clock = Arc::new(TestClock::new());
+    let state = make_app_state_with_clock(adjust, clock.clone());
+    // The same mapping `main` applies, so the trusted-proxy tests below drive
+    // the policy the server actually runs with.
+    let proxies = trusted_proxies(&state.config);
     let service = Router::new()
         .mount(kynos::routes![probe])
         .intercept(BeamRateLimit::interceptor(class))
-        .build(make_app_state_with_clock(adjust, clock.clone()))
+        .trusted_proxies(proxies)
+        .build(state)
         .expect("the probe router describes itself");
 
     Harness {
@@ -176,6 +182,79 @@ async fn an_untrusted_forwarded_for_cannot_buy_a_fresh_budget() {
         second.status(),
         StatusCode::TOO_MANY_REQUESTS,
         "a spoofed X-Forwarded-For must not pick a bucket while no proxy is trusted"
+    );
+}
+
+/// An auth-class limiter with a burst of one, behind a trusted proxy.
+fn behind_a_trusted_proxy() -> Harness {
+    harness(Class::Auth, |config| {
+        config.rate_limit_trust_forwarded_for = true;
+        config.rate_limit_auth_per_minute = 1;
+    })
+}
+
+/// One GET that arrives through the proxy at `CLIENT`, carrying `header`.
+async fn through_the_proxy(
+    client: &TestClient<AppState>,
+    header: &str,
+    value: &str,
+) -> TestResponse {
+    client
+        .get("/probe")
+        .peer(CLIENT.parse().unwrap())
+        .header(header, value)
+        .send()
+        .await
+}
+
+/// With `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR` on, the hop the proxy appended
+/// to `X-Forwarded-For` is the client: two clients behind one proxy get two
+/// buckets, and the same client keeps its own however many proxies it shares.
+#[tokio::test]
+async fn a_trusted_forwarded_for_keys_the_bucket() {
+    let Harness { client, .. } = behind_a_trusted_proxy();
+
+    assert_eq!(
+        through_the_proxy(&client, "X-Forwarded-For", "192.0.2.1")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        through_the_proxy(&client, "X-Forwarded-For", "192.0.2.1")
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the same forwarded client spends the same bucket"
+    );
+    assert_eq!(
+        through_the_proxy(&client, "X-Forwarded-For", "192.0.2.2")
+            .await
+            .status(),
+        StatusCode::OK,
+        "a second client behind the same proxy has a budget of its own"
+    );
+}
+
+/// Trusting is trusting `X-Forwarded-For` only. A `Forwarded` the client wrote
+/// is not a field the proxy appended to, so varying it must not buy a fresh
+/// budget: every such request is keyed by the peer and shares one bucket.
+#[tokio::test]
+async fn a_client_written_forwarded_does_not_key_the_bucket() {
+    let Harness { client, .. } = behind_a_trusted_proxy();
+
+    assert_eq!(
+        through_the_proxy(&client, "Forwarded", "for=192.0.2.1")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        through_the_proxy(&client, "Forwarded", "for=192.0.2.2")
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a `Forwarded` must not pick a bucket when only `X-Forwarded-For` is trusted"
     );
 }
 
