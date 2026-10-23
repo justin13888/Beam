@@ -1681,7 +1681,8 @@ set -eu
 # NoSuchFileException on a file clippy had just deleted (#248).
 cd beam-android
 ktlint --relative '**/*.kt' '!**/build/**'
-./gradlew lintDebug
+# exec, so the Gradle client replaces this shell: see "exec ./gradlew" below.
+exec ./gradlew lintDebug
 '''
 
 [tasks."android:lint:fix"]
@@ -1695,17 +1696,24 @@ run = "ktlint --format --relative '**/*.kt' '!**/build/**'"
 # which serialises on its own lock anyway, so running them at once only
 # contends. The pre-push hook chains its Android steps for that same reason,
 # but it carries three of these four: see hk.pkl for why minify stays out.
+#
+# Every Gradle task here runs `exec ./gradlew`, so the Gradle client replaces
+# the task's shell. When hk aborts a hook step because another step failed, its
+# signal reaches that shell; without exec the shell died and its ./gradlew child
+# was reparented to PID 1 and kept running, its daemon holding the
+# configuration-cache lock, so the next push's Android step timed out waiting
+# for it (#280). With exec the signal lands on the client itself.
 [tasks."android:test"]
 description = "Run the Android unit tests (JVM and Robolectric)"
 depends = ["android:sdk"]
 wait_for = ["android:lint"]
-run = "cd beam-android && ./gradlew testDebugUnitTest"
+run = "cd beam-android && exec ./gradlew testDebugUnitTest"
 
 [tasks."android:screenshot"]
 description = "Check the rendered screens against the recorded references"
 depends = ["android:sdk"]
 wait_for = ["android:lint", "android:test"]
-run = "cd beam-android && ./gradlew verifyRoborazziDebug"
+run = "cd beam-android && exec ./gradlew verifyRoborazziDebug"
 
 [tasks."android:minify"]
 description = "Run R8 over the release build, the only build type that shrinks"
@@ -1736,17 +1744,17 @@ wait_for = ["android:lint", "android:test", "android:screenshot"]
 # the release variant has no separate dex step, because R8 emits the dex for
 # the classes it shrinks. What is left uncovered is packaging, not the
 # compiler-and-annotation-processor contract this gate exists to hold.
-run = "cd beam-android && ./gradlew :app:minifyReleaseWithR8"
+run = "cd beam-android && exec ./gradlew :app:minifyReleaseWithR8"
 
 [tasks."android:screenshot:record"]
 description = "Re-record the screenshot references after an intended visual change"
 depends = ["android:sdk"]
-run = "cd beam-android && ./gradlew recordRoborazziDebug"
+run = "cd beam-android && exec ./gradlew recordRoborazziDebug"
 
 [tasks."android:build"]
 description = "Assemble the debug APK"
 depends = ["android:sdk"]
-run = "cd beam-android && ./gradlew assembleDebug"
+run = "cd beam-android && exec ./gradlew assembleDebug"
 
 [tasks."android:release"]
 description = "Assemble the release APK for every ABI"
@@ -1756,7 +1764,7 @@ depends = ["android:sdk"]
 # a second place for the profile to be chosen, and the two could disagree --
 # which is exactly the bug that made an earlier release APK carry debug
 # libraries.
-run = "cd beam-android && ./gradlew assembleRelease"
+run = "cd beam-android && exec ./gradlew assembleRelease"
 
 # ---------------------------------------------------------------------------
 # Apple client (#66, ADR-0013)
