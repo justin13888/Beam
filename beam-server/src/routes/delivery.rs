@@ -9,9 +9,9 @@
 //! actually answers with.
 //!
 //! Nothing here is an escape hatch. `IntoResponse` and `Responses` are the
-//! public traits every response type implements, and `delivery_responses` is
-//! public precisely so a wrapper can build on it -- the description stays
-//! accurate rather than being waived, and the `unchecked` feature stays off.
+//! public traits every response type implements, and the description starts
+//! from `Delivery`'s own -- the description stays accurate rather than being
+//! waived, and the `unchecked` feature stays off.
 //!
 //! It is still a gap worth closing upstream: a ranged delivery whose media type
 //! is chosen at request time is a normal thing for a file server to want, and
@@ -25,7 +25,7 @@
 
 use std::marker::PhantomData;
 
-use kynos::extract::media::MediaType;
+use kynos::http::media::MediaType;
 use kynos::response::range::served::Delivery;
 use kynos::response::{IntoResponse, Responses};
 
@@ -48,6 +48,17 @@ pub trait MediaRanges {
     /// The ranges this operation answers with, most representative first.
     /// Must not be empty.
     const RANGES: &'static [&'static str];
+}
+
+/// The first of `R`'s ranges, as the type-level media type `Delivery`
+/// describes itself with.
+///
+/// Description only: the bytes are served through a `Delivery<AnyMedia>` and
+/// relabelled per request. Indexing an empty `RANGES` fails to compile.
+struct PrimaryRange<R>(PhantomData<fn() -> R>);
+
+impl<R: MediaRanges> MediaType for PrimaryRange<R> {
+    const MEDIA_TYPE: &'static str = R::RANGES[0];
 }
 
 /// A ranged delivery labelled with the content type of the bytes it carries.
@@ -106,38 +117,26 @@ impl<R: MediaRanges> IntoResponse for RuntimeDelivery<R> {
 }
 
 impl<R: MediaRanges> Responses for RuntimeDelivery<R> {
-    /// The same 200/206/304 shape `Delivery` describes, widened to every range
-    /// in `R`, plus the 416 the range engine answers with directly.
+    /// The shape `Delivery` describes -- 200/206/304/412 and the range
+    /// engine's 416 -- widened to every range in `R`.
     ///
     /// OpenAPI permits a media-type range (`video/*`, `image/*`) as a `content`
     /// key, which is the honest description of "whatever was detected".
     ///
-    /// The 416 belongs here rather than on [`DeliveryError`] because this is
-    /// where it is produced: `Served::deliver` resolves an unsatisfiable range
-    /// into a problem document and returns it as an `Ok` delivery, so the
-    /// handler never sees an error to convert. It was previously declared by a
-    /// `DeliveryError` variant that nothing constructed -- the document was
-    /// right by accident, and deleting the dead variant would have silently
-    /// dropped a status the server still returns.
-    ///
-    /// Declaring it on the generic rather than on one alias is what keeps it
-    /// true: every `RuntimeDelivery` goes through the same range engine, so
-    /// artwork answers 416 on an unsatisfiable range exactly as file delivery
-    /// does.
+    /// The 416 needs no declaration of its own: `Served::deliver` resolves an
+    /// unsatisfiable range into a problem document and returns it as an `Ok`
+    /// delivery, and `Delivery`'s description carries that status itself.
     fn responses(registry: &mut kynos::schema::registry::Registry) -> kynos::openapi::Responses {
         use kynos::openapi::{MediaType as OpenApiMediaType, RefOr, Schema, StatusPattern};
 
-        let (primary, rest) = R::RANGES
-            .split_first()
-            .expect("a delivery answers with at least one media type");
-        let mut responses = kynos::response::range::delivery_responses(primary);
+        let mut responses = <Delivery<PrimaryRange<R>> as Responses>::responses(registry);
 
         for status in [200, 206] {
             if let Some(RefOr::Item(response)) = responses
                 .responses
                 .get_mut(&StatusPattern::Code(status).to_string())
             {
-                for media_type in rest {
+                for media_type in &R::RANGES[1..] {
                     response.content.insert(
                         (*media_type).to_owned(),
                         OpenApiMediaType::new(Schema::Object(Box::default())),
@@ -145,15 +144,6 @@ impl<R: MediaRanges> Responses for RuntimeDelivery<R> {
                 }
             }
         }
-
-        responses = responses.with(
-            416,
-            kynos::openapi::Response::with_content(
-                "Range not satisfiable",
-                kynos::openapi::model::body::mime_names::APPLICATION_PROBLEM_JSON,
-                OpenApiMediaType::new(registry.resolve::<kynos::Problem>()),
-            ),
-        );
 
         responses
     }

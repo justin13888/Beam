@@ -235,12 +235,12 @@ impl BeamRateLimit {
 
     /// The limit this class reports, whatever the outcome.
     fn limit(&self, quota: u64, outcome: &Outcome) -> ServiceLimit {
-        ServiceLimit {
-            name: Cow::Borrowed(self.class.name()),
+        ServiceLimit::new(
+            Cow::Borrowed(self.class.name()),
             quota,
-            remaining: outcome.remaining,
-            reset: outcome.reset,
-        }
+            outcome.remaining,
+            outcome.reset,
+        )
     }
 }
 
@@ -255,12 +255,12 @@ impl RateLimitPolicy<AppState> for BeamRateLimit {
         // the 429 stays declared on these operations in every build, so the
         // exported description does not change with deployment configuration.
         if !state.config.rate_limit_enabled {
-            return Decision::allow(ServiceLimit {
-                name: Cow::Borrowed(self.class.name()),
+            return Decision::allow(ServiceLimit::new(
+                Cow::Borrowed(self.class.name()),
                 quota,
-                remaining: quota,
-                reset: Duration::ZERO,
-            });
+                quota,
+                Duration::ZERO,
+            ));
         }
 
         // Keyed by client only, never by route: the two operations in the auth

@@ -1625,14 +1625,15 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
     ids.dedup();
     assert_eq!(ids.len(), 4, "pages must cover every user exactly once");
 
-    // limit is clamped to at least 1.
-    let clamped: AdminUserList = client
+    // A limit below its published minimum of 1 is refused by Kynos's
+    // `QueryParams` check rather than served.
+    client
         .get("/v1/admin/users?limit=0")
         .cookie("beam_session", &token)
         .send()
         .await
-        .json();
-    assert_eq!(clamped.items.len(), 1);
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("about:blank");
 }
 
 #[tokio::test]

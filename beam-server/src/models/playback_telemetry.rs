@@ -200,12 +200,12 @@ pub struct PlaybackSourceSwitchEvent {
 /// event under the UTC day it arrives and forgets the file it named. An event
 /// whose file the server cannot resolve -- unknown, or missing from disk -- is
 /// dropped, not refused.
-// kynos gap: `Json<T>` enforces serde only, not the constraints the `Schema`
-// derive publishes (`max_items`, `minimum`, `maximum`), although its
-// documentation says a schema violation is a 422. The service validates every
-// bound below itself (`validate_batch`), answering 422 #validation-failed
-// until a kynos release enforces them. Tracked in #223, pending the upstream
-// getkono/kynos issue.
+// `Json<T>` enforces the bounds the `Schema` derive publishes (`max_items`,
+// `minimum`, `maximum`) as Kynos's own 422, `about:blank`, keyed by the JSON
+// Pointer of each member that broke one. The service still validates every
+// bound itself (`validate_batch`) as a second check, and alone answers 422
+// #validation-failed for the rules no schema keyword states: 50 events in
+// total across the lists, and a switch to the file it came from.
 #[derive(Clone, Debug, Serialize, Deserialize, Schema)]
 pub struct PlaybackTelemetryBatch {
     pub client_kind: PlaybackClientKind,

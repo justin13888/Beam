@@ -54,8 +54,8 @@ pub struct EnrichmentListQuery {
     pub kind: Option<TitleKind>,
     /// This many titles (1-100, default 20).
     //
-    // Kynos 0.3.0 neither documents nor enforces `#[schema]` bounds on an
-    // `Option` query field (tracked with #223); the handler enforces them.
+    // Kynos documents and enforces these bounds; the handler's own check
+    // stays as the second.
     #[schema(minimum = 1, maximum = 100)]
     pub first: Option<u32>,
     /// An opaque cursor -- a page's `end_cursor` -- to page on from.

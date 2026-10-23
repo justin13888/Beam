@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use eyre::{Result, eyre};
-use kynos::http::forwarded::TrustedProxies;
+use kynos::http::forwarded::{ProxyHeader, TrustedProxies};
 use kynos::server::{Server, error::ServerError, shutdown::Shutdown};
 use tracing::info;
 
@@ -183,7 +183,9 @@ async fn main() -> Result<()> {
         // global one. With more hops trusted than really exist, a client picks
         // its own bucket by writing its own `Forwarded`.
         .trusted_proxies(if config.rate_limit_trust_forwarded_for {
-            TrustedProxies::hops(1)
+            // The variable is named for `X-Forwarded-For`, and that is the
+            // field a reverse proxy appends to; Kynos reads only this one.
+            TrustedProxies::hops(ProxyHeader::XForwarded, 1)
         } else {
             TrustedProxies::none()
         })

@@ -176,7 +176,7 @@ pub struct EventsQuery {
 /// How the admin user list is paged.
 #[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
 pub struct UsersQuery {
-    /// Max users to return (default 50, clamped to 1..=100).
+    /// Max users to return (1-100, default 50).
     #[schema(minimum = 1, maximum = 100)]
     pub limit: Option<u64>,
     /// Number of users to skip.

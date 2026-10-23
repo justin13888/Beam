@@ -656,13 +656,7 @@ async fn a_search_text_holding_nul_is_a_400_invalid_search_query() {
 async fn a_page_the_server_does_not_answer_is_a_400_invalid_pagination() {
     let (client, token) = signed_in_to(real_service(Library::new())).await;
 
-    for query in [
-        "first=101",
-        "first=0",
-        "last=101",
-        "first=2&last=2",
-        "after=a&before=b",
-    ] {
+    for query in ["first=2&last=2", "after=a&before=b"] {
         client
             .get(&format!("/v1/media?{query}"))
             .cookie("beam_session", &token)
@@ -672,6 +666,34 @@ async fn a_page_the_server_does_not_answer_is_a_400_invalid_pagination() {
             .assert_problem_type(
                 "https://beam.justinchung.net/reference/errors/#invalid-pagination",
             );
+    }
+}
+
+/// A page size outside its published 1-100 is refused by Kynos's
+/// `QueryParams` check before the handler runs, naming the parameter.
+#[tokio::test]
+async fn a_page_size_outside_its_published_bounds_is_refused_at_the_edge() {
+    let (client, token) = signed_in_to(real_service(Library::new())).await;
+
+    for (query, parameter) in [
+        ("first=101", "first"),
+        ("first=0", "first"),
+        ("last=101", "last"),
+    ] {
+        let response = client
+            .get(&format!("/v1/media?{query}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type("about:blank");
+        let body = response.json::<serde_json::Value>();
+        assert_eq!(
+            body["detail"],
+            format!("query parameter `{parameter}` does not satisfy its schema"),
+            "{query}"
+        );
     }
 }
 
@@ -787,10 +809,7 @@ async fn an_out_of_range_numeric_filter_is_a_400_invalid_filter() {
         "year=4294967295",
         "year_from=4294967295",
         "year_to=2147483648",
-        "min_rating=10.5",
-        "min_rating=-1",
         "min_rating=NaN",
-        "min_rating=inf",
     ] {
         client
             .get(&format!("/v1/media?{query}"))
@@ -799,6 +818,18 @@ async fn an_out_of_range_numeric_filter_is_a_400_invalid_filter() {
             .await
             .assert_status(StatusCode::BAD_REQUEST)
             .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-filter");
+    }
+
+    // A rating outside its published 0-10 is Kynos's `QueryParams` check
+    // answering, before the handler's own.
+    for query in ["min_rating=10.5", "min_rating=-1", "min_rating=inf"] {
+        client
+            .get(&format!("/v1/media?{query}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type("about:blank");
     }
 
     // The largest bounds each filter can take are answered, not refused.

@@ -403,9 +403,9 @@ async fn an_unknown_or_missing_file_is_dropped_and_the_rest_counted() {
     assert_eq!(body["totals"]["source_switch_count"], 0);
 }
 
-/// Kynos does not enforce the published `maxItems` (see the gap noted on
-/// `PlaybackTelemetryBatch`), so this is the service's own bound answering:
-/// a 422 naming the list that broke it, and nothing counted.
+/// A list over its published `maxItems` is Kynos's `Json` check answering,
+/// before the service's: a 422 naming the list that broke it, and nothing
+/// counted.
 #[tokio::test]
 async fn more_than_fifty_events_is_a_422_at_the_list_that_broke_it() {
     let fixture = fixture(true);
@@ -422,7 +422,7 @@ async fn more_than_fifty_events_is_a_422_at_the_list_that_broke_it() {
 
     response
         .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#validation-failed");
+        .assert_problem_type("about:blank");
     let body = response.json::<Value>();
     assert_eq!(body["errors"][0]["pointer"], "/starts");
     assert!(nothing_counted(&fixture).await);
@@ -448,11 +448,41 @@ async fn a_zero_length_rebuffer_is_a_422_at_its_duration() {
     response.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
     let body = response.json::<Value>();
     assert_eq!(
+        body["errors"][0]["pointer"], "/rebuffers/0/duration_ms",
+        "{body}"
+    );
+    assert!(
+        nothing_counted(&fixture).await,
+        "a refused batch counts nothing"
+    );
+}
+
+/// The 50-event total spans the lists, which no schema keyword states, so it
+/// is the service's own rule answering: 422 #validation-failed at the batch.
+#[tokio::test]
+async fn more_than_fifty_events_across_the_lists_is_a_422_at_the_batch() {
+    let fixture = fixture(true);
+    let file = seed_hevc_file(&fixture).await;
+    let (_, token) = session(&fixture.state, false).await;
+    let starts: Vec<Value> = (0..26).map(|_| json!({ "file_id": file })).collect();
+    let rebuffers: Vec<Value> = (0..25)
+        .map(|_| json!({ "file_id": file, "duration_ms": 100 }))
+        .collect();
+
+    let response = post(
+        &fixture,
+        &token,
+        &json!({ "client_kind": "android", "starts": starts, "rebuffers": rebuffers }),
+    )
+    .await;
+
+    response
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#validation-failed");
+    let body = response.json::<Value>();
+    assert_eq!(
         body["errors"],
-        json!([{
-            "pointer": "/rebuffers/0/duration_ms",
-            "detail": "must be from 1 to 600000, got 0"
-        }])
+        json!([{ "pointer": "", "detail": "at most 50 events in total, got 51" }])
     );
     assert!(
         nothing_counted(&fixture).await,
