@@ -514,15 +514,26 @@ case "$compose_cmd" in
 esac
 engine=${BEAM_CONTAINER:-$engine}
 if [ -n "${BEAM_CONTAINER_CACHE_DIR:-}" ]; then
+    # Export to a fresh directory and swap it in after the build. buildx's
+    # local exporter never prunes blobs, so exporting into the directory the
+    # cache was restored from would carry every earlier layer forward and grow
+    # the saved cache on each Cargo.lock or Containerfile change.
+    cache_next="$BEAM_CONTAINER_CACHE_DIR.next"
     mkdir -p "$BEAM_CONTAINER_CACHE_DIR"
+    rm -rf "$cache_next"
     set -- buildx build --load \
         --cache-from "type=local,src=$BEAM_CONTAINER_CACHE_DIR" \
-        --cache-to "type=local,dest=$BEAM_CONTAINER_CACHE_DIR,mode=max"
+        --cache-to "type=local,dest=$cache_next,mode=max"
 else
+    cache_next=
     set -- build
 fi
 echo "ts:e2e: $engine $* --file beam-server/Containerfile --tag $image ."
 "$engine" "$@" --file beam-server/Containerfile --tag "$image" .
+if [ -n "$cache_next" ]; then
+    rm -rf "$BEAM_CONTAINER_CACHE_DIR"
+    mv "$cache_next" "$BEAM_CONTAINER_CACHE_DIR"
+fi
 
 (cd beam-web && bun x playwright install chromium)
 
