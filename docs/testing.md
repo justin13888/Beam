@@ -279,6 +279,48 @@ depended on by nothing in production; with the feature off it compiles to an emp
 failed at runtime** — while every hermetic test passed, because neither an in-memory `HashMap` nor
 `MockDatabase` type-checks a parameter. The entity now models it as a `DeriveActiveEnum`.
 
+## The browser end-to-end tier
+
+Every tier above stops at a seam: the web suite at MSW, the Rust suite at the trait line, the
+`pg-integration` tier at the database. None of them shows that the pieces agree with each other once
+they are deployed together -- that the cookie the callback sets is the one the SPA's requests carry,
+that a scan of a real file yields a title the search finds, that the bytes the stream endpoint
+serves are ones a browser decodes. `beam-web/e2e/` is the one suite that asks.
+
+It is a Playwright suite (`beam-web/playwright.config.ts`) driving a real Chromium through the core
+loop, serially, against the composed Postgres, Dex and beam-server stack:
+
+1. **OIDC login** through Dex's own login form as the static admin, ending on the SPA with a session
+   `GET /v1/me` reports as admin.
+2. **Admin scan** -- add a library at the server's `BEAM_VIDEO_DIR`, start a scan, and wait for the
+   fixture to appear in the library's file list.
+3. **Browse and search** -- the title appears on Explore, a matching query finds it, a non-matching
+   one does not.
+4. **Direct play** -- the player fetches the original file from the stream endpoint and the
+   `<video>` element's clock advances, which only a decoded stream does.
+
+The fixture is generated per run, not committed: ten seconds of H.264/AAC in an MP4, written into
+the library volume by a one-shot service in `beam-web/e2e/compose.e2e.yaml` that runs the server's
+own image, since that image already carries the FFmpeg CLI. The server still mounts the library
+read-only (FR-202).
+
+`mise run ts:e2e` is the entry point. It builds the server image, runs the stack as its own compose
+project (`beam-e2e`) from empty volumes, takes the OIDC wiring from `dev:up` rather than restating
+it, runs the suite, prints the server and IdP logs if anything failed, and tears everything down.
+It needs a container runtime, so like `rust:test:pg` it is outside `mise run ci` and the pre-push
+hook (NFR-201); CI runs it in the `web-e2e` job, which `ci-ok` requires.
+
+Two gaps are deliberate:
+
+- **The SPA is served by Vite, not the `web` image.** That image's build runs `codegen:openapi` and
+  `tsc`, which cannot pass until beam-web is regenerated against the OpenAPI 3.2 contract
+  ([#146](https://github.com/justin13888/beam/issues/146)). The bundle is the same `vite build`
+  output; what the suite does not exercise is the image's Caddy configuration, including its
+  Content-Security-Policy. Switching to the `web` service is part of restoring that build.
+- **One browser engine.** Chromium only. Whether a title direct-plays is decided by the browser's
+  decoders, and the cross-browser matrix is a separate question
+  ([#139](https://github.com/justin13888/beam/issues/139)).
+
 ## Contract testing
 
 Clients are generated from the server's OpenAPI document, so the generator's output is what checks
@@ -328,9 +370,8 @@ everything up to the trait boundary hermetically, and validate the real round-tr
   flow is exercised against the opt-in Dex (`mise run dev:up`). `mise run dev:verify-oidc`
   smoke-tests the wiring that flow depends on — that one issuer string resolves identically from
   inside the server container and from the host, and that the profile-less stack starts no IdP.
-  It needs a container runtime, so like `rust:test:pg` it sits outside `ci` (NFR-201). A
-  browser-driven Playwright suite is tracked in
-  [#74](https://github.com/justin13888/beam/issues/74).
+  It needs a container runtime, so like `rust:test:pg` it sits outside `ci` (NFR-201). The
+  flow itself, through Dex's real login form, is driven by the browser end-to-end tier below.
 - **Real `cameo` → TMDB/AniList network calls.** The enrichment pipeline is unit-tested against its
   provider trait with a programmable fake, covering success, partial failure, retry/backoff, and
   missing-API-key behavior. Real network calls are only exercised by running the server against
@@ -419,4 +460,4 @@ A line-coverage percentage says a line executed; it says nothing about assertion
 nothing about the integrations deliberately excluded from the hermetic layer above. Treat the gate
 as a floor against undertested code, not as validation of the real external round-trips -- assertion
 quality is what the mutation-testing loop measures, and the real round-trips are what the
-`pg-integration` tier and manual OIDC verification cover.
+`pg-integration` tier and the browser end-to-end tier cover.

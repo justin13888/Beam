@@ -40,9 +40,11 @@ test("an admin signs in through the OIDC provider", async () => {
 	// Dex with only its password database configured skips the connector
 	// chooser and lands straight on its own login form.
 	await expect(page).toHaveURL(/^http:\/\/dex\.beam\.localhost:5556\/dex\//);
-	await page.getByLabel(/email/i).fill(ADMIN.email);
-	await page.getByLabel(/password/i).fill(ADMIN.password);
-	await page.getByRole("button", { name: /log ?in/i }).click();
+	// By field name: Dex's template points its labels at ids the inputs do not
+	// carry, so the form has no accessible names to select by.
+	await page.locator('input[name="login"]').fill(ADMIN.email);
+	await page.locator('input[name="password"]').fill(ADMIN.password);
+	await page.getByRole("button", { name: "Login" }).click();
 
 	// The callback lands on beam-server, which sets the session cookie and
 	// redirects back into the SPA; the header then reflects GET /v1/me.
