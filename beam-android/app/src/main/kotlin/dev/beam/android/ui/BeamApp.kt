@@ -183,13 +183,14 @@ private fun BeamNavDisplay(
 
                 entry<MediaDetail> {
                     DetailRoute(
-                        onPlay = { fileId, episodeId, title ->
+                        onPlay = { fileId, episodeId, title, isSourcePicked ->
                             backStack.add(
                                 Player(
                                     fileId = fileId,
                                     mediaId = it.mediaId,
                                     episodeId = episodeId,
                                     title = title,
+                                    isSourcePicked = isSourcePicked,
                                 ),
                             )
                         },
@@ -220,6 +221,7 @@ private fun BeamNavDisplay(
                                 fileId = destination.fileId,
                                 title = destination.title,
                                 startPositionSecs = destination.startPositionSecs,
+                                isSourcePicked = destination.isSourcePicked,
                             ),
                         onClose = { backStack.removeLastOrNull() },
                     )

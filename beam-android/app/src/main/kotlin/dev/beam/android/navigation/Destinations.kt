@@ -65,6 +65,8 @@ public data class Player(
     val episodeId: String? = null,
     val title: String = "",
     val startPositionSecs: Double = 0.0,
+    /** Whether the viewer chose this file by hand; see [dev.beam.android.core.model.PlaybackRequest.isSourcePicked]. */
+    val isSourcePicked: Boolean = false,
 ) : Destination
 
 /** Sign-in, shown when there is no session. */
