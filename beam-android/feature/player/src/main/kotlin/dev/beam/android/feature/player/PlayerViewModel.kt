@@ -127,8 +127,16 @@ public class PlayerViewModel
             }
         }
 
-        /** Begin playback. */
+        /**
+         * Begin playback.
+         *
+         * A file the viewer picked before playback starts pinned, exactly as a
+         * pick made in the player would. It only ever adds a pin: the route
+         * calls this again when it is recomposed from scratch, such as after a
+         * rotation, and that must not drop a pin set in the player since.
+         */
         public fun start(request: PlaybackRequest) {
+            mutableState.update { it.copy(isSourcePinned = it.isSourcePinned || request.isSourcePicked) }
             viewModelScope.launch { player.play(request) }
         }
 

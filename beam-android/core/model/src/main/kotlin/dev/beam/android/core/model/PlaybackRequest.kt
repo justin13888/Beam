@@ -24,4 +24,10 @@ public data class PlaybackRequest(
     val startPositionSecs: Double = 0.0,
     /** Total duration where known, for the initial scrubber. */
     val durationSecs: Double? = null,
+    /**
+     * Whether the viewer chose [fileId] by hand rather than taking the file the
+     * quality policy chose. A picked file is pinned: sustained rebuffering
+     * never downgrades it.
+     */
+    val isSourcePicked: Boolean = false,
 )

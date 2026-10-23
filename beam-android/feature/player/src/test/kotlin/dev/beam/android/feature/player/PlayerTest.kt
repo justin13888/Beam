@@ -306,6 +306,42 @@ class PlayerTest {
         }
 
     @Test
+    fun `a source picked before playback is never overridden`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val playback = FakePlaybackRepository().apply { downgrade = smallerSource() }
+            val model = viewModel(player = player, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.start(request().copy(isSourcePicked = true))
+            testScheduler.advanceUntilIdle()
+
+            player.rebufferPersistently()
+            testScheduler.advanceUntilIdle()
+
+            assertTrue(model.state.value.isSourcePinned)
+            assertTrue(player.switched.isEmpty())
+            assertTrue(playback.downgradeRequests.isEmpty())
+            assertNull(model.state.value.downgrade)
+        }
+
+    @Test
+    fun `starting again does not drop a pin set in the player`() =
+        runTest {
+            val model = viewModel()
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            model.switchSource(Fixtures.source(fileId = "file-remux"))
+            testScheduler.advanceUntilIdle()
+
+            // The route starts the request again when it is rebuilt, as after a rotation.
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+
+            assertTrue(model.state.value.isSourcePinned)
+        }
+
+    @Test
     fun `a pick made while the core is asked wins over its answer`() =
         runTest {
             val player = FakeBeamPlayer()

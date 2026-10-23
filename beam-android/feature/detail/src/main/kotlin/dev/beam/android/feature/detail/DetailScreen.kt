@@ -53,7 +53,7 @@ import uniffi.beam_client_core.MediaSourceView
 /** One title's page, wired to its view model. */
 @Composable
 public fun DetailRoute(
-    onPlay: (fileId: String, episodeId: String?, title: String) -> Unit,
+    onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: DetailViewModel = hiltViewModel(),
 ) {
@@ -75,7 +75,7 @@ public fun DetailRoute(
 @Composable
 internal fun DetailScreen(
     state: LoadState<DetailUiState>,
-    onPlay: (fileId: String, episodeId: String?, title: String) -> Unit,
+    onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
     onSelectSeason: (UInt) -> Unit,
     onPickSource: () -> Unit,
     onDismissPicker: () -> Unit,
@@ -133,7 +133,7 @@ internal fun DetailScreen(
 @Composable
 private fun DetailContent(
     state: DetailUiState,
-    onPlay: (fileId: String, episodeId: String?, title: String) -> Unit,
+    onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
     onSelectSeason: (UInt) -> Unit,
     onPickSource: () -> Unit,
     onDismissPicker: () -> Unit,
@@ -148,7 +148,9 @@ private fun DetailContent(
             selection = state.selection,
             onPick = { source: MediaSourceView ->
                 onDismissPicker()
-                onPlay(source.fileId, null, summary.title)
+                // The one place a file is chosen by hand before playback: the
+                // player pins it, so a stall never swaps it for a smaller one.
+                onPlay(source.fileId, null, summary.title, true)
             },
             onDismiss = onDismissPicker,
         )
@@ -266,7 +268,7 @@ private fun DetailContent(
                     episode = episode,
                     onPlay = {
                         episode.fileId?.let { fileId ->
-                            onPlay(fileId, episode.id, episode.title)
+                            onPlay(fileId, episode.id, episode.title, false)
                         }
                     },
                 )
@@ -278,7 +280,7 @@ private fun DetailContent(
 @Composable
 private fun Actions(
     state: DetailUiState,
-    onPlay: (fileId: String, episodeId: String?, title: String) -> Unit,
+    onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
     onPickSource: () -> Unit,
     onDownload: (fileId: String, title: String, subtitle: String?) -> Unit,
 ) {
@@ -292,7 +294,7 @@ private fun Actions(
     ) {
         Button(
             onClick = {
-                playable?.let { onPlay(it.fileId, null, state.summary.title) }
+                playable?.let { onPlay(it.fileId, null, state.summary.title, false) }
             },
             enabled = playable != null,
             modifier = Modifier.weight(1f),
