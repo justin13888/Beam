@@ -26,20 +26,21 @@ use kynos::response::range::served::{Conditions, Served};
 use kynos::response::range::source::ByteSource;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::error;
+use uuid::Uuid;
 
 use beam_index::library_file::{open_regular_file, relative_to};
 
 use crate::routes::api_error::{DeliveryError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::tags::Playback;
-use crate::services::library::{LibraryError, LocatedFile};
+use crate::services::library::LocatedFile;
 use crate::state::AppState;
 
 /// What both delivery endpoints capture.
 #[derive(Debug, Schema, PathParams)]
 pub struct FilePath {
     /// File ID.
-    pub file_id: String,
+    pub file_id: Uuid,
 }
 
 /// One indexed file on disk, read a span at a time.
@@ -133,23 +134,11 @@ pub type MediaDelivery = RuntimeDelivery<SourceFileRanges>;
 /// signature; this only resolves the file.
 async fn locate_file(
     state: &AppState,
-    file_id: &str,
+    file_id: Uuid,
 ) -> Result<(PathBuf, PathBuf, String), DeliveryError> {
-    let file = match state
-        .services
-        .library
-        .get_file_by_id(file_id.to_owned())
-        .await
-    {
+    let file = match state.services.library.get_file_by_id(file_id).await {
         Ok(Some(file)) => file,
         Ok(None) => return Err(DeliveryError::FileNotFound("File not found".into())),
-        // Matched rather than caught: `InvalidId` is the caller's malformed
-        // `{file_id}`, and the catch-all this replaces reported it as a 500.
-        Err(LibraryError::InvalidId) => {
-            return Err(DeliveryError::InvalidFileId(format!(
-                "file id {file_id} is not a valid identifier"
-            )));
-        }
         Err(err) => {
             error!(?err, "failed to look up file");
             return Err(DeliveryError::Internal("Failed to look up file".into()));
@@ -192,7 +181,7 @@ pub(crate) fn validator_tag(modified: SystemTime, length: u64) -> String {
 /// Builds the delivery both endpoints share.
 async fn deliver(
     state: &AppState,
-    file_id: &str,
+    file_id: Uuid,
     conditions: &Conditions,
     attachment: bool,
 ) -> Result<MediaDelivery, DeliveryError> {
@@ -226,7 +215,7 @@ async fn deliver(
 }
 
 /// The name a download is saved under.
-fn download_filename(path: &FsPath, file_id: &str) -> String {
+fn download_filename(path: &FsPath, file_id: Uuid) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| format!("{file_id}.bin"))
@@ -245,7 +234,7 @@ pub async fn stream_file(
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
-    deliver(&state, &path.file_id, &conditions, false).await
+    deliver(&state, path.file_id, &conditions, false).await
 }
 
 /// The same fields with no body, for a player sizing the stream before it
@@ -258,7 +247,7 @@ pub async fn head_stream_file(
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
-    deliver(&state, &path.file_id, &conditions, false).await
+    deliver(&state, path.file_id, &conditions, false).await
 }
 
 /// Download the full source file as an attachment. Same auth and Range
@@ -273,7 +262,7 @@ pub async fn download_file(
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
-    deliver(&state, &path.file_id, &conditions, true).await
+    deliver(&state, path.file_id, &conditions, true).await
 }
 
 /// The same fields with no body, for a client sizing the download first.
@@ -285,7 +274,7 @@ pub async fn head_download_file(
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
-    deliver(&state, &path.file_id, &conditions, true).await
+    deliver(&state, path.file_id, &conditions, true).await
 }
 
 #[cfg(test)]

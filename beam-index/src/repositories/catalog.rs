@@ -161,10 +161,10 @@ impl BranchFilters {
         Self {
             query: query.clone().map(|q| binds.push(q)),
             genre: genre_slug.clone().map(|slug| binds.push(slug)),
-            year: year.map(|y| binds.push(y as i32)),
-            year_from: year_from.map(|y| binds.push(y as i32)),
-            year_to: year_to.map(|y| binds.push(y as i32)),
-            min_rating: min_rating.map(|r| binds.push(r as i32)),
+            year: year.map(|y| binds.push(y)),
+            year_from: year_from.map(|y| binds.push(y)),
+            year_to: year_to.map(|y| binds.push(y)),
+            min_rating: min_rating.map(|r| binds.push(r)),
         }
     }
 
@@ -202,12 +202,10 @@ impl BranchFilters {
             conditions.push(format!("{table}.year <= {y}"));
         }
         if let Some(r) = &self.min_rating {
-            // `10::real` keeps the product single precision, the precision
-            // the rating is stored and shown in, so a 7.2 is 72 here as it
-            // is on the wire.
-            conditions.push(format!(
-                "COALESCE({table}.rating_tmdb * 10::real, 0) >= {r}"
-            ));
+            // Bound as a `real`, the precision the rating is stored in, so a
+            // stored 7.2 meets a minimum of 7.2 exactly: in double precision
+            // the stored value is 7.19999... and would miss it.
+            conditions.push(format!("COALESCE({table}.rating_tmdb, 0) >= {r}"));
         }
         conditions
     }

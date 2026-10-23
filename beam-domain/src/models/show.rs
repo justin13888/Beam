@@ -55,7 +55,7 @@ pub struct Episode {
     pub episode_number: u32,
     pub title: String,
     pub description: Option<String>,
-    pub air_date: Option<String>,
+    pub air_date: Option<NaiveDate>,
     pub runtime: Option<Duration>,
     pub thumbnail_url: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -149,7 +149,7 @@ impl From<beam_entity::episode::Model> for Episode {
             episode_number: model.episode_number as u32,
             title: model.title,
             description: model.description,
-            air_date: model.air_date.map(|d| d.to_string()),
+            air_date: model.air_date,
             runtime: model
                 .runtime_mins
                 .map(|mins| Duration::from_secs((mins * 60) as u64)),

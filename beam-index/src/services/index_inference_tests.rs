@@ -319,7 +319,10 @@ async fn a_date_based_episode_is_filed_under_its_year_with_its_air_date() {
 
     let (season, episode, _) = h.episode_of(rel);
     assert_eq!((season, episode.episode_number), (2024, 301));
-    assert_eq!(episode.air_date.as_deref(), Some("2024-03-01"));
+    assert_eq!(
+        episode.air_date,
+        chrono::NaiveDate::from_ymd_opt(2024, 3, 1)
+    );
     assert_eq!(episode.title, "Guest Name");
 }
 

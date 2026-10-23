@@ -65,7 +65,7 @@ export function library(overrides: Partial<Library> = {}): Library {
 		id: "11111111-1111-1111-1111-111111111111",
 		name: "Movies",
 		description: null,
-		size: 0,
+		file_count: 0,
 		last_scan_started_at: null,
 		last_scan_finished_at: null,
 		last_scan_file_count: null,

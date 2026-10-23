@@ -95,7 +95,7 @@ impl MetadataService for StubMetadataService {
     }
     async fn get_media_sources(
         &self,
-        _media_id: &str,
+        _media_id: uuid::Uuid,
     ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
         unimplemented!("not called in admin route tests")
     }
@@ -528,9 +528,50 @@ async fn an_authenticated_caller_sees_an_empty_library_list() {
     assert!(response.json::<Vec<Library>>().is_empty());
 }
 
-/// Three operations resolve a library by id and share `LibraryRefError`, so a
-/// malformed id has to be the same 400 on each. Table-driven because the
-/// interesting thing is that the answers agree, not any one of them.
+/// The stored scan count is a signed column; a negative one is reported as
+/// unknown rather than wrapped into a huge unsigned count, while a real count
+/// is reported as it is.
+#[tokio::test]
+async fn a_negative_stored_scan_count_is_listed_as_unknown() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let library: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .json();
+    let listed_count = || async {
+        let listed = client
+            .get("/v1/libraries")
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .json::<Vec<Value>>();
+        assert_eq!(listed.len(), 1);
+        listed[0]["last_scan_file_count"].clone()
+    };
+    let repo = &fixture.state.services.library_repo;
+
+    repo.update_scan_progress(library.id, None, None, Some(-1))
+        .await
+        .expect("the in-memory repository does not fail");
+    assert_eq!(listed_count().await, Value::Null);
+
+    repo.update_scan_progress(library.id, None, None, Some(7))
+        .await
+        .expect("the in-memory repository does not fail");
+    assert_eq!(listed_count().await, serde_json::json!(7));
+}
+
+/// Every route naming a library by id types it `Uuid`, so a malformed id is
+/// the `Path` extractor's 400 on each. Table-driven because the interesting
+/// thing is that the answers agree, not any one of them.
 #[tokio::test]
 async fn a_malformed_library_id_is_a_400_on_every_route_that_takes_one() {
     let fixture = make_test_state();
@@ -547,9 +588,6 @@ async fn a_malformed_library_id_is_a_400_on_every_route_that_takes_one() {
     ] {
         let response = request.cookie("beam_session", &token).send().await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
-        response.assert_problem_type(
-            "https://beam.justinchung.net/reference/errors/#invalid-library-id",
-        );
     }
 }
 
@@ -574,7 +612,7 @@ async fn a_regular_user_listing_library_files_never_sees_a_filesystem_path() {
         .send()
         .await
         .json();
-    let library_id = uuid::Uuid::parse_str(&library.id).unwrap();
+    let library_id = library.id;
 
     for path in ["/videos/movies/A (2016)/A.mkv", "/videos/movies/b.mp4"] {
         fixture
@@ -694,7 +732,7 @@ async fn create_movies_library(
         .send()
         .await
         .json();
-    let id = uuid::Uuid::parse_str(&created.id).expect("a library id is a UUID");
+    let id = created.id;
     (created, id)
 }
 
@@ -1102,7 +1140,7 @@ async fn a_created_library_is_watched_at_once_and_a_deleted_one_unwatched() {
         .send()
         .await
         .json();
-    let id = uuid::Uuid::parse_str(&created.id).unwrap();
+    let id = created.id;
     // Registered on a task of its own, after the request has answered.
     fixture.watcher.until_watched(id).await;
     assert_eq!(fixture.watcher.watched_libraries(), vec![id]);
@@ -1241,14 +1279,14 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
             AdminEvent::info(
                 EventCategory::LibraryScan,
                 "scan started",
-                Some("lib-1".to_string()),
+                Some(uuid::Uuid::from_u128(1)),
                 Some("Movies".to_string()),
             ),
             AdminEvent::warning(EventCategory::System, "disk nearly full", None, None),
             AdminEvent::info(
                 EventCategory::ScanProgress,
                 "Scanning 'Movies': 3 of 8 files",
-                Some("lib-1".to_string()),
+                Some(uuid::Uuid::from_u128(1)),
                 Some("Movies".to_string()),
             )
             .with_scan(beam_index::services::scan::ScanEvent {
@@ -1447,8 +1485,7 @@ async fn refreshing_a_malformed_media_id_is_400() {
         .cookie("beam_session", &token)
         .send()
         .await
-        .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-media-id");
+        .assert_status(StatusCode::BAD_REQUEST);
 }
 
 // ─── Admin users & system status (issue #85) ─────────────────────────────────
@@ -1578,11 +1615,11 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
     assert_eq!(page2.items.len(), 2);
     assert_eq!(page1.total, 4);
     assert_eq!(page2.total, 4);
-    let mut ids: Vec<String> = page1
+    let mut ids: Vec<uuid::Uuid> = page1
         .items
         .iter()
         .chain(page2.items.iter())
-        .map(|u| u.id.clone())
+        .map(|u| u.id)
         .collect();
     ids.sort();
     ids.dedup();
@@ -1760,7 +1797,7 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
     fixture
         .file_repo
         .create(CreateMediaFile {
-            library_id: uuid::Uuid::parse_str(&library.id).unwrap(),
+            library_id: library.id,
             path: PathBuf::from("/videos/movies/a.mkv"),
             hash: 1,
             size_bytes: 10,
@@ -1987,7 +2024,7 @@ async fn the_status_endpoint_reports_how_each_library_is_watched() {
         .send()
         .await
         .json();
-    let library_id = uuid::Uuid::parse_str(&library.id).unwrap();
+    let library_id = library.id;
 
     let get_watcher = || async {
         client

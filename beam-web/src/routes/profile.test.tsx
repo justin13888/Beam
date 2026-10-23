@@ -17,16 +17,16 @@ const sessionA: SessionSummary = {
 	id: "sess-a",
 	device_hash: "a".repeat(64),
 	ip: "203.0.113.7",
-	created_at: 1700000000,
-	last_active: 1700003600,
+	created_at: "2023-11-14T22:13:20Z",
+	last_active_at: "2023-11-14T23:13:20Z",
 };
 
 const sessionB: SessionSummary = {
 	id: "sess-b",
 	device_hash: "b".repeat(64),
 	ip: "198.51.100.4",
-	created_at: 1699000000,
-	last_active: 1699003600,
+	created_at: "2023-11-03T08:26:40Z",
+	last_active_at: "2023-11-03T09:26:40Z",
 };
 
 function serveSessions(status = 200) {

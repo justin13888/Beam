@@ -87,25 +87,10 @@ pub enum InternalError {
     Internal(String),
 }
 
-/// `GET /v1/media/{id}`.
+/// `GET /v1/media/{id}`. A malformed id is the `Path` extractor's 400: every
+/// path id is a `Uuid`, so no route owes a typed problem for one.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum MediaLookupError {
-    /// The `{id}` in the path is not a UUID.
-    ///
-    /// `GET /v1/media/{id}` used to answer this 404, because
-    /// `get_media_metadata` returns `Option` and the parse failure was folded
-    /// into the miss -- while `/sources` and the refresh route, which share the
-    /// same path parameter, answered 400. Three routes, one condition, two
-    /// answers. The parse now happens in the handler, before the lookup that
-    /// cannot report it.
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-media-id",
-        title = "Invalid media id"
-    )]
-    InvalidMediaId(String),
-
     #[error("{0}")]
     #[problem(
         status = 404,
@@ -158,6 +143,18 @@ pub enum MediaBrowseError {
     )]
     InvalidSearchQuery(String),
 
+    /// A numeric filter outside the range it can take: a year beyond what the
+    /// catalogue stores, or a `min_rating` outside 0-10. Refused rather than
+    /// narrowed, so an out-of-range bound can never wrap into one that matches
+    /// everything.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-filter",
+        title = "Invalid filter"
+    )]
+    InvalidFilter(String),
+
     #[error("{0}")]
     #[problem(
         status = 500,
@@ -169,19 +166,10 @@ pub enum MediaBrowseError {
 
 /// `GET /v1/media/{id}/sources`.
 ///
-/// Two 400s share one declared response with the `Path` extractor's own. Kynos
-/// joins the three titles into its description and narrows its `type` to a
-/// `oneOf` of the two codes below beside the extractor's `about:blank`.
+/// The 400 below shares one declared response with the `Path` extractor's
+/// own, which answers a malformed id.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum MediaSourcesError {
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-media-id",
-        title = "Invalid media id"
-    )]
-    InvalidMediaId(String),
-
     /// A show has no files of its own; the caller wants an episode id.
     #[error("{0}")]
     #[problem(
@@ -208,17 +196,10 @@ pub enum MediaSourcesError {
     Internal(String),
 }
 
-/// `POST /v1/admin/media/{id}/refresh`.
+/// `POST /v1/admin/media/{id}/refresh`. A malformed id is the `Path`
+/// extractor's 400.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum MediaRefreshError {
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-media-id",
-        title = "Invalid media id"
-    )]
-    InvalidMediaId(String),
-
     #[error("{0}")]
     #[problem(
         status = 404,
@@ -435,17 +416,10 @@ pub enum LibraryRefreshError {
 }
 
 /// An operation naming one library by id: `GET /v1/libraries/{id}`, its
-/// `/files` subresource, and `DELETE /v1/admin/libraries/{id}`.
+/// `/files` subresource, and `DELETE /v1/admin/libraries/{id}`. A malformed id
+/// is the `Path` extractor's 400.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum LibraryRefError {
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-library-id",
-        title = "Invalid library id"
-    )]
-    InvalidLibraryId(String),
-
     #[error("{0}")]
     #[problem(
         status = 404,
@@ -513,8 +487,8 @@ pub enum LibraryCreateError {
 
 /// `POST /v1/admin/libraries/{id}/scan`.
 ///
-/// No invalid-library-id: the path captures a `Uuid`, so a malformed id is
-/// the `Path` extractor's own 400 and never reaches the handler.
+/// The path captures a `Uuid`, so a malformed id is the `Path` extractor's
+/// own 400 and never reaches the handler.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum LibraryScanError {
     /// A library is scanned by one job at a time; the running one can be
@@ -841,21 +815,6 @@ pub enum PlaybackTelemetryReportError {
 /// catalogue and the disk have diverged.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum DeliveryError {
-    /// The `{file_id}` in the path is not a UUID.
-    ///
-    /// `stream.rs` swallowed this into a 500 by catching every `LibraryError`
-    /// from the lookup as an internal fault (issue #123). The path parameter is
-    /// typed `String` rather than `Uuid` deliberately -- a `Uuid` would let
-    /// Kynos answer the 400 first, but its problem document carries no type
-    /// Beam can name.
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-file-id",
-        title = "Invalid file id"
-    )]
-    InvalidFileId(String),
-
     #[error("{0}")]
     #[problem(
         status = 404,
@@ -959,21 +918,6 @@ pub enum SubtitleDeliveryError {
 /// show has no backdrop.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum ArtworkError {
-    /// The `{id}` in the path is not a UUID.
-    ///
-    /// The same code the detail route, `/sources` and the admin refresh answer
-    /// with, because it is the same condition on the same identifier. This
-    /// route used to fold the failed parse into the 404 -- a malformed id and
-    /// an unknown one are different things for a caller to fix, and the other
-    /// three routes over the same id already told them apart.
-    #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-media-id",
-        title = "Invalid media id"
-    )]
-    InvalidId(String),
-
     /// No image for this title: the row carries no stored URL, the variant does
     /// not apply to that kind, or the provider no longer serves it.
     ///

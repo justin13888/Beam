@@ -51,16 +51,6 @@ season or episode: `/v1/media/{id}/progress`, `/v1/media/{id}/watched`,
 **What to do.** Check the id. A title can also disappear between a browse and a detail request if a
 rescan removed it, in which case reloading the list is the right response.
 
-### invalid-media-id
-
-**400.** The media id in the path is not a UUID.
-
-**What to do.** Fix the caller. Every route taking a media id — the detail route, `/sources`, the
-admin refresh, and `/v1/artwork/{kind}/{id}/{variant}` — answers this, so they all agree. `GET
-/v1/media/{id}` and the artwork route used to answer [`media-not-found`](#media-not-found) and
-[`artwork-not-found`](#artwork-not-found) here instead, because each resolved the id through a lookup
-that could not tell "malformed" from "absent".
-
 ### sources-not-available-for-show
 
 **400.** Sources were requested for a *show* id. A show has no files of its own.
@@ -106,14 +96,18 @@ can contain one, so the search is refused rather than run.
 
 **What to do.** Strip control characters from the search text before sending it.
 
+### invalid-filter
+
+**400.** From `GET /v1/media`. A numeric filter is outside the range it can take: `year`,
+`year_from` or `year_to` above 2147483647, or `min_rating` outside 0-10 (TMDB's scale, the one
+`ratings.tmdb` is reported on) -- `NaN` and infinities included. The filter is refused rather than
+narrowed, so an out-of-range bound can never quietly match everything or nothing.
+
+**What to do.** Fix the caller: send a year a title can have, and a rating between 0 and 10.
+
 ### library-not-found
 
 **404.** No library has this id.
-
-### invalid-library-id
-
-**400.** The library id in the path is not a UUID. The scan routes (`/v1/admin/libraries/{id}/scan`)
-take the id as a UUID and answer a malformed one with a plain `400` (`about:blank`) instead.
 
 ### library-path-not-found
 
@@ -311,16 +305,6 @@ could not use the answer: it timed out, errored, or asked Beam to slow down.
 **What to do.** Retry later. A 502 rather than [`internal`](#internal) for the same reason as
 [`artwork-upstream-failed`](#artwork-upstream-failed): the fault is the provider's.
 
-### invalid-file-id
-
-**400.** The file id in the path is not a UUID.
-
-Only from the delivery routes — `/v1/files/{id}/stream` and `/download`. `PUT
-/v1/files/{id}/progress` takes the same parameter but answers a malformed one with `about:blank`
-and no code: its id is typed as a UUID, so the framework rejects it before Beam sees it, and a
-framework rejection carries no type Beam can name. The delivery routes take theirs as a string
-precisely so this code can exist there.
-
 ### login-attempt-invalid
 
 **400.** From `/v1/auth/callback`. The round-trip cannot be matched to one this server started: the
@@ -401,18 +385,6 @@ thirty minutes, less if the identity provider grants less. The flow has ended.
 
 **What to do.** Sign in again. This is distinct from an ordinary 401 because the session was not the
 problem.
-
-### invalid-session-id
-
-**400.** The session id in the path is not a UUID.
-
-Only `DELETE /v1/sessions/{id}` can produce it. Until the taxonomy landed this condition was a
-**500**: the handler flattened every store error into `internal`, so a client's own typo came back
-as "Beam broke" and the 400 the operation advertised had nothing that could reach it.
-
-**What to do.** Send an id from `GET /v1/sessions`. Distinct from
-[`session-not-found`](#session-not-found), which means the id was well-formed and named no session
-of yours -- retrying that one with the same id will never work either, but for a different reason.
 
 ### session-not-found
 
@@ -542,7 +514,7 @@ status code is the whole story, and for each of these there is no finer distinct
 
 | Status | When | What to do |
 |---|---|---|
-| `400` | A path or query parameter, header, cookie or body could not be parsed | Fix the request |
+| `400` | A path or query parameter, header, cookie or body could not be parsed -- including an id in the path that is not a UUID, on every route that takes one | Fix the request |
 | `401` | No session cookie, or one the server does not recognise | Sign in |
 | `404` | The URL matches no route at all | Check the path |
 | `405` | A real path, wrong method | Check the method |
