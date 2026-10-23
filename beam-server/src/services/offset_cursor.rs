@@ -13,7 +13,10 @@
 //! signed: it holds nothing an administrator could not see, and a forged one
 //! only seeks to a place they could page to anyway. A cursor names its list,
 //! so one issued by the other list -- or by any other list, whose members are
-//! not these -- is refused rather than read as a position here.
+//! not these -- is refused rather than read as a position here. So is a
+//! position past [`MAX_AT`]: no list holds that many rows, and the page after
+//! it would start beyond the `bigint` Postgres reads `OFFSET` as, turning a
+//! forged cursor into a database error rather than a `400`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -21,6 +24,10 @@ use serde::{Deserialize, Serialize};
 
 /// The cursor layout this build writes and reads.
 const VERSION: u8 = 1;
+
+/// The furthest row a cursor can name: the page after it starts at
+/// `i64::MAX`, the largest `OFFSET` Postgres accepts.
+pub const MAX_AT: u64 = i64::MAX.unsigned_abs() - 1;
 
 /// The lists an offset cursor can belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +81,7 @@ pub fn decode(list: OffsetList, cursor: &str) -> Result<u64, CursorError> {
     if v != VERSION {
         return Err(CursorError::WrongVersion);
     }
-    if issuer != list {
+    if issuer != list || at > MAX_AT {
         return Err(CursorError::Malformed);
     }
     Ok(at)
@@ -88,7 +95,7 @@ pub fn decode(list: OffsetList, cursor: &str) -> Result<u64, CursorError> {
 /// As [`decode`].
 pub fn start_after(list: OffsetList, after: Option<&str>) -> Result<u64, CursorError> {
     match after {
-        Some(cursor) => Ok(decode(list, cursor)?.saturating_add(1)),
+        Some(cursor) => Ok(decode(list, cursor)? + 1),
         None => Ok(0),
     }
 }
@@ -129,7 +136,7 @@ mod tests {
         /// row after the one it names: a cursor that lost or gained a row
         /// would skip or repeat it at a page boundary.
         #[test]
-        fn an_offset_round_trips(at in 0u64..u64::MAX) {
+        fn an_offset_round_trips(at in 0u64..=MAX_AT) {
             for list in [OffsetList::AdminUsers, OffsetList::AdminLogs] {
                 let cursor = encode(list, at);
                 prop_assert_eq!(decode(list, &cursor), Ok(at));
@@ -187,6 +194,11 @@ mod tests {
                 "an unknown list",
             ),
             (encode(OffsetList::AdminLogs, 3), "the admin log's cursor"),
+            (
+                encode(OffsetList::AdminUsers, MAX_AT + 1),
+                "a position whose next page is past Postgres's OFFSET",
+            ),
+            (encode(OffsetList::AdminUsers, u64::MAX), "the largest u64"),
             (history, "the history list's cursor"),
         ] {
             assert_eq!(

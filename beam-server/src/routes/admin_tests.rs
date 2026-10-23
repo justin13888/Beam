@@ -1935,13 +1935,21 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
         crate::services::offset_cursor::OffsetList::AdminLogs,
         0,
     );
-    client
-        .get(&format!("/v1/admin/users?after={logs}"))
-        .cookie("beam_session", &token)
-        .send()
-        .await
-        .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
+    // Neither is a forged position whose next page starts past the `bigint`
+    // Postgres reads `OFFSET` as: it is the caller's 400, not a database 500.
+    let past_offset = crate::services::offset_cursor::encode(
+        crate::services::offset_cursor::OffsetList::AdminUsers,
+        crate::services::offset_cursor::MAX_AT + 1,
+    );
+    for after in [logs, past_offset] {
+        client
+            .get(&format!("/v1/admin/users?after={after}"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
+    }
 }
 
 #[tokio::test]
