@@ -6,6 +6,7 @@ import type { components } from "@/api.gen";
 import * as factory from "@/test/factories";
 import { BASE_URL, meUnauthenticatedHandler } from "@/test/handlers";
 import { renderRoute, waitForRouter } from "@/test/harness";
+import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
@@ -273,6 +274,149 @@ describe("/admin status tab", () => {
 		expect(
 			screen.getByText("Failed to read /media/broken.mkv"),
 		).toBeInTheDocument();
+	});
+});
+
+const playbackReport = {
+	enabled: false,
+	from: "2026-09-24",
+	to: "2026-10-23",
+	retention_days: 400,
+	totals: {
+		started_count: 9,
+		failed_count: 3,
+		rebuffer_count: 4,
+		rebuffer_total_ms: 9_000,
+		source_switch_count: 2,
+	},
+	starts: [
+		{
+			client_kind: "android_tv",
+			container: "matroska",
+			video_codec: "hevc",
+			audio_codec: "aac",
+			height_class: "uhd",
+			count: 9,
+		},
+	],
+	start_failures: [
+		{
+			client_kind: "android_tv",
+			reason: "audio_codec",
+			stage: "preflight",
+			container: "matroska",
+			video_codec: "hevc",
+			audio_codec: "truehd",
+			height_class: "uhd",
+			count: 3,
+		},
+	],
+	rebuffers: [
+		{
+			client_kind: "android_tv",
+			container: "matroska",
+			video_codec: "hevc",
+			height_class: "uhd",
+			bitrate_class: "at_least_50_mbps",
+			event_count: 4,
+			total_ms: 9_000,
+			histogram: [
+				{ bucket: "under_1_secs", count: 1 },
+				{ bucket: "from_1_to_3_secs", count: 3 },
+				{ bucket: "from_3_to_10_secs", count: 0 },
+				{ bucket: "from_10_to_30_secs", count: 0 },
+				{ bucket: "at_least_30_secs", count: 0 },
+			],
+		},
+	],
+	source_switches: [
+		{
+			client_kind: "android_tv",
+			trigger: "auto",
+			from_height_class: "uhd",
+			to_height_class: "fhd",
+			count: 2,
+		},
+	],
+};
+
+describe("/admin playback tab", () => {
+	it("shows failure rates, the stall histogram, and switches for the last thirty days", async () => {
+		const requests = recordRequests();
+		serveAdmin();
+		server.use(
+			http.get(`${BASE_URL}/v1/admin/telemetry/playback`, () =>
+				HttpResponse.json(playbackReport),
+			),
+		);
+		renderRoute("/admin?tab=playback");
+
+		const byVideo = await screen.findByRole("region", {
+			name: "Failure rate by video codec",
+		});
+		expect(byVideo).toHaveTextContent("hevc");
+		expect(byVideo).toHaveTextContent("3 of 12 failed to start");
+		expect(byVideo).toHaveTextContent("25%");
+		expect(
+			screen.getByRole("region", { name: "Failure rate by audio codec" }),
+		).toHaveTextContent("truehd");
+		expect(
+			screen.getByRole("region", { name: "Failure rate by client" }),
+		).toHaveTextContent("Android TV");
+		expect(
+			screen.getByRole("region", { name: "Stalls by length" }),
+		).toHaveTextContent("1 to 3 s");
+		expect(
+			screen.getByRole("region", { name: "Source switches" }),
+		).toHaveTextContent("4K to 1080p");
+		expect(screen.getByText(/Collection is off/)).toBeInTheDocument();
+
+		const sent = requests.matching("GET", "/v1/admin/telemetry/playback")[0];
+		const from = new Date(`${sent.query.get("from")}T00:00:00Z`);
+		const to = new Date(`${sent.query.get("to")}T00:00:00Z`);
+		expect((to.getTime() - from.getTime()) / 86_400_000).toBe(29);
+	});
+
+	it("asks for the days picked", async () => {
+		const requests = recordRequests();
+		serveAdmin();
+		server.use(
+			http.get(`${BASE_URL}/v1/admin/telemetry/playback`, () =>
+				HttpResponse.json(playbackReport),
+			),
+		);
+		const user = userEvent.setup();
+		renderRoute("/admin?tab=playback");
+		await screen.findByRole("region", { name: "Failure rate by client" });
+
+		await user.click(screen.getByRole("button", { name: "7 days" }));
+
+		await waitFor(() => {
+			const gets = requests.matching("GET", "/v1/admin/telemetry/playback");
+			const last = gets[gets.length - 1];
+			const from = new Date(`${last.query.get("from")}T00:00:00Z`);
+			const to = new Date(`${last.query.get("to")}T00:00:00Z`);
+			expect((to.getTime() - from.getTime()) / 86_400_000).toBe(6);
+		});
+		expect(screen.getByRole("button", { name: "7 days" })).toHaveAttribute(
+			"aria-pressed",
+			"true",
+		);
+	});
+
+	it("says what went wrong when the report cannot be read", async () => {
+		serveAdmin();
+		server.use(
+			http.get(`${BASE_URL}/v1/admin/telemetry/playback`, () =>
+				problem(400, "to is before from", "#invalid-date-range"),
+			),
+		);
+		renderRoute("/admin?tab=playback");
+
+		expect(
+			await screen.findByText("Failed to load playback telemetry"),
+		).toBeInTheDocument();
+		expect(screen.getByText("to is before from")).toBeInTheDocument();
 	});
 });
 

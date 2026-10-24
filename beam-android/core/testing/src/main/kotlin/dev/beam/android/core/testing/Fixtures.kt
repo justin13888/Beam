@@ -8,6 +8,7 @@ import uniffi.beam_client_core.ContinueWatchingEntry
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EnrichmentCounts
 import uniffi.beam_client_core.EpisodeSummary
+import uniffi.beam_client_core.FailureRateRow
 import uniffi.beam_client_core.FileContentType
 import uniffi.beam_client_core.FileIndexStatus
 import uniffi.beam_client_core.HistoryEntry
@@ -18,9 +19,14 @@ import uniffi.beam_client_core.MediaKind
 import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.MediaSummary
+import uniffi.beam_client_core.PlaybackTelemetrySummary
+import uniffi.beam_client_core.RebufferBucket
+import uniffi.beam_client_core.RebufferBucketRow
 import uniffi.beam_client_core.SeasonSummary
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
+import uniffi.beam_client_core.SourceSwitchRow
+import uniffi.beam_client_core.SwitchTrigger
 import uniffi.beam_client_core.UserSummary
 
 /**
@@ -312,4 +318,58 @@ public object Fixtures {
             status = status,
             scannedAtUnix = 1_700_000_000L,
         )
+
+    /** A playback telemetry summary with one codec, one client and one switch. */
+    public fun playbackTelemetry(
+        enabled: Boolean = true,
+        started: ULong = 9uL,
+        failed: ULong = 1uL,
+    ): PlaybackTelemetrySummary =
+        PlaybackTelemetrySummary(
+            enabled = enabled,
+            from = "2026-09-24",
+            to = "2026-10-23",
+            retentionDays = 400u,
+            started = started,
+            failed = failed,
+            rebuffers = 3uL,
+            rebufferTotalMs = 4_500uL,
+            sourceSwitches = 1uL,
+            byVideoCodec = listOf(failureRate("hevc", started, failed)),
+            byAudioCodec = listOf(failureRate("aac", started, failed)),
+            byClient = listOf(failureRate("android", started, failed)),
+            rebufferHistogram =
+                listOf(
+                    RebufferBucketRow(RebufferBucket.UNDER1_SECS, 1uL),
+                    RebufferBucketRow(RebufferBucket.FROM1_TO3_SECS, 2uL),
+                    RebufferBucketRow(RebufferBucket.FROM3_TO10_SECS, 0uL),
+                    RebufferBucketRow(RebufferBucket.FROM10_TO30_SECS, 0uL),
+                    RebufferBucketRow(RebufferBucket.AT_LEAST30_SECS, 0uL),
+                ),
+            switches =
+                listOf(
+                    SourceSwitchRow(
+                        clientKind = "android",
+                        trigger = SwitchTrigger.AUTO,
+                        fromHeightClass = "uhd",
+                        toHeightClass = "fhd",
+                        count = 1uL,
+                    ),
+                ),
+        )
+
+    /** One failure-rate row, its rate derived from its counts. */
+    public fun failureRate(
+        label: String,
+        started: ULong,
+        failed: ULong,
+    ): FailureRateRow {
+        val attempts = started + failed
+        return FailureRateRow(
+            label = label,
+            started = started,
+            failed = failed,
+            failureRate = if (attempts == 0uL) 0.0 else failed.toDouble() / attempts.toDouble(),
+        )
+    }
 }

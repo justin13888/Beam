@@ -7,6 +7,7 @@ import {
 	Ban,
 	CheckCircle2,
 	Info,
+	PlayCircle,
 	Radio,
 	RefreshCw,
 	ScrollText,
@@ -22,6 +23,16 @@ import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 import { useAuth } from "../hooks/auth";
 import { useAdminEventStream } from "../hooks/useAdminEventStream";
+import {
+	type DayRange,
+	type FailureRateRow,
+	failureRate,
+	failureRates,
+	lastDays,
+	type RebufferBucket,
+	rebufferHistogram,
+	usePlaybackTelemetry,
+} from "../hooks/usePlaybackTelemetry";
 
 type AdminLogEntry =
 	components["schemas"]["beam_server.models.admin.AdminLogEntryDto"];
@@ -35,13 +46,13 @@ const PAGE_SIZE = 50;
 
 /** Which admin tab is active. Kept in the URL (`?tab=`) so a view is
  * shareable/bookmarkable, matching the repo's URL-state idiom. */
-export type AdminTab = "users" | "status" | "logs";
+export type AdminTab = "users" | "status" | "playback" | "logs";
 
 export interface AdminSearch {
 	tab: AdminTab;
 }
 
-const ADMIN_TABS: readonly AdminTab[] = ["users", "status", "logs"];
+const ADMIN_TABS: readonly AdminTab[] = ["users", "status", "playback", "logs"];
 
 /** Narrow navigation contract the page needs; satisfied by the router's
  * `useNavigate` and trivially fakeable in tests. */
@@ -166,6 +177,7 @@ function TabBar({ tab, navigate }: { tab: AdminTab; navigate: AdminNavigate }) {
 	const tabs: { id: AdminTab; label: string; icon: typeof UsersIcon }[] = [
 		{ id: "users", label: "Users", icon: UsersIcon },
 		{ id: "status", label: "Status", icon: Activity },
+		{ id: "playback", label: "Playback", icon: PlayCircle },
 		{ id: "logs", label: "Logs", icon: ScrollText },
 	];
 	return (
@@ -562,6 +574,309 @@ function StatusTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Playback tab
+// ---------------------------------------------------------------------------
+
+const RANGE_PRESETS: { days: number; label: string }[] = [
+	{ days: 7, label: "7 days" },
+	{ days: 30, label: "30 days" },
+	{ days: 90, label: "90 days" },
+	{ days: 365, label: "1 year" },
+];
+
+const CLIENT_LABELS: Record<string, string> = {
+	android: "Android",
+	android_tv: "Android TV",
+	apple_ios: "iPhone and iPad",
+	apple_tvos: "Apple TV",
+	apple_macos: "Mac",
+	web_chromium: "Chromium browsers",
+	web_firefox: "Firefox",
+	web_safari: "Safari",
+	web_other: "Other browsers",
+	other: "Other",
+};
+
+const HEIGHT_LABELS: Record<string, string> = {
+	sd: "SD",
+	hd: "720p",
+	fhd: "1080p",
+	uhd: "4K",
+	unknown: "Unknown",
+};
+
+const BUCKET_LABELS: Record<RebufferBucket, string> = {
+	under_1_secs: "Under 1 s",
+	from_1_to_3_secs: "1 to 3 s",
+	from_3_to_10_secs: "3 to 10 s",
+	from_10_to_30_secs: "10 to 30 s",
+	at_least_30_secs: "30 s or more",
+};
+
+function percent(rate: number): string {
+	return `${Math.round(rate * 100)}%`;
+}
+
+function FailureRateTable({
+	title,
+	rows,
+	label = (value) => value,
+}: {
+	title: string;
+	rows: FailureRateRow[];
+	label?: (value: string) => string;
+}) {
+	return (
+		<section
+			aria-label={title}
+			className="rounded-xl bg-gray-800/30 border border-gray-700/50 overflow-hidden"
+		>
+			<div className="px-6 py-4 border-b border-gray-700/50">
+				<h2 className="text-lg font-semibold text-white">{title}</h2>
+			</div>
+			{rows.length === 0 ? (
+				<div className="px-6 py-8 text-center text-gray-500 text-sm">
+					No playback reported.
+				</div>
+			) : (
+				<ul className="divide-y divide-gray-700/30">
+					{rows.map((row) => (
+						<li key={row.label} className="px-6 py-3">
+							<div className="flex items-center gap-3">
+								<span className="text-gray-200 font-medium flex-1">
+									{label(row.label)}
+								</span>
+								<span className="text-xs text-gray-500">
+									{row.failed} of {row.started + row.failed} failed to start
+								</span>
+								<span className="text-sm text-gray-200 w-12 text-right">
+									{percent(row.failureRate)}
+								</span>
+							</div>
+							<div className="mt-2 h-1.5 rounded bg-gray-700/60 overflow-hidden">
+								<div
+									className="h-full bg-red-400/80"
+									style={{ width: percent(row.failureRate) }}
+								/>
+							</div>
+						</li>
+					))}
+				</ul>
+			)}
+		</section>
+	);
+}
+
+function PlaybackTab() {
+	const [range, setRange] = useState<DayRange>(() => lastDays(30));
+	const { data, isLoading: loading, error } = usePlaybackTelemetry(range);
+
+	const setDay = (edge: keyof DayRange, value: string) => {
+		// An emptied date input reads as "" -- keep the last day that was set
+		// rather than sending a query the server would refuse.
+		if (value) setRange((current) => ({ ...current, [edge]: value }));
+	};
+
+	return (
+		<div className="space-y-8">
+			<div className="flex flex-wrap items-end gap-4">
+				<div className="flex overflow-hidden rounded-lg border border-gray-700 w-fit">
+					{RANGE_PRESETS.map(({ days, label }) => {
+						const preset = lastDays(days);
+						const selected =
+							preset.from === range.from && preset.to === range.to;
+						return (
+							<button
+								key={days}
+								type="button"
+								aria-pressed={selected}
+								onClick={() => setRange(preset)}
+								className={`px-3 py-1.5 text-sm transition-colors ${
+									selected
+										? "bg-cyan-600 text-white"
+										: "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white"
+								}`}
+							>
+								{label}
+							</button>
+						);
+					})}
+				</div>
+				<label className="flex flex-col text-xs text-gray-400 gap-1">
+					From
+					<input
+						type="date"
+						value={range.from}
+						max={range.to}
+						onChange={(event) => setDay("from", event.target.value)}
+						className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+					/>
+				</label>
+				<label className="flex flex-col text-xs text-gray-400 gap-1">
+					To
+					<input
+						type="date"
+						value={range.to}
+						min={range.from}
+						onChange={(event) => setDay("to", event.target.value)}
+						className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+					/>
+				</label>
+				<span className="text-xs text-gray-500 pb-1.5">UTC days</span>
+			</div>
+
+			{error && (
+				<div className={`${cardClass} text-center`}>
+					<AlertCircle className="mx-auto text-red-400 mb-3" size={32} />
+					<p className="text-red-400 font-medium">
+						Failed to load playback telemetry
+					</p>
+					<p className="text-gray-500 text-sm mt-1">{error.message}</p>
+				</div>
+			)}
+
+			{loading && (
+				<div className="px-6 py-12 text-center text-gray-500">
+					Loading playback telemetry...
+				</div>
+			)}
+
+			{data && (
+				<>
+					{!data.enabled && (
+						<div className={`${cardClass} flex items-start gap-3`}>
+							<Info className="text-cyan-400 shrink-0 mt-0.5" size={18} />
+							<p className="text-sm text-gray-300">
+								Collection is off: clients report nothing until{" "}
+								<code className="text-gray-200">
+									BEAM_PLAYBACK_TELEMETRY_ENABLED
+								</code>{" "}
+								is set. Counts kept while it was on are still shown.
+							</p>
+						</div>
+					)}
+
+					<div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+						<StatBlock label="Started" value={data.totals.started_count} />
+						<StatBlock
+							label="Failed to start"
+							value={`${data.totals.failed_count} (${percent(
+								failureRate(
+									data.totals.started_count,
+									data.totals.failed_count,
+								),
+							)})`}
+						/>
+						<StatBlock label="Stalls" value={data.totals.rebuffer_count} />
+						<StatBlock
+							label="Source switches"
+							value={data.totals.source_switch_count}
+						/>
+					</div>
+					<p className="text-xs text-gray-500 -mt-4">
+						{data.from} to {data.to} · counts are kept {data.retention_days}{" "}
+						days
+					</p>
+
+					<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+						<FailureRateTable
+							title="Failure rate by video codec"
+							rows={failureRates(data, "video_codec")}
+						/>
+						<FailureRateTable
+							title="Failure rate by audio codec"
+							rows={failureRates(data, "audio_codec")}
+						/>
+						<FailureRateTable
+							title="Failure rate by client"
+							rows={failureRates(data, "client_kind")}
+							label={(kind) => CLIENT_LABELS[kind] ?? kind}
+						/>
+						<RebufferHistogram histogram={rebufferHistogram(data)} />
+					</div>
+
+					<section
+						aria-label="Source switches"
+						className="rounded-xl bg-gray-800/30 border border-gray-700/50 overflow-hidden"
+					>
+						<div className="px-6 py-4 border-b border-gray-700/50">
+							<h2 className="text-lg font-semibold text-white">
+								Source switches
+							</h2>
+						</div>
+						{data.source_switches.length === 0 ? (
+							<div className="px-6 py-8 text-center text-gray-500 text-sm">
+								No source switches.
+							</div>
+						) : (
+							<ul className="divide-y divide-gray-700/30">
+								{data.source_switches.map((row) => (
+									<li
+										key={`${row.client_kind}-${row.trigger}-${row.from_height_class}-${row.to_height_class}`}
+										className="px-6 py-3 flex items-center gap-3"
+									>
+										<span className="text-gray-200 flex-1">
+											{HEIGHT_LABELS[row.from_height_class] ??
+												row.from_height_class}{" "}
+											to{" "}
+											{HEIGHT_LABELS[row.to_height_class] ??
+												row.to_height_class}
+										</span>
+										<span className="text-xs text-gray-500">
+											{CLIENT_LABELS[row.client_kind] ?? row.client_kind} ·{" "}
+											{row.trigger === "auto"
+												? "after sustained stalling"
+												: "chosen by the viewer"}
+										</span>
+										<span className="text-sm text-gray-200 w-12 text-right">
+											{row.count}
+										</span>
+									</li>
+								))}
+							</ul>
+						)}
+					</section>
+				</>
+			)}
+		</div>
+	);
+}
+
+function RebufferHistogram({
+	histogram,
+}: {
+	histogram: { bucket: RebufferBucket; count: number }[];
+}) {
+	const largest = Math.max(1, ...histogram.map((row) => row.count));
+	return (
+		<section
+			aria-label="Stalls by length"
+			className="rounded-xl bg-gray-800/30 border border-gray-700/50 overflow-hidden"
+		>
+			<div className="px-6 py-4 border-b border-gray-700/50">
+				<h2 className="text-lg font-semibold text-white">Stalls by length</h2>
+			</div>
+			<ul className="px-6 py-4 space-y-2">
+				{histogram.map(({ bucket, count }) => (
+					<li key={bucket} className="flex items-center gap-3 text-sm">
+						<span className="text-gray-400 w-24 shrink-0">
+							{BUCKET_LABELS[bucket]}
+						</span>
+						<div className="flex-1 h-2 rounded bg-gray-700/60 overflow-hidden">
+							<div
+								className="h-full bg-cyan-500/80"
+								style={{ width: `${(count / largest) * 100}%` }}
+							/>
+						</div>
+						<span className="text-gray-200 w-10 text-right">{count}</span>
+					</li>
+				))}
+			</ul>
+		</section>
+	);
+}
+
+// ---------------------------------------------------------------------------
 // Logs tab (the original admin dashboard content, unchanged in behavior)
 // ---------------------------------------------------------------------------
 
@@ -808,7 +1123,7 @@ export function AdminPage({
 						<div>
 							<h1 className="text-3xl font-bold text-white">Admin Dashboard</h1>
 							<p className="text-gray-400 text-sm mt-1">
-								Users, system status, and administrative logs
+								Users, system status, playback, and administrative logs
 							</p>
 						</div>
 					</div>
@@ -824,6 +1139,7 @@ export function AdminPage({
 
 				{tab === "users" && <UsersTab />}
 				{tab === "status" && <StatusTab />}
+				{tab === "playback" && <PlaybackTab />}
 				{tab === "logs" && <LogsTab />}
 			</div>
 		</div>

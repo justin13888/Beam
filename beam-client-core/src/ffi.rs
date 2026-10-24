@@ -26,6 +26,10 @@ use crate::servers::{ServerRecord, normalize_base_url, server_id_for};
 use crate::session::{
     DeviceLoginPrompt, DeviceLoginStep, SessionEffect, SessionEvent, SessionState, UserSummary,
 };
+use crate::telemetry::{
+    PlaybackEvent, PlaybackTelemetrySummary, StartFailureCause, SwitchTrigger, TELEMETRY_DISABLED,
+    TelemetryClientKind, TelemetryFlush, TelemetryQueue, batch_body,
+};
 use crate::transport::{ABOUT_BLANK, FailureKind, SessionMiddleware, TransportFailure, classify};
 use crate::upnext::{UpNextSeason, next_playable_episode};
 use secrecy::{ExposeSecret, SecretString};
@@ -167,6 +171,9 @@ struct ServerContext {
     state: SessionState,
     throttle: Arc<ProgressThrottle>,
     queue: Arc<ProgressQueue>,
+    /// Playback telemetry waiting to be reported to this server. Per server,
+    /// because every event names one of this server's files.
+    telemetry: Arc<TelemetryQueue>,
     /// Titles already resolved for this server.
     ///
     /// The playback endpoints return bare identifiers, so every
@@ -296,6 +303,8 @@ pub struct BeamClient {
     servers: RwLock<HashMap<String, ServerContext>>,
     active: RwLock<Option<String>>,
     device_profile: RwLock<Option<DeviceProfile>>,
+    /// Which kind of client playback telemetry reports as.
+    client_kind: RwLock<TelemetryClientKind>,
     /// Servers whose rejected cookie is still in the platform keystore.
     ///
     /// `ClearCookie` on the 401 path is swallowed rather than returned -- the
@@ -320,6 +329,7 @@ impl BeamClient {
             servers: RwLock::new(HashMap::new()),
             active: RwLock::new(None),
             device_profile: RwLock::new(None),
+            client_kind: RwLock::new(TelemetryClientKind::default()),
             abandoned_sessions: RwLock::new(HashSet::new()),
         })
     }
@@ -1348,6 +1358,211 @@ impl BeamClient {
         Ok(u32::try_from(queue.len().await?).unwrap_or(u32::MAX))
     }
 
+    // -- playback telemetry -----------------------------------------------
+
+    /// Which kind of client this is, for every playback telemetry report.
+    ///
+    /// Set once at start-up, beside the device profile. A client that never
+    /// sets it reports as [`TelemetryClientKind::Other`].
+    pub fn set_playback_client_kind(&self, kind: TelemetryClientKind) {
+        *self.client_kind.write().expect("client kind lock") = kind;
+    }
+
+    /// A playback started: its first frame is on screen.
+    ///
+    /// `audio_track_index` is the index into the source's `audio_tracks` of
+    /// the track that is playing. Every `record_*` call answers how many events
+    /// are now waiting, so the player can flush once a request's worth has
+    /// built up; zero once the server has said telemetry is off.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::BadRequest`] when `file_id` is not a UUID, and
+    /// [`BeamError::NoActiveServer`] when no server is selected.
+    pub fn record_playback_start(
+        &self,
+        file_id: String,
+        audio_track_index: Option<u32>,
+    ) -> Result<u32, BeamError> {
+        let file_id = parse_uuid("file_id", &file_id)?;
+        self.record_telemetry(Some(PlaybackEvent::Start {
+            file_id,
+            audio_track_index,
+        }))
+    }
+
+    /// A playback failed to start.
+    ///
+    /// A failure after the first frame is not a start failure and is not
+    /// reported. A [`StartFailureCause::Rejected`] for a policy exclusion is
+    /// accepted and not counted.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::record_playback_start`].
+    pub fn record_playback_start_failure(
+        &self,
+        file_id: String,
+        cause: StartFailureCause,
+        audio_track_index: Option<u32>,
+    ) -> Result<u32, BeamError> {
+        let file_id = parse_uuid("file_id", &file_id)?;
+        self.record_telemetry(PlaybackEvent::start_failure(
+            file_id,
+            cause,
+            audio_track_index,
+        ))
+    }
+
+    /// Playback stalled mid-stream for `duration_ms`.
+    ///
+    /// Only a stall after the first frame, and never the buffering a seek or a
+    /// source switch causes: those are the player filling an empty buffer on
+    /// purpose. A zero-length stall is not counted; one over ten minutes is
+    /// counted as ten minutes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::record_playback_start`].
+    pub fn record_playback_rebuffer(
+        &self,
+        file_id: String,
+        duration_ms: u64,
+    ) -> Result<u32, BeamError> {
+        let file_id = parse_uuid("file_id", &file_id)?;
+        self.record_telemetry(PlaybackEvent::rebuffer(file_id, duration_ms))
+    }
+
+    /// Playback moved from one source of a title to another.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::record_playback_start`], for either identifier.
+    pub fn record_playback_source_switch(
+        &self,
+        from_file_id: String,
+        to_file_id: String,
+        trigger: SwitchTrigger,
+    ) -> Result<u32, BeamError> {
+        let from_file_id = parse_uuid("from_file_id", &from_file_id)?;
+        let to_file_id = parse_uuid("to_file_id", &to_file_id)?;
+        self.record_telemetry(PlaybackEvent::source_switch(
+            from_file_id,
+            to_file_id,
+            trigger,
+        ))
+    }
+
+    /// Report everything waiting, at most
+    /// [`crate::telemetry::MAX_EVENTS_PER_REQUEST`] events to
+    /// a request.
+    ///
+    /// Called on pause, on stop, when the app leaves the foreground, and once
+    /// a `record_*` call says a request's worth is waiting. A 409 means the
+    /// operator has telemetry off: the queue lets go of everything and stops
+    /// for the rest of the session. A refused batch -- 422 above all -- is
+    /// dropped, and its pointers logged, because the identical batch is
+    /// refused identically. Anything transient stops the flush and keeps the
+    /// batch for the next one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// [`BeamError::SessionExpired`] when the server rejected the session
+    /// part-way through -- which signs the device out, as it does for
+    /// [`Self::flush_progress`]. Every other failure is an outcome, not an
+    /// error: telemetry is never worth interrupting the viewer for.
+    pub async fn flush_playback_telemetry(&self) -> Result<TelemetryFlush, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let telemetry = self.with_context(&server_id, |context| Arc::clone(&context.telemetry))?;
+        let client_kind = *self.client_kind.read().expect("client kind lock");
+
+        let mut outcome = TelemetryFlush::default();
+        loop {
+            let batch = telemetry.take_batch();
+            if batch.is_empty() {
+                break;
+            }
+            let size = u32::try_from(batch.len()).unwrap_or(u32::MAX);
+            let body = batch_body(client_kind, &batch);
+            let Err(failure) =
+                TransportFailure::capture(client.report_playback_telemetry(None, &body)).await
+            else {
+                outcome.sent = outcome.sent.saturating_add(size);
+                continue;
+            };
+
+            let mapped = self.fail(&server_id, &failure).await;
+            match &mapped {
+                BeamError::Server {
+                    status: 409, code, ..
+                } if code == TELEMETRY_DISABLED => {
+                    telemetry.disable();
+                    break;
+                }
+                refused if refused.is_permanent() => {
+                    let pointers = failure
+                        .problem
+                        .as_ref()
+                        .map(|problem| problem.pointers.join(", "))
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        server_id,
+                        error = %refused,
+                        pointers,
+                        events = size,
+                        "the server refused a playback telemetry batch; dropping it"
+                    );
+                    outcome.dropped = outcome.dropped.saturating_add(size);
+                }
+                transient => {
+                    telemetry.restore(batch);
+                    if matches!(transient, BeamError::SessionExpired) {
+                        return Err(mapped);
+                    }
+                    break;
+                }
+            }
+        }
+        outcome.pending = telemetry.len();
+        outcome.disabled = telemetry.is_disabled();
+        Ok(outcome)
+    }
+
+    /// Playback telemetry for an inclusive range of UTC days, summed into the
+    /// admin views.
+    ///
+    /// `from` and `to` are `YYYY-MM-DD`. Either may be omitted: the server
+    /// then answers the thirty days ending today. Readable whether or not
+    /// collection is on, so an operator can read what was kept after turning
+    /// it off.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::BadRequest`] for a date that does not parse, or a
+    /// range the server refuses, and [`BeamError::Forbidden`] for a
+    /// non-administrator.
+    pub async fn admin_playback_telemetry(
+        &self,
+        from: Option<String>,
+        to: Option<String>,
+    ) -> Result<PlaybackTelemetrySummary, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let params = crate::api::GetPlaybackTelemetryParams {
+            from: from
+                .as_deref()
+                .map(|day| parse_day("from", day))
+                .transpose()?,
+            to: to.as_deref().map(|day| parse_day("to", day)).transpose()?,
+            origin: None,
+            referer: None,
+        };
+        let response = self
+            .send(&server_id, client.get_playback_telemetry(params))
+            .await?;
+        Ok(PlaybackTelemetrySummary::from_report(response.into_inner()))
+    }
+
     // -- sessions ---------------------------------------------------------
 
     /// Every device signed in as this user.
@@ -1638,6 +1853,16 @@ fn parse_uuid(field: &str, value: &str) -> Result<uuid::Uuid, BeamError> {
     })
 }
 
+/// A `YYYY-MM-DD` day, for a date query parameter.
+fn parse_day(field: &str, value: &str) -> Result<crate::api::Date, BeamError> {
+    time::Date::parse(value, &time::format_description::well_known::Iso8601::DATE)
+        .map(crate::api::Date)
+        .map_err(|_| BeamError::BadRequest {
+            detail: format!("{field} is not a YYYY-MM-DD date"),
+            code: ABOUT_BLANK.to_owned(),
+        })
+}
+
 /// The episode with this id, wherever it sits in a series.
 fn find_episode(detail: &MediaDetail, episode_id: &str) -> Option<EpisodeSummary> {
     let MediaDetail::Show { seasons, .. } = detail else {
@@ -1712,6 +1937,7 @@ impl BeamClient {
             state,
             throttle: Arc::new(ProgressThrottle::new(Arc::clone(&self.clock))),
             queue,
+            telemetry: Arc::new(TelemetryQueue::new()),
             metadata: Arc::new(RwLock::new(HashMap::new())),
             trust,
         };
@@ -1991,6 +2217,19 @@ impl BeamClient {
             }
         }
         resolved
+    }
+
+    /// Queue `event` for the active server, where there is one to queue.
+    ///
+    /// `None` is an event the vocabulary does not count -- a policy
+    /// exclusion, a zero-length stall, a switch to the same file -- and
+    /// changes nothing.
+    fn record_telemetry(&self, event: Option<PlaybackEvent>) -> Result<u32, BeamError> {
+        let server_id = self.require_active()?;
+        self.with_context(&server_id, |context| match event {
+            Some(event) => context.telemetry.record(event),
+            None => context.telemetry.len(),
+        })
     }
 
     fn require_active(&self) -> Result<String, BeamError> {
@@ -4060,6 +4299,7 @@ mod tests {
         let document = crate::transport::ProblemDetail {
             type_uri: "https://beam.justinchung.net/reference/errors/#media-not-found".to_owned(),
             detail: Some("media 7 not found".to_owned()),
+            pointers: Vec::new(),
         };
 
         assert_eq!(
@@ -4168,5 +4408,333 @@ mod tests {
                 .await,
             Err(BeamError::Storage { .. })
         ));
+    }
+
+    // -- playback telemetry -----------------------------------------------
+
+    const TELEMETRY_PATH: &str = "/v1/telemetry/playback";
+
+    /// A distinct, well-formed file id per `n`.
+    fn telemetry_file(n: u32) -> String {
+        format!("00000000-0000-4000-8000-{n:012}")
+    }
+
+    /// A signed-in client whose telemetry requests get these answers in turn.
+    async fn telemetry_client(
+        answers: Vec<(u16, &'static str, &'static str)>,
+    ) -> (Arc<BeamClient>, Arc<CannedBackend>) {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering_in_turn(answers));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        (client, backend)
+    }
+
+    /// Every telemetry request's body, in order.
+    fn telemetry_bodies(backend: &CannedBackend) -> Vec<serde_json::Value> {
+        backend
+            .recorded()
+            .iter()
+            .filter(|request| request.url.path() == TELEMETRY_PATH)
+            .map(|request| {
+                assert_eq!(request.method, reqwest::Method::POST);
+                serde_json::from_slice(&request.body).expect("a JSON body")
+            })
+            .collect()
+    }
+
+    const NO_CONTENT: (u16, &str, &str) = (204, "text/plain", "");
+
+    #[tokio::test]
+    async fn telemetry_leaves_at_most_fifty_events_to_a_request() {
+        let (client, backend) = telemetry_client(vec![NO_CONTENT]).await;
+        client.set_playback_client_kind(TelemetryClientKind::AndroidTv);
+        for n in 0..120 {
+            client
+                .record_playback_start(telemetry_file(n), Some(0))
+                .expect("recorded");
+        }
+
+        let flush = client.flush_playback_telemetry().await.expect("flushed");
+
+        assert_eq!(
+            flush,
+            TelemetryFlush {
+                sent: 120,
+                dropped: 0,
+                pending: 0,
+                disabled: false
+            }
+        );
+        let bodies = telemetry_bodies(&backend);
+        let sizes: Vec<_> = bodies
+            .iter()
+            .map(|body| body["starts"].as_array().expect("starts").len())
+            .collect();
+        assert_eq!(sizes, [50, 50, 20]);
+        assert_eq!(bodies[0]["client_kind"], "android_tv");
+        assert_eq!(
+            bodies[0]["starts"][0]["file_id"],
+            telemetry_file(0),
+            "oldest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_409_stops_telemetry_for_the_rest_of_the_session() {
+        let (client, backend) = telemetry_client(vec![(
+            409,
+            "application/problem+json",
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#playback-telemetry-disabled","status":409}"#,
+        )])
+        .await;
+        for n in 0..60 {
+            client
+                .record_playback_rebuffer(telemetry_file(n), 2_000)
+                .expect("recorded");
+        }
+
+        let flush = client.flush_playback_telemetry().await.expect("flushed");
+
+        assert!(flush.disabled);
+        assert_eq!((flush.sent, flush.pending), (0, 0));
+        assert_eq!(
+            telemetry_bodies(&backend).len(),
+            1,
+            "one refusal is the operator's answer; the rest of the queue is not tried"
+        );
+        assert_eq!(
+            client
+                .record_playback_start(telemetry_file(1), None)
+                .expect("accepted"),
+            0,
+            "nothing is held once the server has said no"
+        );
+        client.flush_playback_telemetry().await.expect("flushed");
+        assert_eq!(
+            telemetry_bodies(&backend).len(),
+            1,
+            "and nothing is asked again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_batch_is_dropped_and_the_flush_moves_on() {
+        let (client, backend) = telemetry_client(vec![
+            (
+                422,
+                "application/problem+json",
+                r#"{"type":"https://beam.justinchung.net/reference/errors/#validation-failed","status":422,"errors":[{"pointer":"/starts/0/file_id","detail":"bad"}]}"#,
+            ),
+            NO_CONTENT,
+        ])
+        .await;
+        for n in 0..60 {
+            client
+                .record_playback_start(telemetry_file(n), None)
+                .expect("recorded");
+        }
+
+        let flush = client.flush_playback_telemetry().await.expect("flushed");
+
+        assert_eq!(
+            flush,
+            TelemetryFlush {
+                sent: 10,
+                dropped: 50,
+                pending: 0,
+                disabled: false
+            }
+        );
+        assert_eq!(telemetry_bodies(&backend).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_keeps_the_batch_for_the_next_flush() {
+        let (client, backend) = telemetry_client(vec![
+            (
+                503,
+                "application/problem+json",
+                r#"{"type":"about:blank","status":503}"#,
+            ),
+            NO_CONTENT,
+        ])
+        .await;
+        for n in 0..60 {
+            client
+                .record_playback_start(telemetry_file(n), None)
+                .expect("recorded");
+        }
+
+        let first = client.flush_playback_telemetry().await.expect("flushed");
+        assert_eq!((first.sent, first.dropped, first.pending), (0, 0, 60));
+        assert_eq!(
+            telemetry_bodies(&backend).len(),
+            1,
+            "an unavailable server is not handed the rest of the backlog"
+        );
+
+        let second = client.flush_playback_telemetry().await.expect("flushed");
+        assert_eq!((second.sent, second.pending), (60, 0));
+        assert_eq!(
+            telemetry_bodies(&backend)[1]["starts"][0]["file_id"],
+            telemetry_file(0),
+            "the kept batch goes first"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_ends_the_flush_and_keeps_the_events() {
+        let (client, _) = telemetry_client(vec![(
+            401,
+            "application/problem+json",
+            r#"{"type":"about:blank","status":401}"#,
+        )])
+        .await;
+        client
+            .record_playback_start(telemetry_file(1), None)
+            .expect("recorded");
+
+        assert_eq!(
+            client.flush_playback_telemetry().await,
+            Err(BeamError::SessionExpired)
+        );
+        assert_eq!(
+            client
+                .record_playback_start(telemetry_file(2), None)
+                .expect("recorded"),
+            2,
+            "signing in again delivers what was waiting"
+        );
+    }
+
+    #[tokio::test]
+    async fn uncounted_events_are_accepted_and_change_nothing() {
+        let (client, backend) = telemetry_client(vec![NO_CONTENT]).await;
+
+        let excluded = client
+            .record_playback_start_failure(
+                telemetry_file(1),
+                StartFailureCause::Rejected {
+                    reason: crate::RejectionReason::ExcludedByPolicy,
+                },
+                None,
+            )
+            .expect("accepted");
+        let reload = client
+            .record_playback_source_switch(
+                telemetry_file(1),
+                telemetry_file(1),
+                SwitchTrigger::Manual,
+            )
+            .expect("accepted");
+        let instant = client
+            .record_playback_rebuffer(telemetry_file(1), 0)
+            .expect("accepted");
+
+        assert_eq!((excluded, reload, instant), (0, 0, 0));
+        client.flush_playback_telemetry().await.expect("flushed");
+        assert!(telemetry_bodies(&backend).is_empty(), "nothing to send");
+    }
+
+    #[tokio::test]
+    async fn a_preflight_rejection_reaches_the_wire_as_one() {
+        let (client, backend) = telemetry_client(vec![NO_CONTENT]).await;
+        client
+            .record_playback_start_failure(
+                telemetry_file(1),
+                StartFailureCause::Rejected {
+                    reason: crate::RejectionReason::ContainerUnsupported,
+                },
+                Some(1),
+            )
+            .expect("recorded");
+
+        client.flush_playback_telemetry().await.expect("flushed");
+
+        assert_eq!(
+            telemetry_bodies(&backend)[0]["start_failures"][0],
+            serde_json::json!({
+                "file_id": telemetry_file(1),
+                "reason": "container",
+                "stage": "preflight",
+                "audio_track_index": 1,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_file_id_is_refused_before_it_is_queued() {
+        let (client, _) = telemetry_client(vec![NO_CONTENT]).await;
+        assert!(matches!(
+            client.record_playback_start("not-a-uuid".to_owned(), None),
+            Err(BeamError::BadRequest { .. })
+        ));
+        assert!(matches!(
+            client.record_playback_source_switch(
+                telemetry_file(1),
+                "nope".to_owned(),
+                SwitchTrigger::Auto
+            ),
+            Err(BeamError::BadRequest { .. })
+        ));
+    }
+
+    const TELEMETRY_REPORT: &str = r#"{
+        "enabled": false,
+        "from": "2026-10-01",
+        "to": "2026-10-07",
+        "retention_days": 400,
+        "totals": { "started_count": 4, "failed_count": 1, "rebuffer_count": 0,
+                    "rebuffer_total_ms": 0, "source_switch_count": 0 },
+        "starts": [{ "client_kind": "android", "container": "mp4", "video_codec": "h264",
+                     "audio_codec": "aac", "height_class": "hd", "count": 4 }],
+        "start_failures": [{ "client_kind": "android", "reason": "audio_codec",
+                             "stage": "preflight", "container": "mp4", "video_codec": "h264",
+                             "audio_codec": "dts", "height_class": "hd", "count": 1 }],
+        "rebuffers": [],
+        "source_switches": []
+    }"#;
+
+    #[tokio::test]
+    async fn the_admin_telemetry_view_asks_for_the_days_it_was_given() {
+        let (client, backend) =
+            telemetry_client(vec![(200, "application/json", TELEMETRY_REPORT)]).await;
+
+        let summary = client
+            .admin_playback_telemetry(Some("2026-10-01".to_owned()), Some("2026-10-07".to_owned()))
+            .await
+            .expect("answered");
+
+        let request = backend.recorded().last().cloned().expect("a request");
+        assert_eq!(request.url.path(), "/v1/admin/telemetry/playback");
+        let query: HashMap<_, _> = request.url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("from").map(String::as_str), Some("2026-10-01"));
+        assert_eq!(query.get("to").map(String::as_str), Some("2026-10-07"));
+        assert!(
+            !summary.enabled,
+            "counts stay readable after collection is off"
+        );
+        assert_eq!((summary.started, summary.failed), (4, 1));
+        assert_eq!(summary.by_client[0].label, "android");
+    }
+
+    #[tokio::test]
+    async fn a_day_that_does_not_parse_never_reaches_the_server() {
+        let (client, backend) =
+            telemetry_client(vec![(200, "application/json", TELEMETRY_REPORT)]).await;
+        let sent_before = backend.recorded().len();
+
+        assert!(matches!(
+            client
+                .admin_playback_telemetry(Some("last tuesday".to_owned()), None)
+                .await,
+            Err(BeamError::BadRequest { .. })
+        ));
+        assert_eq!(backend.recorded().len(), sent_before);
     }
 }

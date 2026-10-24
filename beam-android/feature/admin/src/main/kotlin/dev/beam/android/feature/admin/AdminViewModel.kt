@@ -18,6 +18,9 @@ import uniffi.beam_client_core.AdminStatus
 import uniffi.beam_client_core.AdminUser
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.LibrarySummary
+import uniffi.beam_client_core.PlaybackTelemetrySummary
+import java.time.LocalDate
+import java.time.ZoneOffset
 import javax.inject.Inject
 
 /** The administrative dashboard. */
@@ -32,7 +35,36 @@ public data class AdminUiState(
     val scanningLibraryId: String? = null,
     /** The result of the last action, to show in a snackbar. */
     val message: String? = null,
+    /** The days playback telemetry is shown for. */
+    val telemetryRange: TelemetryRange = TelemetryRange.LAST_30_DAYS,
+    /** Playback telemetry for [telemetryRange], or null before it loads or when it failed. */
+    val telemetry: PlaybackTelemetrySummary? = null,
+    /**
+     * Why telemetry could not be loaded. A section of its own, so its failing
+     * never takes the rest of the dashboard with it.
+     */
+    val telemetryError: String? = null,
 )
+
+/** The ranges of days the playback telemetry section offers. */
+public enum class TelemetryRange(
+    /** How many days, today included. */
+    public val days: Long,
+    /** What the picker shows. */
+    public val label: String,
+) {
+    LAST_7_DAYS(7, "7 days"),
+    LAST_30_DAYS(30, "30 days"),
+    LAST_90_DAYS(90, "90 days"),
+    LAST_365_DAYS(365, "1 year"),
+    ;
+
+    /**
+     * The `from` and `to` days, `YYYY-MM-DD`, ending on [today]. The server
+     * counts in UTC days, so [today] is the UTC date.
+     */
+    public fun bounds(today: LocalDate): Pair<String, String> = today.minusDays(days - 1).toString() to today.toString()
+}
 
 /**
  * The admin area.
@@ -81,10 +113,16 @@ public class AdminViewModel
                                     runCatching { admin.users(first = USER_PAGE, after = null).items }
                                         .getOrDefault(emptyList())
                                 }
+                            val range = mutableState.value.previous()?.telemetryRange ?: TelemetryRange.LAST_30_DAYS
+                            val telemetry = async { loadTelemetry(range) }
+                            val (summary, telemetryError) = telemetry.await()
                             AdminUiState(
                                 status = status.await(),
                                 libraries = libraries.await(),
                                 users = users.await(),
+                                telemetryRange = range,
+                                telemetry = summary,
+                                telemetryError = telemetryError,
                             )
                         }
                     mutableState.value = LoadState.Success(loaded)
@@ -169,6 +207,35 @@ public class AdminViewModel
             viewModelScope.launch {
                 runCatching { admin.deleteLibrary(libraryId) }
                 reload()
+            }
+        }
+
+        /** Show playback telemetry for a different range of days. */
+        public fun setTelemetryRange(range: TelemetryRange) {
+            mutableState.update { it.mapValue { state -> state.copy(telemetryRange = range) } }
+            viewModelScope.launch {
+                val (summary, error) = loadTelemetry(range)
+                mutableState.update {
+                    it.mapValue { state ->
+                        // A later pick wins: an answer for a range no longer
+                        // selected is about a question nobody is asking.
+                        if (state.telemetryRange != range) {
+                            state
+                        } else {
+                            state.copy(telemetry = summary, telemetryError = error)
+                        }
+                    }
+                }
+            }
+        }
+
+        /** Telemetry for [range], or why it could not be had. */
+        private suspend fun loadTelemetry(range: TelemetryRange): Pair<PlaybackTelemetrySummary?, String?> {
+            val (from, to) = range.bounds(LocalDate.now(ZoneOffset.UTC))
+            return try {
+                admin.playbackTelemetry(from, to) to null
+            } catch (failure: BeamException) {
+                null to failure.toFailure().message
             }
         }
 

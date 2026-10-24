@@ -22,12 +22,17 @@ import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
+import uniffi.beam_client_core.PlaybackTelemetrySummary
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.SourceSelection
+import uniffi.beam_client_core.StartFailureCause
+import uniffi.beam_client_core.SwitchTrigger
+import uniffi.beam_client_core.TelemetryClientKind
+import uniffi.beam_client_core.TelemetryFlush
 import uniffi.beam_client_core.UserSummary
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -181,6 +186,39 @@ internal class BeamPlaybackRepository
     }
 
 @Singleton
+internal class BeamTelemetryRepository
+    @Inject
+    constructor(
+        private val client: BeamClient,
+    ) : TelemetryRepository {
+        override fun setClientKind(kind: TelemetryClientKind) = client.setPlaybackClientKind(kind)
+
+        override fun recordStart(
+            fileId: String,
+            audioTrackIndex: UInt?,
+        ): UInt = client.recordPlaybackStart(fileId, audioTrackIndex)
+
+        override fun recordStartFailure(
+            fileId: String,
+            cause: StartFailureCause,
+            audioTrackIndex: UInt?,
+        ): UInt = client.recordPlaybackStartFailure(fileId, cause, audioTrackIndex)
+
+        override fun recordRebuffer(
+            fileId: String,
+            durationMs: ULong,
+        ): UInt = client.recordPlaybackRebuffer(fileId, durationMs)
+
+        override fun recordSourceSwitch(
+            fromFileId: String,
+            toFileId: String,
+            trigger: SwitchTrigger,
+        ): UInt = client.recordPlaybackSourceSwitch(fromFileId, toFileId, trigger)
+
+        override suspend fun flush(): TelemetryFlush = client.flushPlaybackTelemetry()
+    }
+
+@Singleton
 internal class BeamSessionRepository
     @Inject
     constructor(
@@ -230,4 +268,9 @@ internal class BeamAdminRepository
         override suspend fun scanLibrary(libraryId: String) = client.scanLibrary(libraryId)
 
         override suspend fun refreshMetadata(mediaId: String) = client.refreshMediaMetadata(mediaId)
+
+        override suspend fun playbackTelemetry(
+            from: String?,
+            to: String?,
+        ): PlaybackTelemetrySummary = client.adminPlaybackTelemetry(from, to)
     }

@@ -8,6 +8,7 @@
 package dev.beam.android.core.media.player
 
 import android.content.Context
+import android.content.pm.PackageManager
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -19,6 +20,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import dev.beam.android.core.ffi.BeamFailure
 import dev.beam.android.core.ffi.repository.PlaybackRepository
+import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.ffi.toFailure
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.beamDataSourceFactory
@@ -34,6 +36,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.RebufferMonitor
+import uniffi.beam_client_core.SwitchTrigger
+import uniffi.beam_client_core.TelemetryClientKind
 
 /**
  * [BeamPlayer] over Media3's [ExoPlayer].
@@ -46,6 +50,7 @@ internal class ExoBeamPlayer(
     private val context: Context,
     private val exoPlayer: ExoPlayer,
     private val repository: PlaybackRepository,
+    telemetry: TelemetryRepository,
     private val clients: BeamHttpClientFactory,
     private val scope: CoroutineScope,
 ) : BeamPlayer,
@@ -54,6 +59,12 @@ internal class ExoBeamPlayer(
     override val state: StateFlow<PlaybackUiState> = mutableState.asStateFlow()
 
     private val reporter = ProgressReporter(repository, scope)
+
+    /** Starts, start failures, rebuffers and switches, for the server's counts. */
+    private val recorder = TelemetryRecorder(telemetry, scope)
+
+    /** When the open stall began, on [nowMs]'s clock. */
+    private var stallStartedAtMs: ULong = 0uL
     private var positionTicker: Job? = null
     private var currentFileId: String? = null
 
@@ -76,6 +87,14 @@ internal class ExoBeamPlayer(
 
     init {
         exoPlayer.addListener(this)
+        // A television reports as one, so the operator's counts can tell a
+        // living-room decoder from a phone's.
+        val isTelevision = context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+        runCatching {
+            telemetry.setClientKind(
+                if (isTelevision) TelemetryClientKind.ANDROID_TV else TelemetryClientKind.ANDROID,
+            )
+        }
     }
 
     override suspend fun play(request: PlaybackRequest) {
@@ -96,6 +115,7 @@ internal class ExoBeamPlayer(
         endStall()
         reporter.stop()
         forceReport()
+        recorder.flush()
     }
 
     override fun seekTo(positionMs: Long) {
@@ -143,8 +163,12 @@ internal class ExoBeamPlayer(
         applyOverride(C.TRACK_TYPE_TEXT, id)
     }
 
-    override suspend fun switchSource(fileId: String) {
+    override suspend fun switchSource(
+        fileId: String,
+        trigger: SwitchTrigger,
+    ) {
         val request = mutableState.value.request ?: return
+        recorder.switched(from = request.fileId, to = fileId, trigger = trigger)
         // Read the position before tearing anything down: after `prepare` the
         // player has been reset and `currentPosition` is zero, so reading it
         // afterwards would silently restart the title.
@@ -169,10 +193,12 @@ internal class ExoBeamPlayer(
         exoPlayer.clearMediaItems()
         currentFileId = null
         mutableState.value = PlaybackUiState()
+        recorder.end()
     }
 
     override fun release() {
         reporter.stop()
+        recorder.end()
         positionTicker?.cancel()
         positionTicker = null
         exoPlayer.removeListener(this)
@@ -223,6 +249,7 @@ internal class ExoBeamPlayer(
         // A different file: whatever the last one's stalls said about it, they
         // say nothing about this one.
         rebuffers.reset()
+        recorder.begin(request.fileId)
         isStalled = false
         isFillingOnPurpose = true
         exoPlayer.setMediaSource(source)
@@ -313,14 +340,32 @@ internal class ExoBeamPlayer(
     private fun startStall() {
         if (isStalled || isFillingOnPurpose || !exoPlayer.playWhenReady) return
         isStalled = true
-        publishRebuffering(rebuffers.stallStarted(nowMs()))
+        stallStartedAtMs = nowMs()
+        publishRebuffering(rebuffers.stallStarted(stallStartedAtMs))
     }
 
     private fun endStall() {
         if (!isStalled) return
         isStalled = false
-        publishRebuffering(rebuffers.stallEnded(nowMs()))
+        val endedAtMs = nowMs()
+        recorder.stalled(
+            durationMs = if (endedAtMs > stallStartedAtMs) (endedAtMs - stallStartedAtMs).toLong() else 0L,
+        )
+        publishRebuffering(rebuffers.stallEnded(endedAtMs))
     }
+
+    /**
+     * Which of the file's audio tracks is playing, counted the way the server
+     * lists the file's `audio_tracks`: the selected one's position among the
+     * audio groups, which ExoPlayer exposes one per stream in container order,
+     * the order probing records them in. Null before any is selected.
+     */
+    private fun selectedAudioTrackIndex(): UInt? =
+        exoPlayer.currentTracks.groups
+            .filter { it.type == C.TRACK_TYPE_AUDIO }
+            .indexOfFirst { it.isSelected }
+            .takeIf { it >= 0 }
+            ?.toUInt()
 
     private fun publishRebuffering(sustained: Boolean) {
         if (sustained && !mutableState.value.isRebufferingSustained) {
@@ -391,7 +436,15 @@ internal class ExoBeamPlayer(
         publishTracks(tracks)
     }
 
+    override fun onRenderedFirstFrame() {
+        recorder.firstFrame(selectedAudioTrackIndex())
+    }
+
     override fun onPlayerError(error: PlaybackException) {
+        recorder.failed(
+            isNetwork = error.errorCode in NETWORK_ERRORS,
+            audioTrackIndex = selectedAudioTrackIndex(),
+        )
         reporter.stop()
         forceReport()
         mutableState.update { it.copy(error = error.asPlaybackFailure(), isBuffering = false) }
@@ -475,6 +528,17 @@ private fun PlaybackException.asPlaybackFailure(): PlaybackFailure {
         suggestsAnotherSource = decoderProblem,
     )
 }
+
+/**
+ * The failures that are the connection rather than the file or the server: a
+ * start failure under one of these is counted as `network`, anything else as
+ * `other`. A bad HTTP status is the server answering, so it is not here.
+ */
+private val NETWORK_ERRORS =
+    setOf(
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+    )
 
 private val DECODER_ERRORS =
     setOf(

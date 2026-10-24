@@ -19,12 +19,17 @@ import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
+import uniffi.beam_client_core.PlaybackTelemetrySummary
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.SourceSelection
+import uniffi.beam_client_core.StartFailureCause
+import uniffi.beam_client_core.SwitchTrigger
+import uniffi.beam_client_core.TelemetryClientKind
+import uniffi.beam_client_core.TelemetryFlush
 import uniffi.beam_client_core.UserSummary
 
 // Every screen depends on one of these interfaces rather than on `BeamClient`
@@ -180,6 +185,51 @@ public interface PlaybackRepository {
     public suspend fun pendingProgressCount(): UInt
 }
 
+/**
+ * Playback telemetry: what started, what failed to start, what stalled, and
+ * what switched source.
+ *
+ * The vocabulary, the batching and what each server answer means are the
+ * core's; this side reports what the player saw. Every `record` call is local
+ * and cheap -- nothing leaves the device until [flush] -- and answers how many
+ * events are waiting, so the player can flush once a request's worth has built
+ * up. Off by default on the server: once it answers that telemetry is off,
+ * every call here is a no-op for the rest of the session.
+ */
+public interface TelemetryRepository {
+    /** Which kind of client this is, for every report. Set once. */
+    public fun setClientKind(kind: TelemetryClientKind)
+
+    /** A playback's first frame is on screen. */
+    public fun recordStart(
+        fileId: String,
+        audioTrackIndex: UInt?,
+    ): UInt
+
+    /** A playback failed before its first frame. */
+    public fun recordStartFailure(
+        fileId: String,
+        cause: StartFailureCause,
+        audioTrackIndex: UInt?,
+    ): UInt
+
+    /** Playback stalled mid-stream, after its first frame, for [durationMs]. */
+    public fun recordRebuffer(
+        fileId: String,
+        durationMs: ULong,
+    ): UInt
+
+    /** Playback moved from one file of a title to another. */
+    public fun recordSourceSwitch(
+        fromFileId: String,
+        toFileId: String,
+        trigger: SwitchTrigger,
+    ): UInt
+
+    /** Report everything waiting. */
+    public suspend fun flush(): TelemetryFlush
+}
+
 /** The signed-in devices on the profile screen. */
 public interface SessionRepository {
     /** Every device signed in as this user. */
@@ -241,4 +291,13 @@ public interface AdminRepository {
 
     /** Re-fetch metadata for one title. */
     public suspend fun refreshMetadata(mediaId: String)
+
+    /**
+     * Playback telemetry from [from] to [to], inclusive UTC days as
+     * `YYYY-MM-DD`; null for the server's default of the last thirty days.
+     */
+    public suspend fun playbackTelemetry(
+        from: String?,
+        to: String?,
+    ): PlaybackTelemetrySummary
 }
