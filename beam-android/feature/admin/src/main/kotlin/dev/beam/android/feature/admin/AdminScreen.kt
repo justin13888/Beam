@@ -45,6 +45,7 @@ public fun AdminRoute(
         onScan = viewModel::scan,
         onDeleteLibrary = viewModel::deleteLibrary,
         onSetUserDisabled = viewModel::setUserDisabled,
+        onTelemetryRange = viewModel::setTelemetryRange,
         onRetry = viewModel::refresh,
         modifier = modifier,
     )
@@ -59,6 +60,7 @@ internal fun AdminScreen(
     onSetUserDisabled: (String, Boolean) -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
+    onTelemetryRange: (TelemetryRange) -> Unit = {},
 ) {
     val content = state.valueOrNull
 
@@ -69,6 +71,7 @@ internal fun AdminScreen(
                 onScan = onScan,
                 onDeleteLibrary = onDeleteLibrary,
                 onSetUserDisabled = onSetUserDisabled,
+                onTelemetryRange = onTelemetryRange,
                 modifier = modifier,
             )
         }
@@ -93,6 +96,7 @@ private fun AdminContent(
     onScan: (String) -> Unit,
     onDeleteLibrary: (String) -> Unit,
     onSetUserDisabled: (String, Boolean) -> Unit,
+    onTelemetryRange: (TelemetryRange) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val status = state.status
@@ -175,6 +179,13 @@ private fun AdminContent(
                 )
             }
         }
+
+        playbackTelemetry(
+            range = state.telemetryRange,
+            telemetry = state.telemetry,
+            error = state.telemetryError,
+            onRange = onTelemetryRange,
+        )
     }
 }
 

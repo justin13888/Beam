@@ -76,6 +76,36 @@ pub enum RejectionReason {
     SoftwareDecodeDisabled,
 }
 
+impl RejectionReason {
+    /// The playback-telemetry reason a rejection is counted under, or `None`
+    /// for one that is not a failure at all.
+    ///
+    /// The telemetry vocabulary is coarser on purpose: it answers "which part
+    /// of the file could this device not play", and every decoder-capability
+    /// limit -- size, bit rate, HDR, a software-only match, a missing video
+    /// stream -- is the video stream not playing. A policy exclusion is the
+    /// viewer's or the caller's choice, not the device failing, so counting it
+    /// would make a quality preference look like an incompatibility.
+    ///
+    /// Exhaustive with no wildcard arm, so a new reason cannot be added
+    /// without deciding where it is counted.
+    #[must_use]
+    pub const fn failure_reason(self) -> Option<crate::telemetry::FailureReason> {
+        use crate::telemetry::FailureReason;
+        match self {
+            Self::ContainerUnsupported => Some(FailureReason::Container),
+            Self::VideoCodecUnsupported
+            | Self::ResolutionExceedsDecoder
+            | Self::BitrateExceedsDecoder
+            | Self::HdrUnsupported
+            | Self::SoftwareDecodeDisabled
+            | Self::NoVideoStream => Some(FailureReason::VideoCodec),
+            Self::AudioCodecUnsupported => Some(FailureReason::AudioCodec),
+            Self::ExcludedByPolicy => None,
+        }
+    }
+}
+
 /// A source that was considered and set aside, with the reason.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct RejectedSource {

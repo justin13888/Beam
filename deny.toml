@@ -78,6 +78,15 @@ ignore = [
     # doesn't apply to our usage. No safe upgrade exists upstream as of this
     # writing; re-evaluate when RustCrypto/RSA ships a constant-time impl.
     { id = "RUSTSEC-2023-0071", reason = "timing side-channel only affects RSA private-key ops; beam only verifies signatures against public JWKS keys as an OIDC relying party" },
+    # crypto-bigint 0.5.5 (via openidconnect -> p256/p384 -> elliptic-curve):
+    # secret-dependent branches in arithmetic meant to be constant-time. As
+    # with the rsa entry above, beam only verifies ES256/ES384 ID token
+    # signatures against the IdP's *public* JWKS keys; it holds no EC private
+    # key (`private_key_jwt` client auth is rejected by config), so no secret
+    # integer ever reaches the affected operations. The fix is crypto-bigint
+    # 0.7.6, which elliptic-curve 0.13 (openidconnect 4.0.1's pin) cannot take;
+    # re-evaluate when openidconnect moves to elliptic-curve 0.14.
+    { id = "RUSTSEC-2026-0387", reason = "constant-time leak only matters for secret integers; beam only verifies EC signatures against public JWKS keys as an OIDC relying party, and no patched 0.5.x exists" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
