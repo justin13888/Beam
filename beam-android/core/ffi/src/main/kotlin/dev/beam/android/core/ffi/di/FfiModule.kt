@@ -19,10 +19,12 @@ import dev.beam.android.core.ffi.repository.BeamCatalogRepository
 import dev.beam.android.core.ffi.repository.BeamPlaybackRepository
 import dev.beam.android.core.ffi.repository.BeamServerRepository
 import dev.beam.android.core.ffi.repository.BeamSessionRepository
+import dev.beam.android.core.ffi.repository.BeamTelemetryRepository
 import dev.beam.android.core.ffi.repository.CatalogRepository
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.repository.SessionRepository
+import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.ffi.storage.DataStoreKeyValueStore
 import uniffi.beam_client_core.BeamClient
 import uniffi.beam_client_core.KeyValueStore
@@ -76,6 +78,9 @@ internal interface FfiBindsModule {
 
     @Binds
     fun adminRepository(impl: BeamAdminRepository): AdminRepository
+
+    @Binds
+    fun telemetryRepository(impl: BeamTelemetryRepository): TelemetryRepository
 
     @Binds
     fun preferencesRepository(impl: DataStorePreferencesRepository): PreferencesRepository

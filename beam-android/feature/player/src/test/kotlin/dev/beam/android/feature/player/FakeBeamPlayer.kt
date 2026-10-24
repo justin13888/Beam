@@ -5,6 +5,7 @@ import dev.beam.android.core.media.player.PlaybackUiState
 import dev.beam.android.core.model.PlaybackRequest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import uniffi.beam_client_core.SwitchTrigger
 
 /**
  * A player that records what it was told to do.
@@ -23,6 +24,9 @@ internal class FakeBeamPlayer : BeamPlayer {
 
     /** Every file id passed to [switchSource]. */
     val switched: MutableList<String> = mutableListOf()
+
+    /** Who chose each switch in [switched], in the same order. */
+    val switchTriggers: MutableList<SwitchTrigger> = mutableListOf()
 
     /** Every seek delta, in milliseconds. */
     val seeks: MutableList<Long> = mutableListOf()
@@ -65,8 +69,12 @@ internal class FakeBeamPlayer : BeamPlayer {
 
     override fun selectSubtitleTrack(id: String?) = Unit
 
-    override suspend fun switchSource(fileId: String) {
+    override suspend fun switchSource(
+        fileId: String,
+        trigger: SwitchTrigger,
+    ) {
         switched += fileId
+        switchTriggers += trigger
         // As the real player does: a different file starts with a clean
         // rebuffering verdict.
         mutableState.value =

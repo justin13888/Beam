@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.EpisodeSummary
 import uniffi.beam_client_core.MediaSourceView
+import uniffi.beam_client_core.SwitchTrigger
 import javax.inject.Inject
 
 /** What the player screen shows, beyond the player's own state. */
@@ -171,7 +172,7 @@ public class PlayerViewModel
          */
         public fun switchSource(source: MediaSourceView) {
             mutableState.update { it.copy(isSourcePinned = true, downgrade = null) }
-            viewModelScope.launch { player.switchSource(source.fileId) }
+            viewModelScope.launch { player.switchSource(source.fileId, SwitchTrigger.MANUAL) }
         }
 
         /**
@@ -181,7 +182,8 @@ public class PlayerViewModel
         public fun undoDowngrade() {
             val downgrade = mutableState.value.downgrade ?: return
             mutableState.update { it.copy(isSourcePinned = true, downgrade = null) }
-            viewModelScope.launch { player.switchSource(downgrade.fromFileId) }
+            // The viewer asked for this file back: their choice, so manual.
+            viewModelScope.launch { player.switchSource(downgrade.fromFileId, SwitchTrigger.MANUAL) }
         }
 
         /** Hide the downgrade notice, keeping the smaller file. */
@@ -261,7 +263,7 @@ public class PlayerViewModel
                 mutableState.update {
                     it.copy(downgrade = SourceDowngrade(message = selection.reason, fromFileId = request.fileId))
                 }
-                player.switchSource(selection.source.fileId)
+                player.switchSource(selection.source.fileId, SwitchTrigger.AUTO)
             }
         }
 

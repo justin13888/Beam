@@ -4,7 +4,10 @@
 
 Accepted. Delivered with [#93](https://github.com/justin13888/beam/issues/93). Extended with
 [Playback telemetry](#playback-telemetry) by [#143](https://github.com/justin13888/beam/issues/143)
-(server half; the client emitters follow).
+(server half), and fed by the client emitters of
+[#222](https://github.com/justin13888/beam/issues/222): the native core's batching emitter and the
+Android player, with admin views on the web and on Android. The Apple players and the web player
+follow.
 
 ## Context
 
