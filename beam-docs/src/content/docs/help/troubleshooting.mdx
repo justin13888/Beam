@@ -198,8 +198,9 @@ Rate limiting, which applies to sign-in and search only.
 
 <Aside type="tip">
 Behind a reverse proxy, every user can share one bucket because they all appear to come from the
-proxy's IP. Set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only if your proxy **overwrites**
-`X-Forwarded-For`. If it appends, clients can forge the header and bypass the limit.
+proxy's IP. Name the proxy in `BEAM_TRUSTED_PROXIES` as CIDR (for example `172.18.0.0/16`). Beam
+then uses the `X-Forwarded-For` entry that proxy appended, for the rate limit and for the address
+recorded on each session; an entry a client wrote itself is never believed.
 </Aside>
 
 ## Health says "degraded"
