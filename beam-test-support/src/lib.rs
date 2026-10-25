@@ -14,3 +14,6 @@ pub mod postgres;
 
 #[cfg(feature = "pg-integration")]
 pub mod seed;
+
+#[cfg(feature = "e2e-server")]
+pub mod e2e;

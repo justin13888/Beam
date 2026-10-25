@@ -765,12 +765,16 @@ dependencies = [
 name = "beam-test-support"
 version = "0.1.0"
 dependencies = [
+ "beam-client-core",
  "beam-domain",
  "beam-entity",
  "beam-migration",
  "chrono",
+ "reqwest 0.13.4",
  "sea-orm",
  "sea-orm-migration",
+ "sha2 0.11.0",
+ "tempfile",
  "tokio",
  "uuid",
 ]

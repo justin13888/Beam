@@ -21,13 +21,25 @@ publish.workspace = true
 # would not match. That is why those contracts live *in* `beam-domain` under its
 # `test-utils` feature instead of here.
 
+#
+# It also carries the harness of the opt-in `e2e-server` tier (#191), behind a
+# feature of its own: the composed stack -- a real Postgres, Dex and the
+# `beam-server` binary -- driven over the wire through the generated client.
+# `beam-client-core` is depended on only from there, so nothing in the
+# production graph links it either.
+
 [dependencies]
+beam-client-core = { path = "../beam-client-core", optional = true }
 beam-domain = { path = "../beam-domain", features = ["entity", "test-utils"], optional = true }
 beam-entity = { path = "../beam-entity", optional = true }
 beam-migration = { path = "../beam-migration", optional = true }
 chrono = { workspace = true, optional = true }
+# `form` for Dex's login form, which the suite submits as a browser would.
+reqwest = { workspace = true, features = ["form"], optional = true }
 sea-orm = { workspace = true, optional = true }
 sea-orm-migration = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tempfile = { version = "3.27.0", optional = true }
 tokio = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 
@@ -41,6 +53,18 @@ pg-integration = [
     "dep:chrono",
     "dep:sea-orm",
     "dep:sea-orm-migration",
+    "dep:tokio",
+    "dep:uuid",
+]
+# The server end-to-end tier (#191). Off by default for the same reason: it
+# needs Postgres, Dex and an FFmpeg CLI, none of which the default run may.
+e2e-server = [
+    "dep:beam-client-core",
+    "dep:beam-entity",
+    "dep:reqwest",
+    "dep:sea-orm",
+    "dep:sha2",
+    "dep:tempfile",
     "dep:tokio",
     "dep:uuid",
 ]
