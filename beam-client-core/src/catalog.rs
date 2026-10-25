@@ -1145,8 +1145,6 @@ pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParam
         // The record keeps its percentage (issue #190 left the UniFFI surface
         // alone); the wire takes the rating on its own 0-10 scale.
         min_rating: query.min_rating.map(|percent| f64::from(percent) / 10.0),
-        origin: None,
-        referer: None,
     })
 }
 
