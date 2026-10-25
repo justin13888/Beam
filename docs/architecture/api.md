@@ -28,9 +28,9 @@ role.
 | `/v1/media` | GET | Browse/search catalog (cursor pagination, filters, sort) |
 | `/v1/media/{id}` | GET | Full metadata for one movie or show |
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, primary first, each with its video, audio and subtitle tracks |
-| `/v1/genres` | GET | Every genre in the catalog, for filter chips |
+| `/v1/genres` | GET | Every genre in the catalog, for filter chips: a `GenreConnection`, never paged |
 | `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`; `variant` is `poster`/`backdrop`/`thumbnail` |
-| `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing and contents (file paths are relative to the library root, NFR-108) |
+| `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing (a `LibraryConnection`, never paged) and contents: a `LibraryFileConnection` paged by `first` (1-500, default 100) and `after`, by stored path then id. File paths are relative to the library root, in the listing and inside its cursor (NFR-108); another library's cursor is `400 #invalid-cursor` |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
 | `/v1/files/{fileId}/subtitles/{subtitleId}` | GET | A subtitle file beside the video, as stored, Range-capable; `404` `subtitle-not-found` for an id this file's sources do not list ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)) |
@@ -48,9 +48,9 @@ role.
 | `/v1/auth/device/token` | POST | Poll a device login once: `202` while waiting (`authorization_pending` / `slow_down`), `200` with the `beam_session` value on approval |
 | `/v1/me` | GET | Current user |
 | `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions |
-| `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List / revoke own sessions |
+| `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List (a `SessionConnection`, never paged) / revoke own sessions; an id naming none of the caller's is `404 #session-not-found`, another user's included |
 | `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, each metadata provider's configuration (`configured`, `not_configured`, `unavailable`, FR-307), recent scans, and the filesystem watcher's per-library mode (native, polling and why, unwatched) with the watch limit |
-| `/v1/admin/users` | GET | User accounts (limit/offset paged) |
+| `/v1/admin/users` | GET | User accounts, oldest first: an `AdminUserConnection` paged by `first` (1-100, default 50) and `after`, with `total` |
 | `/v1/admin/users/{id}` | PATCH | Block or unblock an account |
 | `/v1/admin/libraries`, `/v1/admin/libraries/{id}` | POST, DELETE | Library management; deleting a library cancels its scan and waits for it to stop (at most 30 s on the injected clock) before its rows go, then forgets its latest scan job |
 | `/v1/admin/libraries/{id}/scan` | POST, GET | Start a scan: `202` with the scan job, queued, and the scan runs in the background; `409` `library-scan-in-progress` while one is queued or running. `GET` reads the latest job since the server started (`404` `scan-not-found` before one). `{id}` is a UUID (`format: uuid`); a malformed one is the path extractor's `400` `about:blank` |
@@ -61,8 +61,8 @@ role.
 | `/v1/admin/media/{id}/match` | POST, DELETE | Fix a title's match: `{"external_ref": "tmdb:603"}` pins it as the administrator's (outranks and is never replaced by an NFO, FR-312) and queues it: `202` with the title; `422` `validation-failed`, `409` `provider-not-configured` / `external-ref-taken`. `DELETE` clears an administrator's pin back to the NFO's pin or to a search and queues the title; on a title no administrator pinned it changes nothing (`204` either way) |
 | `/v1/admin/media/{id}/enrichment/locks` | PUT | Lock exactly the listed fields, so enrichment leaves them alone; `422` for a show's `release_date`/`runtime` |
 | `/v1/admin/media/refresh`, `/v1/admin/libraries/{id}/refresh` | POST | Queue every title, or one library's -- a title with no enrichment row yet is given one -- for another pass (FR-308), keeping each match unless `?rematch=true`: `202` `{queued_count}` |
-| `/v1/admin/logs`, `/v1/admin/logs/count` | GET | Admin log view |
-| `/v1/admin/events` | GET | Recent admin events (JSON) |
+| `/v1/admin/logs` | GET | The operational log, newest first: an `AdminLogConnection` paged by `first` (1-200, default 50) and `after`, with `total` |
+| `/v1/admin/events` | GET | The most recent admin events, oldest first: an `AdminEventConnection` of at most `first` (1-1000, default 100), with no cursors; `has_next_page` says older events were left out |
 | `/v1/admin/events/stream` | GET | Admin event stream (SSE) |
 | `/v1/admin/telemetry/library` | GET | The anonymous library report, and its exact OTLP request body, as it would be sent now -- sends nothing ([ADR-0019](decisions/ADR-0019-telemetry-posture.md)) |
 | `/v1/admin/telemetry/playback` | GET | Playback telemetry counts summed over `from`..`to` (UTC days, inclusive; default the last 30, at most 366, else `400` `invalid-date-range`) -- operator-local, never sent anywhere |
@@ -122,8 +122,11 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
 
 ## Conventions
 
-- **Versioning:** all routes are prefixed `/v1`. A future breaking change gets a `/v2` prefix
-  rather than mutating `/v1` in place.
+- **Versioning:** all routes are prefixed `/v1`, and `/v1` is frozen: a breaking change gets a
+  `/v2` prefix rather than mutating `/v1` in place
+  ([ADR-0021](decisions/ADR-0021-v1-frozen.md)). The document's `info.version` is the release
+  (`CARGO_PKG_VERSION`), not the contract's version; the release workflow regenerates both
+  committed copies on the release pull request.
 - **Identifiers:** resource identifiers in paths are opaque UUIDs, never filesystem paths — see
   `security.md`.
 - **Actions:** operations that don't map to CRUD are sub-resource verbs, not query-string RPC
@@ -179,6 +182,26 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   cursor (`services/enrichment_cursor.rs`) holds just that pair, at full precision, and is valid
   under any `status`/`kind` filter. A page is one keyset statement on
   `idx_metadata_enrichment_list`, one count and one read by ids per kind to name the titles.
+
+  **Every list is a connection** ([#190](https://github.com/justin13888/beam/issues/190), wire
+  rule R3): `items` and `page_info`, plus `total` where the list counts itself, never a bare array.
+  The rest page the same way, forwards only:
+  - `GET /v1/libraries/{id}/files` by `first` (1-500, default 100) and `after`, ordered by stored
+    path then id, through `FileRepository::find_page_by_library` -- a keyset seek, so a page costs
+    one statement whatever the library's size. Its cursor (`services/library_files_cursor.rs`)
+    holds the root-relative path the page reported, never the absolute one (NFR-108), and its
+    library's id, so another library's cursor is `400 #invalid-cursor`. No `total`: the library's
+    `file_count` is it.
+  - `GET /v1/admin/users` (`first` 1-100, default 50) and `GET /v1/admin/logs` (`first` 1-200,
+    default 50) with `total`. Both read by `LIMIT`/`OFFSET` underneath, so the offset rides inside
+    an opaque cursor (`services/offset_cursor.rs`) naming its list: the other list's cursor is
+    `400 #invalid-cursor`, and either can move to a keyset later without a client noticing. An
+    entry logged while an admin pages shifts the log's later pages by one. The log's count is its
+    `total`; there is no separate count operation.
+  - `GET /v1/libraries`, `GET /v1/sessions`, `GET /v1/genres` and `GET /v1/media/{id}/sources` are
+    small enough never to page: `items` is the whole list and `page_info` one complete page.
+    `GET /v1/admin/events` and `GET /v1/continue-watching` are bounded shelves: `first` caps them,
+    and `has_next_page` alone says more existed.
 - **Errors:** every failure is an **RFC 9457 problem document** — one body shape for every status,
   on every route, including Kynos's own extractor rejections. There is no second envelope and no
   hook to render one, which closed half of [#123](https://github.com/justin13888/beam/issues/123):
@@ -242,7 +265,9 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   the response's description in the order it meets them — extractors and authenticators before the
   handler's return type — and narrows `type` to the union of their codes.
 
-  Statuses in use: `400`, `401`, `403`, `404`, `416` (stream/download range), `429` (rate limiter,
+  Statuses in use: `400`, `401`, `403`, `404`, `409` and `422` (each with a named code, wire rule
+  R10, except Kynos's `422` for a request body that does not decode), `416` (stream/download
+  range), `429` (rate limiter,
   with `Retry-After` and `X-RateLimit-Limit`/`-Remaining`/`-Reset`), `500`, `502` (artwork only:
   `artwork-upstream-failed`, when the metadata provider answered the image fetch unusably or not at
   all — the fault is the provider's, and `internal` is documented to mean it is Beam's), `503`
@@ -284,9 +309,14 @@ still use the pre-migration dotted names. While that holds, the TypeScript compi
 contract check for `beam-web`; the Rust side of the contract is checked by `codegen:openapi:check`
 and by the router refusing to build if it cannot describe itself.
 
-**Wire conventions.** `routes/conventions_tests.rs` walks the exported document and fails on any
-violation, with no exception list — a schema that cannot comply is changed, not waived
-([#190](https://github.com/justin13888/beam/issues/190)):
+### Wire conventions (frozen /v1)
+
+`/v1` is frozen ([ADR-0021](decisions/ADR-0021-v1-frozen.md)), and these are the conventions it is
+frozen in. `beam-server/src/routes/conventions_tests.rs` is the contract: it walks the exported
+document and fails on any violation, with no exception list -- a schema that cannot comply is
+changed, not waived ([#190](https://github.com/justin13888/beam/issues/190)). Each rule is also
+shown to catch its violation in a document built for the purpose, so none passes for free. This
+section describes them; when the two disagree, the test is right:
 
 - **R1** every enum value and every `const` is `snake_case` (`^[a-z][a-z0-9_]*$`). A problem
   document's `type` is a URI by RFC 9457, not a value from a set; the taxonomy test governs it;
@@ -306,11 +336,26 @@ violation, with no exception list — a schema that cannot comply is changed, no
   `*_epoch`, `*_unix`);
 - **R6** a number measuring a duration, runtime, size, position or length names its unit:
   `_secs`, `_mins`, `_ms`, `_days`, `_bytes` or `_count` (`duration_secs`, `runtime_mins`,
-  `size_bytes`, `file_count`).
+  `size_bytes`, `file_count`);
+- **R3** no response body is a bare JSON array: every list is a `*Connection` (see Pagination
+  above), so it can page, or say it does not, without a breaking change;
+- **R8** `info.version` is the release, `CARGO_PKG_VERSION`, in the document served and in both
+  committed copies;
+- **R10** a `409` or `422` names its problem `type` from the taxonomy, never leaving it open or
+  `about:blank`. The one `about:blank` allowed is Kynos's own `422` for a request body that does
+  not decode, on an operation that takes one.
+
+**R9**, no single-key `oneOf` wrapper, is not enforced yet. `MediaMetadata` is the one schema it
+would refuse -- `{"Movie": {...}}` rather than a `media_type` tag beside the fields -- and the
+tagged form waits on a spargen release that dispatches on the tag the server sends
+([getkono/spargen#403](https://github.com/getkono/spargen/issues/403),
+[#300](https://github.com/justin13888/beam/issues/300)).
 
 R4-R6 read every property of every component schema and every path and query parameter. Headers
-are transport, and so is the SSE frame Kynos describes around an event (its `id` is the
-event-stream field, not a Beam identifier); the event payload inside it is a component and is read.
+are transport, described by Kynos rather than by Beam's types, and are not asserted
+([#200](https://github.com/justin13888/beam/issues/200)); so is the SSE frame Kynos describes
+around an event (its `id` is the event-stream field, not a Beam identifier); the event payload
+inside it is a component and is read.
 
 ## Server-Sent Events
 

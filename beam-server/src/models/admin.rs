@@ -388,9 +388,31 @@ pub struct CreateLibraryRequest {
     pub root_path: String,
 }
 
+/// One page of the operational log, newest first: what
+/// `GET /v1/admin/logs` returns.
+///
+/// Pass `page_info.end_cursor` as `after` for the next page. `total` counts
+/// every entry the log holds.
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct AdminLogCount {
-    pub count: u64,
+pub struct AdminLogConnection {
+    pub items: Vec<AdminLogEntry>,
+    pub page_info: crate::models::search::PageInfo,
+    /// Every entry in the log, across all pages.
+    pub total: u64,
+}
+
+/// The most recent admin events, oldest first: what `GET /v1/admin/events`
+/// returns.
+///
+/// A snapshot of the events the server keeps in memory, not a paged list: it
+/// carries no cursors and `has_previous_page` is always `false`.
+/// `has_next_page` is `true` when older events were left out to keep to
+/// `first`.
+#[derive(Debug, Serialize, Schema)]
+pub struct AdminEventConnection {
+    pub items: Vec<AdminEvent>,
+    /// No cursors; `has_next_page` says whether older events exist.
+    pub page_info: crate::models::search::PageInfo,
 }
 
 // ── Admin user management (issue #85) ────────────────────────────────────────
@@ -437,9 +459,14 @@ impl From<beam_auth::utils::models::User> for AdminUser {
     }
 }
 
+/// One page of user accounts, oldest first: what `GET /v1/admin/users`
+/// returns.
+///
+/// Pass `page_info.end_cursor` as `after` for the next page.
 #[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct AdminUserList {
+pub struct AdminUserConnection {
     pub items: Vec<AdminUser>,
+    pub page_info: crate::models::search::PageInfo,
     /// Total number of users across all pages.
     pub total: u64,
 }

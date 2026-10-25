@@ -12,6 +12,15 @@ pub use show::*;
 pub use source::*;
 
 /// Media metadata
+// spargen gap: this stays externally tagged (`{"Movie": {...}}`) until a
+// spargen release carries getkono/spargen#403. Internally tagged
+// (`#[serde(tag = "media_type", rename_all = "snake_case")]`), Kynos describes
+// it as a `oneOf` of inline `allOf` branches, each narrowing `media_type` to a
+// `const`, under a `discriminator` with no `mapping`; spargen 0.5.0 dispatches
+// such inline members on a tag it invents (`MediaMetadataVariant0`) instead of
+// the value the server sends, so the generated client refuses every title.
+// The fix is on spargen's main branch, unreleased. The tagging, and wire rule
+// R9 against single-key `oneOf` wrappers that waits on it, are #300.
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub enum MediaMetadata {
     Show(ShowMetadata),

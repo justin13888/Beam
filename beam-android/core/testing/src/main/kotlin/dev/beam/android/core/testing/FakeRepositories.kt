@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import uniffi.beam_client_core.AdminEvent
 import uniffi.beam_client_core.AdminLogEntry
+import uniffi.beam_client_core.AdminLogPage
 import uniffi.beam_client_core.AdminStatus
 import uniffi.beam_client_core.AdminUser
 import uniffi.beam_client_core.AdminUserPage
@@ -536,12 +537,12 @@ public class FakeAdminRepository : AdminRepository {
     }
 
     override suspend fun users(
-        limit: UInt?,
-        offset: UInt?,
+        first: UInt?,
+        after: String?,
     ): AdminUserPage {
         usersFailWith?.let { throw it }
         failWith?.let { throw it }
-        return AdminUserPage(userList, userList.size.toULong())
+        return AdminUserPage(userList, userList.size.toULong(), endCursor = null, hasNextPage = false)
     }
 
     override suspend fun setUserDisabled(
@@ -557,16 +558,11 @@ public class FakeAdminRepository : AdminRepository {
     }
 
     override suspend fun logs(
-        limit: UInt?,
-        offset: UInt?,
-    ): List<AdminLogEntry> {
+        first: UInt?,
+        after: String?,
+    ): AdminLogPage {
         failWith?.let { throw it }
-        return logEntries
-    }
-
-    override suspend fun logCount(): ULong {
-        failWith?.let { throw it }
-        return logEntries.size.toULong()
+        return AdminLogPage(logEntries, logEntries.size.toULong(), endCursor = null, hasNextPage = false)
     }
 
     override suspend fun events(limit: UInt?): List<AdminEvent> {

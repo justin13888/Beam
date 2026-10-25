@@ -110,7 +110,7 @@ public class AdminViewModel
                             val libraries = async { catalog.libraries() }
                             val users =
                                 async {
-                                    runCatching { admin.users(limit = USER_PAGE, offset = null).items }
+                                    runCatching { admin.users(first = USER_PAGE, after = null).items }
                                         .getOrDefault(emptyList())
                                 }
                             val range = mutableState.value.previous()?.telemetryRange ?: TelemetryRange.LAST_30_DAYS

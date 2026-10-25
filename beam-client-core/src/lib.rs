@@ -69,7 +69,7 @@ pub use capability::{
     select_downgrade, select_source,
 };
 pub use catalog::{
-    AdminEvent, AdminLogEntry, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
+    AdminEvent, AdminLogEntry, AdminLogPage, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
     ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
     LibraryFileSummary, LibrarySummary, MediaDetail, MediaKind, MediaPage, MediaSortField,
     MediaSummary, MediaTypeFilter, SeasonSummary, ServerHealth, SortOrder,

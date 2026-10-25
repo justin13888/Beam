@@ -33,7 +33,6 @@ use kynos::prelude::*;
 use kynos::test::TestClient;
 use tempfile::TempDir;
 
-use crate::models::LibraryFile;
 use crate::routes::stream::{download_file, head_download_file, head_stream_file, stream_file};
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::hash::HashService;
@@ -142,7 +141,9 @@ impl LibraryService for StubLibraryService {
     async fn get_library_files(
         &self,
         _library_id: uuid::Uuid,
-    ) -> Result<Vec<LibraryFile>, LibraryError> {
+        _after: Option<(String, uuid::Uuid)>,
+        _first: std::num::NonZeroU32,
+    ) -> Result<crate::services::library::LibraryFilePage, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
     async fn create_library(

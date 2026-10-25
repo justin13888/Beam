@@ -12,7 +12,7 @@ use crate::capability::{
     DeviceProfile, MediaSourceView, QualityPolicy, RebufferDetector, SourceSelection,
 };
 use crate::catalog::{
-    AdminEvent, AdminLogEntry, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
+    AdminEvent, AdminLogEntry, AdminLogPage, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
     ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
     LibraryFileSummary, LibrarySummary, MediaDetail, MediaPage, ServerHealth, browse_params,
 };
@@ -40,6 +40,10 @@ use std::sync::{Arc, Mutex, RwLock};
 const SERVER_INDEX_KEY: &str = "servers/index";
 /// Storage key holding the currently selected server id.
 const ACTIVE_SERVER_KEY: &str = "servers/active";
+/// The page size [`BeamClient::library_files`] walks a library's files at:
+/// the largest `GET /v1/libraries/{id}/files` takes, so the fewest round
+/// trips.
+const LIBRARY_FILES_PAGE: i64 = 500;
 
 /// A server as the UI sees it.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -950,7 +954,8 @@ impl BeamClient {
     pub async fn genres(&self) -> Result<Vec<String>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self.send(&server_id, client.list_genres(None)).await?;
-        Ok(response.into_inner().genres)
+        // A connection that is never paged: `items` is every genre.
+        Ok(response.into_inner().items)
     }
 
     /// The next playable episode of a series after the given one.
@@ -1004,8 +1009,10 @@ impl BeamClient {
     pub async fn libraries(&self) -> Result<Vec<LibrarySummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self.send(&server_id, client.list_libraries(None)).await?;
+        // A connection that is never paged: `items` is every library.
         Ok(response
             .into_inner()
+            .items
             .into_iter()
             .map(LibrarySummary::from_generated)
             .collect())
@@ -1027,7 +1034,10 @@ impl BeamClient {
         Ok(LibrarySummary::from_generated(response.into_inner()))
     }
 
-    /// The files indexed into one library.
+    /// The files indexed into one library, by path.
+    ///
+    /// The server pages this list; the core walks every page, at the
+    /// largest size the server takes, so a caller still gets the whole list.
     ///
     /// # Errors
     ///
@@ -1036,18 +1046,35 @@ impl BeamClient {
         &self,
         library_id: String,
     ) -> Result<Vec<LibraryFileSummary>, BeamError> {
+        let wire_library_id = parse_uuid("library_id", &library_id)?;
         let (server_id, client, _) = self.active_context()?;
-        let response = self
-            .send(
-                &server_id,
-                client.get_library_files(parse_uuid("library_id", &library_id)?, None),
-            )
-            .await?;
-        Ok(response
-            .into_inner()
-            .into_iter()
-            .map(LibraryFileSummary::from_generated)
-            .collect())
+        let mut files = Vec::new();
+        let mut after = None;
+        loop {
+            let params = crate::api::GetLibraryFilesParams {
+                first: Some(LIBRARY_FILES_PAGE),
+                after: after.take(),
+                origin: None,
+                referer: None,
+            };
+            let page = self
+                .send(
+                    &server_id,
+                    client.get_library_files(wire_library_id, params),
+                )
+                .await?
+                .into_inner();
+            files.extend(
+                page.items
+                    .into_iter()
+                    .map(LibraryFileSummary::from_generated),
+            );
+            match page.page_info.end_cursor {
+                Some(cursor) if page.page_info.has_next_page => after = Some(cursor),
+                _ => break,
+            }
+        }
+        Ok(files)
     }
 
     // -- playback ---------------------------------------------------------
@@ -1546,8 +1573,10 @@ impl BeamClient {
     pub async fn sessions(&self) -> Result<Vec<DeviceSession>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self.send(&server_id, client.list_sessions(None)).await?;
+        // A connection that is never paged: `items` is every session.
         Ok(response
             .into_inner()
+            .items
             .into_iter()
             .map(DeviceSession::from_generated)
             .collect())
@@ -1598,20 +1627,21 @@ impl BeamClient {
         Ok(AdminStatus::from_generated(response.into_inner()))
     }
 
-    /// One page of user accounts.
+    /// One page of user accounts, oldest first: `first` accounts, after the
+    /// page whose `end_cursor` is `after`, or from the start.
     ///
     /// # Errors
     ///
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn admin_users(
         &self,
-        limit: Option<u32>,
-        offset: Option<u32>,
+        first: Option<u32>,
+        after: Option<String>,
     ) -> Result<AdminUserPage, BeamError> {
         let (server_id, client, record) = self.active_context()?;
         let params = crate::api::ListAdminUsersParams {
-            limit: limit.map(i64::from),
-            offset: offset.map(i64::from),
+            first: first.map(i64::from),
+            after,
             origin: None,
             referer: None,
         };
@@ -1621,6 +1651,8 @@ impl BeamClient {
             .into_inner();
         Ok(AdminUserPage {
             total: u64::try_from(response.total).unwrap_or(0),
+            end_cursor: response.page_info.end_cursor,
+            has_next_page: response.page_info.has_next_page,
             items: response
                 .items
                 .into_iter()
@@ -1651,42 +1683,39 @@ impl BeamClient {
         Ok(())
     }
 
-    /// One page of the operational log.
+    /// One page of the operational log, newest first: `first` lines, after
+    /// the page whose `end_cursor` is `after`, or from the start. `total`
+    /// counts every line the server holds.
     ///
     /// # Errors
     ///
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn admin_logs(
         &self,
-        limit: Option<u32>,
-        offset: Option<u32>,
-    ) -> Result<Vec<AdminLogEntry>, BeamError> {
+        first: Option<u32>,
+        after: Option<String>,
+    ) -> Result<AdminLogPage, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let params = crate::api::GetAdminLogsParams {
-            limit: limit.map(i64::from),
-            offset: offset.map(i64::from),
+            first: first.map(i64::from),
+            after,
             origin: None,
             referer: None,
         };
-        let response = self.send(&server_id, client.get_admin_logs(params)).await?;
-        Ok(response
-            .into_inner()
-            .into_iter()
-            .map(AdminLogEntry::from_generated)
-            .collect())
-    }
-
-    /// How many log lines the server holds.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
-    pub async fn admin_log_count(&self) -> Result<u64, BeamError> {
-        let (server_id, client, _) = self.active_context()?;
         let response = self
-            .send(&server_id, client.get_admin_log_count(None))
-            .await?;
-        Ok(u64::try_from(response.into_inner().count).unwrap_or(0))
+            .send(&server_id, client.get_admin_logs(params))
+            .await?
+            .into_inner();
+        Ok(AdminLogPage {
+            total: u64::try_from(response.total).unwrap_or(0),
+            end_cursor: response.page_info.end_cursor,
+            has_next_page: response.page_info.has_next_page,
+            items: response
+                .items
+                .into_iter()
+                .map(AdminLogEntry::from_generated)
+                .collect(),
+        })
     }
 
     /// Recent server events, newest first.
@@ -1706,15 +1735,17 @@ impl BeamClient {
     pub async fn admin_events(&self, limit: Option<u32>) -> Result<Vec<AdminEvent>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let params = crate::api::GetAdminEventsParams {
-            limit: limit.map(i64::from),
+            first: limit.map(i64::from),
             origin: None,
             referer: None,
         };
         let response = self
             .send(&server_id, client.get_admin_events(params))
             .await?;
+        // A snapshot, not a paged list: `items` is the most recent `limit`.
         Ok(response
             .into_inner()
+            .items
             .into_iter()
             .map(AdminEvent::from_generated)
             .collect())
@@ -2830,6 +2861,101 @@ mod tests {
                 reqwest::Method::GET
             ],
             "the read after the refresh must reach the server, not the cache"
+        );
+    }
+
+    /// A library file, as `GET /v1/libraries/{id}/files` lists one.
+    macro_rules! library_file {
+        ($id:literal, $path:literal) => {
+            concat!(
+                r#"{"id":""#,
+                $id,
+                r#"","library_id":"00000000-0000-0000-0000-00000000000a","path":""#,
+                $path,
+                r#"","size_bytes":1,"hash":"1","status":"known","content_type":"movie","scanned_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#
+            )
+        };
+    }
+
+    /// The server pages a library's files; the core walks every page, each
+    /// request after the first carrying the previous page's `end_cursor`, and
+    /// returns the whole list in order.
+    #[tokio::test]
+    async fn a_library_s_files_are_walked_page_by_page() {
+        let (client, id, _) = signed_in_client().await;
+        let first_page: &'static str = concat!(
+            r#"{"items":["#,
+            library_file!("00000000-0000-0000-0000-000000000001", "a.mkv"),
+            r#"],"page_info":{"has_next_page":true,"has_previous_page":false,"start_cursor":"c1","end_cursor":"c1"}}"#
+        );
+        let last_page: &'static str = concat!(
+            r#"{"items":["#,
+            library_file!("00000000-0000-0000-0000-000000000002", "b.mkv"),
+            r#"],"page_info":{"has_next_page":false,"has_previous_page":true,"start_cursor":"c2","end_cursor":"c2"}}"#
+        );
+        let backend = Arc::new(CannedBackend::answering_in_turn(vec![
+            (200, "application/json", first_page),
+            (200, "application/json", last_page),
+        ]));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        let files = client
+            .library_files("00000000-0000-0000-0000-00000000000a".to_owned())
+            .await
+            .expect("both pages decode");
+
+        let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.mkv", "b.mkv"]);
+        let queries: Vec<String> = backend
+            .recorded()
+            .iter()
+            .map(|request| request.url.query().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(queries.len(), 2, "one request per page: {queries:?}");
+        assert!(!queries[0].contains("after="), "{}", queries[0]);
+        assert!(queries[1].contains("after=c1"), "{}", queries[1]);
+        assert!(
+            queries.iter().all(|query| query.contains("first=500")),
+            "{queries:?}"
+        );
+    }
+
+    /// A page of the log carries the server's cursor and total through, and
+    /// the next request sends the cursor it was handed.
+    #[tokio::test]
+    async fn a_page_of_the_log_carries_its_cursor_and_total() {
+        let (client, id, _) = signed_in_client().await;
+        let page: &'static str = r#"{"items":[{"id":"00000000-0000-0000-0000-000000000003","level":"info","category":"system","message":"started","created_at":"2026-01-01T00:00:00Z"}],"page_info":{"has_next_page":true,"has_previous_page":false,"start_cursor":"l0","end_cursor":"l0"},"total":7}"#;
+        let backend = Arc::new(CannedBackend::answering(200, "application/json", page));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        let logs = client
+            .admin_logs(Some(1), Some("l-1".to_owned()))
+            .await
+            .expect("the page decodes");
+
+        assert_eq!(logs.items.len(), 1);
+        assert_eq!(logs.total, 7);
+        assert_eq!(logs.end_cursor.as_deref(), Some("l0"));
+        assert!(logs.has_next_page);
+        let query = backend.recorded()[0]
+            .url
+            .query()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            query.contains("first=1") && query.contains("after=l-1"),
+            "{query}"
         );
     }
 

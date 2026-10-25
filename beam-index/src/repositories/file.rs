@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,8 +10,8 @@ use uuid::Uuid;
 
 use beam_domain::models::file::container_tags_json;
 use beam_domain::models::{
-    CreateMediaFile, FileClassification, FileRelink, MediaFile, MediaFileContent, ProbeUpdate,
-    UpdateMediaFile, displaced_path,
+    CreateMediaFile, FileClassification, FileRelink, LibraryFilePosition, MediaFile,
+    MediaFileContent, ProbeUpdate, UpdateMediaFile, displaced_path,
 };
 
 /// The `files` columns a file's content is stored in.
@@ -109,6 +110,40 @@ impl FileRepository for SqlFileRepository {
         let models = files::Entity::find()
             .filter(files::Column::LibraryId.eq(library_id))
             .filter(files::Column::MissingSince.is_null())
+            .all(self.db.as_ref())
+            .await?;
+
+        Ok(models.into_iter().map(MediaFile::from).collect())
+    }
+
+    async fn find_page_by_library(
+        &self,
+        library_id: Uuid,
+        after: Option<LibraryFilePosition>,
+        limit: NonZeroU32,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        use beam_entity::files;
+        use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let mut select = files::Entity::find()
+            .filter(files::Column::LibraryId.eq(library_id))
+            .filter(files::Column::MissingSince.is_null());
+        if let Some(LibraryFilePosition { path, id }) = after {
+            let path = path.to_string_lossy().into_owned();
+            select = select.filter(
+                Condition::any()
+                    .add(files::Column::FilePath.gt(path.clone()))
+                    .add(
+                        Condition::all()
+                            .add(files::Column::FilePath.eq(path))
+                            .add(files::Column::Id.gt(id)),
+                    ),
+            );
+        }
+        let models = select
+            .order_by_asc(files::Column::FilePath)
+            .order_by_asc(files::Column::Id)
+            .limit(u64::from(limit.get()))
             .all(self.db.as_ref())
             .await?;
 

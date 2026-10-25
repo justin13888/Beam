@@ -181,20 +181,16 @@ public struct BeamRepositories: ServerRepository, CatalogRepository, PlaybackRep
         try await mapping { try await client.adminStatus() }
     }
 
-    public func users(limit: UInt32?, offset: UInt32?) async throws -> AdminUserPage {
-        try await mapping { try await client.adminUsers(limit: limit, offset: offset) }
+    public func users(first: UInt32?, after: String?) async throws -> AdminUserPage {
+        try await mapping { try await client.adminUsers(first: first, after: after) }
     }
 
     public func setUserDisabled(userId: String, disabled: Bool) async throws {
         try await mapping { try await client.setUserDisabled(userId: userId, disabled: disabled) }
     }
 
-    public func logs(limit: UInt32?, offset: UInt32?) async throws -> [AdminLogEntry] {
-        try await mapping { try await client.adminLogs(limit: limit, offset: offset) }
-    }
-
-    public func logCount() async throws -> UInt64 {
-        try await mapping { try await client.adminLogCount() }
+    public func logs(first: UInt32?, after: String?) async throws -> AdminLogPage {
+        try await mapping { try await client.adminLogs(first: first, after: after) }
     }
 
     public func events(limit: UInt32?) async throws -> [AdminEvent] {

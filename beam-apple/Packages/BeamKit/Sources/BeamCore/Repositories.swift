@@ -102,14 +102,15 @@ public protocol SessionRepository: Sendable {
 public protocol AdminRepository: Sendable {
     /// The dashboard snapshot.
     func status() async throws -> AdminStatus
-    /// One page of user accounts.
-    func users(limit: UInt32?, offset: UInt32?) async throws -> AdminUserPage
+    /// One page of user accounts: `first` of them, after the page whose
+    /// `endCursor` is `after`.
+    func users(first: UInt32?, after: String?) async throws -> AdminUserPage
     /// Disable or re-enable an account.
     func setUserDisabled(userId: String, disabled: Bool) async throws
-    /// One page of the operational log.
-    func logs(limit: UInt32?, offset: UInt32?) async throws -> [AdminLogEntry]
-    /// How many log lines the server holds.
-    func logCount() async throws -> UInt64
+    /// One page of the operational log, newest first: `first` lines, after
+    /// the page whose `endCursor` is `after`. Its `total` is how many lines
+    /// the server holds.
+    func logs(first: UInt32?, after: String?) async throws -> AdminLogPage
     /// Recent server events.
     func events(limit: UInt32?) async throws -> [AdminEvent]
     /// Add a library rooted at a path on the server.

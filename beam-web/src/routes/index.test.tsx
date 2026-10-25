@@ -11,10 +11,12 @@ describe("/ (dashboard)", () => {
 	it("totals the file counts across libraries", async () => {
 		server.use(
 			http.get(`${BASE_URL}/v1/libraries`, () =>
-				HttpResponse.json([
-					factory.library({ id: "lib-1", name: "Movies", file_count: 40 }),
-					factory.library({ id: "lib-2", name: "Shows", file_count: 2 }),
-				]),
+				HttpResponse.json(
+					factory.connection([
+						factory.library({ id: "lib-1", name: "Movies", file_count: 40 }),
+						factory.library({ id: "lib-2", name: "Shows", file_count: 2 }),
+					]),
+				),
 			),
 		);
 		renderRoute("/");
@@ -27,9 +29,11 @@ describe("/ (dashboard)", () => {
 	it("lists each library with a link into its detail page", async () => {
 		server.use(
 			http.get(`${BASE_URL}/v1/libraries`, () =>
-				HttpResponse.json([
-					factory.library({ id: "lib-1", name: "Movies", file_count: 3 }),
-				]),
+				HttpResponse.json(
+					factory.connection([
+						factory.library({ id: "lib-1", name: "Movies", file_count: 3 }),
+					]),
+				),
 			),
 		);
 		renderRoute("/");

@@ -1,4 +1,5 @@
 import type { components } from "@/api.gen";
+import type { Connection, PageInfo } from "@/lib/apiClient";
 
 /**
  * Test data builders, every one typed as the schema the server actually
@@ -35,6 +36,27 @@ export type AdminStatus =
 	Schemas["beam_server.models.admin.AdminStatusResponse"];
 export type SessionSummary =
 	Schemas["beam_auth.server.oidc_routes.SessionSummary"];
+
+/**
+ * A `/v1` list response: the items as one page, the whole list unless
+ * `page_info` says a page follows. Typed by hand, not from `api.gen.ts`, which
+ * predates the envelope (TODO(#146)).
+ */
+export function connection<T>(
+	items: T[],
+	pageInfo: Partial<PageInfo> = {},
+): Connection<T> {
+	return {
+		items,
+		page_info: {
+			has_next_page: false,
+			has_previous_page: false,
+			start_cursor: null,
+			end_cursor: null,
+			...pageInfo,
+		},
+	};
+}
 
 export function user(overrides: Partial<User> = {}): User {
 	return {

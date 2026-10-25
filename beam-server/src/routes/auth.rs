@@ -71,6 +71,19 @@ pub struct CurrentUser {
     pub avatar_url: Option<String>,
 }
 
+/// Every active session of the current user: what `GET /v1/sessions`
+/// returns.
+///
+/// A connection, as every `/v1` list is, though a user has few enough
+/// sessions that it is never paged: `items` is the whole list, both of
+/// `page_info`'s `has_*_page` flags are `false`, and it carries no cursors.
+#[derive(Debug, Serialize, Deserialize, Schema)]
+pub struct SessionConnection {
+    pub items: Vec<SessionSummary>,
+    /// Always a single, complete page.
+    pub page_info: crate::models::PageInfo,
+}
+
 /// One of the current user's active sessions, as returned by `GET
 /// /sessions`. `id` is an opaque row identifier for revocation via `DELETE
 /// /sessions/{id}` -- never the session credential itself, which is hashed
@@ -501,16 +514,17 @@ pub enum CurrentUserError {
 
 /// `DELETE /v1/sessions/{id}`.
 ///
-/// Keeps its own 401 because the status carries meaning here that
-/// `SessionAuth`'s does not: a session id that does not exist and one that
-/// belongs to somebody else answer identically and deliberately, so a caller
-/// cannot enumerate other people's sessions. A malformed id is the `Path`
+/// A `404`, as any id naming nothing the caller can reach is: a session id
+/// that does not exist and one that belongs to somebody else answer
+/// identically and deliberately, so a caller cannot enumerate other people's
+/// sessions. It was a `401`, which told a client its own credential had
+/// failed and sent it to sign in again. A malformed id is the `Path`
 /// extractor's 400.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
 pub enum SessionRevokeError {
     #[error("{0}")]
     #[problem(
-        status = 401,
+        status = 404,
         type = "https://beam.justinchung.net/reference/errors/#session-not-found",
         title = "Session not found"
     )]
@@ -1067,7 +1081,7 @@ pub async fn oidc_logout_all(
 pub async fn oidc_list_sessions(
     auth: SessionAuth,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<Json<Vec<SessionSummary>>, InternalError> {
+) -> Result<Json<SessionConnection>, InternalError> {
     let sessions = session_store
         .list_for_user(&auth.0.user_id)
         .await
@@ -1078,11 +1092,14 @@ pub async fn oidc_list_sessions(
         .map(|(id, data)| SessionSummary::from_store(id, data))
         .collect::<Result<Vec<_>, _>>()
         .map_err(InternalError::Internal)?;
-    Ok(Json(summaries))
+    Ok(Json(SessionConnection {
+        items: summaries,
+        page_info: crate::models::PageInfo::complete(),
+    }))
 }
 
 /// Revokes a specific session by its listing id, scoped to the current user
-/// (returns 401 for a session that doesn't exist or belongs to someone
+/// (returns 404 for a session that doesn't exist or belongs to someone
 /// else, never distinguishing the two).
 #[kynos::delete("/sessions/{id}", tag = Auth, operation_id = "deleteSession")]
 pub async fn oidc_delete_session(

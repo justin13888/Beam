@@ -51,3 +51,30 @@ impl Library {
         }
     }
 }
+
+/// Every library on the server: what `GET /v1/libraries` returns.
+///
+/// A connection, as every `/v1` list is, though a server has few enough
+/// libraries that it is never paged: `items` is the whole list, both of
+/// `page_info`'s `has_*_page` flags are `false`, and it carries no cursors.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+pub struct LibraryConnection {
+    /// Every library, in the order the server keeps them.
+    pub items: Vec<Library>,
+    /// Always a single, complete page.
+    pub page_info: crate::models::search::PageInfo,
+}
+
+/// One page of a library's files, by path: what
+/// `GET /v1/libraries/{id}/files` returns.
+///
+/// Ordered by the file's stored path, then id. Pass `page_info.end_cursor` as
+/// `after` for the next page. The library's `file_count` says how many files
+/// there are in all.
+#[derive(Clone, Debug, Serialize, Schema)]
+pub struct LibraryFileConnection {
+    /// The files on this page.
+    pub items: Vec<LibraryFile>,
+    /// Where this page sits in the whole listing.
+    pub page_info: crate::models::search::PageInfo,
+}

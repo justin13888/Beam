@@ -4,7 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import uniffi.beam_client_core.AdminEvent
-import uniffi.beam_client_core.AdminLogEntry
+import uniffi.beam_client_core.AdminLogPage
 import uniffi.beam_client_core.AdminStatus
 import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BeamClient
@@ -242,9 +242,9 @@ internal class BeamAdminRepository
         override suspend fun health(): ServerHealth = client.health()
 
         override suspend fun users(
-            limit: UInt?,
-            offset: UInt?,
-        ): AdminUserPage = client.adminUsers(limit, offset)
+            first: UInt?,
+            after: String?,
+        ): AdminUserPage = client.adminUsers(first, after)
 
         override suspend fun setUserDisabled(
             userId: String,
@@ -252,11 +252,9 @@ internal class BeamAdminRepository
         ) = client.setUserDisabled(userId, disabled)
 
         override suspend fun logs(
-            limit: UInt?,
-            offset: UInt?,
-        ): List<AdminLogEntry> = client.adminLogs(limit, offset)
-
-        override suspend fun logCount(): ULong = client.adminLogCount()
+            first: UInt?,
+            after: String?,
+        ): AdminLogPage = client.adminLogs(first, after)
 
         override suspend fun events(limit: UInt?): List<AdminEvent> = client.adminEvents(limit)
 

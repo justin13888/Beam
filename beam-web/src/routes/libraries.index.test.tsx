@@ -18,7 +18,7 @@ const testLibrary = factory.library({
 function serveLibraries(...extra: Parameters<typeof server.use>) {
 	server.use(
 		http.get(`${BASE_URL}/v1/libraries`, () =>
-			HttpResponse.json([testLibrary]),
+			HttpResponse.json(factory.connection([testLibrary])),
 		),
 		...extra,
 	);
@@ -94,7 +94,9 @@ describe("/libraries", () => {
 
 	it("shows the empty state and no cards when nothing is configured", async () => {
 		server.use(
-			http.get(`${BASE_URL}/v1/libraries`, () => HttpResponse.json([])),
+			http.get(`${BASE_URL}/v1/libraries`, () =>
+				HttpResponse.json(factory.connection([])),
+			),
 		);
 		renderRoute("/libraries");
 
