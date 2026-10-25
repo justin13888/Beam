@@ -1,5 +1,6 @@
 use beam_auth::utils::oidc::ClientAuthMethod;
 use confique::Config;
+use kynos::http::forwarded::{Network, ProxyHeader, TrustedProxies};
 use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -296,12 +297,31 @@ pub struct ServerConfig {
     #[config(env = "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE", default = 30)]
     pub rate_limit_device_poll_per_minute: u32,
 
-    /// Whether to trust a client-supplied `X-Forwarded-For` header when
-    /// deriving the rate-limit client key. Off by default: the header is
-    /// trivially spoofable unless the server sits behind a trusted proxy that
-    /// overwrites it. When off, the peer socket IP is used.
+    /// Whether to believe the one `X-Forwarded-For` hop nearest the server,
+    /// whatever its address -- for a managed load balancer whose addresses are
+    /// not known in advance. Off by default: the header is trivially spoofable
+    /// unless the server sits behind a proxy that appends to it. When off, and
+    /// [`Self::trusted_proxies`] is empty, the peer socket IP is used. Like
+    /// `BEAM_TRUSTED_PROXIES`, it governs both the rate-limit client key and
+    /// the address recorded on a session.
     #[config(env = "BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR", default = false)]
     pub rate_limit_trust_forwarded_for: bool,
+
+    /// The reverse proxies whose `X-Forwarded-For` is believed, as
+    /// comma-separated CIDR networks (`10.0.0.0/8, 2001:db8::/32`; one host is
+    /// `/32` or `/128`). **Empty -- the default -- believes nobody**: the
+    /// client address is the socket peer, whatever the request's headers say.
+    /// A request whose peer is in one of these networks is attributed to the
+    /// address that proxy appended, walking back through any further listed
+    /// proxies. Governs both the address recorded on a session and the rate
+    /// limiter's client key (issue #200). `/0` is refused; an entry that is
+    /// not a network is a startup error.
+    #[config(
+        env = "BEAM_TRUSTED_PROXIES",
+        parse_env = confique::env::parse::list_by_comma,
+        default = []
+    )]
+    pub trusted_proxies: Vec<String>,
 
     /// Where to send the anonymous weekly library report (issue #93,
     /// ADR-0019): an OTLP/HTTP metrics endpoint, used exactly as given --
@@ -386,6 +406,7 @@ impl fmt::Debug for ServerConfig {
             rate_limit_search_per_minute,
             rate_limit_device_poll_per_minute,
             rate_limit_trust_forwarded_for,
+            trusted_proxies,
             telemetry_url,
             playback_telemetry_enabled,
             playback_telemetry_retention_days,
@@ -441,6 +462,7 @@ impl fmt::Debug for ServerConfig {
                 "rate_limit_trust_forwarded_for",
                 rate_limit_trust_forwarded_for,
             )
+            .field("trusted_proxies", trusted_proxies)
             // Origin only: a collector URL may carry an ingest token in its
             // path or query, and the log line must not.
             .field(
@@ -600,6 +622,36 @@ impl ServerConfig {
         })
     }
 
+    /// Which hops the router believes about who the client is: the networks
+    /// in [`Self::trusted_proxies`], plus the one nearest hop
+    /// [`Self::rate_limit_trust_forwarded_for`] trusts wherever it is.
+    ///
+    /// Both read `X-Forwarded-For` alone -- the field a reverse proxy appends
+    /// to -- so a `Forwarded` the client wrote itself is never believed.
+    /// Trusting nobody, the default, means the socket peer.
+    ///
+    /// One policy for the whole router: the session's recorded address and the
+    /// rate limiter's client key are always the same address.
+    pub fn trusted_proxy_policy(&self) -> Result<TrustedProxies, ConfigError> {
+        let networks = self
+            .trusted_proxies
+            .iter()
+            .map(|entry| {
+                entry.parse::<Network>().map_err(|reason| {
+                    ConfigError::InvalidValue(
+                        "BEAM_TRUSTED_PROXIES".to_string(),
+                        format!("{entry:?} is not a network to trust: {reason}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(if self.rate_limit_trust_forwarded_for {
+            TrustedProxies::hops(ProxyHeader::XForwarded, 1).and_networks(networks)
+        } else {
+            TrustedProxies::networks(ProxyHeader::XForwarded, networks)
+        })
+    }
+
     /// What the anonymous library report is scheduled with (issue #93): the
     /// collector, its printable origin, and where deliveries are recorded --
     /// `BEAM_DATA_DIR/telemetry/library-report.json`.
@@ -679,6 +731,11 @@ impl ServerConfig {
             .map(|pattern| pattern.trim().to_string())
             .filter(|pattern| !pattern.is_empty())
             .collect();
+        self.trusted_proxies = std::mem::take(&mut self.trusted_proxies)
+            .into_iter()
+            .map(|network| network.trim().to_string())
+            .filter(|network| !network.is_empty())
+            .collect();
         self.oidc_admin_claim = empty_to_none(self.oidc_admin_claim.take());
         self.oidc_admin_value = empty_to_none(self.oidc_admin_value.take());
         self.telemetry_url = empty_to_none(self.telemetry_url.take());
@@ -736,6 +793,7 @@ impl ServerConfig {
         }
 
         self.scan_path_policy()?;
+        self.trusted_proxy_policy()?;
 
         // An expected admin-claim value is meaningless without the claim to
         // read it from -- reject the half-configured combination up front
@@ -1356,8 +1414,131 @@ mod tests {
         );
     }
 
-    /// `list_by_comma` splits without trimming, so `a, b,` arrives as
-    /// `["a", " b", ""]`; normalising makes it the two patterns it means.
+    /// Who `config`'s trusted-proxy policy says sent a request that arrived
+    /// from `peer` carrying `X-Forwarded-For: forwarded_for`.
+    fn resolved_client(config: &ServerConfig, peer: &str, forwarded_for: &str) -> String {
+        let mut headers = kynos::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            forwarded_for.parse().expect("a valid header value"),
+        );
+        let policy = config.trusted_proxy_policy().expect("the policy is valid");
+        kynos::http::forwarded::Forwarded::resolve(
+            &headers,
+            Some(peer.parse().expect("a socket address")),
+            &policy,
+        )
+        .client()
+        .expect("a socket peer always names a client")
+        .to_string()
+    }
+
+    /// Issue #200: with no proxy configured, a client cannot name its own
+    /// address -- the socket peer is the client whatever the header says.
+    #[test]
+    fn by_default_the_socket_peer_is_the_client() {
+        let config = ServerConfig::default();
+        assert_eq!(
+            resolved_client(&config, "203.0.113.7:41000", "1.1.1.1"),
+            "203.0.113.7"
+        );
+    }
+
+    /// A peer inside a listed network is believed about the hop before it, and
+    /// a listed proxy behind another is walked through; a peer outside every
+    /// listed network is not believed at all.
+    #[test]
+    fn only_a_peer_in_a_listed_network_is_believed() {
+        let config = ServerConfig {
+            trusted_proxies: vec!["10.0.0.0/8".to_string(), "2001:db8::/32".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolved_client(&config, "10.1.2.3:443", "198.51.100.4"),
+            "198.51.100.4",
+            "a listed proxy names the client"
+        );
+        assert_eq!(
+            resolved_client(&config, "10.1.2.3:443", "198.51.100.4, 10.9.9.9"),
+            "198.51.100.4",
+            "a chain of listed proxies is walked to the first unlisted hop"
+        );
+        assert_eq!(
+            resolved_client(&config, "10.1.2.3:443", "6.6.6.6, 198.51.100.4"),
+            "198.51.100.4",
+            "the walk stops at the first unlisted hop, so an entry the client \
+             wrote before it is never believed"
+        );
+        assert_eq!(
+            resolved_client(&config, "1.2.3.4:443", "198.51.100.4"),
+            "1.2.3.4",
+            "a peer outside every listed network is the client"
+        );
+        assert_eq!(
+            resolved_client(&config, "[2001:db8::1]:443", "198.51.100.4"),
+            "198.51.100.4",
+            "IPv6 networks are honoured"
+        );
+    }
+
+    /// `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR` adds the nearest hop wherever it
+    /// is, and composes with the listed networks rather than replacing them.
+    #[test]
+    fn the_nearest_hop_flag_composes_with_the_listed_networks() {
+        let flag_only = ServerConfig {
+            rate_limit_trust_forwarded_for: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolved_client(&flag_only, "203.0.113.7:443", "6.6.6.6, 198.51.100.4"),
+            "198.51.100.4",
+            "one hop is believed from any peer, and only one"
+        );
+
+        let both = ServerConfig {
+            rate_limit_trust_forwarded_for: true,
+            trusted_proxies: vec!["10.0.0.0/8".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolved_client(&both, "203.0.113.7:443", "198.51.100.4, 10.9.9.9"),
+            "198.51.100.4",
+            "the nearest hop, then a listed proxy behind it"
+        );
+    }
+
+    #[test]
+    fn an_invalid_trusted_proxy_fails_startup_and_names_the_entry() {
+        for entry in ["10.0.0.1", "10.0.0.0/33", "0.0.0.0/0", "proxy.internal/8"] {
+            let config = ServerConfig {
+                trusted_proxies: vec!["10.0.0.0/8".to_string(), entry.to_string()],
+                ..Default::default()
+            };
+            let err = config.validate_values().unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::InvalidValue(field, reason)
+                    if field == "BEAM_TRUSTED_PROXIES" && reason.contains(entry)),
+                "{entry}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_proxies_are_trimmed_and_empty_ones_dropped() {
+        let mut config = ServerConfig {
+            trusted_proxies: vec![
+                "10.0.0.0/8".to_string(),
+                " 192.0.2.1/32".to_string(),
+                String::new(),
+            ],
+            ..Default::default()
+        };
+        config.normalize_values();
+        assert_eq!(config.trusted_proxies, vec!["10.0.0.0/8", "192.0.2.1/32"]);
+        assert!(config.validate_values().is_ok());
+    }
+
     #[test]
     fn scan_ignore_patterns_are_trimmed_and_empty_ones_dropped() {
         let mut config = ServerConfig {

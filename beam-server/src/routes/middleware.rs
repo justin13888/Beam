@@ -15,7 +15,9 @@
 //! emitted spec entirely. A Kynos `Interceptor` declares what it answers with
 //! and what it reads, so both now appear on every operation it covers.
 
-use kynos::http::{Method, Request};
+use kynos::error::rejection::HeaderRejection;
+use kynos::extract::params::header::{DecodeHeaders, HeaderParams};
+use kynos::http::{HeaderMap, Method, Request};
 use kynos::middleware::{Continued, Interceptor, Next};
 use kynos::prelude::*;
 
@@ -52,12 +54,53 @@ fn allowed_origins(state: &AppState) -> Vec<String> {
 /// Declaring them is how it gets them: `Reads` arrives already extracted, so an
 /// interceptor cannot claim a parameter it never looks at, nor read one it did
 /// not declare.
-#[derive(Debug, Schema, HeaderParams)]
+///
+/// Declared but not *described*: a browser sets both on its own, so they are
+/// transport, not an input any client chooses, and describing them would put
+/// `Origin` and `Referer` on every operation this interceptor covers and in
+/// every generated client's parameters (issue #200).
+//
+// Hand-implemented rather than derived because `#[derive(HeaderParams)]` in
+// kynos 0.4.0 has no way to set `DESCRIBED = false`: getkono/kynos#1021.
+// Once a release carries that attribute, go back to the derive with it.
+#[derive(Debug)]
 pub struct OriginHeaders {
-    #[header(rename = "Origin")]
     pub origin: Option<String>,
-    #[header(rename = "Referer")]
     pub referer: Option<String>,
+}
+
+impl HeaderParams for OriginHeaders {
+    const NAMES: &'static [&'static str] = &["Origin", "Referer"];
+    const DESCRIBED: bool = false;
+}
+
+impl DecodeHeaders for OriginHeaders {
+    fn decode(headers: &HeaderMap) -> Result<Self, HeaderRejection> {
+        Ok(Self {
+            origin: optional_header(headers, "Origin")?,
+            referer: optional_header(headers, "Referer")?,
+        })
+    }
+}
+
+/// The first value of the optional header `name`, refused as the derive would
+/// refuse it when it is not printable ASCII.
+pub(crate) fn optional_header(
+    headers: &HeaderMap,
+    name: &str,
+) -> Result<Option<String>, HeaderRejection> {
+    headers
+        .get(name)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| HeaderRejection::Invalid {
+                    name: name.to_owned(),
+                    detail: "the value is not printable ASCII".to_owned(),
+                })
+        })
+        .transpose()
 }
 
 /// The 403 a cross-origin state-changing request gets.

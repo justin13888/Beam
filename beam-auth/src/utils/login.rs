@@ -22,7 +22,9 @@ use crate::utils::session_store::{SessionData, SessionStore};
 pub struct ClientContext {
     /// The `User-Agent`, hashed into the session's device fingerprint.
     pub user_agent: Option<String>,
-    /// The client address, as the deployment's proxy reports it.
+    /// The client address, as the transport resolved it: the socket peer, or
+    /// the client a trusted proxy names. Resolving it is the HTTP adapter's
+    /// job, so this crate never reads a forwarding header itself.
     pub ip: String,
 }
 
@@ -160,19 +162,6 @@ pub fn device_hash(user_agent: Option<&str>) -> String {
     // Session rows are compared by equality against this string, so it is
     // produced by the crate's one encoder rather than a local `{:x}`.
     crate::utils::hex::encode_lower(&Sha256::digest(user_agent.unwrap_or("").as_bytes()))
-}
-
-/// The client address, as the deployment's proxy reports it: the first entry
-/// of `X-Forwarded-For`, else `X-Real-IP`, else `unknown`.
-#[must_use]
-pub fn client_ip(forwarded_for: Option<&str>, real_ip: Option<&str>) -> String {
-    if let Some(first) = forwarded_for.and_then(|value| value.split(',').next()) {
-        let first = first.trim();
-        if !first.is_empty() {
-            return first.to_owned();
-        }
-    }
-    real_ip.map_or_else(|| "unknown".to_owned(), str::to_owned)
 }
 
 /// Picks a display name when the IdP doesn't release a `name` claim: the
@@ -356,21 +345,6 @@ mod tests {
             world.sessions.get(&minted.token).await.unwrap().is_none(),
             "an untouched session dies at the idle deadline"
         );
-    }
-
-    #[test]
-    fn the_forwarded_chain_yields_its_first_entry() {
-        assert_eq!(
-            client_ip(Some("203.0.113.7, 70.41.3.18"), Some("10.0.0.1")),
-            "203.0.113.7"
-        );
-    }
-
-    #[test]
-    fn the_real_ip_header_is_the_fallback() {
-        assert_eq!(client_ip(None, Some("10.0.0.1")), "10.0.0.1");
-        assert_eq!(client_ip(Some(" "), Some("10.0.0.1")), "10.0.0.1");
-        assert_eq!(client_ip(None, None), "unknown");
     }
 
     #[test]

@@ -71,6 +71,9 @@ host-side mounts in Compose)
 `BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE`, `BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`,
 `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR`
 
+**Reverse proxies** — `BEAM_TRUSTED_PROXIES` (CIDR networks whose `X-Forwarded-For` is believed for
+the session address and the rate-limit key; empty, the socket peer is the client)
+
 **Observability** — `BEAM_ENABLE_METRICS`, `RUST_LOG`
 
 **Anonymous library report** (opt-in, off unless set) — `BEAM_TELEMETRY_URL`; see

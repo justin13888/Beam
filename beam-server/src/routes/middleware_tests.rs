@@ -116,6 +116,18 @@ async fn a_malformed_header_is_rejected_rather_than_ignored() {
     );
 }
 
+/// A header that is not printable ASCII is refused, not read as absent:
+/// absent is the one case the check lets through, so an unreadable `Origin`
+/// treated as missing would be a way past it.
+#[tokio::test]
+async fn an_unreadable_origin_or_referer_is_refused_rather_than_treated_as_absent() {
+    let client = client(None);
+    for header in ["Origin", "Referer"] {
+        let status = post_with(&client, header, "http://évil.example").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{header}");
+    }
+}
+
 /// Non-browser clients send neither header and never carry the cookie, so
 /// `SameSite=Lax` is what actually stops the attack this guards against.
 #[tokio::test]

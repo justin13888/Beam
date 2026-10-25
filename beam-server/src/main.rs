@@ -7,7 +7,6 @@ use tracing::info;
 
 use beam_server::config::ServerConfig;
 use beam_server::routes::create_router;
-use beam_server::routes::rate_limit::trusted_proxies;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -178,12 +177,14 @@ async fn main() -> Result<()> {
         // rather than part of the description, so it is the one thing set here
         // instead of in `create_router` -- the exported document is unaffected.
         //
-        // Without it `ByClientAddress` reads the socket peer, and every client
-        // behind a proxy shares one bucket: a per-IP limit that is silently a
-        // global one. With more hops trusted than really exist, a client picks
-        // its own bucket by writing its own `X-Forwarded-For`. The mapping from
-        // configuration lives beside the limiter so a test can drive it.
-        .trusted_proxies(trusted_proxies(&config))
+        // Without it `ByClientAddress` and every session's recorded address
+        // read the socket peer, so every client behind a proxy shares one
+        // bucket: a per-IP limit that is silently a global one. With more hops
+        // trusted than really exist, a client picks its own bucket and its own
+        // session address by writing its own `X-Forwarded-For`. The mapping
+        // from configuration is `ServerConfig::trusted_proxy_policy`, already
+        // checked when the configuration loaded, so a test can drive it.
+        .trusted_proxies(config.trusted_proxy_policy()?)
         .build(state)
         .map_err(|e| eyre!("The router does not describe itself: {e}"))?;
 

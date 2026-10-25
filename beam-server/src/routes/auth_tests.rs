@@ -151,6 +151,25 @@ mod tests {
         session_store: Arc<InMemorySessionStore>,
         config: OidcRuntimeConfig,
     ) -> Harness {
+        make_harness_behind(
+            oidc_client,
+            user_repo,
+            session_store,
+            config,
+            |_server_config| {},
+        )
+    }
+
+    /// As [`make_harness_sharing_store`], with the router's trusted-proxy
+    /// policy taken from a `ServerConfig` `adjust` writes -- through
+    /// `ServerConfig::trusted_proxy_policy`, the mapping `main` applies.
+    fn make_harness_behind(
+        oidc_client: FakeOidcClient,
+        user_repo: Arc<InMemoryUserRepository>,
+        session_store: Arc<InMemorySessionStore>,
+        config: OidcRuntimeConfig,
+        adjust: impl FnOnce(&mut crate::config::ServerConfig),
+    ) -> Harness {
         let oidc_client = Arc::new(oidc_client);
         let oidc_dyn: Arc<dyn OidcClient> = oidc_client.clone();
         let pending_auth_store: Arc<dyn PendingAuthStore> =
@@ -169,6 +188,10 @@ mod tests {
         server_config.cookie_secure = Some(config.cookie_secure);
         server_config.session_idle_days = config.session_idle_days;
         server_config.session_max_days = config.session_max_days;
+        adjust(&mut server_config);
+        let trusted_proxies = server_config
+            .trusted_proxy_policy()
+            .expect("the test configuration names valid networks");
 
         let services = AppServices {
             hash: base.services.hash.clone(),
@@ -217,6 +240,7 @@ mod tests {
                     oidc_delete_session,
                 ]),
             )
+            .trusted_proxies(trusted_proxies)
             .build(state)
             .expect("the auth router describes itself");
 
@@ -981,6 +1005,93 @@ mod tests {
         assert_eq!(
             instant("last_active_at"),
             signed_in_at + chrono::Duration::hours(2)
+        );
+    }
+
+    /// Signs in through a callback that arrives from the socket `peer`
+    /// carrying every forwarding header a client could forge, and returns the
+    /// address `GET /v1/sessions` then reports for that session.
+    async fn session_ip_after_callback_from(harness: &Harness, peer: &str) -> String {
+        let (state_cookie, _) = do_login(harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+        let response = harness
+            .client
+            .get(&format!(
+                "/v1/auth/callback?state={}&code=fake-code",
+                begin.state
+            ))
+            .cookie(STATE_COOKIE, &state_cookie)
+            .peer(peer.parse().expect("a socket address"))
+            .header("X-Forwarded-For", "198.51.100.4")
+            .header("X-Real-IP", "192.0.2.99")
+            .header("User-Agent", "BeamTV/1.0")
+            .send()
+            .await;
+        response.assert_status(StatusCode::FOUND);
+        let session_cookie = live_cookie(&response, SESSION_COOKIE)
+            .expect("a session was minted")
+            .to_owned();
+
+        let listed = harness
+            .client
+            .get("/v1/sessions")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
+            .await;
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = listed.json::<Value>();
+        let sessions = body["items"].as_array().expect("a connection's items");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0]["device_hash"],
+            beam_auth::utils::login::device_hash(Some("BeamTV/1.0")),
+            "the User-Agent still reaches the session's device fingerprint"
+        );
+        sessions[0]["ip"]
+            .as_str()
+            .expect("the session's address is a string")
+            .to_owned()
+    }
+
+    /// Issue #200: with no proxy trusted -- the default -- the session records
+    /// the socket peer, and neither `X-Forwarded-For` nor `X-Real-IP` the
+    /// client wrote changes it.
+    #[tokio::test]
+    async fn a_session_records_the_socket_peer_when_no_proxy_is_trusted() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "peer@example.com",
+            true,
+        )));
+        assert_eq!(
+            session_ip_after_callback_from(&harness, "203.0.113.7:41000").await,
+            "203.0.113.7"
+        );
+    }
+
+    /// Behind a proxy listed in `BEAM_TRUSTED_PROXIES`, the session records the
+    /// client that proxy appended to `X-Forwarded-For`; a peer outside the
+    /// list is still recorded as itself.
+    #[tokio::test]
+    async fn a_session_records_the_client_a_trusted_proxy_names() {
+        let behind_proxy = || {
+            make_harness_behind(
+                FakeOidcClient::with_identity(identity("proxied@example.com", true)),
+                Arc::new(InMemoryUserRepository::default()),
+                Arc::new(InMemorySessionStore::default()),
+                test_config(),
+                |server_config| server_config.trusted_proxies = vec!["10.0.0.0/8".to_owned()],
+            )
+        };
+
+        assert_eq!(
+            session_ip_after_callback_from(&behind_proxy(), "10.1.2.3:443").await,
+            "198.51.100.4",
+            "the listed proxy names the client"
+        );
+        assert_eq!(
+            session_ip_after_callback_from(&behind_proxy(), "203.0.113.7:41000").await,
+            "203.0.113.7",
+            "a peer outside the list cannot name its own address"
         );
     }
 

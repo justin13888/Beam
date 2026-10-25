@@ -98,6 +98,10 @@ rolling back to the previous image is safe after a failed upgrade. Only `up` is 
      If TLS terminates in front of a plain-HTTP `BEAM_SERVER_URL`, the server refuses to start
      until you either use the public HTTPS URL or set `BEAM_COOKIE_SECURE` explicitly (see
      [`configuration.md`](configuration.md)).
+   - Name your reverse proxy in `BEAM_TRUSTED_PROXIES` (its address or network as CIDR, e.g.
+     `172.18.0.0/16` for a compose network), so sessions and the rate limiter see each client's
+     own address rather than the proxy's. Left empty, every request is attributed to its socket
+     peer -- the proxy -- and no `X-Forwarded-For` a client sends is ever believed.
    - Configure `BEAM_OIDC_ISSUER`/`BEAM_OIDC_CLIENT_ID`/`BEAM_OIDC_CLIENT_SECRET` against a real
      OIDC provider; register `<BEAM_SERVER_URL>/v1/auth/callback` as the redirect URI. Dex's
      static users are for local development only — never enable the `dev-idp` profile in
