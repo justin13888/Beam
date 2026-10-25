@@ -446,8 +446,9 @@ it would break seeking.
 
 **What to do.** Wait for `Retry-After`. Operators: raise `BEAM_RATE_LIMIT_AUTH_PER_MINUTE`,
 `BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE` or `BEAM_RATE_LIMIT_SEARCH_PER_MINUTE`. If every user shares one bucket because they arrive through a
-proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — but only behind a proxy that **overwrites**
-`X-Forwarded-For`, since a proxy that appends lets a client forge the header and evade the limit.
+proxy, name that proxy in `BEAM_TRUSTED_PROXIES` as CIDR. Beam then keys each client on the
+`X-Forwarded-For` entry the proxy appended (the same address it records on the session), so a
+client cannot choose its own bucket by writing the header itself.
 
 ### playback-telemetry-disabled
 

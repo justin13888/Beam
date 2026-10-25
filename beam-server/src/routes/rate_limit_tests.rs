@@ -23,7 +23,7 @@ use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::{TestClient, TestResponse};
 
-use super::{BeamRateLimit, Class, trusted_proxies};
+use super::{BeamRateLimit, Class};
 use crate::config::ServerConfig;
 use crate::routes::test_support::make_app_state_with_clock;
 use crate::state::AppState;
@@ -53,7 +53,10 @@ fn harness(class: Class, adjust: impl FnOnce(&mut ServerConfig)) -> Harness {
     let state = make_app_state_with_clock(adjust, clock.clone());
     // The same mapping `main` applies, so the trusted-proxy tests below drive
     // the policy the server actually runs with.
-    let proxies = trusted_proxies(&state.config);
+    let proxies = state
+        .config
+        .trusted_proxy_policy()
+        .expect("the test configuration names valid networks");
     let service = Router::new()
         .mount(kynos::routes![probe])
         .intercept(BeamRateLimit::interceptor(class))
@@ -255,6 +258,41 @@ async fn a_client_written_forwarded_does_not_key_the_bucket() {
             .status(),
         StatusCode::TOO_MANY_REQUESTS,
         "a `Forwarded` must not pick a bucket when only `X-Forwarded-For` is trusted"
+    );
+}
+
+/// `BEAM_TRUSTED_PROXIES` keys the limiter too: the router has one policy, so
+/// a listed proxy's clients get a bucket each, and a peer outside the list is
+/// keyed by itself however its `X-Forwarded-For` varies (issue #200).
+#[tokio::test]
+async fn a_listed_proxy_keys_the_bucket_and_an_unlisted_peer_does_not() {
+    let Harness { client, .. } = harness(Class::Auth, |config| {
+        config.trusted_proxies = vec!["203.0.113.0/24".to_owned()];
+        config.rate_limit_auth_per_minute = 1;
+    });
+
+    for forwarded in ["192.0.2.1", "192.0.2.2"] {
+        assert_eq!(
+            through_the_proxy(&client, "X-Forwarded-For", forwarded)
+                .await
+                .status(),
+            StatusCode::OK,
+            "{forwarded} behind the listed proxy has a budget of its own"
+        );
+    }
+
+    let unlisted = |forwarded: &'static str| {
+        client
+            .get("/probe")
+            .peer(OTHER_CLIENT.parse().unwrap())
+            .header("X-Forwarded-For", forwarded)
+            .send()
+    };
+    assert_eq!(unlisted("192.0.2.3").await.status(), StatusCode::OK);
+    assert_eq!(
+        unlisted("192.0.2.4").await.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "an unlisted peer cannot buy a fresh budget by varying the header"
     );
 }
 

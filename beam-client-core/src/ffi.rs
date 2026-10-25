@@ -548,7 +548,7 @@ impl BeamClient {
     ) -> Result<DeviceLoginPrompt, BeamError> {
         let client = self.client_for(&server_id)?;
         let started = self
-            .send(&server_id, client.start_device_login(None))
+            .send(&server_id, client.start_device_login())
             .await?
             .into_inner();
         Ok(DeviceLoginPrompt {
@@ -581,7 +581,7 @@ impl BeamClient {
         let client = self.client_for(&server_id)?;
         let body = crate::api::types::DeviceLoginPoll { device_handle };
         let answer = self
-            .send(&server_id, client.poll_device_login(None, &body))
+            .send(&server_id, client.poll_device_login(&body))
             .await?
             .into_inner();
         match answer {
@@ -699,7 +699,7 @@ impl BeamClient {
         let response = self
             .send(
                 &server_id,
-                client.get_media_sources(parse_uuid("media_id", &media_id)?, None),
+                client.get_media_sources(parse_uuid("media_id", &media_id)?),
             )
             .await?;
 
@@ -953,7 +953,7 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn genres(&self) -> Result<Vec<String>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = self.send(&server_id, client.list_genres(None)).await?;
+        let response = self.send(&server_id, client.list_genres()).await?;
         // A connection that is never paged: `items` is every genre.
         Ok(response.into_inner().items)
     }
@@ -1008,7 +1008,7 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn libraries(&self) -> Result<Vec<LibrarySummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = self.send(&server_id, client.list_libraries(None)).await?;
+        let response = self.send(&server_id, client.list_libraries()).await?;
         // A connection that is never paged: `items` is every library.
         Ok(response
             .into_inner()
@@ -1028,7 +1028,7 @@ impl BeamClient {
         let response = self
             .send(
                 &server_id,
-                client.get_library(parse_uuid("library_id", &library_id)?, None),
+                client.get_library(parse_uuid("library_id", &library_id)?),
             )
             .await?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
@@ -1054,8 +1054,6 @@ impl BeamClient {
             let params = crate::api::GetLibraryFilesParams {
                 first: Some(LIBRARY_FILES_PAGE),
                 after: after.take(),
-                origin: None,
-                referer: None,
             };
             let page = self
                 .send(
@@ -1097,8 +1095,6 @@ impl BeamClient {
         let (server_id, client, record) = self.active_context()?;
         let params = crate::api::GetContinueWatchingParams {
             first: limit.map(i64::from),
-            origin: None,
-            referer: None,
         };
         let response = self
             .send(&server_id, client.get_continue_watching(params))
@@ -1143,8 +1139,6 @@ impl BeamClient {
         let params = crate::api::GetHistoryParams {
             first: first.map(i64::from),
             after,
-            origin: None,
-            referer: None,
         };
         let response = self
             .send(&server_id, client.get_history(params))
@@ -1226,8 +1220,7 @@ impl BeamClient {
             duration_secs: duration,
             position_secs: position,
         };
-        match TransportFailure::capture(client.report_playback_progress(wire_file_id, None, &body))
-            .await
+        match TransportFailure::capture(client.report_playback_progress(wire_file_id, &body)).await
         {
             Ok(response) => {
                 queue.remove(&file_id).await?;
@@ -1313,12 +1306,8 @@ impl BeamClient {
                 duration_secs: entry.duration_secs,
                 position_secs: entry.position_secs,
             };
-            match TransportFailure::capture(client.report_playback_progress(
-                wire_file_id,
-                None,
-                &body,
-            ))
-            .await
+            match TransportFailure::capture(client.report_playback_progress(wire_file_id, &body))
+                .await
             {
                 Ok(_) => {
                     queue.remove(&entry.file_id).await?;
@@ -1486,7 +1475,7 @@ impl BeamClient {
             let size = u32::try_from(batch.len()).unwrap_or(u32::MAX);
             let body = batch_body(client_kind, &batch);
             let Err(failure) =
-                TransportFailure::capture(client.report_playback_telemetry(None, &body)).await
+                TransportFailure::capture(client.report_playback_telemetry(&body)).await
             else {
                 outcome.sent = outcome.sent.saturating_add(size);
                 continue;
@@ -1554,8 +1543,6 @@ impl BeamClient {
                 .map(|day| parse_day("from", day))
                 .transpose()?,
             to: to.as_deref().map(|day| parse_day("to", day)).transpose()?,
-            origin: None,
-            referer: None,
         };
         let response = self
             .send(&server_id, client.get_playback_telemetry(params))
@@ -1572,7 +1559,7 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn sessions(&self) -> Result<Vec<DeviceSession>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = self.send(&server_id, client.list_sessions(None)).await?;
+        let response = self.send(&server_id, client.list_sessions()).await?;
         // A connection that is never paged: `items` is every session.
         Ok(response
             .into_inner()
@@ -1608,7 +1595,7 @@ impl BeamClient {
     /// Propagates transport and server failures.
     pub async fn logout_everywhere(&self) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        self.send(&server_id, client.logout_all(None)).await?;
+        self.send(&server_id, client.logout_all()).await?;
 
         let effects = self.apply(&server_id, SessionEvent::LogoutRequested)?;
         self.perform(&server_id, &effects, None).await
@@ -1623,7 +1610,7 @@ impl BeamClient {
     /// Returns [`BeamError::Forbidden`] for a non-administrator.
     pub async fn admin_status(&self) -> Result<AdminStatus, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = self.send(&server_id, client.get_admin_status(None)).await?;
+        let response = self.send(&server_id, client.get_admin_status()).await?;
         Ok(AdminStatus::from_generated(response.into_inner()))
     }
 
@@ -1642,8 +1629,6 @@ impl BeamClient {
         let params = crate::api::ListAdminUsersParams {
             first: first.map(i64::from),
             after,
-            origin: None,
-            referer: None,
         };
         let response = self
             .send(&server_id, client.list_admin_users(params))
@@ -1675,11 +1660,8 @@ impl BeamClient {
         let wire_user_id = parse_uuid("user_id", &user_id)?;
         let (server_id, client, _) = self.active_context()?;
         let body = crate::api::types::UpdateAdminUserRequest { disabled };
-        self.send(
-            &server_id,
-            client.update_admin_user(wire_user_id, None, &body),
-        )
-        .await?;
+        self.send(&server_id, client.update_admin_user(wire_user_id, &body))
+            .await?;
         Ok(())
     }
 
@@ -1699,8 +1681,6 @@ impl BeamClient {
         let params = crate::api::GetAdminLogsParams {
             first: first.map(i64::from),
             after,
-            origin: None,
-            referer: None,
         };
         let response = self
             .send(&server_id, client.get_admin_logs(params))
@@ -1736,8 +1716,6 @@ impl BeamClient {
         let (server_id, client, _) = self.active_context()?;
         let params = crate::api::GetAdminEventsParams {
             first: limit.map(i64::from),
-            origin: None,
-            referer: None,
         };
         let response = self
             .send(&server_id, client.get_admin_events(params))
@@ -1763,9 +1741,7 @@ impl BeamClient {
     ) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let body = crate::api::types::CreateLibraryRequest { name, root_path };
-        let response = self
-            .send(&server_id, client.create_library(None, &body))
-            .await?;
+        let response = self.send(&server_id, client.create_library(&body)).await?;
         Ok(LibrarySummary::from_generated(response.into_inner()))
     }
 
@@ -1778,7 +1754,7 @@ impl BeamClient {
         let (server_id, client, _) = self.active_context()?;
         self.send(
             &server_id,
-            client.delete_library(parse_uuid("library_id", &library_id)?, None),
+            client.delete_library(parse_uuid("library_id", &library_id)?),
         )
         .await?;
         Ok(())
@@ -1797,7 +1773,7 @@ impl BeamClient {
     pub async fn scan_library(&self, library_id: String) -> Result<(), BeamError> {
         let wire_library_id = parse_uuid("library_id", &library_id)?;
         let (server_id, client, _) = self.active_context()?;
-        self.send(&server_id, client.scan_library(wire_library_id, None))
+        self.send(&server_id, client.scan_library(wire_library_id))
             .await?;
         Ok(())
     }
@@ -1836,7 +1812,7 @@ impl BeamClient {
     /// Propagates transport failures.
     pub async fn health(&self) -> Result<ServerHealth, BeamError> {
         let (server_id, client, _) = self.active_context()?;
-        let response = self.send(&server_id, client.get_health(None)).await?;
+        let response = self.send(&server_id, client.get_health()).await?;
         Ok(ServerHealth::from_generated(response.into_inner()))
     }
 }
@@ -2168,7 +2144,7 @@ impl BeamClient {
         if let Some(hit) = cache.read().expect("metadata lock").get(&key) {
             return Ok(hit.clone());
         }
-        let response = TransportFailure::capture(client.get_media_detail(media_id, None)).await?;
+        let response = TransportFailure::capture(client.get_media_detail(media_id)).await?;
         let detail = MediaDetail::from_generated(response.into_inner(), record);
         cache
             .write()
@@ -2392,7 +2368,7 @@ impl BeamClient {
 
     async fn fetch_me(&self, server_id: &str) -> Result<UserSummary, BeamError> {
         let client = self.client_for(server_id)?;
-        let response = self.send(server_id, client.get_current_user(None)).await?;
+        let response = self.send(server_id, client.get_current_user()).await?;
         let me = response.into_inner();
         Ok(UserSummary {
             id: me.id.to_string(),
@@ -4379,7 +4355,7 @@ mod tests {
         let sent_before = backend.recorded().len();
 
         let refused = held
-            .get_current_user(None)
+            .get_current_user()
             .await
             .expect_err("no cookie, no request");
 

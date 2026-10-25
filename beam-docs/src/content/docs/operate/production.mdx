@@ -40,9 +40,12 @@ before you depend on an instance.
 - Leave `/metrics` off the proxy. It is unauthenticated. Better still, leave
   `BEAM_ENABLE_METRICS` off unless something scrapes it.
 - Keep rate limiting on. It defends `/v1/auth/login`, `/v1/auth/callback` and `/v1/media`.
-- Behind a proxy, set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` — otherwise every user shares one
-  bucket. Only do this behind a proxy that **overwrites** `X-Forwarded-For`; if it appends, a
-  client can forge the header and evade the limit entirely.
+- Behind a proxy, name it in `BEAM_TRUSTED_PROXIES` as CIDR (for example `172.18.0.0/16` for a
+  Compose network). Otherwise every request is attributed to the proxy: every user shares one
+  rate-limit bucket, and every session records the proxy's address. Beam believes only the
+  `X-Forwarded-For` entry a listed proxy **appended**, so an entry a client wrote itself is never
+  used. Set `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR=true` instead only when the proxy's address is not
+  known in advance and nothing but that proxy can reach the server.
 
 **Storage**
 

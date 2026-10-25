@@ -60,7 +60,6 @@ use std::time::{Duration, Instant};
 
 use kynos::error::problem::ProblemType;
 use kynos::http::Request;
-use kynos::http::forwarded::{ProxyHeader, TrustedProxies};
 use kynos::middleware::rate_limit::decision::{Decision, RateLimitPolicy, ServiceLimit};
 use kynos::middleware::rate_limit::key::{ByClientAddress, RateLimitKey};
 use kynos::middleware::rate_limit::{Legacy, RateLimit};
@@ -68,22 +67,6 @@ use kynos::router::operation::Route;
 
 use crate::config::ServerConfig;
 use crate::state::AppState;
-
-/// Which hops the router believes about who the client is, from
-/// `BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR`.
-///
-/// Trusting is one hop of `X-Forwarded-For` -- the field the variable is
-/// named for, and the one a reverse proxy appends to. Kynos then reads only
-/// that field: a `Forwarded` the client wrote itself never picks a bucket.
-/// Not trusting means the socket peer, whatever either header says.
-#[must_use]
-pub fn trusted_proxies(config: &ServerConfig) -> TrustedProxies {
-    if config.rate_limit_trust_forwarded_for {
-        TrustedProxies::hops(ProxyHeader::XForwarded, 1)
-    } else {
-        TrustedProxies::none()
-    }
-}
 
 /// One client's bucket: `tokens` available as of `last_refill`.
 #[derive(Debug)]

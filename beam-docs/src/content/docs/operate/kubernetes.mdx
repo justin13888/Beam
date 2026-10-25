@@ -177,8 +177,9 @@ development default (`http://localhost:5173`), which is fine when only the nativ
 - Keep `service.type` at `ClusterIP`. A `NodePort` or `LoadBalancer` Service exposes the server's
   whole port directly, `/metrics` (when enabled) and `/openapi` included, and lets clients bypass
   the ingress.
-- With an ingress in front of a `ClusterIP` Service, the rate limiter counts requests per client
-  using the `X-Forwarded-For` header the ingress controller sets. With a `NodePort` or
+- With an ingress in front of a `ClusterIP` Service, the rate limiter counts requests per client,
+  and each session records the client's address, using the `X-Forwarded-For` entry the ingress
+  controller appends. With a `NodePort` or
   `LoadBalancer` Service it uses the connecting address instead, since a client reaching the server
   directly could forge that header. `rateLimit.trustForwardedFor` overrides either default.
 - `metrics.enabled: true` turns on `/metrics` and annotates the pod for a Prometheus scraper inside

@@ -28,9 +28,7 @@ use std::time::Duration;
 use beam_auth::utils::device_auth_store::{
     Claim, DeviceAuthStore, NewDeviceAuth, generate_handle, hash_handle,
 };
-use beam_auth::utils::login::{
-    ClientContext, LoginError, MintedSession, client_ip, complete_login,
-};
+use beam_auth::utils::login::{ClientContext, LoginError, MintedSession, complete_login};
 use beam_auth::utils::models::User;
 use beam_auth::utils::oidc::{DevicePoll, OidcClient, OidcError};
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
@@ -38,6 +36,10 @@ use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
 use beam_auth::utils::session_store::{SessionData, SessionStore};
 use chrono::{DateTime, Utc};
+use kynos::error::rejection::HeaderRejection;
+use kynos::extract::params::header::{DecodeHeaders, HeaderParams};
+use kynos::http::HeaderMap;
+use kynos::http::forwarded::Forwarded;
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
 use kynos::response::headers::WithHeaders;
@@ -46,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::routes::api_error::{InternalError, SESSION_COOKIE, SessionAuth};
+use crate::routes::middleware::optional_header;
 use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
@@ -568,15 +571,34 @@ impl From<CookieEncodingError> for InternalError {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// The proxy-supplied headers the session record stores.
-#[derive(Debug, Schema, HeaderParams)]
+/// The header the session record's device fingerprint is taken from.
+///
+/// Declared but not *described*: every HTTP client sends a `User-Agent` of its
+/// own accord, so it is transport, not an operation input, and describing it
+/// would add a `user_agent` argument to every generated client (issue #200).
+/// The client address is not a header here at all: it is [`Forwarded`],
+/// resolved by the router's trusted-proxy policy, so a client cannot name its
+/// own address by writing `X-Forwarded-For`.
+//
+// Hand-implemented rather than derived because `#[derive(HeaderParams)]` in
+// kynos 0.4.0 has no way to set `DESCRIBED = false`: getkono/kynos#1021.
+// Once a release carries that attribute, go back to the derive with it.
+#[derive(Debug)]
 pub struct ClientHeaders {
-    #[header(rename = "User-Agent")]
     pub user_agent: Option<String>,
-    #[header(rename = "X-Forwarded-For")]
-    pub x_forwarded_for: Option<String>,
-    #[header(rename = "X-Real-IP")]
-    pub x_real_ip: Option<String>,
+}
+
+impl HeaderParams for ClientHeaders {
+    const NAMES: &'static [&'static str] = &["User-Agent"];
+    const DESCRIBED: bool = false;
+}
+
+impl DecodeHeaders for ClientHeaders {
+    fn decode(headers: &HeaderMap) -> Result<Self, HeaderRejection> {
+        Ok(Self {
+            user_agent: optional_header(headers, "User-Agent")?,
+        })
+    }
 }
 
 fn build_cookie(name: &str, value: String, path: &str, secure: bool, max_age: Duration) -> Cookie {
@@ -609,13 +631,17 @@ fn sanitize_redirect_path(raw: Option<&str>) -> String {
     }
 }
 
-impl ClientHeaders {
-    /// The session record's view of the caller.
-    fn context(&self) -> ClientContext {
-        ClientContext {
-            user_agent: self.user_agent.clone(),
-            ip: client_ip(self.x_forwarded_for.as_deref(), self.x_real_ip.as_deref()),
-        }
+/// The session record's view of the caller: its `User-Agent`, and the client
+/// address as far as the trusted-proxy policy (`BEAM_TRUSTED_PROXIES`) lets
+/// the forwarding fields be believed -- the socket peer when nobody is trusted.
+fn client_context(headers: &ClientHeaders, forwarded: &Forwarded) -> ClientContext {
+    ClientContext {
+        user_agent: headers.user_agent.clone(),
+        // `None` only where no socket and no trusted hop named an address: an
+        // in-process request, or trust ending on `for=unknown`.
+        ip: forwarded
+            .client()
+            .map_or_else(|| "unknown".to_owned(), |address| address.to_string()),
     }
 }
 
@@ -677,10 +703,10 @@ pub async fn oidc_login(
 
 /// Completes the Authorization Code + PKCE exchange, JIT-provisions or
 /// looks up the user, mints a session, and redirects back into the web app.
-// Eight parameters, and none of them is an argument in the sense the lint
+// Nine parameters, and none of them is an argument in the sense the lint
 // means. Nothing calls this function: Kynos resolves each parameter from the
 // request or the context, and the list *is* the operation's declared contract --
-// three extractors and five injected dependencies. Collapsing them into a
+// four extractors and five injected dependencies. Collapsing them into a
 // struct would hide the contract from the description without removing a single
 // dependency. `expect` rather than `allow` so it reports itself if the
 // signature ever shrinks below the threshold.
@@ -693,6 +719,7 @@ pub async fn oidc_callback(
     Query(query): Query<CallbackQuery>,
     Cookies(cookies): Cookies<AuthCookies>,
     Headers(headers): Headers<ClientHeaders>,
+    forwarded: Forwarded,
     Inject(oidc_client): Inject<Arc<dyn OidcClient>>,
     Inject(pending_auth_store): Inject<Arc<dyn PendingAuthStore>>,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
@@ -750,7 +777,7 @@ pub async fn oidc_callback(
         absolute_ttl_secs,
     } = complete_login(
         &identity,
-        &headers.context(),
+        &client_context(&headers, &forwarded),
         user_repo.as_ref(),
         session_store.as_ref(),
         &config,
@@ -858,9 +885,17 @@ pub async fn start_device_login(
 //
 // Replace this block with the issue link once filed. Until a release closes
 // it, the one described scheme is the one every client uses.
+//
+// Eight parameters, for the reason `oidc_callback` gives: each is a declared
+// extractor or injection, and nothing calls this function.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter is a declared extractor or injection, not a caller-supplied argument"
+)]
 #[kynos::post("/auth/device/token", tag = Auth, operation_id = "pollDeviceLogin")]
 pub async fn poll_device_login(
     Headers(headers): Headers<ClientHeaders>,
+    forwarded: Forwarded,
     Inject(oidc_client): Inject<Arc<dyn OidcClient>>,
     Inject(device_auth_store): Inject<Arc<dyn DeviceAuthStore>>,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
@@ -1000,7 +1035,7 @@ pub async fn poll_device_login(
         absolute_ttl_secs,
     } = complete_login(
         &identity,
-        &headers.context(),
+        &client_context(&headers, &forwarded),
         user_repo.as_ref(),
         session_store.as_ref(),
         &config,

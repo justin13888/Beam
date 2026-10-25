@@ -93,6 +93,62 @@ mod tests {
             .expect("the contract exports as OpenAPI 3.2");
     }
 
+    /// No operation describes a transport header as one of its parameters
+    /// (issue #200).
+    ///
+    /// The headers a browser or HTTP stack sets on its own -- the ones
+    /// `EnforceSameOrigin` and the session record read, plus the forwarding
+    /// fields the trusted-proxy policy reads -- are not inputs a client
+    /// chooses, and describing them puts an argument for each in every
+    /// generated client. The names come from the groups' own `NAMES`, so a
+    /// header added to either group is covered without touching this test.
+    #[test]
+    fn no_operation_describes_a_transport_header() {
+        use kynos::extract::params::header::HeaderParams;
+
+        use crate::routes::auth::ClientHeaders;
+        use crate::routes::middleware::OriginHeaders;
+
+        let transport: BTreeSet<String> = OriginHeaders::NAMES
+            .iter()
+            .chain(ClientHeaders::NAMES)
+            .chain(&["Forwarded", "X-Forwarded-For", "X-Real-IP"])
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+
+        let exported = create_router()
+            .openapi_as(SpecVersion::V3_2)
+            .expect("the contract exports");
+        let exported = serde_json::to_value(&exported).expect("the document serializes");
+
+        let described: BTreeSet<(String, String, String)> = exported["paths"]
+            .as_object()
+            .expect("paths is an object")
+            .iter()
+            .flat_map(|(path, item)| {
+                item.as_object()
+                    .expect("a path item is an object")
+                    .iter()
+                    .filter(|(method, _)| METHODS.contains(&method.as_str()))
+                    .flat_map(move |(method, operation)| {
+                        operation["parameters"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|parameter| parameter["in"] == "header")
+                            .filter_map(|parameter| parameter["name"].as_str())
+                            .map(move |name| (path.clone(), method.clone(), name.to_owned()))
+                    })
+            })
+            .filter(|(_, _, name)| transport.contains(&name.to_ascii_lowercase()))
+            .collect();
+
+        assert!(
+            described.is_empty(),
+            "transport headers described as operation parameters: {described:#?}"
+        );
+    }
+
     /// The exported operation set is the one the committed contract carries.
     ///
     /// Compared against `beam-web/openapi.json`, which is committed and is what
