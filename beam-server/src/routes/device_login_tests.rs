@@ -156,7 +156,14 @@ fn build(
         clock.clone(),
         None,
     );
+    // The router's trusted-proxy policy is the one `main` applies, taken from
+    // the configuration `adjust` wrote.
+    let trusted_proxies = base
+        .config
+        .trusted_proxy_policy()
+        .expect("the test configuration names valid networks");
     let service = create_router()
+        .trusted_proxies(trusted_proxies)
         .build(state)
         .expect("the served router describes itself");
 
@@ -433,6 +440,84 @@ async fn approval_mints_a_session_the_client_presents_as_the_cookie() {
         .await
         .assert_status(StatusCode::BAD_REQUEST)
         .assert_problem_type(&problem("device-login-invalid"));
+}
+
+/// Completes a device login whose approving poll arrives from the socket
+/// `peer` carrying every forwarding header a client could forge, and returns
+/// the address `GET /v1/sessions` then reports for the minted session.
+async fn session_ip_after_device_poll_from(harness: &Harness, peer: &str) -> String {
+    let handle = started(harness).await;
+    let response = harness
+        .client
+        .post("/v1/auth/device/token")
+        .json(&json!({ "device_handle": handle }))
+        .peer(peer.parse().expect("a socket address"))
+        .header("X-Forwarded-For", "198.51.100.4")
+        .header("X-Real-IP", "192.0.2.99")
+        .send()
+        .await;
+    response.assert_status(StatusCode::OK);
+    let token = response.json::<Value>()["session_token"]
+        .as_str()
+        .expect("a session token")
+        .to_owned();
+
+    let listed = harness
+        .client
+        .get("/v1/sessions")
+        .cookie(SESSION_COOKIE, &token)
+        .send()
+        .await;
+    listed.assert_status(StatusCode::OK);
+    let body = listed.json::<Value>();
+    let sessions = body["items"].as_array().expect("a connection's items");
+    assert_eq!(sessions.len(), 1);
+    sessions[0]["ip"]
+        .as_str()
+        .expect("the session's address is a string")
+        .to_owned()
+}
+
+fn approving_idp() -> Arc<FakeOidcClient> {
+    Arc::new(
+        FakeOidcClient::default()
+            .with_device_script(vec![Ok(DevicePoll::Complete(identity(json!({}))))]),
+    )
+}
+
+/// Issue #200: with no proxy trusted -- the default -- a device login records
+/// the socket peer of the approving poll, whatever forwarding headers it
+/// carries.
+#[tokio::test]
+async fn a_device_session_records_the_socket_peer_when_no_proxy_is_trusted() {
+    let harness = harness_with(approving_idp(), |_| {});
+    assert_eq!(
+        session_ip_after_device_poll_from(&harness, PEER).await,
+        "203.0.113.7"
+    );
+}
+
+/// Behind a proxy listed in `BEAM_TRUSTED_PROXIES`, a device login records
+/// the client that proxy appended to `X-Forwarded-For`; a peer outside the
+/// list is still recorded as itself.
+#[tokio::test]
+async fn a_device_session_records_the_client_a_trusted_proxy_names() {
+    let behind_proxy = || {
+        harness_with(approving_idp(), |config| {
+            config.trusted_proxies = vec!["10.0.0.0/8".to_owned()];
+        })
+    };
+
+    assert_eq!(
+        session_ip_after_device_poll_from(&behind_proxy(), "10.1.2.3:443").await,
+        "198.51.100.4",
+        "the listed proxy names the client"
+    );
+    assert_eq!(
+        session_ip_after_device_poll_from(&behind_proxy(), PEER).await,
+        "203.0.113.7",
+        "a peer outside the list cannot name its own address"
+    );
 }
 
 #[tokio::test]
