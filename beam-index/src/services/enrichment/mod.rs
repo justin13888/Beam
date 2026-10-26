@@ -838,19 +838,14 @@ impl MetadataEnrichmentService {
                 }
             }
 
-            let season_enrichment = match (provider_season, placed.is_empty()) {
-                (Some(mut provider), _) => {
-                    provider.episodes.extend(placed);
-                    provider
-                }
-                (None, false) => SeasonEnrichment {
-                    season_number,
-                    poster_url: None,
-                    air_date: None,
-                    episodes: placed,
-                },
-                (None, true) => continue,
+            // With no provider season of this number nothing is ever placed:
+            // the absolute order stops at the first season the provider lacks,
+            // so it holds no episode of this season. There is nothing to apply,
+            // and applying an empty season would clear its poster and air date.
+            let Some(mut season_enrichment) = provider_season else {
+                continue;
             };
+            season_enrichment.episodes.extend(placed);
             if let Err(err) = self
                 .show_repo
                 .apply_season_enrichment(show_id, &season_enrichment)
@@ -883,9 +878,11 @@ impl MetadataEnrichmentService {
     }
 
     /// The pin a title carries, and the reference to fetch it by when a
-    /// configured provider resolves the pin's ids (decision D184-2: cameo
-    /// resolves TMDB and AniList ids; an IMDb or TheTVDB pin is only checked
-    /// against a match).
+    /// configured provider resolves the pin's ids: a pin is fetched by its id
+    /// when its provider is configured -- TMDB and AniList through cameo
+    /// (decision D184-2), TheTVDB through its own client when one is
+    /// configured (issue #267) -- and otherwise, as an IMDb pin always is,
+    /// only checked against a match.
     fn pin_of(&self, pinned_ref: Option<&str>) -> (Option<ProviderPin>, Option<ExternalMediaRef>) {
         let pin = pinned_ref.and_then(ProviderPin::parse);
         let fetchable = pin
