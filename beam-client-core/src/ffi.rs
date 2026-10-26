@@ -657,10 +657,21 @@ impl BeamClient {
     /// failed remote revoke is deliberately not an error: a user who taps sign
     /// out with no signal is still signed out on this device.
     pub async fn logout(&self, server_id: String) -> Result<(), BeamError> {
-        let client = self.client_for(&server_id)?;
-        // `RevokeRemoteSession`, performed before the transition because the
-        // request needs the credential the transition withdraws.
-        let _ = client.logout(None).await;
+        // Read together, before the transition: `LogoutRequested` withdraws
+        // the cookie, and the cookie is what names the session to revoke.
+        let (client, session) = self.with_context(&server_id, |context| {
+            (context.client.clone(), context.cookie.get())
+        })?;
+        // `RevokeRemoteSession`. `POST /v1/logout` takes the session as an
+        // optional `beam_session` cookie *parameter* rather than through the
+        // `BeamSession` scheme, so the generated client attaches the
+        // registered credential only when it is passed here explicitly --
+        // without it the server answers 204 and revokes nothing.
+        let params = crate::api::LogoutParams {
+            beam_session: session.map(|cookie| cookie.expose_secret().to_owned()),
+            beam_oidc_state: None,
+        };
+        let _ = client.logout(Some(params)).await;
 
         let effects = self.apply(&server_id, SessionEvent::LogoutRequested)?;
         self.perform(&server_id, &effects, None).await
@@ -3021,6 +3032,30 @@ mod tests {
             cookies_of(&recorded[0]),
             vec!["beam_session=opaque-value"],
             "the sign-in's own /v1/me is a secured call too"
+        );
+    }
+
+    /// Signing out revokes the session on the server, not only on the device:
+    /// the `POST /v1/logout` carries the cookie it is ending, read before the
+    /// transition withdraws it. Without it the server answers 204 and leaves
+    /// the session valid until it expires.
+    #[tokio::test]
+    async fn logout_sends_the_session_it_is_ending() {
+        let (client, id, backend) = signed_in_client().await;
+        let sent_before = backend.recorded().len();
+
+        client.logout(id.clone()).await.expect("logged out");
+
+        let recorded = backend.recorded();
+        assert_eq!(recorded.len(), sent_before + 1, "exactly the revoke");
+        let revoke = recorded.last().expect("the revoke was sent");
+        assert_eq!(revoke.method, reqwest::Method::POST);
+        assert_eq!(revoke.url.path(), "/v1/logout");
+        assert_eq!(cookies_of(revoke), vec!["beam_session=opaque-value"]);
+        assert_eq!(
+            client.session_state(id).expect("registered"),
+            SessionState::LoggedOut,
+            "and the device is signed out"
         );
     }
 
